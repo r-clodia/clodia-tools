@@ -1,0 +1,11 @@
+# clodia-tools — MCP HTTP tool gateway
+# Deps di terze parti (gli adapter trello/email sono vendorizzati e stdlib+httpx).
+mcp>=1.2.0
+starlette>=0.37.0
+uvicorn>=0.30.0
+httpx>=0.27.0
+cryptography>=42.0.0
+PyYAML>=6.0
+# Backend gworkspace (Drive/Docs/Slides/Calendar): client ufficiale Google.
+google-api-python-client>=2.120.0
+google-auth>=2.29.0

@@ -1,0 +1,38 @@
+# Gateway clodia-tools — config pristine (clonabile).
+# agents: solo clodia (ophelia quando si cabla codex→gateway). mcp_backends: vuoto
+# (l'owner aggiunge i server via Add-MCP). Default tool: email+fs+agent (no Trello).
+workspace_root: /Users/erreclaudea/erre-claudia
+mcp_backends: []
+agents:
+  clodia:
+    allowed_paths:
+    - .
+    allowed_shell_cmds: []
+    denied_shell_patterns: []
+    allowed_tools:
+    - email.send
+    - email.folders
+    - email.list
+    - email.read
+    - email.search
+    - email.reply
+    - fs.list_dir
+    - agent.spawn
+    - topic.*
+    - runtime.*
+  ophelia:
+    allowed_paths:
+    - .
+    allowed_shell_cmds: []
+    denied_shell_patterns: []
+    allowed_tools:
+    - email.send
+    - email.folders
+    - email.list
+    - email.read
+    - email.search
+    - email.reply
+    - fs.list_dir
+    - agent.spawn
+    - topic.*
+    - runtime.*
