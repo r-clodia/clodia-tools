@@ -114,6 +114,15 @@ async def list_tools(request: Request):
         "connected": vault.has_credential("trello"),
         "accounts": [],
     })
+    # GitHub (server MCP ufficiale, tool github.*): connesso se il PAT è nel vault.
+    # "Connetti" inserisce un Personal Access Token (paste-key) → vault.
+    connectors.append({
+        "id": "github",
+        "label": "GitHub",
+        "provider": "github",
+        "connected": vault.has_credential("github_pat"),
+        "accounts": [],
+    })
     # Topic storage (Topic System v2): il backend attivo mostrato come
     # integrazione "built-in" (oggi local-fs; Drive/Dropbox in P4).
     try:
@@ -524,6 +533,44 @@ async def trello_connect(request: Request):
     return JSONResponse({"connected": True})
 
 
+GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
+
+
+async def github_connect(request: Request):
+    """Deposita il PAT GitHub nel vault e registra/rimuove il backend MCP ufficiale
+    GitHub. Body: {pat}. pat vuoto → disconnette (rimuove cred + backend).
+    Il PAT non transita mai dal modello: il proxy lo risolve via ${VAULT:github_pat}."""
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    pat = (body.get("pat") or body.get("token") or "").strip()
+    backends = [b for b in (whitelist.CONFIG.get("mcp_backends") or [])
+                if b.get("name") != "github"]
+    if not pat:
+        vault.remove("github_pat")
+        whitelist.CONFIG["mcp_backends"] = backends
+        whitelist.save_config(); whitelist.reload_config(); proxy.clear_cache()
+        LOG.info("github_connect: disconnesso (cred + backend rimossi)")
+        return JSONResponse({"connected": False})
+    vault.deposit("github_pat", {"value": pat}, cred_type="mcp_secret", grant_agents=[])
+    backends.append({
+        "name": "github", "label": "GitHub", "transport": "http",
+        "url": GITHUB_MCP_URL,
+        "headers": {"Authorization": "Bearer ${VAULT:github_pat}"},
+    })
+    whitelist.CONFIG["mcp_backends"] = backends
+    agents = whitelist.CONFIG.setdefault("agents", {})
+    ct = agents.setdefault("clodia", {}).setdefault("allowed_tools", [])
+    if "github.*" not in ct:
+        ct.append("github.*")
+    whitelist.save_config(); whitelist.reload_config(); proxy.clear_cache()
+    LOG.info("github_connect: PAT depositato + backend github registrato (len=%d)", len(pat))
+    return JSONResponse({"connected": True})
+
+
 routes = [
     Route("/tools", list_tools, methods=["GET"]),
     Route("/tools/trello/connect", trello_connect, methods=["POST"]),
@@ -537,6 +584,7 @@ routes = [
     Route("/tools/gworkspace/auth", gworkspace_auth, methods=["GET"]),
     Route("/tools/gworkspace/connect", gworkspace_connect, methods=["POST"]),
     Route("/tools/openai/connect", openai_connect, methods=["POST"]),
+    Route("/tools/github/connect", github_connect, methods=["POST"]),
     Route("/tools/mcp", register_mcp, methods=["POST"]),
     Route("/tools/mcp/{name}", unregister_mcp, methods=["DELETE"]),
 ]
