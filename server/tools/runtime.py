@@ -94,7 +94,7 @@ def topics(include_restricted: bool = False) -> dict:
     rows = [t for t in rows
             if me and (me == t.get("owner") or me in (t.get("participants") or []))]
     if not include_restricted:
-        rows = [t for t in rows if t.get("tier") != "P3"]
+        rows = [t for t in rows if t.get("tier") not in ("P3", "SEAL-3", "SEAL-4")]
     return {"count": len(rows), "topics": rows}
 
 

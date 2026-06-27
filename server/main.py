@@ -185,12 +185,12 @@ _FS_TOOLS: list[Tool] = [
 _TOPIC_TOOLS: list[Tool] = [
     Tool(
         name="topic.new",
-        description=("Crea (idempotente) un topic. tier = P0|P1|P2|P3 "
-                     "(Public/Internal/Confidential/Restricted; default P0). "
+        description=("Crea (idempotente) un topic. tier = SEAL-0..4 "
+                     "(Public/Internal/Confidential/Restricted/Sovereign; default SEAL-0). "
                      "meta opzionale: title, type, tags, people, entity, deadline, contact_agent."),
         inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["P0", "P1", "P2", "P3"],
-                     "description": "classe/privacy del topic (default P0 Public)"},
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"],
+                     "description": "classe/sovranità del topic — scala SEAL (default SEAL-0 Public)"},
             "name": {"type": "string", "description": "slug a-z0-9_-"},
             "meta": {"type": "object"},
         }, "required": ["name"]},
@@ -200,7 +200,7 @@ _TOPIC_TOOLS: list[Tool] = [
         description=("Apre un topic (read-only): ritorna meta, summary (col "
                      "summary_version per l'optimistic lock), tldr, lista minute."),
         inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
         }, "required": ["tier", "name"]},
     ),
@@ -209,7 +209,7 @@ _TOPIC_TOOLS: list[Tool] = [
         description=("Riscrive il summary in optimistic lock. Passa base_version "
                      "ottenuto da topic.open. Su conflitto NON sovrascrive: rilegge ed escala."),
         inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
             "text": {"type": "string", "description": "prima riga = TLDR; sezione '## Prossimi passi'"},
             "base_version": {"type": ["string", "null"]},
@@ -219,7 +219,7 @@ _TOPIC_TOOLS: list[Tool] = [
         name="topic.add_minute",
         description="Aggiunge una minuta (file append-only datato). Niente contesa concorrente.",
         inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
             "text": {"type": "string"},
         }, "required": ["tier", "name", "text"]},
@@ -228,7 +228,7 @@ _TOPIC_TOOLS: list[Tool] = [
         name="topic.archive",
         description="Imposta status=archived nel meta (non sposta su storage inferiore).",
         inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
         }, "required": ["tier", "name"]},
     ),
@@ -236,7 +236,7 @@ _TOPIC_TOOLS: list[Tool] = [
         name="topic.list",
         description="Elenca i topic (riga sintetica). Gli archived sono nascosti salvo include_archived.",
         inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "include_archived": {"type": "boolean"},
         }},
     ),
@@ -254,7 +254,7 @@ _TOPIC_TOOLS: list[Tool] = [
                      "name, path, size, mtime. Usalo per scoprire i file caricati "
                      "dagli utenti nel canale."),
         inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
         }, "required": ["tier", "name"]},
     ),
@@ -264,7 +264,7 @@ _TOPIC_TOOLS: list[Tool] = [
                      "(es. 'files/report.md'). I file di testo tornano come testo; "
                      "i binari (PDF/immagini) tornano come base64 con encoding='base64'."),
         inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
             "path": {"type": "string", "description": "path relativo al topic, es. files/foo.md"},
         }, "required": ["tier", "name", "path"]},
@@ -277,7 +277,7 @@ _TOPIC_TOOLS: list[Tool] = [
                      "vengono create. content = testo; per i binari passa il base64 e "
                      "encoding='base64'. Usa QUESTO, non hosting esterni."),
         inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
             "filename": {"type": "string", "description": "nome file semplice, finisce in files/"},
             "content": {"type": "string", "description": "contenuto (testo o base64)"},

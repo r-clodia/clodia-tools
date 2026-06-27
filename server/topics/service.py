@@ -25,9 +25,22 @@ from datetime import datetime, timezone
 from .storage import NotFound, Storage, StorageError, VersionConflict
 
 VALID_STATUS = {"active", "await", "idle", "archived"}
-VALID_TIER = ["P0", "P1", "P2", "P3"]
-TIER_NAMES = {"P0": "Public", "P1": "Internal", "P2": "Confidential", "P3": "Restricted"}
-DEFAULT_TIER = "P0"
+# Scala SEAL (EC Cloud Sovereignty Framework v1.2.1). Sostituisce P0–P3.
+VALID_TIER = ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]
+TIER_NAMES = {
+    "SEAL-0": "Public", "SEAL-1": "Internal", "SEAL-2": "Confidential",
+    "SEAL-3": "Restricted", "SEAL-4": "Sovereign",
+}
+DEFAULT_TIER = "SEAL-0"
+# Legacy P0–P3 → SEAL-0..3 (compat: dati/clearance non ancora migrati).
+_LEGACY_TIER = {"P0": "SEAL-0", "P1": "SEAL-1", "P2": "SEAL-2", "P3": "SEAL-3"}
+
+
+def _normalize_tier(t: str | None) -> str:
+    if not t:
+        return DEFAULT_TIER
+    u = str(t).strip().upper()
+    return _LEGACY_TIER.get(u, u)
 
 
 class TopicError(RuntimeError):
@@ -73,6 +86,7 @@ class TopicService:
 
     # ── path helper ────────────────────────────────────────────────────────
     def _dir(self, tier: str, name: str) -> str:
+        tier = _normalize_tier(tier)
         if tier not in VALID_TIER:
             raise TopicError(f"tier non valido: {tier} (ammessi: {VALID_TIER})")
         if not re.match(r"^[a-z0-9][a-z0-9_-]{0,60}$", name or ""):
@@ -88,7 +102,7 @@ class TopicService:
     # ── verbi ──────────────────────────────────────────────────────────────
     def new(self, tier: str | None, name: str, meta: dict | None = None) -> dict:
         """Scaffold idempotente: se il topic esiste già ritorna il suo meta."""
-        tier = tier or DEFAULT_TIER
+        tier = _normalize_tier(tier or DEFAULT_TIER)
         mp = self._meta_p(tier, name)
         if self.s.exists(mp):
             return self.open(tier, name)["meta"]
@@ -123,6 +137,7 @@ class TopicService:
             raise TopicError(f"topic non trovato: {tier}/{name}")
         meta = json.loads(meta_r.data.decode())
         meta.setdefault("tier", tier)
+        meta["tier"] = _normalize_tier(meta.get("tier"))
         meta.setdefault("storage", self.s.capability().name)
         try:
             sumr = self.s.read(self._summary_p(tier, name))
