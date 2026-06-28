@@ -321,6 +321,28 @@ _TRELLO_TOOLS: list[Tool] = [
 ]
 
 
+_PROFILE_TOOLS: list[Tool] = [
+    Tool(name="profile.get",
+         description=("Dati personali (PII) di un agent/umano: email, iban, domicilio, ecc. "
+                      "Ritorna i campi SOLO se sei il titolare, un admin, o hai ricevuto il grant "
+                      "(ACL per-profilo). Usalo quando ti serve un dato personale di qualcuno."),
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string", "description": "nome dell'agent/umano di cui leggere il profilo"}},
+             "required": ["agent"]}),
+    Tool(name="profile.set",
+         description="Crea/aggiorna i campi del TUO profilo (o, se admin, di un altro). fields = oggetto chiave→valore; valore null rimuove la chiave.",
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string"}, "fields": {"type": "object"}},
+             "required": ["fields"]}),
+    Tool(name="profile.grant",
+         description="Concedi/revoca a un altro agent la lettura del TUO profilo (o, se admin, di un altro). granted=false per revocare.",
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string"}, "grantee": {"type": "string"},
+             "granted": {"type": "boolean"}},
+             "required": ["grantee"]}),
+]
+
+
 _RUNTIME_TOOLS: list[Tool] = [
     Tool(name="runtime.agents",
          description="Introspezione runtime: gli agent dell'istanza (nome, tipo, provider effettivo, stato connessione, paused). Solo metadati.",
@@ -389,6 +411,19 @@ def _dispatch_trello(name: str, a: dict):
     if verb == "comment":
         return tr.comment(a["card_id"], a["text"])
     raise ValueError(f"unknown trello verb: {name}")
+
+
+def _dispatch_profile(name: str, a: dict, caller: str | None):
+    from . import profile as prof
+    sub = name.split(NS_SEP_DOT, 1)[1]
+    target = a.get("agent") or caller
+    if sub == "get":
+        return prof.get(caller, target)
+    if sub == "set":
+        return prof.set_fields(caller, target, a.get("fields") or {})
+    if sub == "grant":
+        return prof.grant(caller, target, a["grantee"], bool(a.get("granted", True)))
+    raise ValueError(f"unknown profile tool: {name}")
 
 
 def _dispatch_settings(name: str, arguments: dict, agent: str | None):
@@ -482,7 +517,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _AGENT_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS)
+    native = list(_FS_TOOLS + _AGENT_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS)
     # C1: tool dei backend MCP montati (namespaced), aggregati dal proxy.
     try:
         proxied = await proxy.list_proxied_tools()
@@ -558,6 +593,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_trello(name, arguments)
         elif name.startswith("topic."):
             result = _dispatch_topic(name, arguments)
+        elif name.startswith("profile."):
+            result = _dispatch_profile(name, arguments, _ag)
         elif name.startswith("settings."):
             result = _dispatch_settings(name, arguments, _ag)
         elif name.startswith("runtime."):

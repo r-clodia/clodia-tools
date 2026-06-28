@@ -85,9 +85,10 @@ def build_app() -> Starlette:
     from .topics_api import routes as topics_routes
     # Connettori delegabili (email per-account) — grant per-agent.
     from .connectors_api import routes as connectors_routes
+    from .profile_api import routes as profile_routes
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
-                *imagegen_routes, *topics_routes, *connectors_routes],
+                *imagegen_routes, *topics_routes, *connectors_routes, *profile_routes],
         lifespan=_lifespan)
 
 
