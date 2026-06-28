@@ -27,7 +27,12 @@ _EXCLUDES = ["*.bak-*", "topics-store.bak-*", "**/__pycache__", "**/*.pyc"]
 
 def _cfg() -> dict | None:
     """Config backup dal vault, o None se non configurato."""
-    return vault.read_internal(CRED)
+    if not vault.has_credential(CRED):
+        return None
+    try:
+        return vault.read_internal(CRED)
+    except Exception:
+        return None
 
 
 def _restic_env(cfg: dict) -> dict:
