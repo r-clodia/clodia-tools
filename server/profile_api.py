@@ -17,6 +17,12 @@ from .pki_verify import verify_session_token
 LOG = logging.getLogger("clodia-tools.profile")
 
 
+# Servizi fidati (agent-server) che possono dichiarare il principal effettivo via
+# header — necessario per gli UMANI, che non hanno chiave server-side per coniare
+# un token a proprio nome. Solo i super-agent sono ammessi come servizio.
+_TRUSTED_SERVICES = {"clodia", "ophelia"}
+
+
 def _principal(request: Request) -> tuple[str | None, JSONResponse | None]:
     auth = request.headers.get("authorization", "")
     token = auth[7:] if auth.lower().startswith("bearer ") else ""
@@ -25,7 +31,12 @@ def _principal(request: Request) -> tuple[str | None, JSONResponse | None]:
     except PermissionError as e:
         LOG.warning("profile auth fallita: %s", e)
         return None, JSONResponse({"error": "unauthorized"}, status_code=401)
-    return str(payload.get("agent") or ""), None
+    agent = str(payload.get("agent") or "")
+    # Un servizio fidato può agire per conto del principal reale (header).
+    declared = request.headers.get("x-clodia-principal", "")
+    if declared and agent in _TRUSTED_SERVICES:
+        return declared, None
+    return agent, None
 
 
 def _err(e: Exception) -> JSONResponse:
