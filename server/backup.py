@@ -159,3 +159,35 @@ def restore_test() -> dict:
             raise RuntimeError(f"restore-test fallito: {r.stderr[:300]}")
         restored = list(Path(tmp).rglob("meta.json"))
         return {"ok": len(restored) > 0, "restored_topics": len(restored)}
+
+
+# ── superficie conversazionale (tool settings.*): MAI segreti ────────────────
+def config_redacted() -> dict:
+    """Config backup SENZA segreti (per la chat con l'agente): backend, repository,
+    schedule, retention, stato, ultimo snapshot, e quali credenziali risultano
+    impostate (booleani). passphrase / access keys NON sono mai esposte."""
+    cfg = _cfg()
+    base = status()  # configured/backend/repository/schedule/retention/last_snapshot
+    if cfg:
+        base["has_passphrase"] = bool(cfg.get("passphrase"))
+        base["credentials_set"] = sorted(cfg.get("env", {}).keys())
+    return base
+
+
+_NONSECRET_FIELDS = {"backend", "repository", "schedule", "retention"}
+
+
+def set_config(patch: dict) -> dict:
+    """Aggiorna SOLO i campi non-segreti (backend/repository/schedule/retention),
+    preservando passphrase e credenziali esistenti. NON accetta passphrase/env via
+    questo path: le credenziali sensibili si impostano solo dalla pagina Settings
+    (paste-key). Se il backup non è ancora configurato, rifiuta (servono prima le
+    credenziali via UI)."""
+    cfg = _cfg()
+    if not cfg:
+        raise RuntimeError("backup non ancora configurato: imposta prima credenziali e passphrase dalla pagina Settings (paste-key).")
+    rejected = sorted(set(patch) - _NONSECRET_FIELDS)
+    clean = {k: v for k, v in patch.items() if k in _NONSECRET_FIELDS}
+    cfg.update(clean)
+    vault.deposit(CRED, cfg, cred_type="backup_config", grant_agents=[])
+    return {"updated": sorted(clean.keys()), "rejected": rejected, "config": config_redacted()}

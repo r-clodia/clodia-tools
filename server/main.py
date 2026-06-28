@@ -345,6 +345,29 @@ _RUNTIME_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {}}),
 ]
 
+# settings.* — superficie conversazionale per i settings della piattaforma
+# (oggi: backup). SOLO super-agent. MAI segreti (passphrase/credenziali si
+# impostano dalla pagina Settings via paste-key).
+_SETTINGS_TOOLS: list[Tool] = [
+    Tool(name="settings.backup_get",
+         description="Backup della piattaforma (ISO 27001 A.8.13): configurazione SENZA segreti, stato e ultimo snapshot.",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="settings.backup_set",
+         description=("Aggiorna i campi NON-segreti del backup (backend, repository, "
+                      "schedule cron, retention {daily,weekly,monthly}). Le credenziali e la "
+                      "passphrase NON si impostano qui: vanno inserite dalla pagina Settings."),
+         inputSchema={"type": "object", "properties": {
+             "backend": {"type": "string"}, "repository": {"type": "string"},
+             "schedule": {"type": "string"},
+             "retention": {"type": "object"}}}),
+    Tool(name="settings.backup_run",
+         description="Esegue subito un backup completo (snapshot + retention + verifica integrità).",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="settings.backup_restore_test",
+         description="Restore-test: ripristina l'ultimo snapshot in area temporanea e verifica (evidenza A.8.13).",
+         inputSchema={"type": "object", "properties": {}}),
+]
+
 
 def _dispatch_trello(name: str, a: dict):
     from .tools import trello as tr
@@ -362,6 +385,23 @@ def _dispatch_trello(name: str, a: dict):
     if verb == "comment":
         return tr.comment(a["card_id"], a["text"])
     raise ValueError(f"unknown trello verb: {name}")
+
+
+def _dispatch_settings(name: str, arguments: dict, agent: str | None):
+    # SOLO super-agent: settings.* tocca la configurazione di piattaforma.
+    if not _is_super(agent):
+        raise PermissionError("settings.* riservato ai super-agent")
+    from . import backup
+    sub = name.split(NS_SEP_DOT, 1)[1]
+    if sub == "backup_get":
+        return backup.config_redacted()
+    if sub == "backup_set":
+        return backup.set_config(arguments or {})
+    if sub == "backup_run":
+        return backup.run_backup()
+    if sub == "backup_restore_test":
+        return backup.restore_test()
+    raise ValueError(f"unknown settings tool: {name}")
 
 
 def _dispatch_runtime(name: str, arguments: dict):
@@ -438,7 +478,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _AGENT_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS)
+    native = list(_FS_TOOLS + _AGENT_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS)
     # C1: tool dei backend MCP montati (namespaced), aggregati dal proxy.
     try:
         proxied = await proxy.list_proxied_tools()
@@ -514,6 +554,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_trello(name, arguments)
         elif name.startswith("topic."):
             result = _dispatch_topic(name, arguments)
+        elif name.startswith("settings."):
+            result = _dispatch_settings(name, arguments, _ag)
         elif name.startswith("runtime."):
             result = _dispatch_runtime(name, arguments)
         elif proxy.is_proxied(name):
