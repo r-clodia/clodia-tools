@@ -250,12 +250,16 @@ _TOPIC_TOOLS: list[Tool] = [
     ),
     Tool(
         name="topic.files",
-        description=("Elenca i file allegati al topic/canale (cartella files/): "
-                     "name, path, size, mtime. Usalo per scoprire i file caricati "
-                     "dagli utenti nel canale."),
+        description=("Elenca file e cartelle del topic/canale a partire da `subpath` "
+                     "(relativo alla ROOT del topic; vuoto = root). Ritorna name, path, "
+                     "kind (file|dir), size, mtime. I file caricati stanno di norma in "
+                     "'files/'. Per vedere il CONTENUTO di una sottocartella passa il suo "
+                     "path come subpath (es. subpath='files/expenses'). Usa il `path` "
+                     "ritornato con topic.read_file."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
+            "subpath": {"type": "string", "description": "cartella da elencare, relativa alla root del topic (es. 'files' o 'files/expenses'); vuoto = root"},
         }, "required": ["tier", "name"]},
     ),
     Tool(
@@ -595,7 +599,7 @@ def _dispatch_topic(name: str, a: dict):
     if verb == "search":
         return svc.search(a["query"], a.get("mode", "lexical"))
     if verb == "files":
-        return svc.list_files(a["tier"], a["name"])
+        return svc.list_files(a["tier"], a["name"], a.get("subpath", ""))
     if verb == "read_file":
         data = svc.read_file(a["tier"], a["name"], a["path"])
         try:
