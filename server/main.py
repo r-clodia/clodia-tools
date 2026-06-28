@@ -278,8 +278,10 @@ _TOPIC_TOOLS: list[Tool] = [
         description=("Carica/sovrascrive un file nella cartella files/ del topic/canale "
                      "(es. un deliverable, o i file estratti da uno zip). filename può "
                      "includere sottocartelle (es. 'archivio/foto/1.jpg'); le dir padre "
-                     "vengono create. content = testo; per i binari passa il base64 e "
-                     "encoding='base64'. Usa QUESTO, non hosting esterni."),
+                     "vengono create. content = testo; per i binari (xlsx/pdf/docx/"
+                     "zip/immagini) passa il base64 COMPLETO del file e encoding='base64' "
+                     "(i file con estensione binaria sono comunque decodificati da base64, "
+                     "mai scritti come testo). Usa QUESTO, non hosting esterni."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
@@ -634,6 +636,37 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"ERROR: {type(e).__name__}: {e}")]
 
 
+# Estensioni che indicano contenuto BINARIO: un file con questo suffisso non può
+# essere scritto come testo (es. un .xlsx scritto come testo = file corrotto che
+# Excel non apre). Per questi forziamo la decodifica base64.
+_BINARY_EXTS = {
+    "xlsx", "xls", "xlsm", "docx", "doc", "pptx", "ppt", "pdf", "odt", "ods", "odp",
+    "zip", "tar", "gz", "tgz", "7z", "rar",
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "ico", "heic",
+    "mp3", "wav", "ogg", "mp4", "mov", "avi", "mkv", "webm",
+    "bin", "exe", "woff", "woff2", "ttf", "otf",
+}
+
+
+def _decode_b64_strict(content: str, filename: str) -> bytes:
+    """Decodifica base64 in modo robusto: tollera whitespace/newline e padding
+    mancante (errori comuni quando un LLM passa un blob lungo), ma su input non
+    valido solleva un errore CHIARO — così l'agente rigenera il base64 invece di
+    far scrivere spazzatura senza accorgersene."""
+    import base64 as _b64
+    import binascii
+    t = "".join((content or "").split())          # togli spazi/newline
+    t += "=" * ((-len(t)) % 4)                      # ripristina padding mancante
+    try:
+        return _b64.b64decode(t, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise ValueError(
+            f"Il content per '{filename}' non è base64 valido ({e}). I file binari "
+            f"(xlsx/pdf/docx/zip/immagini) vanno passati come base64 con "
+            f"encoding='base64'; rigenera il base64 COMPLETO del file e riprova."
+        ) from e
+
+
 def _dispatch_topic(name: str, a: dict):
     svc = _topics()
     verb = name.split(".", 1)[1]
@@ -663,13 +696,18 @@ def _dispatch_topic(name: str, a: dict):
                     "content": _b64.b64encode(data).decode("ascii"),
                     "note": "file binario (PDF/immagine/...): decodifica da base64"}
     if verb == "write_file":
+        fn = a["filename"]
         enc = (a.get("encoding") or "text").lower()
-        if enc == "base64":
-            import base64 as _b64
-            data = _b64.b64decode(a["content"])
+        ext = fn.rsplit(".", 1)[-1].lower() if "." in fn else ""
+        # Un file con estensione binaria NON può essere testo: lo decodifichiamo
+        # sempre come base64 (anche se l'agente ha dimenticato encoding='base64'),
+        # con errore chiaro se il base64 è malformato. Era questo il bug del
+        # Travel_reimbursement.xlsx: base64 scritto come testo → file corrotto.
+        if enc == "base64" or ext in _BINARY_EXTS:
+            data = _decode_b64_strict(a["content"], fn)
         else:
             data = (a["content"] or "").encode("utf-8")
-        return svc.put_file(a["tier"], a["name"], a["filename"], data)
+        return svc.put_file(a["tier"], a["name"], fn, data)
     raise ValueError(f"unknown topic verb: {name}")
 
 
