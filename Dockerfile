@@ -9,7 +9,7 @@ WORKDIR /app
 # NB: `npx <pkg>` scarica ed esegue codice da npm a runtime → pinnare le versioni
 # e vettare i pacchetti (rischio supply-chain). Egress npm richiesto a runtime.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg restic sqlite3 \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*

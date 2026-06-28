@@ -571,6 +571,61 @@ async def github_connect(request: Request):
     return JSONResponse({"connected": True})
 
 
+# ── Backup gestito (ISO 27001 A.8.13) ────────────────────────────────────────
+async def backup_configure(request: Request):
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import backup
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    try:
+        return JSONResponse(backup.configure(body))
+    except Exception as e:
+        return JSONResponse({"error": str(e)[:300]}, status_code=400)
+
+
+async def backup_status(request: Request):
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import backup
+    try:
+        return JSONResponse(backup.status())
+    except Exception as e:
+        return JSONResponse({"error": str(e)[:300]}, status_code=500)
+
+
+async def backup_snapshots(request: Request):
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import backup
+    try:
+        return JSONResponse({"snapshots": backup.snapshots()})
+    except Exception as e:
+        return JSONResponse({"error": str(e)[:300]}, status_code=500)
+
+
+async def backup_run(request: Request):
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import backup
+    try:
+        return JSONResponse(backup.run_backup())
+    except Exception as e:
+        return JSONResponse({"error": str(e)[:400]}, status_code=500)
+
+
+async def backup_restore_test(request: Request):
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import backup
+    try:
+        return JSONResponse(backup.restore_test())
+    except Exception as e:
+        return JSONResponse({"error": str(e)[:400]}, status_code=500)
+
+
 routes = [
     Route("/tools", list_tools, methods=["GET"]),
     Route("/tools/trello/connect", trello_connect, methods=["POST"]),
@@ -585,6 +640,11 @@ routes = [
     Route("/tools/gworkspace/connect", gworkspace_connect, methods=["POST"]),
     Route("/tools/openai/connect", openai_connect, methods=["POST"]),
     Route("/tools/github/connect", github_connect, methods=["POST"]),
+    Route("/tools/backup/config", backup_configure, methods=["POST"]),
+    Route("/tools/backup/status", backup_status, methods=["GET"]),
+    Route("/tools/backup/snapshots", backup_snapshots, methods=["GET"]),
+    Route("/tools/backup/run", backup_run, methods=["POST"]),
+    Route("/tools/backup/restore-test", backup_restore_test, methods=["POST"]),
     Route("/tools/mcp", register_mcp, methods=["POST"]),
     Route("/tools/mcp/{name}", unregister_mcp, methods=["DELETE"]),
 ]
