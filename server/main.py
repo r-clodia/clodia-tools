@@ -334,6 +334,13 @@ _PROFILE_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {
              "agent": {"type": "string"}, "fields": {"type": "object"}},
              "required": ["fields"]}),
+    Tool(name="profile.list_files",
+         description="Elenca i file allegati al profilo di un agent (se autorizzato): name, size, mtime.",
+         inputSchema={"type": "object", "properties": {"agent": {"type": "string"}}, "required": ["agent"]}),
+    Tool(name="profile.read_file",
+         description="Legge un file allegato al profilo (se autorizzato). Ritorna testo, o base64 per i binari.",
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string"}, "filename": {"type": "string"}}, "required": ["agent", "filename"]}),
     Tool(name="profile.grant",
          description="Concedi/revoca a un altro agent la lettura del TUO profilo (o, se admin, di un altro). granted=false per revocare.",
          inputSchema={"type": "object", "properties": {
@@ -421,6 +428,15 @@ def _dispatch_profile(name: str, a: dict, caller: str | None):
         return prof.get(caller, target)
     if sub == "set":
         return prof.set_fields(caller, target, a.get("fields") or {})
+    if sub == "list_files":
+        return {"files": prof.list_files(caller, target)}
+    if sub == "read_file":
+        import base64 as _b64
+        raw = prof.read_file(caller, target, a["filename"])
+        try:
+            return {"filename": a["filename"], "text": raw.decode("utf-8")}
+        except UnicodeDecodeError:
+            return {"filename": a["filename"], "encoding": "base64", "data": _b64.b64encode(raw).decode()}
     if sub == "grant":
         return prof.grant(caller, target, a["grantee"], bool(a.get("granted", True)))
     raise ValueError(f"unknown profile tool: {name}")

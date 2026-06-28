@@ -5,10 +5,11 @@ ACL (self/admin/grant) è in `profile.py`. I valori non transitano mai da un mod
 """
 from __future__ import annotations
 
+import base64
 import logging
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from . import profile
@@ -84,8 +85,59 @@ async def grant_profile(request: Request):
         return _err(e)
 
 
+
+async def list_files(request: Request):
+    caller, err = _principal(request)
+    if err:
+        return err
+    try:
+        return JSONResponse({"files": profile.list_files(caller, request.path_params["agent"])})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+async def upload_file(request: Request):
+    caller, err = _principal(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+        data = base64.b64decode(body["data_b64"])
+        return JSONResponse(profile.put_file(caller, request.path_params["agent"],
+                                             body["filename"], data))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+async def download_file(request: Request):
+    caller, err = _principal(request)
+    if err:
+        return err
+    try:
+        data = profile.read_file(caller, request.path_params["agent"],
+                                 request.path_params["filename"])
+        return Response(data, media_type="application/octet-stream")
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+async def delete_file(request: Request):
+    caller, err = _principal(request)
+    if err:
+        return err
+    try:
+        return JSONResponse(profile.delete_file(caller, request.path_params["agent"],
+                                                request.path_params["filename"]))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 routes = [
     Route("/internal/profile/{agent}", get_profile, methods=["GET"]),
     Route("/internal/profile/{agent}", put_profile, methods=["PUT"]),
     Route("/internal/profile/{agent}/grant", grant_profile, methods=["POST"]),
+    Route("/internal/profile/{agent}/files", list_files, methods=["GET"]),
+    Route("/internal/profile/{agent}/files", upload_file, methods=["POST"]),
+    Route("/internal/profile/{agent}/files/{filename}", download_file, methods=["GET"]),
+    Route("/internal/profile/{agent}/files/{filename}", delete_file, methods=["DELETE"]),
 ]
