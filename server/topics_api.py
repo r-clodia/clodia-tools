@@ -95,6 +95,17 @@ async def open_file(request: Request):
     return Response(content=data, media_type=ct)
 
 
+async def archive_topic(request: Request):
+    _, err = _authorize(request)
+    if err:
+        return err
+    try:
+        meta = _service().archive(request.path_params["tier"], request.path_params["name"])
+        return JSONResponse({"archived": True, "meta": meta})
+    except TopicError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
 async def create_topic(request: Request):
     _, err = _authorize(request)
     if err:
@@ -287,6 +298,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/file", open_file, methods=["GET"]),
     Route("/internal/topics/{tier}/{name}/messages", list_messages, methods=["GET"]),
     Route("/internal/topics/{tier}/{name}/messages", post_message, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/archive", archive_topic, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/participants", participants, methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/files", files, methods=["GET", "POST"]),
 ]
