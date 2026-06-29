@@ -334,6 +334,18 @@ _TOPIC_TOOLS: list[Tool] = [
             "src": {"type": "string", "description": "path assoluto del file nel tuo scratch"},
         }, "required": ["tier", "name", "filename", "src"]},
     ),
+    Tool(
+        name="topic.delete_file",
+        description=("Elimina un file o una cartella (ricorsivo) DENTRO files/ del topic. "
+                     "Solo sotto files/ (la struttura del topic — meta, summary, minutes — "
+                     "è protetta). path = path relativo alla root del topic, come restituito "
+                     "da topic.files (es. 'files/old/x.pdf' o 'files/files')."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "path": {"type": "string", "description": "path da eliminare, dentro files/"},
+        }, "required": ["tier", "name", "path"]},
+    ),
 ]
 
 
@@ -913,6 +925,8 @@ def _dispatch_topic(name: str, a: dict):
         with open(src, "rb") as f:
             data = f.read()
         return svc.put_file(a["tier"], a["name"], a["filename"], data)
+    if verb == "delete_file":
+        return svc.delete_file(a["tier"], a["name"], a["path"])
     raise ValueError(f"unknown topic verb: {name}")
 
 

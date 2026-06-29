@@ -317,6 +317,27 @@ class TopicService:
         self.s.write(f"{self._dir(tier, name)}/files/{rel}", data)
         return {"name": parts[-1], "path": f"files/{rel}"}
 
+    def delete_file(self, tier: str, name: str, relpath: str) -> dict:
+        """Elimina un file o una cartella DENTRO files/ del topic (ricorsivo per
+        le cartelle). La struttura del topic (meta, summary, minutes/, .messages)
+        è protetta: si può cancellare solo ciò che vive sotto files/, simmetrico a
+        put_file. Anti-traversal per segmento."""
+        if not self.s.exists(self._meta_p(tier, name)):
+            raise TopicError(f"topic non trovato: {tier}/{name}")
+        rel = (relpath or "").strip().strip("/")
+        parts = rel.split("/")
+        if not rel or "\\" in rel or any(p in ("", ".", "..") for p in parts):
+            raise TopicError(f"path non valido: {relpath}")
+        if parts[0] != "files" or len(parts) < 2:
+            raise TopicError(
+                "puoi eliminare solo file/cartelle dentro 'files/' del topic "
+                "(meta, summary, minutes sono protetti)")
+        target = f"{self._dir(tier, name)}/{rel}"
+        if not self.s.exists(target):
+            raise TopicError(f"non trovato: {relpath}")
+        self.s.delete(target)
+        return {"deleted": rel}
+
     def archive(self, tier: str, name: str) -> dict:
         """Imposta status=archived nel meta (NON sposta su storage inferiore)."""
         mp = self._meta_p(tier, name)
