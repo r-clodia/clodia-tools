@@ -447,6 +447,46 @@ _SETTINGS_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {}}),
 ]
 
+# gdrive.* — export/import file fra i topic e Drive, riusando le credenziali
+# Workspace nel vault. Trasferimento via scratch (come topic.fetch/put).
+_GDRIVE_TOOLS: list[Tool] = [
+    Tool(name="gdrive.list",
+         description=("Elenca file/cartelle di Google Drive. folder_id per il contenuto di "
+                      "una cartella; query per una query Drive (es. \"name contains 'x'\")."),
+         inputSchema={"type": "object", "properties": {
+             "folder_id": {"type": "string"}, "query": {"type": "string"},
+             "limit": {"type": "integer"}, "account": {"type": "string"}}}),
+    Tool(name="gdrive.search",
+         description="Cerca file/cartelle Drive per nome (match parziale).",
+         inputSchema={"type": "object", "properties": {
+             "name": {"type": "string"}, "limit": {"type": "integer"},
+             "account": {"type": "string"}}, "required": ["name"]}),
+    Tool(name="gdrive.mkdir",
+         description="Crea una cartella Drive (riusa una omonima nello stesso parent se esiste).",
+         inputSchema={"type": "object", "properties": {
+             "name": {"type": "string"}, "parent_id": {"type": "string"},
+             "account": {"type": "string"}}, "required": ["name"]}),
+    Tool(name="gdrive.upload",
+         description=("Carica un file su Drive. src = path di un file nello scratch dell'agent "
+                      "(prepara con topic.fetch). name = nome su Drive; folder_id = cartella."),
+         inputSchema={"type": "object", "properties": {
+             "src": {"type": "string"}, "name": {"type": "string"},
+             "folder_id": {"type": "string"}, "account": {"type": "string"}},
+             "required": ["src"]}),
+    Tool(name="gdrive.download",
+         description=("Scarica un file Drive in dest (path scratch dell'agent; poi usa topic.put "
+                      "per metterlo nel topic). I Google-doc nativi sono esportati (PDF/xlsx)."),
+         inputSchema={"type": "object", "properties": {
+             "file_id": {"type": "string"}, "dest": {"type": "string"},
+             "account": {"type": "string"}}, "required": ["file_id", "dest"]}),
+    Tool(name="gdrive.share",
+         description="Condivide un file/cartella Drive con un'email. role: writer (editor, default)|reader|commenter.",
+         inputSchema={"type": "object", "properties": {
+             "file_id": {"type": "string"}, "email": {"type": "string"},
+             "role": {"type": "string"}, "account": {"type": "string"}},
+             "required": ["file_id", "email"]}),
+]
+
 # telegram.* — invio + inbound con lease per-chat. Un agente scrive solo a chat
 # che hanno già scritto e di cui detiene il lease; chat diverse → lease
 # indipendenti. Il bot token vive nel vault, mai nel modello.
@@ -539,6 +579,30 @@ def _dispatch_settings(name: str, arguments: dict, agent: str | None):
     raise ValueError(f"unknown settings tool: {name}")
 
 
+def _dispatch_gdrive(name: str, a: dict):
+    from .tools import gdrive as gd
+    verb = name.split(NS_SEP_DOT, 1)[1]
+    if verb == "list":
+        return gd.list_files(folder_id=a.get("folder_id"), query=a.get("query"),
+                             limit=a.get("limit", 50), account=a.get("account"))
+    if verb == "search":
+        return gd.search(a["name"], limit=a.get("limit", 20), account=a.get("account"))
+    if verb == "mkdir":
+        return gd.mkdir(a["name"], parent_id=a.get("parent_id"), account=a.get("account"))
+    if verb == "upload":
+        src = _safe_scratch_path(a["src"])  # i byte vengono dallo scratch, mai dal modello
+        return gd.upload(src, name=a.get("name"), folder_id=a.get("folder_id"),
+                         account=a.get("account"))
+    if verb == "download":
+        dest = _safe_scratch_path(a["dest"])
+        _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+        return gd.download(a["file_id"], dest, account=a.get("account"))
+    if verb == "share":
+        return gd.share(a["file_id"], a["email"], role=a.get("role", "writer"),
+                        account=a.get("account"))
+    raise ValueError(f"unknown gdrive verb: {name}")
+
+
 def _dispatch_telegram(name: str, a: dict):
     from .tools import telegram as tg
     verb = name.split(NS_SEP_DOT, 1)[1]
@@ -608,6 +672,8 @@ def _connector_allows(name: str, agent: str | None) -> bool:
         return True
     if name.startswith("telegram.") and "telegram_bot_token" in grants:
         return True
+    if name.startswith("gdrive.") and any(c.startswith("gworkspace_") for c in grants):
+        return True
     return False
 
 
@@ -631,7 +697,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _AGENT_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS)
+    native = list(_FS_TOOLS + _AGENT_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS)
     # C1: tool dei backend MCP montati (namespaced), aggregati dal proxy.
     try:
         proxied = await proxy.list_proxied_tools()
@@ -720,6 +786,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_settings(name, arguments, _ag)
         elif name.startswith("telegram."):
             result = _dispatch_telegram(name, arguments)
+        elif name.startswith("gdrive."):
+            result = _dispatch_gdrive(name, arguments)
         elif name.startswith("runtime."):
             result = _dispatch_runtime(name, arguments)
         elif proxy.is_proxied(name):
