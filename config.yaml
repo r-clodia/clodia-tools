@@ -17,7 +17,6 @@ agents:
     - email.search
     - email.reply
     - fs.list_dir
-    - agent.spawn
     - topic.*
     - runtime.*
   ophelia:
@@ -33,6 +32,5 @@ agents:
     - email.search
     - email.reply
     - fs.list_dir
-    - agent.spawn
     - topic.*
     - runtime.*

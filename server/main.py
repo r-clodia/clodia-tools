@@ -9,7 +9,7 @@ from mcp.types import TextContent, Tool
 
 from . import __version__
 from . import proxy
-from .tools import agent, email, fs, runtime
+from .tools import email, fs, runtime
 from .whitelist import agent_config, agent_name
 
 import os as _os
@@ -145,36 +145,12 @@ _EMAIL_TOOLS: list[Tool] = [
 ]
 
 
-_AGENT_TOOLS: list[Tool] = [
-    Tool(
-        name="agent.spawn",
-        description=(
-            "Spawn a new chat of the given agent-type via the local agent-server "
-            "and hand it a first user message. Returns chat_id, kind, and (if "
-            "wait_for_reply=true) the agent's reply. Used by 'looper' to dispatch "
-            "tasks to other agents (e.g. ada)."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "agent_type": {
-                    "type": "string",
-                    "description": "agent kind to spawn: 'ada', 'clodia', or 'looper'",
-                    "enum": ["ada", "clodia", "looper"],
-                },
-                "task": {
-                    "type": "string",
-                    "description": "first user message to deliver to the spawned agent",
-                },
-                "wait_for_reply": {
-                    "type": "boolean",
-                    "description": "if true wait for the agent's reply before returning; default false (fire-and-forget): the message is queued and the spawned agent processes it in background",
-                },
-            },
-            "required": ["agent_type", "task"],
-        },
-    ),
-]
+# agent.spawn RIMOSSO (29 giu 2026): creava chat via POST /clodia/chats, endpoint
+# eliminato nel passaggio al modello a canali/topic → il tool falliva a runtime
+# (tool "fantasma" che illudeva l'agent di poter delegare in background). I
+# subagent reali sono in-process (Task tool del Claude SDK), che girano dentro il
+# turno (osservabili) e il cui esito rientra nel turno.
+_AGENT_TOOLS: list[Tool] = []
 
 
 _FS_TOOLS: list[Tool] = [
@@ -709,7 +685,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _AGENT_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS)
+    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS)
     # C1: tool dei backend MCP montati (namespaced), aggregati dal proxy.
     try:
         proxied = await proxy.list_proxied_tools()
@@ -738,12 +714,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 f"tool '{name}' non in whitelist per agent '{_ag}'")
         if name == "fs.list_dir":
             result = fs.list_dir(arguments["path"])
-        elif name == "agent.spawn":
-            result = agent.spawn(
-                arguments["agent_type"],
-                arguments["task"],
-                wait_for_reply=arguments.get("wait_for_reply", False),
-            )
         elif name == "email.send":
             result = email.send(
                 arguments["to"],
