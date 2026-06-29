@@ -138,6 +138,16 @@ def read_message(email_id: str, account: str = "demo", folder: str = "INBOX") ->
     return _run_json(account, ["read", str(email_id), "--folder", folder])
 
 
+
+def get_attachment(email_id: str, filename: str, account: str = "demo",
+                   folder: str = "INBOX") -> dict:
+    """Contenuto base64 di un allegato (componibile con topic.write_file/profile)."""
+    tool_allowed("email.get_attachment")
+    if not filename:
+        raise ValueError("'filename' must be provided")
+    return _run_json(account, ["get-attachment", str(email_id), "--filename", filename,
+                               "--folder", folder])
+
 def search(query: str, account: str = "demo", folder: str = "INBOX", limit: int = 20) -> dict:
     """Cerca messaggi via query IMAP (es. FROM \"x@y.it\")."""
     tool_allowed("email.search")

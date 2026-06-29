@@ -338,6 +338,42 @@ def download_attachments(account, email_id, output_dir=".", folder="INBOX"):
     return downloaded
 
 
+
+def get_attachment(account, email_id, filename, folder="INBOX"):
+    """Ritorna il contenuto base64 di un singolo allegato (per nome file)."""
+    imap = connect_imap(account)
+    imap.select(folder, readonly=True)
+    status, msg_data = imap.fetch(
+        email_id.encode() if isinstance(email_id, str) else email_id, "(RFC822)"
+    )
+    target = None
+    for response_part in msg_data:
+        if isinstance(response_part, tuple):
+            msg = email.message_from_bytes(response_part[1])
+            for part in msg.walk():
+                if part.get_content_maintype() == "multipart":
+                    continue
+                if part.get("Content-Disposition") is None:
+                    continue
+                fn = part.get_filename()
+                if fn and decode_mime_header(fn) == filename:
+                    payload = part.get_payload(decode=True)
+                    if payload is None:
+                        continue
+                    target = {
+                        "filename": filename,
+                        "size": len(payload),
+                        "content_type": part.get_content_type(),
+                        "encoding": "base64",
+                        "data": base64.b64encode(payload).decode("ascii"),
+                    }
+                    break
+    imap.logout()
+    if target is None:
+        raise ValueError(f"allegato non trovato: {filename}")
+    return target
+
+
 def reply_email(account, email_id, body, folder="INBOX", cc=None, attachments=None):
     """Rispondi a un'email mantenendo il threading (In-Reply-To + References)."""
     original = read_email(account, email_id, folder)
@@ -626,6 +662,11 @@ def main():
     download_parser.add_argument("--output", default=".")
     download_parser.add_argument("--folder", default="INBOX")
 
+    ga_parser = subparsers.add_parser("get-attachment", help="Contenuto base64 di un allegato")
+    ga_parser.add_argument("email_id")
+    ga_parser.add_argument("--filename", required=True)
+    ga_parser.add_argument("--folder", default="INBOX")
+
     # accounts
     subparsers.add_parser("accounts", help="Lista account configurati")
 
@@ -743,6 +784,10 @@ def main():
     elif args.command == "reply":
         result = reply_email(account, args.email_id, args.body, folder=args.folder, cc=args.cc, attachments=args.attachment)
         print(json.dumps({"status": "ok", "message": f"Reply inviato da {account['email']}", "to": result["to"], "subject": result["subject"]}))
+
+    elif args.command == "get-attachment":
+        result = get_attachment(account, args.email_id, args.filename, args.folder)
+        print(json.dumps(result, ensure_ascii=False))
 
     elif args.command == "download-attachments":
         result = download_attachments(account, args.email_id, args.output, args.folder)

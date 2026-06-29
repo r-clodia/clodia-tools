@@ -98,6 +98,22 @@ _EMAIL_TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="email.get_attachment",
+        description=("Contenuto di un allegato di un messaggio, in base64 (per nome file). "
+                     "Componibile con topic.write_file(encoding='base64') o gli allegati profilo. "
+                     "Usa email.read per scoprire i nomi degli allegati."),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "email_id": {"type": "string", "description": "IMAP message id"},
+                "filename": {"type": "string", "description": "nome esatto dell'allegato (da email.read)"},
+                "account": {"type": "string"},
+                "folder": {"type": "string", "description": "IMAP folder, default INBOX"},
+            },
+            "required": ["email_id", "filename"],
+        },
+    ),
+    Tool(
         name="email.search",
         description="Search messages with an IMAP query (e.g. FROM \"x@y.it\") in a folder.",
         inputSchema={
@@ -617,6 +633,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name == "email.read":
             result = email.read_message(
                 arguments["email_id"],
+                account=arguments.get("account", "demo"),
+                folder=arguments.get("folder", "INBOX"),
+            )
+        elif name == "email.get_attachment":
+            result = email.get_attachment(
+                arguments["email_id"],
+                arguments["filename"],
                 account=arguments.get("account", "demo"),
                 folder=arguments.get("folder", "INBOX"),
             )
