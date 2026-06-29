@@ -118,9 +118,27 @@ def resolve_safe_path(rel_or_abs: str) -> Path:
     )
 
 
+# Super-agent: bypassano la whitelist (coerente con main.py call_tool). Estendibile
+# via env CLODIA_SUPER_AGENTS (CSV).
+import os as _os
+_SUPER_AGENTS = {"clodia", "ophelia", *(
+    a.strip() for a in _os.environ.get("CLODIA_SUPER_AGENTS", "").split(",") if a.strip()
+)}
+
+
 def tool_allowed(tool_name: str) -> None:
-    cfg = agent_config()
-    if tool_name not in cfg.get("allowed_tools", []):
-        raise PermissionError(
-            f"tool '{tool_name}' not in allowed_tools of agent '{agent_name()}'"
-        )
+    """Gate a livello adapter, coerente con main.py: super-agent bypassano; il
+    wildcard `<ns>.*` concede tutti i tool di un namespace. Senza questo, un tool
+    nuovo (es. email.get_attachment) o un wildcard veniva bloccato qui anche se
+    main.py lo consentiva (doppio gate incoerente)."""
+    ag = agent_name()
+    if ag in _SUPER_AGENTS:
+        return
+    allowed = agent_config().get("allowed_tools", [])
+    if tool_name in allowed:
+        return
+    if "." in tool_name and f"{tool_name.split('.', 1)[0]}.*" in allowed:
+        return
+    raise PermissionError(
+        f"tool '{tool_name}' not in allowed_tools of agent '{ag}'"
+    )
