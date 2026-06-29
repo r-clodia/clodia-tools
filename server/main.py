@@ -312,10 +312,10 @@ _TOPIC_TOOLS: list[Tool] = [
     ),
     Tool(
         name="topic.delete_file",
-        description=("Elimina un file o una cartella (ricorsivo) DENTRO files/ del topic. "
-                     "Solo sotto files/ (la struttura del topic — meta, summary, minutes — "
-                     "è protetta). path = path relativo alla root del topic, come restituito "
-                     "da topic.files (es. 'files/old/x.pdf' o 'files/files')."),
+        description=("Sposta nel CESTINO (.trash/) un file o una cartella DENTRO files/ del "
+                     "topic — NON cancella mai davvero: è sempre recuperabile. Solo sotto "
+                     "files/ (meta, summary, minutes sono protetti). path = path relativo alla "
+                     "root del topic, come da topic.files (es. 'files/old/x.pdf' o 'files/files')."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},

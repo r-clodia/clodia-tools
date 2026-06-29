@@ -318,9 +318,10 @@ class TopicService:
         return {"name": parts[-1], "path": f"files/{rel}"}
 
     def delete_file(self, tier: str, name: str, relpath: str) -> dict:
-        """Elimina un file o una cartella DENTRO files/ del topic (ricorsivo per
-        le cartelle). La struttura del topic (meta, summary, minutes/, .messages)
-        è protetta: si può cancellare solo ciò che vive sotto files/, simmetrico a
+        """SOFT-DELETE: NON cancella mai davvero. Sposta un file o una cartella
+        (dentro files/) nel cestino del topic `.trash/<timestamp>/<path>`, creato
+        se non esiste → sempre recuperabile. La struttura del topic (meta, summary,
+        minutes/, .messages) è protetta: si agisce solo sotto files/, simmetrico a
         put_file. Anti-traversal per segmento."""
         if not self.s.exists(self._meta_p(tier, name)):
             raise TopicError(f"topic non trovato: {tier}/{name}")
@@ -330,13 +331,19 @@ class TopicService:
             raise TopicError(f"path non valido: {relpath}")
         if parts[0] != "files" or len(parts) < 2:
             raise TopicError(
-                "puoi eliminare solo file/cartelle dentro 'files/' del topic "
+                "puoi rimuovere solo file/cartelle dentro 'files/' del topic "
                 "(meta, summary, minutes sono protetti)")
-        target = f"{self._dir(tier, name)}/{rel}"
+        d = self._dir(tier, name)
+        target = f"{d}/{rel}"
         if not self.s.exists(target):
             raise TopicError(f"non trovato: {relpath}")
-        self.s.delete(target)
-        return {"deleted": rel}
+        # Cestino: conserva il path relativo sotto un timestamp (no collisioni,
+        # tracciabilità di quando è stato rimosso). `.trash` è dotfile → nascosto
+        # nel browser file (list_files salta i path che iniziano con '.').
+        ts = _now().strftime("%Y%m%d-%H%M%S")
+        trash_rel = f".trash/{ts}/{rel}"
+        self.s.move(target, f"{d}/{trash_rel}")
+        return {"trashed": rel, "trash_path": trash_rel, "recoverable": True}
 
     def archive(self, tier: str, name: str) -> dict:
         """Imposta status=archived nel meta (NON sposta su storage inferiore)."""
