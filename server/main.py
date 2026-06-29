@@ -290,6 +290,34 @@ _TOPIC_TOOLS: list[Tool] = [
             "encoding": {"type": "string", "enum": ["text", "base64"], "description": "default text"},
         }, "required": ["tier", "name", "filename", "content"]},
     ),
+    Tool(
+        name="topic.fetch",
+        description=("Scarica una COPIA di un file del topic nel TUO scratch (path "
+                     "locale), per trattarlo con le skill standard (xlsx/pdf/docx/…). "
+                     "USA QUESTO per i BINARI invece di topic.read_file (che passa "
+                     "base64 nel contesto e si tronca sui file grandi). `dest` = path "
+                     "assoluto sotto il tuo scratch. Flusso: topic.fetch → skill "
+                     "standard sul file locale → topic.put."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "path": {"type": "string", "description": "path nel topic, es. files/expenses/x.xlsx"},
+            "dest": {"type": "string", "description": "path assoluto di destinazione nel tuo scratch"},
+        }, "required": ["tier", "name", "path", "dest"]},
+    ),
+    Tool(
+        name="topic.put",
+        description=("Carica nel topic (files/) un file preparato nel TUO scratch. USA "
+                     "QUESTO per i BINARI invece di topic.write_file: il gateway legge i "
+                     "byte dal path locale, niente base64 nel modello. `src` = path "
+                     "assoluto nel tuo scratch; `filename` può includere sottocartelle."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "filename": {"type": "string", "description": "nome file (può includere sottocartelle)"},
+            "src": {"type": "string", "description": "path assoluto del file nel tuo scratch"},
+        }, "required": ["tier", "name", "filename", "src"]},
+    ),
 ]
 
 
@@ -667,6 +695,20 @@ def _decode_b64_strict(content: str, filename: str) -> bytes:
         ) from e
 
 
+_SPAWNS_ROOT = _os.environ.get("CLODIA_SPAWNS_ROOT", "/datadir/spawns")
+
+
+def _safe_scratch_path(p: str) -> str:
+    """Valida che `p` stia nello scratch di uno spawn (`/datadir/spawns/**`):
+    il gateway scrive/legge SOLO lì, mai nel topic store o nei secrets, anche se
+    l'agent passa un path arbitrario. Difesa contro path-traversal/abuso."""
+    rp = _os.path.realpath(p or "")
+    root = _os.path.realpath(_SPAWNS_ROOT)
+    if not (rp == root or rp.startswith(root + "/")):
+        raise ValueError(f"path non consentito (deve stare sotto {_SPAWNS_ROOT}): {p}")
+    return rp
+
+
 def _dispatch_topic(name: str, a: dict):
     svc = _topics()
     verb = name.split(".", 1)[1]
@@ -708,6 +750,24 @@ def _dispatch_topic(name: str, a: dict):
         else:
             data = (a["content"] or "").encode("utf-8")
         return svc.put_file(a["tier"], a["name"], fn, data)
+    if verb == "fetch":
+        # Consegna una COPIA del file del topic nello SCRATCH dell'agent (path
+        # locale), come un `git clone` ma di un singolo file e mediato dal gateway:
+        # i byte NON transitano dal modello (niente base64 nel contesto → niente
+        # troncamento sui file grandi). ACL: read_file rispetta la classe del topic.
+        data = svc.read_file(a["tier"], a["name"], a["path"])
+        dest = _safe_scratch_path(a["dest"])
+        _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(data)
+        return {"local_path": dest, "size": len(data)}
+    if verb == "put":
+        # Mette nel topic store un file preparato nello scratch dell'agent (come un
+        # `push`): il gateway legge i byte dal path locale e li scrive nello store.
+        src = _safe_scratch_path(a["src"])
+        with open(src, "rb") as f:
+            data = f.read()
+        return svc.put_file(a["tier"], a["name"], a["filename"], data)
     raise ValueError(f"unknown topic verb: {name}")
 
 
