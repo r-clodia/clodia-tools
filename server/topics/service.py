@@ -304,6 +304,11 @@ class TopicService:
         if not self.s.exists(self._meta_p(tier, name)):
             raise TopicError(f"topic non trovato: {tier}/{name}")
         rel = (filename or "").strip().strip("/")
+        # Normalizza il prefisso 'files/' ridondante: gli agenti spesso passano il
+        # path completo che vedono (es. 'files/x.pdf') invece del nome relativo a
+        # files/ → senza questo si crea files/files/x.pdf (annidamento + duplicati).
+        while rel == "files" or rel.startswith("files/"):
+            rel = rel[len("files"):].strip("/")
         if not rel or "\\" in rel:
             raise TopicError(f"nome file non valido: {filename}")
         parts = rel.split("/")
