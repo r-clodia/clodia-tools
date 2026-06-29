@@ -431,6 +431,40 @@ _SETTINGS_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {}}),
 ]
 
+# telegram.* — invio + inbound con lease per-chat. Un agente scrive solo a chat
+# che hanno già scritto e di cui detiene il lease; chat diverse → lease
+# indipendenti. Il bot token vive nel vault, mai nel modello.
+_TELEGRAM_TOOLS: list[Tool] = [
+    Tool(name="telegram.inbox",
+         description=("Chat Telegram con messaggi in arrivo (metadati, NON consuma): "
+                      "per ognuna chat_id, titolo, n. messaggi pendenti, anteprima e chi "
+                      "detiene il lease. Punto di partenza prima di prendere un lease."),
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="telegram.lease_acquire",
+         description=("Acquisisce il lease ESCLUSIVO su una chat per N minuti: finché è "
+                      "valido sei l'unico a consumarne i messaggi e a poterle scrivere. "
+                      "Fallisce se un altro agente la detiene. Solo chat che hanno scritto."),
+         inputSchema={"type": "object", "properties": {
+             "chat_id": {"type": "string", "description": "ID chat (da telegram.inbox)"},
+             "minutes": {"type": "integer", "description": "Durata lease (default 10, max 120)"}},
+             "required": ["chat_id"]}),
+    Tool(name="telegram.poll",
+         description=("Consuma (svuota) i messaggi in coda di una chat. Richiede un lease "
+                      "attivo del chiamante su quella chat."),
+         inputSchema={"type": "object", "properties": {
+             "chat_id": {"type": "string"}}, "required": ["chat_id"]}),
+    Tool(name="telegram.send",
+         description=("Invia un messaggio a una chat. Consentito SOLO verso una chat che ha "
+                      "già scritto al bot e di cui detieni il lease."),
+         inputSchema={"type": "object", "properties": {
+             "chat_id": {"type": "string"}, "text": {"type": "string"}},
+             "required": ["chat_id", "text"]}),
+    Tool(name="telegram.lease_release",
+         description="Rilascia anticipatamente il lease su una chat (no-op se non lo detieni).",
+         inputSchema={"type": "object", "properties": {
+             "chat_id": {"type": "string"}}, "required": ["chat_id"]}),
+]
+
 
 def _dispatch_trello(name: str, a: dict):
     from .tools import trello as tr
@@ -489,6 +523,22 @@ def _dispatch_settings(name: str, arguments: dict, agent: str | None):
     raise ValueError(f"unknown settings tool: {name}")
 
 
+def _dispatch_telegram(name: str, a: dict):
+    from .tools import telegram as tg
+    verb = name.split(NS_SEP_DOT, 1)[1]
+    if verb == "inbox":
+        return tg.inbox()
+    if verb == "lease_acquire":
+        return tg.lease_acquire(a["chat_id"], a.get("minutes", 10))
+    if verb == "poll":
+        return tg.poll(a["chat_id"])
+    if verb == "send":
+        return tg.send(a["chat_id"], a["text"])
+    if verb == "lease_release":
+        return tg.lease_release(a["chat_id"])
+    raise ValueError(f"unknown telegram verb: {name}")
+
+
 def _dispatch_runtime(name: str, arguments: dict):
     sub = name.split(NS_SEP_DOT, 1)[1]
     if sub == "agents":
@@ -540,6 +590,8 @@ def _connector_allows(name: str, agent: str | None) -> bool:
         return True
     if name.startswith("trello.") and "trello" in grants:
         return True
+    if name.startswith("telegram.") and "telegram_bot_token" in grants:
+        return True
     return False
 
 
@@ -563,7 +615,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _AGENT_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS)
+    native = list(_FS_TOOLS + _AGENT_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS)
     # C1: tool dei backend MCP montati (namespaced), aggregati dal proxy.
     try:
         proxied = await proxy.list_proxied_tools()
@@ -643,6 +695,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_profile(name, arguments, _ag)
         elif name.startswith("settings."):
             result = _dispatch_settings(name, arguments, _ag)
+        elif name.startswith("telegram."):
+            result = _dispatch_telegram(name, arguments)
         elif name.startswith("runtime."):
             result = _dispatch_runtime(name, arguments)
         elif proxy.is_proxied(name):
