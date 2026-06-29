@@ -290,7 +290,8 @@ class TopicService:
                 st = self.s.stat(f"{base}/{e.name}")
                 out.append({"name": e.name, "path": p, "kind": "file",
                             "size": getattr(st, "size", None) if st else None,
-                            "mtime_iso": _iso(st.mtime) if st else None})
+                            "mtime_iso": _iso(st.mtime) if st else None,
+                            "md5": getattr(st, "md5", None) if st else None})
         dirs = sorted((f for f in out if f.get("kind") == "dir"),
                       key=lambda f: f.get("name", "").lower())
         files = sorted((f for f in out if f.get("kind") != "dir"),

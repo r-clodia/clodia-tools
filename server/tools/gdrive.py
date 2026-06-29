@@ -28,7 +28,7 @@ _GOOGLE_EXPORT = {
         ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),
     "application/vnd.google-apps.presentation": ("application/pdf", ".pdf"),
 }
-_FIELDS = "id, name, mimeType, modifiedTime, size, webViewLink, parents"
+_FIELDS = "id, name, mimeType, modifiedTime, size, webViewLink, parents, md5Checksum"
 
 
 def gworkspace_accounts() -> list[str]:
@@ -73,8 +73,12 @@ def _service(account: Optional[str] = None):
 
 
 def _clean(f: dict) -> dict:
-    return {k: f.get(k) for k in ("id", "name", "mimeType", "modifiedTime",
-                                  "size", "webViewLink") if f.get(k) is not None}
+    out = {k: f.get(k) for k in ("id", "name", "mimeType", "modifiedTime",
+                                 "size", "webViewLink") if f.get(k) is not None}
+    # md5Checksum esposto come "md5" → simmetrico a topic.files, per il verbo `same`.
+    if f.get("md5Checksum"):
+        out["md5"] = f["md5Checksum"]
+    return out
 
 
 # ── Tool esposti via MCP ─────────────────────────────────────────────────────

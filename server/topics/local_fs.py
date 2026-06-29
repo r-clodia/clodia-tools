@@ -96,4 +96,5 @@ class LocalFsStorage(Storage):
         if p.is_dir():
             return Stat("", 0, st.st_mtime, "dir")
         data = p.read_bytes()
-        return Stat(_version(data), st.st_size, st.st_mtime, "file")
+        return Stat(_version(data), st.st_size, st.st_mtime, "file",
+                    md5=hashlib.md5(data).hexdigest())

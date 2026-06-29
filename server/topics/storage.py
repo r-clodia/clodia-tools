@@ -45,6 +45,7 @@ class Stat:
     size: int
     mtime: float
     kind: str      # "file" | "dir"
+    md5: str | None = None   # md5 del contenuto (confronto con Drive md5Checksum); None per le dir
 
 
 @dataclass
