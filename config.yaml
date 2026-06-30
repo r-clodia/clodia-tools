@@ -34,3 +34,14 @@ agents:
     - fs.list_dir
     - topic.*
     - runtime.*
+  # Wainston (agent di sistema, normal): helpdesk widget + amministrazione delle
+  # capability degli ALTRI agent editabili. Non super → la whitelist è esplicita.
+  wainston:
+    allowed_paths:
+    - .
+    allowed_shell_cmds: []
+    denied_shell_patterns: []
+    allowed_tools:
+    - agents.*
+    - runtime.*
+    - app_runtime.*
