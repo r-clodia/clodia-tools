@@ -84,6 +84,26 @@ def current_principal() -> str | None:
     return _CURRENT_PRINCIPAL.get()
 
 
+# Token ckt1 grezzo della richiesta corrente. Serve per INOLTRARLO al backend
+# quando il gateway deve compiere, per conto del caller, un'operazione che il
+# backend autorizza per principal-agent (es. agents.* → PATCH /api/agents/*/caps).
+# Il gateway non conia token: riusa quello già verificato in ingresso.
+_CURRENT_TOKEN: ContextVar[str | None] = ContextVar("mcp_current_token", default=None)
+
+
+def set_current_token(token: str | None) -> object:
+    return _CURRENT_TOKEN.set(token)
+
+
+def reset_current_token(token: object) -> None:
+    _CURRENT_TOKEN.reset(token)  # type: ignore[arg-type]
+
+
+def current_token() -> str | None:
+    """Token ckt1 grezzo della richiesta corrente (da inoltrare al backend)."""
+    return _CURRENT_TOKEN.get()
+
+
 def agent_name() -> str:
     """Agente chiamante: prima il contextvar (HTTP per-richiesta), poi l'env
     MCP_AGENT_NAME (stdio legacy)."""

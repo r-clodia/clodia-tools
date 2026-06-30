@@ -57,9 +57,12 @@ class _AuthMiddleware:
         tok = whitelist.set_current_agent(str(payload.get("agent") or ""))
         # claim `principal` (utente umano della chat) → contextvar per runtime.current_user
         ptok = whitelist.set_current_principal(payload.get("principal") or None)
+        # token grezzo verificato → inoltrabile al backend (agents.* → caps)
+        ttok = whitelist.set_current_token(token or None)
         try:
             await self.handler(scope, receive, send)
         finally:
+            whitelist.reset_current_token(ttok)
             whitelist.reset_current_principal(ptok)
             whitelist.reset_current_agent(tok)
 

@@ -160,7 +160,63 @@ _EMAIL_TOOLS: list[Tool] = [
 # (tool "fantasma" che illudeva l'agent di poter delegare in background). I
 # subagent reali sono in-process (Task tool del Claude SDK), che girano dentro il
 # turno (osservabili) e il cui esito rientra nel turno.
-_AGENT_TOOLS: list[Tool] = []
+#
+# agents.* (30 giu 2026): amministrazione delle capability degli ALTRI agent —
+# dotare un agent editabile di skill/tool/rules dalla chat. Immutabili (super +
+# flag immutable, es. Wainston) non toccabili. Scritture verificate anche dal
+# backend (token inoltrato). Vedi tools/agents_admin.py.
+_AGENT_TOOLS: list[Tool] = [
+    Tool(name="agents.list",
+         description=("Elenca gli agent dell'istanza con tipo e flag `immutable`. "
+                      "Gli immutabili (super + protetti come Wainston) non sono "
+                      "modificabili: si cambiano solo via codice/rebuild."),
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="agents.show",
+         description="Capability correnti di un agent: skill (capabilities), rules, tool_permissions, immutabilità.",
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string", "description": "nome dell'agent"}},
+             "required": ["agent"]}),
+    Tool(name="agents.list_skills",
+         description="Nomi delle skill disponibili nel catalogo (assegnabili come capabilities).",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="agents.list_rules",
+         description="Nomi delle rule disponibili nel catalogo (assegnabili).",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="agents.list_tools",
+         description="Namespace dei tool nativi del gateway concedibili a un agent (es. fs, email, topic, gdrive).",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="agents.grant_skill",
+         description="Aggiunge una skill (capability) a un agent editabile.",
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string"}, "skill": {"type": "string"}},
+             "required": ["agent", "skill"]}),
+    Tool(name="agents.revoke_skill",
+         description="Rimuove una skill da un agent editabile.",
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string"}, "skill": {"type": "string"}},
+             "required": ["agent", "skill"]}),
+    Tool(name="agents.grant_tool",
+         description=("Concede un permesso tool a un agent editabile. Può essere un "
+                      "tool puntuale (es. `email.send`) o un namespace (`fs.*`)."),
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string"}, "tool": {"type": "string"}},
+             "required": ["agent", "tool"]}),
+    Tool(name="agents.revoke_tool",
+         description="Revoca un permesso tool a un agent editabile.",
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string"}, "tool": {"type": "string"}},
+             "required": ["agent", "tool"]}),
+    Tool(name="agents.grant_rule",
+         description="Aggiunge una rule (regola di stile/comportamento) a un agent editabile.",
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string"}, "rule": {"type": "string"}},
+             "required": ["agent", "rule"]}),
+    Tool(name="agents.revoke_rule",
+         description="Rimuove una rule da un agent editabile.",
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string"}, "rule": {"type": "string"}},
+             "required": ["agent", "rule"]}),
+]
 
 
 _FS_TOOLS: list[Tool] = [
@@ -633,6 +689,43 @@ def _dispatch_telegram(name: str, a: dict):
     raise ValueError(f"unknown telegram verb: {name}")
 
 
+def _native_tool_namespaces() -> list[str]:
+    """Namespace dei tool nativi del gateway (per agents.list_tools)."""
+    tools = (_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS
+             + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
+    ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in tools})
+    return ns
+
+
+def _dispatch_agents(name: str, a: dict, caller: str | None):
+    from .tools import agents_admin as adm
+    verb = name.split(NS_SEP_DOT, 1)[1]
+    if verb == "list":
+        return adm.list_agents()
+    if verb == "show":
+        return adm.show(a["agent"])
+    if verb == "list_skills":
+        return adm.list_skills()
+    if verb == "list_rules":
+        return adm.list_rules()
+    if verb == "list_tools":
+        return {"namespaces": _native_tool_namespaces(),
+                "note": "concedi un namespace intero con `<ns>.*` o un tool puntuale `<ns>.<verbo>`"}
+    if verb == "grant_skill":
+        return adm.grant_skill(a["agent"], a["skill"])
+    if verb == "revoke_skill":
+        return adm.revoke_skill(a["agent"], a["skill"])
+    if verb == "grant_tool":
+        return adm.grant_tool(a["agent"], a["tool"])
+    if verb == "revoke_tool":
+        return adm.revoke_tool(a["agent"], a["tool"])
+    if verb == "grant_rule":
+        return adm.grant_rule(a["agent"], a["rule"])
+    if verb == "revoke_rule":
+        return adm.revoke_rule(a["agent"], a["rule"])
+    raise ValueError(f"unknown agents verb: {name}")
+
+
 def _dispatch_runtime(name: str, arguments: dict):
     sub = name.split(NS_SEP_DOT, 1)[1]
     if sub == "agents":
@@ -711,7 +804,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS)
+    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
     # C1: tool dei backend MCP montati (namespaced), aggregati dal proxy.
     try:
         proxied = await proxy.list_proxied_tools()
@@ -800,6 +893,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_gdrive(name, arguments)
         elif name.startswith("runtime."):
             result = _dispatch_runtime(name, arguments)
+        elif name.startswith("agents."):
+            result = _dispatch_agents(name, arguments, _ag)
         elif proxy.is_proxied(name):
             # C1: instrada al backend MCP montato (già passato il check whitelist).
             text = await proxy.call_proxied(name, arguments)
