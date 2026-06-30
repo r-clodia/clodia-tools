@@ -44,12 +44,12 @@ Se l'agente chiamante non è dichiarato in `config.yaml`, il server **rifiuta tu
 `trello.assign_member` / `trello.unassign_member` accettano in `member` un member id (24-hex), un alias breve della famiglia Clodia (es. `ada`, `clodia`, `klaus` → username `demo<alias>` per convenzione), o un username Trello arbitrario.
 
 **Email** (wrapper sub-process di `vendor/email_client.py`, OAuth/IMAP in `secrets/`):
-- `email.send(to, subject, body, account?, cc?)` — invio plain text. Account: `demo` (default) o `studio`. No allegati in questa versione.
+- `email.send(to, subject, body, account?, cc?, attachments?)` — invio plain text con allegati locali opzionali (`attachments` = lista di path file). Account: `demo` (default) o `studio`.
 - `email.folders(account?)` — elenco cartelle IMAP.
 - `email.list(account?, folder?, limit?)` — elenco messaggi di una cartella (default INBOX).
 - `email.read(email_id, account?, folder?)` — lettura di un singolo messaggio.
 - `email.search(query, account?, folder?, limit?)` — ricerca via query IMAP (es. `FROM "x@y.it"`).
-- `email.reply(email_id, body, account?, folder?, cc?)` — risposta mantenendo il threading (plain text).
+- `email.reply(email_id, body, account?, folder?, cc?, attachments?)` — risposta mantenendo il threading (plain text con allegati locali opzionali).
 - Le credenziali (refresh token OAuth/IMAP) non transitano mai dal motore di inferenza: il CLI le risolve internamente da `secrets/`. `download_attachments` non è ancora esposto (richiede la decisione sull'area di retention dei file scaricati).
 
 **Agent control** (parla con l'agent-server REST locale a `127.0.0.1:7842`):

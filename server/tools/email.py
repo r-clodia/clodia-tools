@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 from .. import vault
 from ..whitelist import agent_name, tool_allowed
@@ -116,6 +116,17 @@ def _run_json(account: str, cli_args: list[str], *, timeout: int = 60) -> Union[
     return _run_cli(account, cli_args, want_json=True, timeout=timeout)
 
 
+def _attachment_args(attachments: Optional[Sequence[str]]) -> list[str]:
+    """Converte path locali in flag CLI --attachment, validandoli presto."""
+    args: list[str] = []
+    for raw in attachments or []:
+        path = Path(str(raw)).expanduser()
+        if not path.is_file():
+            raise ValueError(f"attachment not found or not a file: '{raw}'")
+        args += ["--attachment", str(path)]
+    return args
+
+
 def folders(account: str = "demo") -> dict:
     """Elenca le cartelle IMAP dell'account."""
     tool_allowed("email.folders")
@@ -161,7 +172,8 @@ def search(query: str, account: str = "demo", folder: str = "INBOX", limit: int 
 
 
 def reply(email_id: str, body: str, account: str = "demo",
-          folder: str = "INBOX", cc: Optional[str] = None) -> dict:
+          folder: str = "INBOX", cc: Optional[str] = None,
+          attachments: Optional[Sequence[str]] = None) -> dict:
     """Risponde a un messaggio mantenendo il threading (SMTP)."""
     tool_allowed("email.reply")
     if body is None:
@@ -169,6 +181,7 @@ def reply(email_id: str, body: str, account: str = "demo",
     args = ["reply", str(email_id), "--body", body, "--folder", folder]
     if cc:
         args += ["--cc", cc]
+    args += _attachment_args(attachments)
     return _run_json(account, args)
 
 
@@ -178,12 +191,12 @@ def send(
     body: str,
     account: str = "demo",
     cc: Optional[str] = None,
+    attachments: Optional[Sequence[str]] = None,
 ) -> dict:
     """Invia una email via account configurato.
 
-    Wrap minimal del CLI `email_client.py send`. Nessun allegato in questa
-    versione: i casi d'uso correnti (notifiche di Looper, ack di task) non
-    ne hanno bisogno.
+    Wrap minimal del CLI `email_client.py send`, inclusi allegati locali gia'
+    presenti nel filesystem del gateway/runtime.
     """
     tool_allowed("email.send")
     if not to or "@" not in to:
@@ -196,11 +209,13 @@ def send(
     args = ["send", "--to", to, "--subject", subject, "--body", body]
     if cc:
         args += ["--cc", cc]
+    args += _attachment_args(attachments)
     res = _run_cli(account, args, want_json=False)
     return {
         "ok": True,
         "to": to,
         "subject": subject,
         "account": account,
+        "attachments": [str(Path(str(p)).expanduser()) for p in attachments or []],
         "stdout": res.get("stdout", ""),
     }

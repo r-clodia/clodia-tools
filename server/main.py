@@ -44,7 +44,7 @@ _EMAIL_TOOLS: list[Tool] = [
         name="email.send",
         description=(
             "Send an email via one of the configured accounts (demo, studio). "
-            "Plain-text body, optional CC. No attachments in this version."
+            "Plain-text body, optional CC and local file attachments."
         ),
         inputSchema={
             "type": "object",
@@ -57,6 +57,11 @@ _EMAIL_TOOLS: list[Tool] = [
                     "description": "sender account (default 'demo')",
                 },
                 "cc": {"type": "string", "description": "optional CC address"},
+                "attachments": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "optional local file paths to attach",
+                },
             },
             "required": ["to", "subject", "body"],
         },
@@ -129,7 +134,7 @@ _EMAIL_TOOLS: list[Tool] = [
     ),
     Tool(
         name="email.reply",
-        description="Reply to a message keeping the thread (plain-text body, optional CC).",
+        description="Reply to a message keeping the thread (plain-text body, optional CC and local attachments).",
         inputSchema={
             "type": "object",
             "properties": {
@@ -138,6 +143,11 @@ _EMAIL_TOOLS: list[Tool] = [
                 "account": {"type": "string"},
                 "folder": {"type": "string", "description": "IMAP folder, default INBOX"},
                 "cc": {"type": "string", "description": "optional CC address"},
+                "attachments": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "optional local file paths to attach",
+                },
             },
             "required": ["email_id", "body"],
         },
@@ -721,6 +731,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 arguments["body"],
                 account=arguments.get("account", "demo"),
                 cc=arguments.get("cc"),
+                attachments=arguments.get("attachments"),
             )
         elif name == "email.folders":
             result = email.folders(account=arguments.get("account", "demo"))
@@ -757,6 +768,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 account=arguments.get("account", "demo"),
                 folder=arguments.get("folder", "INBOX"),
                 cc=arguments.get("cc"),
+                attachments=arguments.get("attachments"),
             )
         elif name.startswith("trello."):
             result = _dispatch_trello(name, arguments)
