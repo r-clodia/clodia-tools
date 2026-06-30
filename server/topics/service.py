@@ -126,28 +126,100 @@ class TopicService:
             folder = created["id"]
         return {"folder": folder, "account": account}
 
+    def _resolve_backend(self, tier: str, name: str, storage: str | None, cfg: dict):
+        """(storage_obj, base_path) per una config storage data (non dal meta).
+        - google-drive → (DriveStorage(cartella), '') ; local → (self.s, '<dir>/files')."""
+        if storage == "google-drive":
+            from .drive_fs import DriveStorage
+            folder = (cfg or {}).get("folder")
+            if not folder:
+                raise TopicError(f"topic {tier}/{name}: storage drive senza folder")
+            key = f"{tier}/{name}:{folder}"
+            ds = self._drive_cache.get(key)
+            if ds is None:
+                ds = DriveStorage(self._drive_service((cfg or {}).get("account")), folder)
+                self._drive_cache[key] = ds
+            return ds, ""
+        return self.s, f"{self._dir(tier, name)}/files"
+
     def _files_backend(self, tier: str, name: str):
-        """Ritorna (storage, base_path) per i FILE del topic:
-        - storage=local  → (self.s, '<tier>/<name>/files') [default, come sempre];
-        - storage=drive  → (DriveStorage(cartella del topic), '') — la cartella
-          Drive È l'area file del topic. Routing letto dal meta (control-plane)."""
+        """Storage dei FILE del topic, dal meta (control-plane). Default local."""
         try:
             meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
         except Exception:  # noqa: BLE001 — topic legacy/assente → local
             meta = {}
-        if meta.get("storage") == "google-drive":
-            from .drive_fs import DriveStorage
-            cfg = meta.get("storage_config") or {}
-            folder = cfg.get("folder")
-            if not folder:
-                raise TopicError(f"topic {tier}/{name}: storage drive senza folder")
-            key = f"{tier}/{name}"
-            ds = self._drive_cache.get(key)
-            if ds is None:
-                ds = DriveStorage(self._drive_service(cfg.get("account")), folder)
-                self._drive_cache[key] = ds
-            return ds, ""
-        return self.s, f"{self._dir(tier, name)}/files"
+        return self._resolve_backend(tier, name, meta.get("storage"),
+                                     meta.get("storage_config") or {})
+
+    # storage drive: livello SEAL massimo (cap). eu-west-1 → SEAL-2.
+    _DRIVE_SEAL_CAP = 2
+
+    def _copy_tree(self, src, src_base: str, dst, dst_base: str, rel: str = "") -> tuple[int, list]:
+        """Copia ricorsiva di files/ da src a dst. Non sovrascrive: se il file
+        esiste già nel dst → conflitto (skippato). Ritorna (copiati, conflitti)."""
+        copied, conflicts = 0, []
+        sp = f"{src_base}/{rel}".strip("/")
+        for e in src.list(sp):
+            if e.name.startswith("."):
+                continue
+            child = f"{rel}/{e.name}".strip("/")
+            if e.kind == "dir":
+                c, cf = self._copy_tree(src, src_base, dst, dst_base, child)
+                copied += c; conflicts += cf
+            else:
+                dpath = f"{dst_base}/{child}".strip("/")
+                if dst.exists(dpath):
+                    conflicts.append(child)
+                    continue
+                dst.write(dpath, src.read(f"{src_base}/{child}".strip("/")).data)
+                copied += 1
+        return copied, conflicts
+
+    def migrate_storage(self, tier: str, name: str, target: dict) -> dict:
+        """Migra i FILE del topic da uno storage all'altro (local↔drive). Copia
+        non distruttiva: il vecchio contenuto va nel cestino (recuperabile). Guard
+        SEAL: vietato migrare su uno storage con livello inferiore al tier."""
+        mp = self._meta_p(tier, name)
+        if not self.s.exists(mp):
+            raise TopicError(f"topic non trovato: {tier}/{name}")
+        meta = json.loads(self.s.read(mp).data.decode())
+        cur_storage = meta.get("storage") or self.s.capability().name
+        cur_cfg = meta.get("storage_config") or {}
+        tgt_type = (target or {}).get("type")
+        tgt_storage = "google-drive" if tgt_type == "drive" else "local-fs"
+        if tgt_storage == cur_storage:
+            return {"migrated": 0, "note": f"già su {cur_storage}"}
+        # guard SEAL anti-declassamento
+        try:
+            tier_n = int(_normalize_tier(tier).replace("SEAL-", ""))
+        except ValueError:
+            tier_n = 0
+        if tgt_type == "drive" and tier_n > self._DRIVE_SEAL_CAP:
+            raise TopicError(
+                f"storage drive ha cap SEAL-{self._DRIVE_SEAL_CAP}: un topic {tier} "
+                f"non può migrare su Drive (anti-declassamento)")
+        old_store, old_base = self._resolve_backend(tier, name, cur_storage, cur_cfg)
+        new_cfg = self._provision_drive_folder(target, name) if tgt_type == "drive" else {}
+        new_store, new_base = self._resolve_backend(tier, name, tgt_storage, new_cfg)
+        copied, conflicts = self._copy_tree(old_store, old_base, new_store, new_base)
+        # aggiorna il meta (control-plane)
+        meta["storage"] = tgt_storage
+        if tgt_type == "drive":
+            meta["storage_config"] = new_cfg
+        else:
+            meta.pop("storage_config", None)
+        self.s.write(mp, json.dumps(meta, ensure_ascii=False, indent=2).encode())
+        self._drive_cache.clear()
+        # ritira il vecchio (non distruttivo)
+        backup = "(cartella Drive di origine conservata)"
+        if cur_storage != "google-drive":  # vecchio era local → files/ nel cestino
+            d = self._dir(tier, name)
+            if self.s.exists(f"{d}/files"):
+                ts = _now().strftime("%Y%m%d-%H%M%S")
+                self.s.move(f"{d}/files", f"{d}/.trash/{ts}/files")
+                backup = f".trash/{ts}/files"
+        return {"migrated": copied, "conflicts": conflicts,
+                "from": cur_storage, "to": tgt_storage, "backup": backup}
 
     @staticmethod
     def _files_rel(relpath: str) -> tuple[bool, str]:

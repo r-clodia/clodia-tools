@@ -332,6 +332,22 @@ _TOPIC_TOOLS: list[Tool] = [
             "path": {"type": "string", "description": "path da eliminare, dentro files/"},
         }, "required": ["tier", "name", "path"]},
     ),
+    Tool(
+        name="topic.migrate_storage",
+        description=("Migra i FILE del topic da uno storage all'altro (local↔Google Drive). "
+                     "Copia NON distruttiva: il vecchio contenuto va nel cestino (recuperabile). "
+                     "Guard SEAL: vietato migrare su uno storage con livello inferiore al tier "
+                     "(es. SEAL-3 non va su Drive). target.type=local|drive; per drive folder "
+                     "(link/id) opzionale (vuoto = crea cartella)."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "target": {"type": "object", "properties": {
+                "type": {"type": "string", "enum": ["local", "drive"]},
+                "folder": {"type": "string"}, "account": {"type": "string"}},
+                "required": ["type"]},
+        }, "required": ["tier", "name", "target"]},
+    ),
 ]
 
 
@@ -909,6 +925,8 @@ def _dispatch_topic(name: str, a: dict):
         return svc.put_file(a["tier"], a["name"], a["filename"], data)
     if verb == "delete_file":
         return svc.delete_file(a["tier"], a["name"], a["path"])
+    if verb == "migrate_storage":
+        return svc.migrate_storage(a["tier"], a["name"], a["target"])
     raise ValueError(f"unknown topic verb: {name}")
 
 
