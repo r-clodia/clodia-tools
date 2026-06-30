@@ -29,6 +29,10 @@ _GOOGLE_EXPORT = {
     "application/vnd.google-apps.presentation": ("application/pdf", ".pdf"),
 }
 _FIELDS = "id, name, mimeType, modifiedTime, size, webViewLink, parents, md5Checksum"
+# Shared Drive (Team Drive): senza questi flag l'API vede solo il "My Drive".
+# supportsAllDrives → opera anche su file in shared drive; includeItemsFromAllDrives
+# + corpora=allDrives → list/search includono i contenuti dei shared drive.
+_ALL_DRIVES = {"supportsAllDrives": True, "includeItemsFromAllDrives": True}
 
 
 def gworkspace_accounts() -> list[str]:
@@ -96,12 +100,13 @@ def list_files(folder_id: Optional[str] = None, query: Optional[str] = None,
         clauses.append(f"({query})")
     res = svc.files().list(
         q=" and ".join(clauses), pageSize=max(1, min(int(limit), 1000)),
-        fields=f"files({_FIELDS})", orderBy="folder,name").execute()
+        fields=f"files({_FIELDS})", orderBy="folder,name",
+        corpora="allDrives", **_ALL_DRIVES).execute()
     return {"account": acct, "files": [_clean(f) for f in res.get("files", [])]}
 
 
 def search(name: str, limit: int = 20, account: Optional[str] = None) -> dict:
-    """Cerca per nome (match parziale, case-insensitive)."""
+    """Cerca per nome (match parziale, case-insensitive). Include i Shared Drive."""
     tool_allowed("gdrive.search")
     if not name:
         raise ValueError("'name' non può essere vuoto")
@@ -110,7 +115,8 @@ def search(name: str, limit: int = 20, account: Optional[str] = None) -> dict:
     res = svc.files().list(
         q=f"name contains '{safe}' and trashed = false",
         pageSize=max(1, min(int(limit), 1000)),
-        fields=f"files({_FIELDS})", orderBy="folder,name").execute()
+        fields=f"files({_FIELDS})", orderBy="folder,name",
+        corpora="allDrives", **_ALL_DRIVES).execute()
     return {"account": acct, "files": [_clean(f) for f in res.get("files", [])]}
 
 
@@ -125,13 +131,14 @@ def mkdir(name: str, parent_id: Optional[str] = None,
     safe = name.replace("'", "\\'")
     q = (f"name = '{safe}' and mimeType = '{_FOLDER_MIME}' and trashed = false"
          + (f" and '{parent_id}' in parents" if parent_id else ""))
-    existing = svc.files().list(q=q, fields=f"files({_FIELDS})").execute().get("files", [])
+    existing = svc.files().list(q=q, fields=f"files({_FIELDS})",
+                                corpora="allDrives", **_ALL_DRIVES).execute().get("files", [])
     if existing:
         return {"account": acct, "reused": True, **_clean(existing[0])}
     body = {"name": name, "mimeType": _FOLDER_MIME}
     if parent_id:
         body["parents"] = [parent_id]
-    f = svc.files().create(body=body, fields=_FIELDS).execute()
+    f = svc.files().create(body=body, fields=_FIELDS, supportsAllDrives=True).execute()
     return {"account": acct, "reused": False, **_clean(f)}
 
 
@@ -149,7 +156,8 @@ def upload(src: str, name: Optional[str] = None, folder_id: Optional[str] = None
     if folder_id:
         body["parents"] = [folder_id]
     media = MediaFileUpload(src, resumable=False)
-    f = svc.files().create(body=body, media_body=media, fields=_FIELDS).execute()
+    f = svc.files().create(body=body, media_body=media, fields=_FIELDS,
+                           supportsAllDrives=True).execute()
     return {"account": acct, "uploaded": True, **_clean(f)}
 
 
@@ -160,7 +168,8 @@ def download(file_id: str, dest: str, account: Optional[str] = None) -> dict:
     tool_allowed("gdrive.download")
     from googleapiclient.http import MediaIoBaseDownload
     svc, acct = _service(account)
-    meta = svc.files().get(fileId=file_id, fields="id, name, mimeType").execute()
+    meta = svc.files().get(fileId=file_id, fields="id, name, mimeType",
+                           supportsAllDrives=True).execute()
     mime = meta.get("mimeType", "")
     if mime in _GOOGLE_EXPORT:
         export_mime, _ext = _GOOGLE_EXPORT[mime]
@@ -168,7 +177,7 @@ def download(file_id: str, dest: str, account: Optional[str] = None) -> dict:
     elif mime.startswith("application/vnd.google-apps"):
         raise ValueError(f"tipo Google non esportabile: {mime}")
     else:
-        request = svc.files().get_media(fileId=file_id)
+        request = svc.files().get_media(fileId=file_id, supportsAllDrives=True)
     buf = io.BytesIO()
     downloader = MediaIoBaseDownload(buf, request)
     done = False
@@ -192,9 +201,10 @@ def share(file_id: str, email: str, role: str = "writer",
         raise ValueError("role deve essere writer | reader | commenter")
     svc, acct = _service(account)
     perm = svc.permissions().create(
-        fileId=file_id, sendNotificationEmail=True,
+        fileId=file_id, sendNotificationEmail=True, supportsAllDrives=True,
         body={"type": "user", "role": role, "emailAddress": email},
         fields="id").execute()
-    meta = svc.files().get(fileId=file_id, fields="id, name, webViewLink").execute()
+    meta = svc.files().get(fileId=file_id, fields="id, name, webViewLink",
+                           supportsAllDrives=True).execute()
     return {"account": acct, "shared": True, "permission_id": perm.get("id"),
             "email": email, "role": role, **_clean(meta)}
