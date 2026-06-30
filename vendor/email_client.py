@@ -188,6 +188,65 @@ def connect_smtp(account):
     return server
 
 
+# Nomi comuni della cartella "Inviati" (fallback se manca il flag SPECIAL-USE \Sent).
+_SENT_FALLBACKS = ["Sent", "Posta inviata", "Sent Items", "Sent Messages",
+                   "INBOX.Sent", "Elementi inviati", "Éléments envoyés", "Gesendet"]
+
+
+def _find_sent_folder(imap):
+    """Determina la cartella Inviati del server: prima via flag SPECIAL-USE
+    `\\Sent` (robusto, indipendente da lingua/provider — es. IONOS = "Posta
+    inviata"), poi per nome fra i fallback comuni. None se non determinabile."""
+    try:
+        status, lines = imap.list()
+    except Exception:  # noqa: BLE001
+        return None
+    if status != "OK" or not lines:
+        return None
+    parsed = []  # (flags_lower, name)
+    for raw in lines:
+        s = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        flags = s[s.find("(") + 1:s.find(")")].lower() if "(" in s and ")" in s else ""
+        # formato LIST: (flags) "sep" name → togli flags e separator, resta il nome
+        rest = s[s.find(")") + 1:].strip() if ")" in s else s
+        if rest.startswith('"'):                    # separator quotato es. "/"
+            j = rest.find('"', 1)
+            rest = rest[j + 1:].strip() if j != -1 else rest
+        elif " " in rest:                           # separator NIL/non quotato
+            rest = rest.split(None, 1)[1]
+        name = rest.strip().strip('"')              # nome, eventualmente quotato
+        if name:
+            parsed.append((flags, name))
+    for flags, name in parsed:  # 1) flag \Sent (autoritativo)
+        if "\\sent" in flags:
+            return name
+    names = {n for _, n in parsed}
+    for cand in _SENT_FALLBACKS:  # 2) nome comune realmente esistente
+        if cand in names:
+            return cand
+    return None
+
+
+def _save_to_sent(account, msg_bytes):
+    """Salva una copia del messaggio nella cartella Inviati via IMAP APPEND
+    (necessario per i provider non-Gmail: SMTP invia ma non archivia). La
+    cartella è quella esplicita (`sent_folder`) o auto-rilevata via \\Sent.
+    Ritorna il nome cartella usato, o None se non riuscito."""
+    try:
+        imap = connect_imap(account)
+        try:
+            sent = account.get("sent_folder") or _find_sent_folder(imap)
+            if not sent:
+                return None
+            folder_arg = f'"{sent}"' if " " in sent else sent
+            imap.append(folder_arg, None, None, msg_bytes)
+            return sent
+        finally:
+            imap.logout()
+    except Exception:  # noqa: BLE001 — Gmail archivia già da sé; non bloccare l'invio
+        return None
+
+
 def list_folders(account):
     imap = connect_imap(account)
     status, folders = imap.list()
@@ -426,17 +485,7 @@ def reply_email(account, email_id, body, folder="INBOX", cc=None, attachments=No
     with connect_smtp(account) as server:
         server.send_message(msg)
     msg_bytes = msg.as_bytes()
-
-    # Salva copia nella cartella Inviati
-    sent_folder = account.get("sent_folder", "Sent")
-    if sent_folder:
-        try:
-            imap = connect_imap(account)
-            folder_arg = f'"{sent_folder}"' if " " in sent_folder else sent_folder
-            imap.append(folder_arg, None, None, msg_bytes)
-            imap.logout()
-        except Exception:
-            pass
+    _save_to_sent(account, msg_bytes)  # copia in Inviati (cartella auto-rilevata via \Sent)
 
     return {"to": to, "subject": subject}
 
@@ -577,19 +626,7 @@ def send_email(account, to, subject, body, cc=None, attachments=None):
     with connect_smtp(account) as server:
         server.send_message(msg)
     msg_bytes = msg.as_bytes()
-
-    # Salva copia nella cartella Inviati via IMAP (necessario per provider non-Gmail)
-    sent_folder = account.get("sent_folder", "Sent")
-    if sent_folder:
-        try:
-            imap = connect_imap(account)
-            # Quota il nome se contiene spazi (es. "Posta inviata" su IONOS)
-            folder_arg = f'"{sent_folder}"' if " " in sent_folder else sent_folder
-            imap.append(folder_arg, None, None, msg_bytes)
-            imap.logout()
-        except Exception:
-            pass  # Gmail gestisce già gli Inviati automaticamente — ignora errori silenziosamente
-
+    _save_to_sent(account, msg_bytes)  # copia in Inviati (cartella auto-rilevata via \Sent)
     return True
 
 
