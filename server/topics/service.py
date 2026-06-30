@@ -82,7 +82,83 @@ def _action_points(summary_text: str) -> list[str]:
 
 class TopicService:
     def __init__(self, storage: Storage):
-        self.s = storage
+        self.s = storage          # control-plane local (meta, summary, minutes, .messages)
+        self._drive_cache: dict = {}   # (account → DriveStorage) cache per-cartella topic
+
+    # ── routing storage dei FILE (control-plane resta su self.s) ─────────────
+    def _drive_service(self, account: str | None):
+        """Costruisce (e cache) il client Drive dalle credenziali gworkspace nel
+        vault. Lato gateway → principal di sistema 'clodia'. Il segreto non
+        raggiunge il modello."""
+        from .. import vault
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request as GReq
+        from googleapiclient.discovery import build
+        accts = sorted(n[len("gworkspace_"):] for n in vault.store_names()
+                       if n.startswith("gworkspace_"))
+        acct = account or (accts[0] if accts else None)
+        if not acct:
+            raise TopicError("storage drive: nessun account Google Workspace nel vault")
+        b = vault.get_secret("clodia", f"gworkspace_{acct}")
+        creds = Credentials(token=None, refresh_token=b["refresh_token"],
+                            client_id=b["client_id"], client_secret=b["client_secret"],
+                            token_uri="https://oauth2.googleapis.com/token",
+                            scopes=(b.get("scope") or "").split())
+        creds.refresh(GReq())
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+    def _provision_drive_folder(self, sc: dict, topic_name: str) -> dict:
+        """Risolve la config storage drive alla creazione: usa la cartella indicata
+        (link o id) oppure ne crea una nuova. Ritorna {folder, account}."""
+        account = sc.get("account")
+        raw = (sc.get("folder") or "").strip()
+        if raw:
+            # estrai l'id da un link Drive (…/folders/<ID>…) o usa l'id diretto.
+            m = re.search(r"/folders/([A-Za-z0-9_-]+)", raw)
+            folder = m.group(1) if m else raw
+        else:
+            # crea una cartella nuova dedicata al topic
+            svc = self._drive_service(account)
+            created = svc.files().create(
+                body={"name": sc.get("folder_name") or topic_name,
+                      "mimeType": "application/vnd.google-apps.folder"},
+                fields="id", supportsAllDrives=True).execute()
+            folder = created["id"]
+        return {"folder": folder, "account": account}
+
+    def _files_backend(self, tier: str, name: str):
+        """Ritorna (storage, base_path) per i FILE del topic:
+        - storage=local  → (self.s, '<tier>/<name>/files') [default, come sempre];
+        - storage=drive  → (DriveStorage(cartella del topic), '') — la cartella
+          Drive È l'area file del topic. Routing letto dal meta (control-plane)."""
+        try:
+            meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
+        except Exception:  # noqa: BLE001 — topic legacy/assente → local
+            meta = {}
+        if meta.get("storage") == "google-drive":
+            from .drive_fs import DriveStorage
+            cfg = meta.get("storage_config") or {}
+            folder = cfg.get("folder")
+            if not folder:
+                raise TopicError(f"topic {tier}/{name}: storage drive senza folder")
+            key = f"{tier}/{name}"
+            ds = self._drive_cache.get(key)
+            if ds is None:
+                ds = DriveStorage(self._drive_service(cfg.get("account")), folder)
+                self._drive_cache[key] = ds
+            return ds, ""
+        return self.s, f"{self._dir(tier, name)}/files"
+
+    @staticmethod
+    def _files_rel(relpath: str) -> tuple[bool, str]:
+        """(is_files, rel) — True + path sotto files/ se relpath sta in files/,
+        altrimenti False (control-plane: summary/minutes/meta)."""
+        r = (relpath or "").lstrip("/")
+        if r == "files":
+            return True, ""
+        if r.startswith("files/"):
+            return True, r[len("files/"):]
+        return False, r
 
     # ── path helper ────────────────────────────────────────────────────────
     def _dir(self, tier: str, name: str) -> str:
@@ -112,8 +188,15 @@ class TopicService:
         # tier = unica classe del topic + livello di privacy per l'enforcement.
         meta["tier"] = tier
         meta.setdefault("status", "active")
-        # backend che CONTIENE il topic (routing multi-backend + tiering storage↔topic).
-        meta["storage"] = self.s.capability().name
+        # Storage dei FILE del topic (control-plane = sempre local). Default local;
+        # se richiesto drive (meta.storage_config.type=drive) si lega/crea la cartella.
+        sc = meta.get("storage_config") or {}
+        if meta.get("storage") == "google-drive" or sc.get("type") == "drive":
+            meta["storage"] = "google-drive"
+            meta["storage_config"] = self._provision_drive_folder(sc, name)
+        else:
+            meta["storage"] = self.s.capability().name
+            meta.pop("storage_config", None)
         meta.setdefault("tags", [])
         meta.setdefault("people", [])
         meta.setdefault("contact_agent", "clodia")
@@ -175,10 +258,15 @@ class TopicService:
         }
 
     def read_file(self, tier: str, name: str, relpath: str) -> bytes:
-        """Legge un file dentro il topic (es. files/foo.md). Anti-traversal."""
+        """Legge un file dentro il topic (es. files/foo.md). Anti-traversal.
+        I path sotto files/ vanno sullo storage del topic (local o drive)."""
         rel = (relpath or "").lstrip("/")
         if not rel or ".." in rel.split("/"):
             raise TopicError(f"path non valido: {relpath}")
+        is_files, sub = self._files_rel(rel)
+        if is_files:
+            store, base = self._files_backend(tier, name)
+            return store.read(f"{base}/{sub}".strip("/")).data
         return self.s.read(f"{self._dir(tier, name)}/{rel}").data
 
     def save_summary(self, tier: str, name: str, text: str,
@@ -277,21 +365,48 @@ class TopicService:
         rel = (subpath or "").strip("/")
         if ".." in rel.split("/") or "\\" in rel:
             raise TopicError(f"subpath non valido: {subpath}")
-        d = self._dir(tier, name)
-        base = f"{d}/{rel}" if rel else d
         out: list[dict] = []
-        for e in self.s.list(base):
-            if e.name.startswith("."):   # nascondi .messages e altri interni
-                continue
-            p = f"{rel}/{e.name}" if rel else e.name
-            if e.kind == "dir":
-                out.append({"name": e.name, "path": p, "kind": "dir"})
-            else:
-                st = self.s.stat(f"{base}/{e.name}")
-                out.append({"name": e.name, "path": p, "kind": "file",
-                            "size": getattr(st, "size", None) if st else None,
-                            "mtime_iso": _iso(st.mtime) if st else None,
-                            "md5": getattr(st, "md5", None) if st else None})
+        is_files, sub = self._files_rel(rel) if rel else (False, "")
+        if rel and is_files:
+            # dentro files/ → storage del topic (local o drive)
+            store, base = self._files_backend(tier, name)
+            for e in store.list(f"{base}/{sub}".strip("/")):
+                if e.name.startswith("."):
+                    continue
+                p = "files/" + (f"{sub}/" if sub else "") + e.name
+                if e.kind == "dir":
+                    out.append({"name": e.name, "path": p, "kind": "dir"})
+                else:
+                    st = store.stat(f"{base}/{sub}/{e.name}".strip("/"))
+                    out.append({"name": e.name, "path": p, "kind": "file",
+                                "size": getattr(st, "size", None) if st else None,
+                                "mtime_iso": _iso(st.mtime) if st else None,
+                                "md5": getattr(st, "md5", None) if st else None})
+        else:
+            # root o control-plane (summary/minutes) → local
+            d = self._dir(tier, name)
+            base = f"{d}/{rel}" if rel else d
+            seen_files = False
+            for e in self.s.list(base):
+                if e.name.startswith("."):
+                    continue
+                if e.name == "files":
+                    seen_files = True
+                p = f"{rel}/{e.name}" if rel else e.name
+                if e.kind == "dir":
+                    out.append({"name": e.name, "path": p, "kind": "dir"})
+                else:
+                    st = self.s.stat(f"{base}/{e.name}")
+                    out.append({"name": e.name, "path": p, "kind": "file",
+                                "size": getattr(st, "size", None) if st else None,
+                                "mtime_iso": _iso(st.mtime) if st else None,
+                                "md5": getattr(st, "md5", None) if st else None})
+            # alla root di un topic con storage drive, 'files/' è sul backend →
+            # esponilo come dir navigabile anche se non esiste in local.
+            if not rel and not seen_files:
+                store, _b = self._files_backend(tier, name)
+                if store is not self.s:
+                    out.append({"name": "files", "path": "files", "kind": "dir"})
         dirs = sorted((f for f in out if f.get("kind") == "dir"),
                       key=lambda f: f.get("name", "").lower())
         files = sorted((f for f in out if f.get("kind") != "dir"),
@@ -315,7 +430,8 @@ class TopicService:
         parts = rel.split("/")
         if any(p in ("", ".", "..") or p.startswith(".") for p in parts):
             raise TopicError(f"nome file non valido: {filename}")
-        self.s.write(f"{self._dir(tier, name)}/files/{rel}", data)
+        store, base = self._files_backend(tier, name)
+        store.write(f"{base}/{rel}".strip("/"), data)
         return {"name": parts[-1], "path": f"files/{rel}"}
 
     def delete_file(self, tier: str, name: str, relpath: str) -> dict:
@@ -334,17 +450,21 @@ class TopicService:
             raise TopicError(
                 "puoi rimuovere solo file/cartelle dentro 'files/' del topic "
                 "(meta, summary, minutes sono protetti)")
-        d = self._dir(tier, name)
-        target = f"{d}/{rel}"
-        if not self.s.exists(target):
+        sub = "/".join(parts[1:])   # path sotto files/
+        store, base = self._files_backend(tier, name)
+        target = f"{base}/{sub}".strip("/")
+        if not store.exists(target):
             raise TopicError(f"non trovato: {relpath}")
-        # Cestino: conserva il path relativo sotto un timestamp (no collisioni,
-        # tracciabilità di quando è stato rimosso). `.trash` è dotfile → nascosto
-        # nel browser file (list_files salta i path che iniziano con '.').
-        ts = _now().strftime("%Y%m%d-%H%M%S")
-        trash_rel = f".trash/{ts}/{rel}"
-        self.s.move(target, f"{d}/{trash_rel}")
-        return {"trashed": rel, "trash_path": trash_rel, "recoverable": True}
+        if store is self.s:
+            # local → soft-delete nel cestino del topic `.trash/<ts>/files/<sub>`
+            # (recuperabile; `.trash` è dotfile → nascosto nel browser).
+            ts = _now().strftime("%Y%m%d-%H%M%S")
+            trash_rel = f".trash/{ts}/{rel}"
+            self.s.move(target, f"{self._dir(tier, name)}/{trash_rel}")
+            return {"trashed": rel, "trash_path": trash_rel, "recoverable": True}
+        # drive → trash nativo di Drive (recuperabile dal Cestino dell'account).
+        store.delete(target)
+        return {"trashed": rel, "trash_path": "Drive/Cestino", "recoverable": True}
 
     def archive(self, tier: str, name: str) -> dict:
         """Imposta status=archived nel meta (NON sposta su storage inferiore)."""
