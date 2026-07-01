@@ -47,6 +47,25 @@ def set_agent_tool(agent: str, tool: str, present: bool) -> None:
 def agent_has_tool(agent: str, tool: str) -> bool:
     spec = (CONFIG.get("agents") or {}).get(agent) or {}
     return tool in (spec.get("allowed_tools") or [])
+
+
+def upsert_agent(agent: str, allowed_tools: list | None = None,
+                 allowed_paths: list | None = None) -> dict:
+    """Registra/aggiorna un agent nella whitelist del gateway e persiste. Serve
+    all'auto-provisioning dei responder confinati (clone per-topic): senza una
+    entry in config.yaml la sessione MCP dell'agent non può aprirsi (agent_name).
+    Non tocca gli altri campi se l'agent esiste già (merge non distruttivo)."""
+    agents = CONFIG.setdefault("agents", {})
+    spec = agents.setdefault(agent, {})
+    spec.setdefault("allowed_paths", allowed_paths or ["."])
+    spec.setdefault("allowed_shell_cmds", [])
+    spec.setdefault("denied_shell_patterns", [])
+    if allowed_tools is not None:
+        spec["allowed_tools"] = list(allowed_tools)
+    else:
+        spec.setdefault("allowed_tools", [])
+    save_config()
+    return spec
 # Override portabile: rispetta CLODIA_WORKSPACE_ROOT se settato
 # (utile dentro al container Docker dove il path differisce dal Mac).
 WORKSPACE_ROOT = Path(os.environ.get("CLODIA_WORKSPACE_ROOT", CONFIG["workspace_root"])).resolve()

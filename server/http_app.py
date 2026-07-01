@@ -91,10 +91,12 @@ def build_app() -> Starlette:
     from .profile_api import routes as profile_routes
     # Telegram channel-runner (server-side): endpoint interni ckt1 per drenare/inviare.
     from .telegram_api import routes as telegram_routes
+    # Registrazione whitelist agent (auto-provisioning responder confinati).
+    from .agents_api import routes as agents_routes
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
                 *imagegen_routes, *topics_routes, *connectors_routes, *profile_routes,
-                *telegram_routes],
+                *telegram_routes, *agents_routes],
         lifespan=_lifespan)
 
 
