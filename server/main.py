@@ -959,9 +959,56 @@ def _safe_scratch_path(p: str) -> str:
     return rp
 
 
+# Verbi topic.* che accedono ai dati di UN topic specifico → richiedono che il
+# caller sia participant/owner (compartimento, need-to-know). `new`/`list`/`search`
+# sono gestiti a parte (creazione / risultati filtrati per membership).
+_TOPIC_SCOPED_VERBS = {
+    "open", "save_summary", "add_minute", "archive", "files", "read_file",
+    "write_file", "fetch", "put", "delete_file", "migrate_storage",
+}
+
+
+def _topic_is_member(meta: dict, caller: str) -> bool:
+    return caller == meta.get("owner") or caller in (meta.get("participants") or [])
+
+
+def _require_topic_member(svc, tier, name) -> None:
+    """ACL compartimento: il caller dev'essere participant/owner del topic. I
+    super-agent bypassano (accesso pieno). Enforcement per-(agent,topic): dà il
+    confinamento reale, complementare alla clearance≥tier (vedi
+    project_topic_access_two_axis)."""
+    caller = agent_name()
+    if _is_super(caller):
+        return
+    try:
+        meta = svc.open(tier, name).get("meta", {})
+    except Exception:  # noqa: BLE001 — topic inesistente/illeggibile → nega
+        raise PermissionError(f"topic {tier}/{name}: accesso negato")
+    if not _topic_is_member(meta, caller):
+        raise PermissionError(
+            f"agent '{caller}' non è participant del topic {tier}/{name} "
+            f"(accesso negato: compartimento need-to-know)")
+
+
+def _filter_member_rows(rows: list, caller: str) -> list:
+    """Filtra righe-topic ai soli topic di cui il caller è participant/owner.
+    Super → tutte. Righe senza participants/owner (shape diversa) lasciate."""
+    if _is_super(caller):
+        return rows
+    out = []
+    for r in rows:
+        if not isinstance(r, dict) or ("participants" not in r and "owner" not in r):
+            out.append(r)
+        elif _topic_is_member(r, caller):
+            out.append(r)
+    return out
+
+
 def _dispatch_topic(name: str, a: dict):
     svc = _topics()
     verb = name.split(".", 1)[1]
+    if verb in _TOPIC_SCOPED_VERBS:
+        _require_topic_member(svc, a.get("tier"), a.get("name"))
     if verb == "new":
         return svc.new(a.get("tier"), a["name"], a.get("meta"))
     if verb == "open":
@@ -973,9 +1020,11 @@ def _dispatch_topic(name: str, a: dict):
     if verb == "archive":
         return svc.archive(a["tier"], a["name"])
     if verb == "list":
-        return svc.list(a.get("tier"), a.get("include_archived", False))
+        return _filter_member_rows(svc.list(a.get("tier"), a.get("include_archived", False)),
+                                   agent_name())
     if verb == "search":
-        return svc.search(a["query"], a.get("mode", "lexical"))
+        res = svc.search(a["query"], a.get("mode", "lexical"))
+        return _filter_member_rows(res, agent_name()) if isinstance(res, list) else res
     if verb == "files":
         return svc.list_files(a["tier"], a["name"], a.get("subpath", ""))
     if verb == "read_file":
