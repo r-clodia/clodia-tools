@@ -218,14 +218,25 @@ class TopicService:
         self.s.write(self._seed_marker_p(tier, name), b"1")
         LOG.info("drive-seed: %s/%s seminato in locale da Drive", tier, name)
 
+    # I Google Docs nativi (Documenti/Fogli/Presentazioni) NON sono scaricabili
+    # come binari: si mostrano come proxy/link e si leggono/editano su Drive.
+    _NATIVE_DOC_PREFIX = "application/vnd.google-apps."
+
     def _drive_pull_tree(self, ds, rel: str, local_base: str) -> None:
         for e in ds.list(rel):
             child = f"{rel}/{e.name}".strip("/")
             if e.kind == "dir":
                 self._drive_pull_tree(ds, child, local_base)
+            elif e.mime and e.mime.startswith(self._NATIVE_DOC_PREFIX):
+                # Doc nativo → stub proxy locale col link al documento remoto.
+                stub = {"gdrive_url": e.url or "", "mimeType": e.mime, "name": e.name}
+                self.s.write(f"{local_base}/{child}.gdrive.json".strip("/"),
+                             json.dumps(stub, ensure_ascii=False).encode())
             else:
-                data = ds.read(child).data
-                self.s.write(f"{local_base}/{child}".strip("/"), data)
+                try:
+                    self.s.write(f"{local_base}/{child}".strip("/"), ds.read(child).data)
+                except Exception as ex:  # noqa: BLE001 — non scaricabile → salta, non bloccare
+                    LOG.warning("drive-seed: salto '%s' (%s)", child, ex)
 
     def sync_now(self, tier: str, name: str) -> dict:
         """Push on-demand: mirror di tutti i file locali → Drive. Push-only: NON
@@ -246,8 +257,8 @@ class TopicService:
         import hashlib
         n = 0
         for e in self.s.list(f"{local_base}/{rel}".strip("/")):
-            if e.name.startswith("."):
-                continue
+            if e.name.startswith(".") or e.name.endswith(".gdrive.json"):
+                continue  # dotfile o stub proxy di Doc nativo → non si pusha
             child = f"{rel}/{e.name}".strip("/")
             if e.kind == "dir":
                 n += self._drive_push_tree(ds, child, local_base)
@@ -625,6 +636,19 @@ class TopicService:
             store, base = self._files_backend(tier, name)
             for e in store.list(f"{base}/{sub}".strip("/")):
                 if e.name.startswith("."):
+                    continue
+                if e.name.endswith(".gdrive.json"):
+                    # stub proxy di un Google Doc nativo → voce REMOTA (link a Drive)
+                    try:
+                        info = json.loads(store.read(f"{base}/{sub}/{e.name}".strip("/")).data.decode())
+                    except Exception:  # noqa: BLE001
+                        info = {}
+                    real = e.name[:-len(".gdrive.json")]
+                    out.append({"name": real,
+                                "path": "files/" + (f"{sub}/" if sub else "") + real,
+                                "kind": "file", "remote": True,
+                                "url": info.get("gdrive_url") or "",
+                                "mime": info.get("mimeType")})
                     continue
                 p = "files/" + (f"{sub}/" if sub else "") + e.name
                 if e.kind == "dir":

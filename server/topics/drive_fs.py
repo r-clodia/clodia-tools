@@ -107,12 +107,14 @@ class DriveStorage(Storage):
             return []
         res = self._svc.files().list(
             q=f"'{node['id']}' in parents and trashed = false",
-            fields="files(name, mimeType, size)", pageSize=1000,
+            fields="files(id, name, mimeType, size, webViewLink)", pageSize=1000,
             orderBy="folder,name", **_ALL_LIST).execute()
         out = []
         for f in res.get("files", []):
-            kind = "dir" if f.get("mimeType") == _FOLDER_MIME else "file"
-            out.append(Entry(name=f["name"], kind=kind, size=int(f.get("size") or 0)))
+            mime = f.get("mimeType")
+            kind = "dir" if mime == _FOLDER_MIME else "file"
+            out.append(Entry(name=f["name"], kind=kind, size=int(f.get("size") or 0),
+                             mime=mime, url=f.get("webViewLink")))
         return out
 
     def read(self, path: str) -> ReadResult:

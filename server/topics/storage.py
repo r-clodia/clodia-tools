@@ -31,6 +31,8 @@ class Entry:
     name: str
     kind: str  # "file" | "dir"
     size: int = 0
+    mime: str | None = None   # mimeType del backend (Drive): riconosce i Google Docs nativi
+    url: str | None = None    # webViewLink (Drive): per i Docs nativi mostrati come proxy/link
 
 
 @dataclass
