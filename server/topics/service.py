@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 from datetime import datetime, timezone
 
 from .storage import NotFound, Storage, StorageError, VersionConflict
+
+LOG = logging.getLogger("clodia-tools.topics")
 
 VALID_STATUS = {"active", "await", "idle", "archived"}
 # Scala SEAL (EC Cloud Sovereignty Framework v1.2.1). Sostituisce P0–P3.
