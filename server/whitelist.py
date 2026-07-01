@@ -123,6 +123,23 @@ def current_token() -> str | None:
     return _CURRENT_TOKEN.get()
 
 
+# Clearance (SEAL-N) del caller, dal claim firmato nel token — per l'enforcement
+# clearance≥tier sull'accesso ai topic (asse livello). None → default SEAL-0.
+_CURRENT_CLEARANCE: ContextVar[str | None] = ContextVar("mcp_current_clearance", default=None)
+
+
+def set_current_clearance(c: str | None) -> object:
+    return _CURRENT_CLEARANCE.set(c)
+
+
+def reset_current_clearance(token: object) -> None:
+    _CURRENT_CLEARANCE.reset(token)  # type: ignore[arg-type]
+
+
+def current_clearance() -> str | None:
+    return _CURRENT_CLEARANCE.get()
+
+
 def agent_name() -> str:
     """Agente chiamante: prima il contextvar (HTTP per-richiesta), poi l'env
     MCP_AGENT_NAME (stdio legacy)."""

@@ -10,7 +10,7 @@ from mcp.types import TextContent, Tool
 from . import __version__
 from . import proxy
 from .tools import email, fs, runtime
-from .whitelist import agent_config, agent_name
+from .whitelist import agent_config, agent_name, current_clearance
 
 import os as _os
 from .topics.service import TopicService, TopicError
@@ -968,6 +968,13 @@ _TOPIC_SCOPED_VERBS = {
 }
 
 
+_SEAL_RANK = {"SEAL-0": 0, "SEAL-1": 1, "SEAL-2": 2, "SEAL-3": 3, "SEAL-4": 4}
+
+
+def _rank(tier: str | None) -> int:
+    return _SEAL_RANK.get(str(tier or "SEAL-0").strip().upper(), 0)
+
+
 def _topic_is_member(meta: dict, caller: str) -> bool:
     return caller == meta.get("owner") or caller in (meta.get("participants") or [])
 
@@ -988,6 +995,13 @@ def _require_topic_member(svc, tier, name) -> None:
         raise PermissionError(
             f"agent '{caller}' non è participant del topic {tier}/{name} "
             f"(accesso negato: compartimento need-to-know)")
+    # asse livello: clearance(caller) ≥ tier(topic). Clearance dal claim firmato
+    # nel token (None → SEAL-0). Difesa in profondità oltre al compartimento.
+    tier_t = meta.get("tier", tier)
+    if _rank(current_clearance()) < _rank(tier_t):
+        raise PermissionError(
+            f"agent '{caller}': clearance insufficiente per il tier {tier_t} del "
+            f"topic {tier}/{name} (accesso negato: livello)")
 
 
 def _filter_member_rows(rows: list, caller: str) -> list:
