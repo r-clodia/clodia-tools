@@ -10,6 +10,7 @@ webui. Espone in lettura la stessa vista dei verbi MCP topic.list/open.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -84,7 +85,7 @@ async def open_file(request: Request):
     name = request.path_params["name"]
     path = request.query_params.get("path", "")
     try:
-        data = _service().read_file(tier, name, path)
+        data = await asyncio.to_thread(_service().read_file, tier, name, path)
     except TopicError:
         return JSONResponse({"error": "not_found"}, status_code=404)
     except Exception:  # noqa: BLE001 — file assente / illeggibile
@@ -206,7 +207,7 @@ async def files(request: Request):
     if request.method == "GET":
         subpath = request.query_params.get("path", "")
         try:
-            return JSONResponse({"files": svc.list_files(tier, name, subpath)})
+            return JSONResponse({"files": await asyncio.to_thread(svc.list_files, tier, name, subpath)})
         except TopicError as e:
             return JSONResponse({"error": str(e)}, status_code=404)
     # POST upload: {filename, content_b64}
@@ -221,7 +222,7 @@ async def files(request: Request):
     except Exception:
         return JSONResponse({"error": "bad_content"}, status_code=400)
     try:
-        return JSONResponse(svc.put_file(tier, name, fn, data))
+        return JSONResponse(await asyncio.to_thread(svc.put_file, tier, name, fn, data))
     except TopicError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 

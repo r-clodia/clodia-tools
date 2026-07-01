@@ -73,7 +73,12 @@ def _service(account: Optional[str] = None):
         scopes=(b.get("scope") or "").split(),
     )
     creds.refresh(GoogleRequest())
-    return build("drive", "v3", credentials=creds, cache_discovery=False), acct
+    # Timeout sull'HTTP di Drive: una chiamata stallata FALLISCE dopo N secondi
+    # invece di bloccare per sempre l'event loop del gateway (freeze totale).
+    import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
+    authed = AuthorizedHttp(creds, http=httplib2.Http(timeout=30))
+    return build("drive", "v3", http=authed, cache_discovery=False), acct
 
 
 def _clean(f: dict) -> dict:

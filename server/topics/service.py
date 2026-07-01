@@ -141,7 +141,12 @@ class TopicService:
                             token_uri="https://oauth2.googleapis.com/token",
                             scopes=(b.get("scope") or "").split())
         creds.refresh(GReq())
-        return build("drive", "v3", credentials=creds, cache_discovery=False)
+        # Timeout sull'HTTP di Drive: una chiamata stallata FALLISCE dopo N secondi
+        # invece di bloccare per sempre l'event loop del gateway (freeze totale).
+        import httplib2
+        from google_auth_httplib2 import AuthorizedHttp
+        authed = AuthorizedHttp(creds, http=httplib2.Http(timeout=30))
+        return build("drive", "v3", http=authed, cache_discovery=False)
 
     def _provision_drive_folder(self, sc: dict, topic_name: str) -> dict:
         """Risolve la config storage drive alla creazione: usa la cartella indicata
