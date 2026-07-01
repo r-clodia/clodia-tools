@@ -45,12 +45,7 @@ agents:
     - agents.*
     - runtime.*
     - app_runtime.*
-  # Hermia: responder confinato del canale Telegram (privacy shield). Nessun tool
-  # (risponde solo in chat, il contesto arriva nel prompt) → allowed_tools vuoto.
-  # Presente in config.yaml solo per poter aprire la sessione MCP (agent_name).
-  hermia:
-    allowed_paths:
-    - .
-    allowed_shell_cmds: []
-    denied_shell_patterns: []
-    allowed_tools: []
+  # NB: i responder confinati dei canali (hermia-<topic>) sono CLONI per-topic
+  # registrati a RUNTIME dal backend (channel_responder → /internal/agents/whitelist),
+  # non qui: sono istanza-specifici. Il backend li ri-registra a ogni tick, così
+  # sopravvivono ai rebuild del gateway (config.yaml baked nell'immagine).
