@@ -5,12 +5,48 @@ import os
 import yaml
 
 TOOL_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = TOOL_ROOT / "config.yaml"
+# Default BAKED nell'immagine (repo): è il SEED dei base-agent.
+_DEFAULT_CONFIG_PATH = TOOL_ROOT / "config.yaml"
+# Config RUNTIME sul volume dati: persiste ai rebuild dell'immagine, così le
+# registrazioni a runtime (connettori, backend MCP via Add-MCP, responder
+# confinati dei canali) non vengono azzerate a ogni deploy del gateway. In locale
+# (nessun CLODIA_DATA) coincide col default baked → nessun cambiamento.
+_DATA = os.environ.get("CLODIA_DATA")
+CONFIG_PATH = (Path(_DATA) / "clodia-tools-config.yaml") if _DATA else _DEFAULT_CONFIG_PATH
+
+
+def _read_yaml(p: Path) -> dict:
+    try:
+        with open(p) as f:
+            return yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
 
 
 def _load_config() -> dict:
-    with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+    base = _read_yaml(_DEFAULT_CONFIG_PATH)
+    if not CONFIG_PATH.exists():
+        # Prima esecuzione sul volume: seed dal default baked.
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(CONFIG_PATH, "w") as f:
+            yaml.safe_dump(base, f, sort_keys=False, allow_unicode=True)
+        return base
+    cfg = _read_yaml(CONFIG_PATH)
+    # Merge non distruttivo: porta i BASE agent NUOVI del default (es. un nuovo
+    # seed agent aggiunto in un release) senza sovrascrivere le entry runtime
+    # esistenti (connettori, cloni). I base-agent già presenti restano come sono.
+    c_agents = cfg.setdefault("agents", {})
+    changed = False
+    for name, spec in (base.get("agents") or {}).items():
+        if name not in c_agents:
+            c_agents[name] = spec
+            changed = True
+    cfg.setdefault("workspace_root", base.get("workspace_root"))
+    cfg.setdefault("mcp_backends", base.get("mcp_backends", []))
+    if changed:
+        with open(CONFIG_PATH, "w") as f:
+            yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
+    return cfg
 
 
 CONFIG = _load_config()
