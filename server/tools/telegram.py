@@ -121,6 +121,42 @@ def api_call(token: str, method: str, params: Optional[dict] = None, timeout: in
     return payload.get("result")
 
 
+def _token_internal() -> str:
+    """Token del bot per i flussi INTERNI (channel-runner server-side): letto dal
+    vault SENZA grant per-agente. L'autorizzazione è il principal privilegiato del
+    router /internal/telegram, non un grant MCP (come /internal/providers)."""
+    tok = (vault.read_internal(TELEGRAM_CRED) or {}).get("token", "")
+    if not tok:
+        raise RuntimeError("telegram: bundle nel vault senza campo 'token'")
+    return tok
+
+
+def drain_internal(chat_id: str) -> dict:
+    """Drena (svuota) la coda di UNA chat SENZA lease — per il channel-runner
+    server-side, unico consumer dei chat legati a un topic. Fa getUpdates lazy
+    (che popola le code di TUTTE le chat: le altre restano per i loro topic)."""
+    cid = str(chat_id)
+    with _LOCK:
+        st = _load_state()
+        _refresh(st, _token_internal())
+        chat = st["chats"].get(cid)
+        msgs = (chat.get("queue") or []) if chat else []
+        if chat is not None:
+            chat["queue"] = []
+        _save_state(st)
+    return {"chat_id": cid, "messages": msgs, "count": len(msgs)}
+
+
+def send_internal(chat_id: str, text: str) -> dict:
+    """Invia a una chat SENZA lease/inbox-check — per il channel-runner (trusted,
+    unico consumer del binding chat↔topic)."""
+    if not str(text).strip():
+        raise ValueError("'text' non può essere vuoto")
+    res = api_call(_token_internal(), "sendMessage",
+                   {"chat_id": int(chat_id), "text": str(text)})
+    return {"ok": True, "chat_id": str(chat_id), "message_id": res.get("message_id")}
+
+
 def _chat_title(chat: dict) -> str:
     if chat.get("title"):
         return chat["title"]

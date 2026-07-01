@@ -89,9 +89,12 @@ def build_app() -> Starlette:
     # Connettori delegabili (email per-account) — grant per-agent.
     from .connectors_api import routes as connectors_routes
     from .profile_api import routes as profile_routes
+    # Telegram channel-runner (server-side): endpoint interni ckt1 per drenare/inviare.
+    from .telegram_api import routes as telegram_routes
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
-                *imagegen_routes, *topics_routes, *connectors_routes, *profile_routes],
+                *imagegen_routes, *topics_routes, *connectors_routes, *profile_routes,
+                *telegram_routes],
         lifespan=_lifespan)
 
 

@@ -158,6 +158,24 @@ async def post_message(request: Request):
         return JSONResponse({"error": "not_found"}, status_code=404)
 
 
+async def set_channel(request: Request):
+    """POST /internal/topics/{tier}/{name}/channel {channel} → configura il
+    channel dei messaggi (telegram) del topic; {} o null → rimuove (webui)."""
+    _, err = _authorize(request)
+    if err:
+        return err
+    tier = request.path_params["tier"]; name = request.path_params["name"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    try:
+        meta = _service().set_channel(tier, name, body.get("channel"))
+        return JSONResponse({"ok": True, "channel": meta.get("channel")})
+    except TopicError as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=400)
+
+
 async def participants(request: Request):
     _, err = _authorize(request)
     if err:
@@ -300,5 +318,6 @@ routes = [
     Route("/internal/topics/{tier}/{name}/messages", post_message, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/archive", archive_topic, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/participants", participants, methods=["POST", "DELETE"]),
+    Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/files", files, methods=["GET", "POST"]),
 ]

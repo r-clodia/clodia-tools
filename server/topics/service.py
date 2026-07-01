@@ -43,6 +43,42 @@ def _normalize_tier(t: str | None) -> str:
     return _LEGACY_TIER.get(u, u)
 
 
+def _tier_rank(t: str | None) -> int:
+    """Rango numerico del tier (SEAL-N → N); -1 se ignoto."""
+    try:
+        return VALID_TIER.index(_normalize_tier(t))
+    except ValueError:
+        return -1
+
+
+# Cap SEAL per tipo di channel dei MESSAGGI (anello più debole della catena):
+# Telegram = SEAL-1 (FZ-LLC Dubai, server non-UE, gruppi non-E2E). Un topic con
+# quel channel non può superare il cap. webui = nessun cap (default).
+_CHANNEL_SEAL_CAP = {"telegram": 1}
+_CHANNEL_FIELDS = ("type", "chat_id", "bot_ref")
+
+
+def _clean_channel(ch: dict) -> dict:
+    """Tiene solo i campi ammessi del channel; normalizza chat_id a stringa."""
+    out = {k: ch.get(k) for k in _CHANNEL_FIELDS if ch.get(k) is not None}
+    if "chat_id" in out:
+        out["chat_id"] = str(out["chat_id"])
+    out.setdefault("bot_ref", "telegram_bot_token")
+    return out
+
+
+def _check_channel_cap(channel: dict, tier: str) -> None:
+    """Verifica che il tier del topic rispetti il cap SEAL del channel."""
+    ctype = (channel or {}).get("type")
+    cap = _CHANNEL_SEAL_CAP.get(ctype)
+    if cap is None:
+        raise TopicError(f"channel type non supportato: {ctype}")
+    if _tier_rank(tier) > cap:
+        raise TopicError(
+            f"channel '{ctype}' cappa il tier a SEAL-{cap}: topic {tier} non ammesso "
+            f"(anello più debole: min(dati, provider, storage, channel))")
+
+
 class TopicError(RuntimeError):
     pass
 
@@ -269,6 +305,12 @@ class TopicService:
         else:
             meta["storage"] = self.s.capability().name
             meta.pop("storage_config", None)
+        # Channel dei MESSAGGI (default: webui, implicito). Se dichiarato (es.
+        # telegram) → cap del tier all'anello più debole (SEAL-cap del channel).
+        ch = meta.get("channel")
+        if ch:
+            _check_channel_cap(ch, tier)
+            meta["channel"] = _clean_channel(ch)
         meta.setdefault("tags", [])
         meta.setdefault("people", [])
         meta.setdefault("contact_agent", "clodia")
@@ -282,6 +324,18 @@ class TopicService:
         if not self.s.exists(self._summary_p(tier, name)):
             self.s.write(self._summary_p(tier, name),
                          f"{meta.get('title', name)}\n\n## Prossimi passi\n".encode())
+        return meta
+
+    def set_channel(self, tier: str, name: str, channel: dict | None) -> dict:
+        """Configura/rimuove il channel dei messaggi di un topic esistente.
+        `channel=None` o `{}` → rimuove (torna a webui). Applica il cap SEAL."""
+        meta, ver = self._read_meta(tier, name)
+        if not channel:
+            meta.pop("channel", None)
+        else:
+            _check_channel_cap(channel, meta.get("tier", tier))
+            meta["channel"] = _clean_channel(channel)
+        self._write_meta(tier, name, meta, base_version=ver)
         return meta
 
     def open(self, tier: str, name: str) -> dict:
@@ -577,6 +631,7 @@ class TopicService:
                     "participants": m.get("participants", []),
                     "action_points": _action_points(info["summary"]),
                     "storage": m.get("storage", self.s.capability().name),
+                    "channel": m.get("channel"),
                     "updated_at": info["updated_at"],
                     "recent_files": info["recent_files"],
                 })
