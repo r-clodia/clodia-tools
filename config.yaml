@@ -45,3 +45,12 @@ agents:
     - agents.*
     - runtime.*
     - app_runtime.*
+  # Hermes: responder confinato del canale Telegram (privacy shield). Nessun tool
+  # (risponde solo in chat, il contesto arriva nel prompt) → allowed_tools vuoto.
+  # Presente in config.yaml solo per poter aprire la sessione MCP (agent_name).
+  hermes:
+    allowed_paths:
+    - .
+    allowed_shell_cmds: []
+    denied_shell_patterns: []
+    allowed_tools: []
