@@ -13,6 +13,7 @@ opzionale in base64, niente multipart → nessuna dipendenza extra) e ritorna i
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
@@ -74,11 +75,16 @@ async def generate_image(request: Request):
     try:
         if image_b64:
             raw = base64.b64decode(_strip_data_url(image_b64))
-            png = image_tool.edit(prompt, raw, size=size, quality=quality, background=background)
+            # to_thread: la chiamata OpenAI è sincrona e dura 10-30s → in un thread
+            # non blocca l'event loop del gateway (altrimenti TUTTI gli agent/tool
+            # si fermano durante la generazione).
+            png = await asyncio.to_thread(image_tool.edit, prompt, raw,
+                                          size=size, quality=quality, background=background)
         else:
             if not prompt:
                 return JSONResponse({"error": "serve prompt o image_b64"}, status_code=400)
-            png = image_tool.generate(prompt, size=size, quality=quality, background=background)
+            png = await asyncio.to_thread(image_tool.generate, prompt,
+                                          size=size, quality=quality, background=background)
     except image_tool.ImageGenError as e:
         LOG.warning("imagegen errore: %s", e)
         return JSONResponse({"error": "imagegen_failed", "detail": str(e)[:240]}, status_code=502)
