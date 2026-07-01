@@ -233,8 +233,11 @@ class TopicService:
                 self.s.write(f"{local_base}/{child}.gdrive.json".strip("/"),
                              json.dumps(stub, ensure_ascii=False).encode())
             else:
+                dest = f"{local_base}/{child}".strip("/")
+                if self.s.exists(dest):
+                    continue  # resume: già in locale → salta (seed ripartibile)
                 try:
-                    self.s.write(f"{local_base}/{child}".strip("/"), ds.read(child).data)
+                    self.s.write(dest, ds.read(child).data)
                 except Exception as ex:  # noqa: BLE001 — non scaricabile → salta, non bloccare
                     LOG.warning("drive-seed: salto '%s' (%s)", child, ex)
 
