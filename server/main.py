@@ -10,6 +10,7 @@ from mcp.types import TextContent, Tool
 from . import __version__
 from . import proxy
 from .tools import email, fs, runtime
+from .tools import eu_corpus
 from .whitelist import agent_config, agent_name, current_clearance
 
 import os as _os
@@ -237,6 +238,29 @@ _FS_TOOLS: list[Tool] = [
             },
             "required": ["path"],
         },
+    ),
+]
+
+
+_EU_CORPUS_TOOLS: list[Tool] = [
+    Tool(
+        name="eu_corpus.search",
+        description=(
+            "Retrieval semantico sul corpus normativo UE stabile (Horizon Europe): "
+            "AGA (Annotated Grant Agreement), Programme Guide, General Annexes. "
+            "Query in linguaggio naturale, IT o EN (l'embedding è multilingue). "
+            "Ritorna i passaggi più pertinenti con CITAZIONE (documento, versione, "
+            "sezione, pagina, score). Usalo per domande su eleggibilità costi, "
+            "categorie di budget, funding rate, regole TRL, FSTP/cascade. "
+            "IMPORTANTE: il retrieval trova i candidati, non è la verità — leggi il "
+            "testo del passaggio per intero e cita sempre documento+versione+pagina."
+        ),
+        inputSchema={"type": "object", "properties": {
+            "query": {"type": "string", "description": "domanda in linguaggio naturale (IT/EN)"},
+            "k": {"type": "integer", "description": "n. passaggi (1-20, default 5)"},
+            "doc": {"type": "string", "description": "filtro opzionale per documento: "
+                    "AGA | HE-Programme-Guide | HE-General-Annexes"},
+        }, "required": ["query"]},
     ),
 ]
 
@@ -749,7 +773,8 @@ def _dispatch_telegram(name: str, a: dict):
 def _native_tool_namespaces() -> list[str]:
     """Namespace dei tool nativi del gateway (per agents.list_tools)."""
     tools = (_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS
-             + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
+             + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
+             + _EU_CORPUS_TOOLS)
     ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in tools})
     return ns
 
@@ -877,7 +902,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
+    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS + _EU_CORPUS_TOOLS)
     # C1: tool dei backend MCP montati (namespaced), aggregati dal proxy.
     try:
         proxied = await proxy.list_proxied_tools()
@@ -968,6 +993,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_runtime(name, arguments)
         elif name.startswith("agents."):
             result = _dispatch_agents(name, arguments, _ag)
+        elif name == "eu_corpus.search":
+            result = eu_corpus.search(
+                arguments["query"],
+                k=arguments.get("k", 5),
+                doc=arguments.get("doc"),
+            )
         elif proxy.is_proxied(name):
             # C1: instrada al backend MCP montato (già passato il check whitelist).
             text = await proxy.call_proxied(name, arguments)
