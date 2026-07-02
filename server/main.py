@@ -404,6 +404,62 @@ _TOPIC_TOOLS: list[Tool] = [
                 "required": ["type"]},
         }, "required": ["tier", "name", "target"]},
     ),
+    # ── Remote pluggable: lo storage è SEMPRE locale; un remote opzionale (git o
+    # drive) sincronizza i FILE con verbi uniformi add/commit/push/pull. ──
+    Tool(
+        name="topic.remote_enable",
+        description=("Attiva un remote di sync per i FILE del topic (storage resta locale). "
+                     "type=git (config.url opzionale) | drive (config.folder link/id opzionale = "
+                     "crea cartella, config.account). Poi usa remote_add/commit/push/pull."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "type": {"type": "string", "enum": ["git", "drive"]},
+            "config": {"type": "object", "description": "git: {url,branch} · drive: {folder,account}"},
+        }, "required": ["tier", "name", "type"]},
+    ),
+    Tool(
+        name="topic.remote_disable",
+        description="Disattiva il remote: torna a local pulito PRESERVANDO i file (git→rimuove .git, drive→cancella la sync-list).",
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"}}, "required": ["tier", "name"]},
+    ),
+    Tool(
+        name="topic.remote_add",
+        description="Marca un file per il sync (git: git add · drive: aggiunge a sync-list e push-list). path relativo a files/.",
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"}, "path": {"type": "string"}}, "required": ["tier", "name", "path"]},
+    ),
+    Tool(
+        name="topic.remote_commit",
+        description="Snapshot delle modifiche (git: commit · drive: no-op). message opzionale.",
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"}, "message": {"type": "string"}}, "required": ["tier", "name"]},
+    ),
+    Tool(
+        name="topic.remote_push",
+        description="Invia le modifiche al remote (git: push · drive: carica la push-list, push-only, non cancella su Drive).",
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"}}, "required": ["tier", "name"]},
+    ),
+    Tool(
+        name="topic.remote_pull",
+        description="Riceve dal remote (git: pull, conflitto→escala · drive: scarica; i nuovi entrano in sync-list, last-writer-wins per-file).",
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"}}, "required": ["tier", "name"]},
+    ),
+    Tool(
+        name="topic.remote_status",
+        description="Stato del remote del topic (tipo, abilitato, e per drive: synced/pending).",
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"}}, "required": ["tier", "name"]},
+    ),
 ]
 
 
@@ -965,6 +1021,8 @@ def _safe_scratch_path(p: str) -> str:
 _TOPIC_SCOPED_VERBS = {
     "open", "save_summary", "add_minute", "archive", "files", "read_file",
     "write_file", "fetch", "put", "delete_file", "migrate_storage",
+    "remote_enable", "remote_disable", "remote_add", "remote_commit",
+    "remote_push", "remote_pull", "remote_status",
 }
 
 
@@ -1085,6 +1143,21 @@ def _dispatch_topic(name: str, a: dict):
         return svc.delete_file(a["tier"], a["name"], a["path"])
     if verb == "migrate_storage":
         return svc.migrate_storage(a["tier"], a["name"], a["target"])
+    # Remote pluggable (git/drive): storage sempre local, sync opzionale/manuale.
+    if verb == "remote_status":
+        return svc.remote_status(a["tier"], a["name"])
+    if verb == "remote_enable":
+        return svc.remote_enable(a["tier"], a["name"], a["type"], a.get("config"))
+    if verb == "remote_disable":
+        return svc.remote_disable(a["tier"], a["name"])
+    if verb == "remote_add":
+        return svc.remote_add(a["tier"], a["name"], a["path"])
+    if verb == "remote_commit":
+        return svc.remote_commit(a["tier"], a["name"], a.get("message", ""))
+    if verb == "remote_push":
+        return svc.remote_push(a["tier"], a["name"])
+    if verb == "remote_pull":
+        return svc.remote_pull(a["tier"], a["name"])
     raise ValueError(f"unknown topic verb: {name}")
 
 

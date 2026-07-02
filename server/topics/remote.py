@@ -185,6 +185,15 @@ class DriveRemote(Remote):
             st["push"].append(path)
         self._save(st)
 
+    def seed(self, paths: list[str]) -> None:
+        """Popola la sync-list SENZA push-list (per la migrazione: i file sono già
+        allineati col remoto, non vanno ri-pushati)."""
+        st = self._load()
+        for p in paths:
+            if p not in st["sync"]:
+                st["sync"].append(p)
+        self._save(st)
+
     def commit(self, msg: str = "") -> None:
         return  # no-op per Drive
 

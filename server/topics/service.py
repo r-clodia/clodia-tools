@@ -472,8 +472,113 @@ class TopicService:
         self._write_meta(tier, name, meta, base_version=ver)
         return meta
 
+    # ── Remote pluggable (git/drive): storage sempre local, sync opzionale ─────
+    def _abs(self, tier: str, name: str, sub: str = "") -> str:
+        """Path filesystem ASSOLUTO del topic (le Remote git/drive vi operano)."""
+        root = getattr(self.s, "root", None)
+        if root is None:
+            raise TopicError("remote non supportato: storage non locale")
+        p = root / self._dir(tier, name)
+        return str(p / sub) if sub else str(p)
+
+    def _remote_drive_factory(self, account, folder):
+        from .drive_fs import DriveStorage
+        return DriveStorage(self._drive_service(account), folder)
+
+    def _remote_for(self, tier: str, name: str, meta: dict):
+        from .remote import make_remote
+        r = meta.get("remote") or {}
+        if not r.get("type"):
+            return None
+        return make_remote(r["type"], self._abs(tier, name, "files"),
+                           self._abs(tier, name, ".remote-drive.json"),
+                           drive_factory=self._remote_drive_factory)
+
+    def _remote_or_err(self, tier: str, name: str):
+        meta, _ = self._read_meta(tier, name)
+        rem = self._remote_for(tier, name, meta)
+        if rem is None:
+            raise TopicError("il topic non ha un remote configurato (topic.remote_enable)")
+        return rem
+
+    def remote_status(self, tier: str, name: str) -> dict:
+        meta, _ = self._read_meta(tier, name)
+        rem = self._remote_for(tier, name, meta)
+        return rem.status() if rem else {"enabled": False}
+
+    def remote_enable(self, tier: str, name: str, rtype: str, config: dict | None = None) -> dict:
+        if rtype not in ("git", "drive"):
+            raise TopicError(f"remote type non supportato: {rtype}")
+        meta, ver = self._read_meta(tier, name)
+        config = dict(config or {})
+        if rtype == "drive":
+            config.update(self._provision_drive_folder(config, name))  # risolve/crea la cartella
+        keep = ("url", "branch", "folder", "account", "user_name", "user_email", "message")
+        meta["remote"] = {"type": rtype, "config": {k: v for k, v in config.items() if k in keep}}
+        meta["storage"] = self.s.capability().name   # storage torna esplicitamente local
+        meta.pop("storage_config", None)
+        self._write_meta(tier, name, meta, base_version=ver)
+        rem = self._remote_for(tier, name, meta)
+        rem.enable(meta["remote"]["config"])
+        return {"ok": True, "remote": meta["remote"], "status": rem.status()}
+
+    def remote_disable(self, tier: str, name: str) -> dict:
+        meta, ver = self._read_meta(tier, name)
+        rem = self._remote_for(tier, name, meta)
+        if rem is not None:
+            rem.disable()          # local clean, file PRESERVATI
+        meta.pop("remote", None)
+        self._write_meta(tier, name, meta, base_version=ver)
+        return {"ok": True}
+
+    def remote_add(self, tier: str, name: str, path: str) -> dict:
+        self._remote_or_err(tier, name).add(path)
+        return {"ok": True}
+
+    def remote_commit(self, tier: str, name: str, msg: str = "") -> dict:
+        self._remote_or_err(tier, name).commit(msg)
+        return {"ok": True}
+
+    def remote_push(self, tier: str, name: str) -> dict:
+        return self._remote_or_err(tier, name).push()
+
+    def remote_pull(self, tier: str, name: str) -> dict:
+        return self._remote_or_err(tier, name).pull()
+
+    def _migrate_legacy_drive(self, tier: str, name: str) -> None:
+        """One-shot: legacy storage=google-drive → remote drive (local+sync).
+        Non distruttivo: i file locali restano, si popola la sola sync-list."""
+        meta, ver = self._read_meta(tier, name)
+        if meta.get("storage") != "google-drive" or meta.get("remote"):
+            return
+        sc = meta.get("storage_config") or {}
+        meta["remote"] = {"type": "drive",
+                          "config": {"folder": sc.get("folder"), "account": sc.get("account")}}
+        meta["storage"] = self.s.capability().name
+        meta.pop("storage_config", None)
+        self._write_meta(tier, name, meta, base_version=ver)
+        rem = self._remote_for(tier, name, meta)
+        try:
+            rem.enable(meta["remote"]["config"])
+            base = self._abs(tier, name, "files")
+            paths = []
+            for r, _dirs, fnames in os.walk(base):
+                for fn in fnames:
+                    rel = os.path.relpath(os.path.join(r, fn), base)
+                    if not rel.startswith("."):
+                        paths.append(rel)
+            if hasattr(rem, "seed"):
+                rem.seed(paths)
+        except Exception:  # noqa: BLE001 — la migrazione non deve rompere open()
+            LOG.warning("seed migrazione drive fallito per %s/%s", tier, name)
+
     def open(self, tier: str, name: str) -> dict:
         """Read-only: meta + summary (+ summary_version per optimistic lock) + minutes."""
+        # Migrazione one-shot legacy storage=google-drive → remote drive.
+        try:
+            self._migrate_legacy_drive(tier, name)
+        except Exception:  # noqa: BLE001
+            LOG.warning("migrazione storage→remote fallita per %s/%s", tier, name)
         try:
             meta_r = self.s.read(self._meta_p(tier, name))
         except NotFound:
