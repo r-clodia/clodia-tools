@@ -177,6 +177,41 @@ async def set_channel(request: Request):
         return JSONResponse({"error": str(e)[:200]}, status_code=400)
 
 
+async def remote(request: Request):
+    """POST /internal/topics/{tier}/{name}/remote {action, ...} → verbi Remote.
+    action: status|enable|disable|add|commit|push|pull."""
+    _, err = _authorize(request)
+    if err:
+        return err
+    tier = request.path_params["tier"]; name = request.path_params["name"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    svc = _service()
+    action = body.get("action")
+    try:
+        if action == "status":
+            return JSONResponse(svc.remote_status(tier, name))
+        if action == "enable":
+            return JSONResponse(svc.remote_enable(tier, name, body.get("type"), body.get("config")))
+        if action == "disable":
+            return JSONResponse(svc.remote_disable(tier, name))
+        if action == "add":
+            return JSONResponse(svc.remote_add(tier, name, body.get("path")))
+        if action == "commit":
+            return JSONResponse(svc.remote_commit(tier, name, body.get("message", "")))
+        if action == "push":
+            return JSONResponse(svc.remote_push(tier, name))
+        if action == "pull":
+            return JSONResponse(svc.remote_pull(tier, name))
+        return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
+    except TopicError as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=400)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)[:200]}, status_code=502)
+
+
 async def participants(request: Request):
     _, err = _authorize(request)
     if err:
@@ -320,5 +355,6 @@ routes = [
     Route("/internal/topics/{tier}/{name}/archive", archive_topic, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/participants", participants, methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/remote", remote, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/files", files, methods=["GET", "POST"]),
 ]
