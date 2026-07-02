@@ -43,7 +43,8 @@ _EMAIL_TOOLS: list[Tool] = [
     Tool(
         name="email.send",
         description=(
-            "Send an email via one of the configured accounts (demo, studio). "
+            "Send an email. Specify the sender mailbox via `account` (the account "
+            "name, e.g. as shown by email.folders or your instructions). "
             "Plain-text body, optional CC and local file attachments."
         ),
         inputSchema={
@@ -54,7 +55,7 @@ _EMAIL_TOOLS: list[Tool] = [
                 "body": {"type": "string"},
                 "account": {
                     "type": "string",
-                    "description": "sender account (default 'demo')",
+                    "description": "sender mailbox account name (required if you have more than one)",
                 },
                 "cc": {"type": "string", "description": "optional CC address"},
                 "attachments": {
@@ -68,12 +69,12 @@ _EMAIL_TOOLS: list[Tool] = [
     ),
     Tool(
         name="email.folders",
-        description="List the IMAP folders of a configured account (demo, studio).",
+        description="List the IMAP folders of an account (pass the account name in `account`).",
         inputSchema={
             "type": "object",
             "properties": {
                 "account": {"type": "string",
-                            "description": "account to inspect (default 'demo')"},
+                            "description": "account name to inspect"},
             },
         },
     ),
@@ -840,6 +841,22 @@ def _connector_allows(name: str, agent: str | None) -> bool:
     return False
 
 
+def _email_account(arguments: dict) -> str:
+    """Account per una chiamata email.*: quello richiesto esplicitamente,
+    altrimenti l'UNICO account su cui il chiamante ha un grant vault
+    (gmail_*/mailbox_*). Se assente o ambiguo (più account) resta 'demo' → il
+    tool solleva un errore chiaro con la lista disponibile, così l'agent sa che
+    deve specificare `account`. Evita il default muto a 'demo' quando l'agent ha
+    esattamente una casella delegata."""
+    acct = (arguments.get("account") or "").strip()
+    if acct:
+        return acct
+    grants = _vault_grants(agent_name())
+    accts = sorted({c[len("gmail_"):] for c in grants if c.startswith("gmail_")}
+                   | {c[len("mailbox_"):] for c in grants if c.startswith("mailbox_")})
+    return accts[0] if len(accts) == 1 else "demo"
+
+
 def _tool_allowed(name: str, allowed: set) -> bool:
     """True se il tool è in whitelist. Supporta il wildcard ``<backend>.*`` che
     concede TUTTI i tool di un backend MCP montato (usato dall'Add-MCP UI)."""
@@ -894,35 +911,35 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 arguments["to"],
                 arguments["subject"],
                 arguments["body"],
-                account=arguments.get("account", "demo"),
+                account=_email_account(arguments),
                 cc=arguments.get("cc"),
                 attachments=arguments.get("attachments"),
             )
         elif name == "email.folders":
-            result = email.folders(account=arguments.get("account", "demo"))
+            result = email.folders(account=_email_account(arguments))
         elif name == "email.list":
             result = email.list_messages(
-                account=arguments.get("account", "demo"),
+                account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
                 limit=arguments.get("limit", 10),
             )
         elif name == "email.read":
             result = email.read_message(
                 arguments["email_id"],
-                account=arguments.get("account", "demo"),
+                account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
             )
         elif name == "email.get_attachment":
             result = email.get_attachment(
                 arguments["email_id"],
                 arguments["filename"],
-                account=arguments.get("account", "demo"),
+                account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
             )
         elif name == "email.search":
             result = email.search(
                 arguments["query"],
-                account=arguments.get("account", "demo"),
+                account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
                 limit=arguments.get("limit", 20),
             )
@@ -930,7 +947,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = email.reply(
                 arguments["email_id"],
                 arguments["body"],
-                account=arguments.get("account", "demo"),
+                account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
                 cc=arguments.get("cc"),
                 attachments=arguments.get("attachments"),
