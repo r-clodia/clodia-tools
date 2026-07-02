@@ -45,7 +45,25 @@ agents:
     - agents.*
     - runtime.*
     - app_runtime.*
-  # NB: i responder confinati dei canali (hermia-<topic>) sono CLONI per-topic
+  # Hermia (agent di sistema, normal): HUB delle comunicazioni — email + Telegram.
+  # Non super → whitelist esplicita. La fruizione degli account email e del bot
+  # Telegram resta gated dai grant del VAULT (delega per-agent): la whitelist apre
+  # i namespace, i grant scelgono quali account/token.
+  hermia:
+    allowed_paths:
+    - .
+    allowed_shell_cmds: []
+    denied_shell_patterns: []
+    allowed_tools:
+    - email.send
+    - email.folders
+    - email.list
+    - email.read
+    - email.search
+    - email.reply
+    - telegram.*
+    - fs.list_dir
+  # NB: i responder confinati dei canali (eco-<topic>) sono CLONI per-topic
   # registrati a RUNTIME dal backend (channel_responder → /internal/agents/whitelist),
   # non qui: sono istanza-specifici. Il backend li ri-registra a ogni tick, così
   # sopravvivono ai rebuild del gateway (config.yaml baked nell'immagine).
