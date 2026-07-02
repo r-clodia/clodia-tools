@@ -79,27 +79,34 @@ class GitRemoteTest(unittest.TestCase):
 
 
 class _FakeDrive:
-    """DriveStorage in-memory: {path -> (bytes, mtime)}."""
+    """DriveStorage in-memory: {path -> (bytes, mtime, mime, url)}."""
     def __init__(self):
         self.files = {}
     def write(self, path, data, if_version=None):
-        self.files[path] = (data, 1000.0); return "v"
+        self.files[path] = (data, 1000.0, None, None); return "v"
+    def add_native(self, path, url, mime="application/vnd.google-apps.document"):
+        """Simula un Doc nativo Google (non scaricabile via get_media)."""
+        self.files[path] = (b"", 1000.0, mime, url)
     def read(self, path):
         from .storage import ReadResult
+        _d, _m, mime, _u = self.files[path]
+        if mime and mime.startswith("application/vnd.google-apps."):
+            raise RuntimeError("HTTP 403: native doc non scaricabile via get_media")
         return ReadResult(self.files[path][0], "v")
     def stat(self, path):
         from .storage import Stat
         if path not in self.files:
             return None
         import hashlib
-        d, m = self.files[path]
+        d, m, _mime, _u = self.files[path]
         return Stat(version="v", size=len(d), mtime=m, kind="file", md5=hashlib.md5(d).hexdigest())
     def list(self, path):
         from .storage import Entry
         out = []
         for p in self.files:
             if "/" not in p and path == "":
-                out.append(Entry(name=p, kind="file", size=len(self.files[p][0])))
+                _d, _m, mime, url = self.files[p]
+                out.append(Entry(name=p, kind="file", size=len(_d), mime=mime, url=url))
         return out
 
 
@@ -133,6 +140,35 @@ class DriveRemoteTest(unittest.TestCase):
             self.assertFalse((root / "state.json").is_file())
             self.assertTrue((files / "a.txt").is_file())
             self.assertTrue((files / "b.txt").is_file())
+
+    def test_pull_native_doc_becomes_stub(self):
+        """Doc nativo Google → NON crasha (403); si materializza uno stub
+        proxy .gdrive.json col link, e lo stub NON finisce nella push-list."""
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            files = root / "files"; files.mkdir()
+            fake = _FakeDrive()
+            fake.write("bin.txt", b"DATA")
+            fake.add_native("piano.doc", "https://docs.google.com/document/d/XYZ/edit")
+            r = DriveRemote(str(files), str(root / "state.json"),
+                            drive_factory=lambda acct, folder: fake)
+            r.enable({"folder": "F", "account": "acct"})
+            res = r.pull()
+            # binario scaricato + stub scritto = 2 file materializzati
+            self.assertEqual(res["pulled"], 2)
+            self.assertEqual(res["skipped"], [])
+            self.assertTrue((files / "bin.txt").is_file())
+            stub = files / "piano.doc.gdrive.json"
+            self.assertTrue(stub.is_file())
+            payload = _json.loads(stub.read_text(encoding="utf-8"))
+            self.assertEqual(payload["gdrive_url"], "https://docs.google.com/document/d/XYZ/edit")
+            self.assertTrue(payload["mimeType"].startswith("application/vnd.google-apps."))
+            # lo stub è in sync-list ma NON in push-list (non si ri-carica su Drive)
+            self.assertEqual(r.status()["pending"], 0)
+            self.assertIn("piano.doc.gdrive.json", r._load()["sync"])
+            # pull idempotente: seconda volta nessun nuovo file
+            self.assertEqual(r.pull()["pulled"], 0)
 
 
 if __name__ == "__main__":

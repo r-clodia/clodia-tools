@@ -205,6 +205,8 @@ class DriveRemote(Remote):
         ds = self._ds(st)
         done = []
         for rel in pending:
+            if rel.endswith(".gdrive.json"):
+                done.append(rel); continue   # stub proxy di un Doc nativo → non si ri-carica su Drive
             local = self.files_dir / rel
             if not local.is_file():
                 done.append(rel); continue   # rimosso localmente: lo togliamo dalla push-list (push-only, non cancella su Drive)
@@ -219,9 +221,30 @@ class DriveRemote(Remote):
         ds = self._ds(st)
         pulled = 0
         conflicts = []
-        for rel in _walk_drive(ds, ""):
+        skipped = []
+        for rel, entry in _walk_drive(ds, ""):
+            # Doc nativo Google (Documenti/Fogli/Presentazioni): NON è scaricabile
+            # come binario (get_media → HTTP 403). Si materializza uno stub proxy
+            # locale `<name>.gdrive.json` col link, coerente col mirror local-first
+            # (service._drive_pull_tree). Lo stub entra in sync-list, MAI in push.
+            if entry.mime and entry.mime.startswith(_NATIVE_DOC_PREFIX):
+                stub_rel = f"{rel}.gdrive.json"
+                stub = {"gdrive_url": entry.url or "", "mimeType": entry.mime, "name": entry.name}
+                data = json.dumps(stub, ensure_ascii=False).encode()
+                local = self.files_dir / stub_rel
+                if not local.exists() or local.read_bytes() != data:
+                    local.parent.mkdir(parents=True, exist_ok=True)
+                    local.write_bytes(data)
+                    pulled += 1
+                if stub_rel not in st["sync"]:
+                    st["sync"].append(stub_rel)
+                continue
             local = self.files_dir / rel
-            remote = ds.read(rel)
+            try:
+                remote = ds.read(rel)
+            except Exception:  # noqa: BLE001 — non scaricabile → salta, non bloccare il pull
+                skipped.append(rel)
+                continue
             if not local.exists():
                 local.parent.mkdir(parents=True, exist_ok=True)
                 local.write_bytes(remote.data)
@@ -241,7 +264,7 @@ class DriveRemote(Remote):
                 else:
                     conflicts.append(rel)            # locale più recente → non distruggo, sarà pushato
         self._save(st)
-        return {"pulled": pulled, "conflicts": conflicts}
+        return {"pulled": pulled, "conflicts": conflicts, "skipped": skipped}
 
     def status(self) -> dict:
         st = self._load()
@@ -251,14 +274,20 @@ class DriveRemote(Remote):
                 "synced": len(st.get("sync") or []), "pending": len(st.get("push") or [])}
 
 
+# I Google Docs nativi (Documenti/Fogli/Presentazioni) non hanno contenuto
+# binario: get_media dà HTTP 403. Si rappresentano con uno stub proxy locale.
+_NATIVE_DOC_PREFIX = "application/vnd.google-apps."
+
+
 def _walk_drive(ds, rel: str):
-    """Genera i path relativi dei FILE nella cartella Drive (ricorsivo)."""
+    """Genera (path_relativo, Entry) dei FILE nella cartella Drive (ricorsivo).
+    L'Entry porta mime/url, così il pull distingue i Doc nativi dai binari."""
     for e in ds.list(rel):
         child = f"{rel}/{e.name}".lstrip("/")
         if e.kind == "dir":
             yield from _walk_drive(ds, child)
         else:
-            yield child
+            yield child, e
 
 
 def make_remote(rtype: str, files_dir: str, state_path: str | None = None,
