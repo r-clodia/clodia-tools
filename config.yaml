@@ -45,11 +45,11 @@ agents:
     - agents.*
     - runtime.*
     - app_runtime.*
-  # Hermia (agent di sistema, normal): HUB delle comunicazioni — email + Telegram.
+  # Mercuria (agent di sistema, normal): agente MESSAGGERO — email + Telegram.
   # Non super → whitelist esplicita. La fruizione degli account email e del bot
   # Telegram resta gated dai grant del VAULT (delega per-agent): la whitelist apre
   # i namespace, i grant scelgono quali account/token.
-  hermia:
+  mercuria:
     allowed_paths:
     - .
     allowed_shell_cmds: []
