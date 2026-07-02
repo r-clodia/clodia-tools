@@ -1,0 +1,139 @@
+"""Test GitRemote su repo git reale + bare locale (nessuna dipendenza esterna).
+DriveRemote è testato a parte con un fake DriveStorage in-memory.
+"""
+from __future__ import annotations
+
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+from .remote import GitRemote, DriveRemote, RemoteConflict, make_remote
+
+
+def _has_git() -> bool:
+    try:
+        subprocess.run(["git", "--version"], capture_output=True, check=True)
+        return True
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(_has_git(), "git non disponibile")
+class GitRemoteTest(unittest.TestCase):
+    def test_enable_add_push_pull_disable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bare = root / "origin.git"
+            subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+            subprocess.run(["git", "-C", str(bare), "symbolic-ref", "HEAD", "refs/heads/main"], check=True)
+
+            a = root / "topicA" / "files"
+            a.mkdir(parents=True)
+            (a / "doc.txt").write_text("v1", encoding="utf-8")
+            ra = make_remote("git", str(a))
+            ra.enable({"url": str(bare)})
+            self.assertTrue((a / ".git").is_dir())
+
+            # nuovo file → commit + push
+            (a / "note.md").write_text("ciao", encoding="utf-8")
+            ra.add("note.md")
+            ra.commit("add note")
+            ra.push()
+
+            # secondo topic clona dal bare e vede i file → pull funziona
+            b = root / "topicB" / "files"
+            b.mkdir(parents=True)
+            subprocess.run(["git", "clone", "-q", str(bare), str(b)], check=True)
+            self.assertEqual((b / "note.md").read_text(encoding="utf-8"), "ciao")
+            self.assertEqual((b / "doc.txt").read_text(encoding="utf-8"), "v1")
+
+            # disable → .git rimosso, file preservati
+            ra.disable()
+            self.assertFalse((a / ".git").is_dir())
+            self.assertTrue((a / "doc.txt").is_file())
+            self.assertTrue((a / "note.md").is_file())
+
+    def test_pull_conflict_escala(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bare = root / "o.git"
+            subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+            subprocess.run(["git", "-C", str(bare), "symbolic-ref", "HEAD", "refs/heads/main"], check=True)
+            a = root / "A" / "files"; a.mkdir(parents=True)
+            (a / "f.txt").write_text("base", encoding="utf-8")
+            ra = GitRemote(str(a)); ra.enable({"url": str(bare)})
+            # clone B, diverge, push
+            b = root / "B" / "files"; b.mkdir(parents=True)
+            subprocess.run(["git", "clone", "-q", str(bare), str(b)], check=True)
+            subprocess.run(["git", "-C", str(b), "config", "user.email", "b@x"], check=True)
+            subprocess.run(["git", "-C", str(b), "config", "user.name", "b"], check=True)
+            (b / "f.txt").write_text("da-B", encoding="utf-8")
+            subprocess.run(["git", "-C", str(b), "commit", "-aqm", "B"], check=True)
+            subprocess.run(["git", "-C", str(b), "push", "-q"], check=True)
+            # A diverge in modo incompatibile e prova pull → conflitto → escala
+            (a / "f.txt").write_text("da-A", encoding="utf-8")
+            ra.commit("A")
+            with self.assertRaises(RemoteConflict):
+                ra.pull()
+
+
+class _FakeDrive:
+    """DriveStorage in-memory: {path -> (bytes, mtime)}."""
+    def __init__(self):
+        self.files = {}
+    def write(self, path, data, if_version=None):
+        self.files[path] = (data, 1000.0); return "v"
+    def read(self, path):
+        from .storage import ReadResult
+        return ReadResult(self.files[path][0], "v")
+    def stat(self, path):
+        from .storage import Stat
+        if path not in self.files:
+            return None
+        import hashlib
+        d, m = self.files[path]
+        return Stat(version="v", size=len(d), mtime=m, kind="file", md5=hashlib.md5(d).hexdigest())
+    def list(self, path):
+        from .storage import Entry
+        out = []
+        for p in self.files:
+            if "/" not in p and path == "":
+                out.append(Entry(name=p, kind="file", size=len(self.files[p][0])))
+        return out
+
+
+class DriveRemoteTest(unittest.TestCase):
+    def test_two_lists_and_push_pull(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            files = root / "files"; files.mkdir()
+            (files / "a.txt").write_text("AAA", encoding="utf-8")
+            fake = _FakeDrive()
+            r = DriveRemote(str(files), str(root / "state.json"),
+                            drive_factory=lambda acct, folder: fake)
+            r.enable({"folder": "F", "account": "acct"})
+            # add → sync+push; commit no-op; push → carica e svuota push-list
+            r.add("a.txt")
+            self.assertEqual(r.status()["pending"], 1)
+            r.commit("x")
+            self.assertEqual(r.push()["pushed"], 1)
+            self.assertEqual(r.status()["pending"], 0)          # push-list svuotata
+            self.assertEqual(r.status()["synced"], 1)
+            self.assertIn("a.txt", fake.files)                   # arrivato su Drive
+            # pull di un file NUOVO dal remote → entra in sync ma NON in push
+            fake.write("b.txt", b"BBB")
+            res = r.pull()
+            self.assertEqual(res["pulled"], 1)
+            self.assertTrue((files / "b.txt").is_file())
+            self.assertEqual(r.status()["synced"], 2)
+            self.assertEqual(r.status()["pending"], 0)           # i pull NON vanno in push-list
+            # disable → stato rimosso, file preservati
+            r.disable()
+            self.assertFalse((root / "state.json").is_file())
+            self.assertTrue((files / "a.txt").is_file())
+            self.assertTrue((files / "b.txt").is_file())
+
+
+if __name__ == "__main__":
+    unittest.main()
