@@ -107,6 +107,23 @@ async def archive_topic(request: Request):
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
+async def set_status(request: Request):
+    _, err = _authorize(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    try:
+        res = _service().set_status(request.path_params["tier"],
+                                    request.path_params["name"],
+                                    (body or {}).get("status", ""))
+        return JSONResponse(res)
+    except TopicError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
 async def create_topic(request: Request):
     _, err = _authorize(request)
     if err:
@@ -353,6 +370,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/messages", list_messages, methods=["GET"]),
     Route("/internal/topics/{tier}/{name}/messages", post_message, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/archive", archive_topic, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/status", set_status, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/participants", participants, methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/remote", remote, methods=["POST"]),

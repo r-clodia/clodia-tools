@@ -119,6 +119,51 @@ def _action_points(summary_text: str) -> list[str]:
     return out
 
 
+# Vocabolario unico di status (selezione uguale per tutti). `urgent` = da fare
+# subito. I valori legacy (idle, IT) sono migrati alla lettura.
+TOPIC_STATES = ("await", "active", "archived", "urgent")
+_STATUS_LEGACY = {"idle": "active", "attivo": "active",
+                  "in_attesa": "await", "completato": "active"}
+
+
+def _norm_status(s: str | None) -> str:
+    s = (s or "").strip().lower()
+    s = _STATUS_LEGACY.get(s, s)
+    return s if s in TOPIC_STATES else "active"
+
+
+# Scadenze nei todo (action_points): una data nel testo del punto (es.
+# "inviare LOI entro 2026-07-10" o "20/07/2026"). La card mostra la più vicina.
+import re as _re
+from datetime import date as _date
+_DATE_RXS = [
+    (_re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b"), (1, 2, 3)),          # YYYY-MM-DD
+    (_re.compile(r"\b(\d{1,2})[/.](\d{1,2})[/.](\d{4})\b"), (3, 2, 1)),    # DD/MM/YYYY
+]
+
+
+def _parse_deadline(text: str):
+    for rx, (yi, mi, di) in _DATE_RXS:
+        m = rx.search(text or "")
+        if m:
+            try:
+                return _date(int(m.group(yi)), int(m.group(mi)), int(m.group(di)))
+            except ValueError:
+                continue
+    return None
+
+
+def _next_deadline(action_points: list[str]) -> str | None:
+    """Scadenza più vicina fra i todo con data: la prima IMMINENTE (>= oggi);
+    se sono tutte passate, la più recente (scaduta, ancora rilevante). ISO date."""
+    dates = [d for d in (_parse_deadline(a) for a in (action_points or [])) if d]
+    if not dates:
+        return None
+    today = _date.today()
+    future = sorted(d for d in dates if d >= today)
+    return (future[0] if future else max(dates)).isoformat()
+
+
 class TopicService:
     def __init__(self, storage: Storage):
         import threading
@@ -876,24 +921,39 @@ class TopicService:
                 except TopicError:
                     continue
                 m = info["meta"]
-                if m.get("status") == "archived" and not include_archived:
+                status = _norm_status(m.get("status"))
+                if status == "archived" and not include_archived:
                     continue
+                aps = _action_points(info["summary"])
                 out.append({
                     "tier": tr, "tier_name": TIER_NAMES.get(tr, tr),
                     "name": e.name, "title": m.get("title"),
-                    "status": m.get("status"), "tldr": info["tldr"],
+                    "status": status, "tldr": info["tldr"],
                     "deadline": m.get("deadline"),
+                    # scadenza più vicina fra i todo (action_points) con data
+                    "next_deadline": _next_deadline(aps),
                     "contact_agent": m.get("contact_agent", "clodia"),
                     "kind": m.get("kind"),
                     "owner": m.get("owner"),
                     "participants": m.get("participants", []),
-                    "action_points": _action_points(info["summary"]),
+                    "action_points": aps,
                     "storage": m.get("storage", self.s.capability().name),
                     "channel": m.get("channel"),
                     "updated_at": info["updated_at"],
                     "recent_files": info["recent_files"],
                 })
         return out
+
+    def set_status(self, tier: str, name: str, status: str) -> dict:
+        """Imposta lo status del topic (vocabolario TOPIC_STATES). Ritorna lo
+        status normalizzato applicato."""
+        st = _norm_status(status)
+        if st not in TOPIC_STATES:
+            raise TopicError(f"status non valido: {status} (validi: {', '.join(TOPIC_STATES)})")
+        meta, ver = self._read_meta(tier, name)
+        meta["status"] = st
+        self._write_meta(tier, name, meta, base_version=ver)
+        return {"status": st}
 
     def search(self, query: str, mode: str = "lexical") -> list[dict]:
         """P1: ricerca lessicale (substring) su meta/summary/minute. 'semantic' = P2."""
