@@ -262,6 +262,32 @@ _EU_CORPUS_TOOLS: list[Tool] = [
                     "AGA | HE-Programme-Guide | HE-General-Annexes"},
         }, "required": ["query"]},
     ),
+    Tool(
+        name="eu_corpus.ingest",
+        description=(
+            "Aggiunge un documento PDF alla knowledge base normativa (corpus RAG). "
+            "Il file deve già stare nei files/ di un topic di cui sei participant "
+            "(es. un PDF che l'utente ha allegato in chat → path 'files/xxx.pdf'). "
+            "Lo estrae, chunka, embedda e lo indicizza su pgvector. "
+            "USALO per materiale NORMATIVO/DI RIFERIMENTO stabile (guide, regolamenti, "
+            "grant agreement), NON per dossier confidenziali specifici di un cliente "
+            "(quelli restano nel topic e si leggono live con topic.read_file). "
+            "doc_name+version identificano il documento: se stai caricando una NUOVA "
+            "versione di un documento già presente, passa supersede=true (le versioni "
+            "precedenti restano ma vengono marcate superseded). Ri-ingerire la stessa "
+            "(doc_name, version) è idempotente (rimpiazza i chunk)."
+        ),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"],
+                     "description": "tier del topic da cui leggere il file"},
+            "name": {"type": "string", "description": "nome del topic da cui leggere il file"},
+            "path": {"type": "string", "description": "path del PDF nel topic, es. 'files/aga.pdf'"},
+            "doc_name": {"type": "string", "description": "nome del documento nel corpus (es. 'AGA', 'HE-Programme-Guide')"},
+            "version": {"type": "string", "description": "versione, es. '2.0 (2025-04-01)'"},
+            "url": {"type": "string", "description": "URL fonte ufficiale (opzionale ma consigliato)"},
+            "supersede": {"type": "boolean", "description": "true se è una nuova versione di un doc esistente"},
+        }, "required": ["tier", "name", "path", "doc_name", "version"]},
+    ),
 ]
 
 
@@ -998,6 +1024,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 arguments["query"],
                 k=arguments.get("k", 5),
                 doc=arguments.get("doc"),
+            )
+        elif name == "eu_corpus.ingest":
+            # Legge il PDF dal topic server-side (i byte NON passano dal modello),
+            # con controllo participant+clearance, poi lo invia al micro-servizio.
+            svc = _topics()
+            tier, tname, path = arguments["tier"], arguments["name"], arguments["path"]
+            _require_topic_member(svc, tier, tname)
+            data = svc.read_file(tier, tname, path)
+            filename = path.rsplit("/", 1)[-1]
+            result = eu_corpus.ingest_bytes(
+                data, filename,
+                arguments["doc_name"], arguments["version"],
+                url=arguments.get("url"),
+                supersede=bool(arguments.get("supersede", False)),
             )
         elif proxy.is_proxied(name):
             # C1: instrada al backend MCP montato (già passato il check whitelist).
