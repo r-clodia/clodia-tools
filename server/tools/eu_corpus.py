@@ -57,6 +57,35 @@ def search(query: str, k: int = 5, doc: str | None = None) -> dict:
         raise RuntimeError(f"eu-rag-search irraggiungibile ({_BASE}): {e.reason}")
 
 
+def list_documents() -> dict:
+    """Elenca i documenti indicizzati nel corpus (nome, versione, status, n. chunk)."""
+    try:
+        with urllib.request.urlopen(f"{_BASE}/documents", timeout=_TIMEOUT) as resp:
+            return json.load(resp)
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"eu-rag-search irraggiungibile ({_BASE}): {getattr(e, 'reason', e)}")
+
+
+def remove(doc_name: str, version: str | None = None) -> dict:
+    """Rimuove un documento dal corpus (o una sua versione). Distruttivo, token-gated."""
+    fields = {"name": doc_name}
+    if version:
+        fields["version"] = version
+    data = urllib.parse.urlencode(fields).encode()
+    req = urllib.request.Request(
+        f"{_BASE}/remove", data=data, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded",
+                 "Authorization": f"Bearer {_ingest_token()}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"eu-rag remove HTTP {e.code}: {e.read().decode('utf-8', 'ignore')[:200]}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"eu-rag remove irraggiungibile ({_BASE}): {e.reason}")
+
+
 def _multipart(fields: dict, file_field: str, filename: str, content: bytes) -> tuple[bytes, str]:
     """Costruisce un body multipart/form-data (solo stdlib)."""
     boundary = "----eucorpus" + uuid.uuid4().hex
