@@ -310,6 +310,69 @@ _EU_CORPUS_TOOLS: list[Tool] = [
 ]
 
 
+_RAG_TOOLS: list[Tool] = [
+    Tool(
+        name="rag.collections",
+        description=("Elenca le knowledge base (collection) su cui hai accesso in "
+                     "lettura, con tier e conteggi. Usalo per sapere quali corpora "
+                     "puoi interrogare."),
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="rag.search",
+        description=("Retrieval semantico su una collection della knowledge base. "
+                     "Query IT/EN. Ritorna passaggi con citazione (documento, "
+                     "versione, sezione, pagina, score). Il retrieval trova i "
+                     "candidati, non è la verità: leggi il passaggio per intero e "
+                     "cita sempre documento+versione+pagina."),
+        inputSchema={"type": "object", "properties": {
+            "collection": {"type": "string", "description": "collection su cui cercare"},
+            "query": {"type": "string", "description": "domanda in linguaggio naturale (IT/EN)"},
+            "k": {"type": "integer", "description": "n. passaggi (1-20, default 5)"},
+            "doc": {"type": "string", "description": "filtro opzionale per nome documento"},
+        }, "required": ["collection", "query"]},
+    ),
+    Tool(
+        name="rag.list",
+        description="Elenca i documenti di una collection (nome, versione, status, n. chunk, fonte).",
+        inputSchema={"type": "object", "properties": {
+            "collection": {"type": "string"},
+        }, "required": ["collection"]},
+    ),
+    Tool(
+        name="rag.ingest",
+        description=("Aggiunge un PDF (già nei files/ di un topic di cui sei "
+                     "participant) a una collection della knowledge base. Il gateway "
+                     "legge i byte server-side, li estrae/chunka/embedda/indicizza. "
+                     "Richiede grant di SCRITTURA sulla collection. Solo materiale "
+                     "stabile/di riferimento, non dossier confidenziali per-cliente. "
+                     "supersede=true per una nuova versione di un doc già presente."),
+        inputSchema={"type": "object", "properties": {
+            "collection": {"type": "string"},
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"],
+                     "description": "tier del topic da cui leggere il file"},
+            "name": {"type": "string", "description": "nome del topic da cui leggere il file"},
+            "path": {"type": "string", "description": "path del PDF nel topic, es. 'files/x.pdf'"},
+            "doc_name": {"type": "string", "description": "nome del documento nella collection"},
+            "version": {"type": "string"},
+            "url": {"type": "string"},
+            "supersede": {"type": "boolean"},
+        }, "required": ["collection", "tier", "name", "path", "doc_name", "version"]},
+    ),
+    Tool(
+        name="rag.remove",
+        description=("Rimuove un documento da una collection (DISTRUTTIVO). Richiede "
+                     "grant di SCRITTURA. Se ometti version rimuovi tutte le versioni. "
+                     "Conferma sempre con l'utente cosa stai per rimuovere."),
+        inputSchema={"type": "object", "properties": {
+            "collection": {"type": "string"},
+            "doc_name": {"type": "string"},
+            "version": {"type": "string"},
+        }, "required": ["collection", "doc_name"]},
+    ),
+]
+
+
 _TOPIC_TOOLS: list[Tool] = [
     Tool(
         name="topic.new",
@@ -819,7 +882,7 @@ def _native_tool_namespaces() -> list[str]:
     """Namespace dei tool nativi del gateway (per agents.list_tools)."""
     tools = (_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS
              + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
-             + _EU_CORPUS_TOOLS)
+             + _EU_CORPUS_TOOLS + _RAG_TOOLS)
     ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in tools})
     return ns
 
@@ -947,7 +1010,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS + _EU_CORPUS_TOOLS)
+    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS + _EU_CORPUS_TOOLS + _RAG_TOOLS)
     # C1: tool dei backend MCP montati (namespaced), aggregati dal proxy.
     try:
         proxied = await proxy.list_proxied_tools()
@@ -1039,6 +1102,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name.startswith("agents."):
             result = _dispatch_agents(name, arguments, _ag)
         elif name == "eu_corpus.search":
+            # alias morbido: eu_corpus.* == rag.* sulla collection eu-normativa.
+            _rag_authorize("eu-normativa", write=False)
             result = eu_corpus.search(
                 arguments["query"],
                 k=arguments.get("k", 5),
@@ -1047,6 +1112,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name == "eu_corpus.ingest":
             # Legge il PDF dal topic server-side (i byte NON passano dal modello),
             # con controllo participant+clearance, poi lo invia al micro-servizio.
+            _rag_authorize("eu-normativa", write=True)
             svc = _topics()
             tier, tname, path = arguments["tier"], arguments["name"], arguments["path"]
             _require_topic_member(svc, tier, tname)
@@ -1059,9 +1125,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 supersede=bool(arguments.get("supersede", False)),
             )
         elif name == "eu_corpus.list":
+            _rag_authorize("eu-normativa", write=False)
             result = eu_corpus.list_documents()
         elif name == "eu_corpus.remove":
+            _rag_authorize("eu-normativa", write=True)
             result = eu_corpus.remove(arguments["doc_name"], arguments.get("version"))
+        elif name.startswith("rag."):
+            result = _dispatch_rag(name, arguments)
         elif proxy.is_proxied(name):
             # C1: instrada al backend MCP montato (già passato il check whitelist).
             text = await proxy.call_proxied(name, arguments)
@@ -1185,6 +1255,69 @@ def _filter_member_rows(rows: list, caller: str) -> list:
         elif _topic_is_member(r, caller):
             out.append(r)
     return out
+
+
+def _rag_readable(cfg: dict) -> set:
+    """Collection su cui l'agent ha lettura (read grant OR write grant)."""
+    return set(cfg.get("rag_read") or []) | set(cfg.get("rag_write") or [])
+
+
+def _rag_authorize(collection: str, write: bool) -> None:
+    """Reference monitor per-collection: grant read/write (arg-aware, dal
+    config.yaml del gateway) + tiering (clearance ≥ tier della collection).
+    Super-agent → bypass. Solleva PermissionError su violazione."""
+    ag = agent_name()
+    if _is_super(ag):
+        return
+    cfg = agent_config()
+    if write:
+        if collection not in set(cfg.get("rag_write") or []):
+            raise PermissionError(
+                f"agent '{ag}' senza grant di SCRITTURA sulla collection '{collection}'")
+    else:
+        if collection not in _rag_readable(cfg):
+            raise PermissionError(
+                f"agent '{ag}' senza grant di LETTURA sulla collection '{collection}'")
+    # asse livello: clearance(agent) ≥ tier(collection). Difesa in profondità.
+    tier = eu_corpus.collection_tier(collection)
+    if _rank(current_clearance()) < _rank(tier):
+        raise PermissionError(
+            f"agent '{ag}': clearance insufficiente per la collection '{collection}' "
+            f"(tier {tier})")
+
+
+def _dispatch_rag(name: str, a: dict):
+    verb = name.split(".", 1)[1]
+    if verb == "collections":
+        res = eu_corpus.collections()
+        if not _is_super(agent_name()):
+            allowed = _rag_readable(agent_config())
+            res = {"collections": [c for c in res.get("collections", [])
+                                   if c.get("collection") in allowed]}
+        return res
+    collection = a["collection"]
+    if verb == "search":
+        _rag_authorize(collection, write=False)
+        return eu_corpus.search(a["query"], k=a.get("k", 5), doc=a.get("doc"),
+                                collection=collection)
+    if verb == "list":
+        _rag_authorize(collection, write=False)
+        return eu_corpus.list_documents(collection)
+    if verb == "ingest":
+        _rag_authorize(collection, write=True)
+        svc = _topics()
+        tier, tname, path = a["tier"], a["name"], a["path"]
+        _require_topic_member(svc, tier, tname)
+        data = svc.read_file(tier, tname, path)
+        filename = path.rsplit("/", 1)[-1]
+        return eu_corpus.ingest_bytes(
+            data, filename, a["doc_name"], a["version"],
+            url=a.get("url"), supersede=bool(a.get("supersede", False)),
+            collection=collection)
+    if verb == "remove":
+        _rag_authorize(collection, write=True)
+        return eu_corpus.remove(a["doc_name"], a.get("version"), collection)
+    raise ValueError(f"unknown rag verb: {name}")
 
 
 def _dispatch_topic(name: str, a: dict):
