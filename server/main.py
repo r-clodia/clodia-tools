@@ -288,6 +288,25 @@ _EU_CORPUS_TOOLS: list[Tool] = [
             "supersede": {"type": "boolean", "description": "true se è una nuova versione di un doc esistente"},
         }, "required": ["tier", "name", "path", "doc_name", "version"]},
     ),
+    Tool(
+        name="eu_corpus.list",
+        description=("Elenca i documenti indicizzati nella knowledge base (corpus RAG): "
+                     "nome, versione, status (active/superseded), n. chunk, fonte. "
+                     "Usalo per mostrare all'utente cosa c'è nel corpus."),
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="eu_corpus.remove",
+        description=("Rimuove un documento dalla knowledge base (corpus RAG). "
+                     "DISTRUTTIVO: cancella il documento e tutti i suoi chunk. "
+                     "Se ometti `version` rimuove TUTTE le versioni di quel documento. "
+                     "CONFERMA sempre con l'utente cosa stai per rimuovere prima di chiamarlo "
+                     "(nome + versione). Usa eu_corpus.list per i nomi/versioni esatti."),
+        inputSchema={"type": "object", "properties": {
+            "doc_name": {"type": "string", "description": "nome del documento (come da eu_corpus.list)"},
+            "version": {"type": "string", "description": "versione specifica; se omessa, tutte le versioni"},
+        }, "required": ["doc_name"]},
+    ),
 ]
 
 
@@ -1039,6 +1058,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 url=arguments.get("url"),
                 supersede=bool(arguments.get("supersede", False)),
             )
+        elif name == "eu_corpus.list":
+            result = eu_corpus.list_documents()
+        elif name == "eu_corpus.remove":
+            result = eu_corpus.remove(arguments["doc_name"], arguments.get("version"))
         elif proxy.is_proxied(name):
             # C1: instrada al backend MCP montato (già passato il check whitelist).
             text = await proxy.call_proxied(name, arguments)
