@@ -198,6 +198,9 @@ def _refresh(st: dict, token: str) -> int:
             "from": " ".join(x for x in (frm.get("first_name"), frm.get("last_name")) if x)
                     or (frm.get("username") or str(frm.get("id"))),
             "from_id": frm.get("id"),
+            "from_username": frm.get("username"),  # handle stabile (senza @) per
+            # mappare il mittente a un principal registrato (channel-adapter);
+            # `from` sopra resta la stringa di display per l'etichetta proxy.
             "text": text,
             "date": msg.get("date"),
         }
