@@ -38,6 +38,8 @@ _FEATURE_DEFAULTS: dict[str, Any] = {
     "packs_ui": True,
     "providers_ui": True,
     "activity": True,
+    "pwa": True,
+    "helpdesk": True,
     "kanban": False,
     "colony": False,
 }
@@ -80,7 +82,13 @@ def load(force: bool = False) -> dict:
                 raise ValueError("'features' deve essere un mapping")
             for key, val in feats.items():
                 if key not in _FEATURE_DEFAULTS:
-                    raise ValueError(f"feature sconosciuta: '{key}'")
+                    # Chiave che questo lettore non conosce (schema del profilo
+                    # condiviso con l'agent-server, che può essere più nuovo):
+                    # NON è un errore — ignora con warning. Un fallback FULL
+                    # qui spegnerebbe TUTTO il gating per una chiave altrui
+                    # (successo con features.pwa, 6 lug).
+                    LOG.warning("profile.yaml: feature '%s' ignorata (non gestita dal gateway)", key)
+                    continue
                 if key in _TRISTATE:
                     # Gotcha YAML 1.1: `off` non quotato = booleano False.
                     if isinstance(val, bool):
