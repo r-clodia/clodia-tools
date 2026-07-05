@@ -31,6 +31,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from . import google_oauth as go
+from . import instance_profile
 from . import proxy
 from . import vault
 from . import whitelist
@@ -198,6 +199,12 @@ async def register_mcp(request: Request):
         if not slug or slug in _NATIVE_PREFIXES:
             return JSONResponse({"error": f"nome backend non valido/riservato: {name!r} → {slug!r}"},
                                 status_code=400)
+        # Feature `integrations` (profilo istanza): off = nessun mount di MCP
+        # esterni; fixed = solo la whitelist dell'edizione (i tool del pack).
+        try:
+            instance_profile.integrations_check(slug)
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=403)
         if spec.get("url"):
             backend = {"name": slug, "label": name, "transport": "http", "url": spec["url"]}
             if spec.get("headers"):
@@ -607,6 +614,13 @@ async def github_connect(request: Request):
     except Exception:
         return JSONResponse({"error": "bad_json"}, status_code=400)
     pat = (body.get("pat") or body.get("token") or "").strip()
+    if pat:
+        # Anche GitHub è un MCP esterno: segue il gating integrations del
+        # profilo (la DISCONNESSIONE — pat vuoto — resta sempre permessa).
+        try:
+            instance_profile.integrations_check("github")
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=403)
     backends = [b for b in (whitelist.CONFIG.get("mcp_backends") or [])
                 if b.get("name") != "github"]
     if not pat:

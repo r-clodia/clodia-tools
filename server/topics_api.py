@@ -16,6 +16,8 @@ import json
 import logging
 import os
 import tarfile
+
+from . import instance_profile
 from pathlib import Path
 
 from starlette.requests import Request
@@ -136,6 +138,11 @@ async def create_topic(request: Request):
     tier = body.get("tier") or None
     if not name:
         return JSONResponse({"error": "name_required"}, status_code=400)
+    try:
+        # Profilo topics:single → solo il workspace unico (DM sempre permessi).
+        instance_profile.topic_creation_check(name)
+    except PermissionError as e:
+        return JSONResponse({"error": str(e)}, status_code=403)
     try:
         meta = _service().new(tier, name, body.get("meta") or {})
         return JSONResponse({"created": True, "meta": meta})
