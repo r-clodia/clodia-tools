@@ -152,6 +152,24 @@ def integrations_check(slug: str) -> None:
                 f"profilo integrations:fixed — MCP ammessi: {allowed or 'nessuno'}")
 
 
+def connectors_allowed() -> list[str] | None:
+    """Connettori NATIVI dell'edizione (gmail, mailboxes, trello, …).
+    None = tutti (storico); lista = solo quelli (terraformazione, gap-1
+    edizione acme-min, 6 lug)."""
+    conf = load()["integrations"]
+    val = conf.get("connectors")
+    if val is None:
+        return None
+    return [str(x) for x in (val or [])]
+
+
+def connector_check(cid: str) -> None:
+    allowed = connectors_allowed()
+    if allowed is not None and cid not in allowed:
+        raise PermissionError(
+            f"connettore '{cid}' non previsto dall'edizione (connectors: {allowed})")
+
+
 def topics_mode() -> str:
     return load()["features"]["topics"]
 
