@@ -49,3 +49,8 @@ Env runtime: `CLODIA_CA_CRT`, `CLODIA_PKI_CERTS`, `CLODIA_PKI_REVOKED`,
 Scorporato da `r-clodia/clodia-logic` (`tools/system/mcp-tools-server`) il 2026-06-14
 con storia preservata, per separare il piano di enforcement dal runtime degli
 agenti (vedi roadmap migrazione tool nel topic `clodia-agency`).
+
+## Licenza
+
+GNU AGPL v3 — con opzione di licenza commerciale: vedi [LICENSING.md](LICENSING.md).
+Le versioni fino al tag `apache2-final` restano Apache 2.0.
