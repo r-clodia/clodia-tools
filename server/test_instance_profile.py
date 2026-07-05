@@ -76,6 +76,12 @@ class InstanceProfileGatewayTest(unittest.TestCase):
         with self.assertRaises(PermissionError):
             ip.connector_check("gmail")
 
+    def test_unknown_feature_key_ignored_not_fallback(self) -> None:
+        # Chiave sconosciuta (schema più nuovo lato agent-server): warning e
+        # ignora — il gating delle chiavi note DEVE restare attivo.
+        self._write("features: {rag: off, chiave_futura: true}\n")
+        self.assertEqual(ip.rag_mode(), "off")
+
     def test_invalid_falls_back_full(self) -> None:
         self._write("features: {rag: banana}\n")
         self.assertEqual(ip.rag_mode(), "full")
