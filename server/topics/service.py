@@ -477,13 +477,13 @@ class TopicService:
         meta.setdefault("status", "active")
         # Storage dei FILE del topic (control-plane = sempre local). Default local;
         # se richiesto drive (meta.storage_config.type=drive) si lega/crea la cartella.
+        # Modello remote-pluggable (2 lug): lo storage è SEMPRE locale; "drive"
+        # alla creazione = remote drive abilitato dalla nascita (fix 6 lug: prima
+        # marcava google-drive senza wiring → il topic restava di fatto locale).
         sc = meta.get("storage_config") or {}
-        if meta.get("storage") == "google-drive" or sc.get("type") == "drive":
-            meta["storage"] = "google-drive"
-            meta["storage_config"] = self._provision_drive_folder(sc, name)
-        else:
-            meta["storage"] = self.s.capability().name
-            meta.pop("storage_config", None)
+        want_drive = meta.get("storage") == "google-drive" or sc.get("type") == "drive"
+        meta["storage"] = self.s.capability().name
+        meta.pop("storage_config", None)
         # Channel dei MESSAGGI (default: webui, implicito). Se dichiarato (es.
         # telegram) → cap del tier all'anello più debole (SEAL-cap del channel).
         ch = meta.get("channel")
@@ -496,13 +496,28 @@ class TopicService:
         # Canale (Slack-like): owner = chi amministra il canale (invita/rimuove);
         # participants = agenti (umani/AI) abilitati a parlare nel canale.
         meta.setdefault("owner", meta.get("contact_agent", "clodia"))
-        meta.setdefault("participants", [meta["owner"]])
+        # Partecipanti di default dell'edizione (terraformazione) + owner.
+        from .. import instance_profile as _iprof
+        _defaults = _iprof.topic_default_participants()
+        base_participants = list(dict.fromkeys([meta["owner"], *_defaults]))
+        meta.setdefault("participants", base_participants)
         meta.setdefault("deadline", None)
         meta["created_at"] = _now().isoformat(timespec="seconds")
         self.s.write(mp, json.dumps(meta, ensure_ascii=False, indent=2).encode())
         if not self.s.exists(self._summary_p(tier, name)):
             self.s.write(self._summary_p(tier, name),
                          f"{meta.get('title', name)}\n\n## Prossimi passi\n".encode())
+        if want_drive:
+            # remote drive dalla nascita: risolve/crea la cartella e abilita il
+            # sync (add/commit/push/pull). Best-effort: un problema Drive non
+            # deve impedire la creazione del topic (resta local pulito).
+            try:
+                meta = self.remote_enable(tier, name, "drive", dict(sc))
+            except Exception as e:  # noqa: BLE001
+                import logging
+                logging.getLogger("clodia-tools.topics").warning(
+                    "remote drive alla creazione di %s/%s fallito (topic resta "
+                    "local): %s", tier, name, e)
         return meta
 
     def set_channel(self, tier: str, name: str, channel: dict | None) -> dict:

@@ -62,6 +62,7 @@ def _full() -> dict:
         "rag": {"collection": ""},
         "integrations": {"allowed": []},
         "topics_single": {"name": "workspace", "tier": "SEAL-1"},
+        "topics_defaults": {},
     }
 
 
@@ -99,7 +100,7 @@ def load(force: bool = False) -> dict:
                     val = bool(val)
                 prof["features"][key] = val
             prof["edition"] = str(raw.get("edition") or "full")
-            for section in ("rag", "integrations", "topics_single"):
+            for section in ("rag", "integrations", "topics_single", "topics_defaults"):
                 sec = raw.get(section)
                 if isinstance(sec, dict):
                     prof[section].update(sec)
@@ -176,6 +177,16 @@ def connector_check(cid: str) -> None:
     if allowed is not None and cid not in allowed:
         raise PermissionError(
             f"connettore '{cid}' non previsto dall'edizione (connectors: {allowed})")
+
+
+def topic_default_participants() -> list[str]:
+    """Partecipanti di default dei topic APPENA creati (terraformazione).
+    Chiave profilo: topics_defaults.participants — default [clodia]."""
+    conf = load().get("topics_defaults") or {}
+    val = conf.get("participants")
+    if val is None:
+        return ["clodia"]
+    return [str(x) for x in (val or [])]
 
 
 def topics_mode() -> str:

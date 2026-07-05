@@ -82,6 +82,12 @@ class InstanceProfileGatewayTest(unittest.TestCase):
         self._write("features: {rag: off, chiave_futura: true}\n")
         self.assertEqual(ip.rag_mode(), "off")
 
+    def test_topic_default_participants(self) -> None:
+        ip.load(force=True)
+        self.assertEqual(ip.topic_default_participants(), ["clodia"])
+        self._write("topics_defaults: {participants: [clodia, commercialista]}\n")
+        self.assertEqual(ip.topic_default_participants(), ["clodia", "commercialista"])
+
     def test_invalid_falls_back_full(self) -> None:
         self._write("features: {rag: banana}\n")
         self.assertEqual(ip.rag_mode(), "full")
