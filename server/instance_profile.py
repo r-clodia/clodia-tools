@@ -133,13 +133,20 @@ def integrations_mode() -> str:
 
 
 def integrations_check(slug: str) -> None:
-    """Guard per il mount di MCP esterni (register_mcp / github_connect)."""
+    """Guard per il mount di MCP esterni (register_mcp / github_connect).
+
+    In mode fixed, `integrations.allow_manual_mcp: true` (decisione di
+    terraformazione, spec v0.3 §4b.4) consente all'admin il paste manuale di
+    MCP fuori whitelist dalla UI."""
     mode = integrations_mode()
     if mode == "off":
         raise PermissionError(
             "feature 'integrations' disabilitata dal profilo dell'istanza")
     if mode == "fixed":
-        allowed = [str(s) for s in load()["integrations"].get("allowed") or []]
+        conf = load()["integrations"]
+        if bool(conf.get("allow_manual_mcp")):
+            return
+        allowed = [str(s) for s in conf.get("allowed") or []]
         if slug not in allowed:
             raise PermissionError(
                 f"profilo integrations:fixed — MCP ammessi: {allowed or 'nessuno'}")

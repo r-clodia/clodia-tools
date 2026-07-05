@@ -55,6 +55,9 @@ class InstanceProfileGatewayTest(unittest.TestCase):
         ip.integrations_check("normattiva")           # in whitelist
         with self.assertRaises(PermissionError):
             ip.integrations_check("github")
+        # allow_manual_mcp: paste manuale permesso anche fuori whitelist
+        self._write("features: {integrations: fixed}\nintegrations: {allowed: [], allow_manual_mcp: true}\n")
+        ip.integrations_check("qualunque")
 
     def test_topics_single_allows_workspace_and_dms(self) -> None:
         self._write("features: {topics: single}\n")
