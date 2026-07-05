@@ -74,6 +74,19 @@ class _AuthMiddleware:
 async def _lifespan(_app):
     async with _sm.run():
         LOG.info("clodia-tools MCP HTTP: session manager attivo")
+        # Profilo topics:single → assicura il topic-workspace unico al boot
+        # (TopicService.new è idempotente: se esiste, no-op).
+        try:
+            from . import instance_profile
+            if instance_profile.topics_mode() == "single":
+                conf = instance_profile.topics_single_conf()
+                from .topics_api import _service
+                _service().new(conf.get("tier") or "SEAL-1",
+                               conf.get("name") or "workspace", {})
+                LOG.info("profilo topics:single — workspace '%s' pronto",
+                         conf.get("name") or "workspace")
+        except Exception as e:  # noqa: BLE001 — mai bloccare il boot
+            LOG.warning("auto-create workspace (topics:single) fallito: %s", e)
         yield
 
 

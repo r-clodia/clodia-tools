@@ -8,6 +8,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from . import __version__
+from . import instance_profile
 from . import proxy
 from .tools import email, fs, runtime
 from .tools import eu_corpus
@@ -881,8 +882,9 @@ def _dispatch_telegram(name: str, a: dict):
 def _native_tool_namespaces() -> list[str]:
     """Namespace dei tool nativi del gateway (per agents.list_tools)."""
     tools = (_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS
-             + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
-             + _EU_CORPUS_TOOLS + _RAG_TOOLS)
+             + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
+    if instance_profile.rag_enabled():
+        tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
     ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in tools})
     return ns
 
@@ -1010,7 +1012,11 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS + _EU_CORPUS_TOOLS + _RAG_TOOLS)
+    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
+    # Feature `rag` (profilo istanza): off → i verbi rag.*/eu_corpus.* non
+    # esistono proprio (né in lista né al dispatch).
+    if instance_profile.rag_enabled():
+        native += list(_EU_CORPUS_TOOLS + _RAG_TOOLS)
     # C1: tool dei backend MCP montati (namespaced), aggregati dal proxy.
     try:
         proxied = await proxy.list_proxied_tools()
@@ -1265,7 +1271,9 @@ def _rag_readable(cfg: dict) -> set:
 def _rag_authorize(collection: str, write: bool) -> None:
     """Reference monitor per-collection: grant read/write (arg-aware, dal
     config.yaml del gateway) + tiering (clearance ≥ tier della collection).
-    Super-agent → bypass. Solleva PermissionError su violazione."""
+    Super-agent → bypass dei grant, MA il vincolo del profilo (rag off/single)
+    è strutturale e vale per tutti. Solleva PermissionError su violazione."""
+    instance_profile.rag_check_collection(collection)
     ag = agent_name()
     if _is_super(ag):
         return
@@ -1288,8 +1296,15 @@ def _rag_authorize(collection: str, write: bool) -> None:
 
 def _dispatch_rag(name: str, a: dict):
     verb = name.split(".", 1)[1]
+    if not instance_profile.rag_enabled():
+        raise PermissionError("feature 'rag' disabilitata dal profilo dell'istanza")
     if verb == "collections":
         res = eu_corpus.collections()
+        # Profilo rag:single → la lista mostra solo la collection dell'edizione.
+        if instance_profile.rag_mode() == "single":
+            only = instance_profile.load()["rag"].get("collection") or ""
+            res = {"collections": [c for c in res.get("collections", [])
+                                   if c.get("collection") == only]}
         if not _is_super(agent_name()):
             allowed = _rag_readable(agent_config())
             res = {"collections": [c for c in res.get("collections", [])
@@ -1326,6 +1341,8 @@ def _dispatch_topic(name: str, a: dict):
     if verb in _TOPIC_SCOPED_VERBS:
         _require_topic_member(svc, a.get("tier"), a.get("name"))
     if verb == "new":
+        # Profilo topics:single → solo il workspace unico (DM sempre permessi).
+        instance_profile.topic_creation_check(a["name"])
         return svc.new(a.get("tier"), a["name"], a.get("meta"))
     if verb == "open":
         return svc.open(a["tier"], a["name"])
