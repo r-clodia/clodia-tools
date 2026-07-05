@@ -66,6 +66,16 @@ class InstanceProfileGatewayTest(unittest.TestCase):
         with self.assertRaises(PermissionError):
             ip.topic_creation_check("altro-progetto")
 
+    def test_connectors_gating(self) -> None:
+        ip.load(force=True)                       # profilo assente
+        self.assertIsNone(ip.connectors_allowed())
+        ip.connector_check("gmail")               # tutti permessi
+        self._write("integrations: {connectors: [mailboxes]}\n")
+        self.assertEqual(ip.connectors_allowed(), ["mailboxes"])
+        ip.connector_check("mailboxes")
+        with self.assertRaises(PermissionError):
+            ip.connector_check("gmail")
+
     def test_invalid_falls_back_full(self) -> None:
         self._write("features: {rag: banana}\n")
         self.assertEqual(ip.rag_mode(), "full")

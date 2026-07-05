@@ -76,6 +76,15 @@ def _gc_states() -> None:
         _states.pop(k, None)
 
 
+def _connector_guard(cid: str):
+    """Gating dei connettori nativi dal profilo (integrations.connectors)."""
+    try:
+        instance_profile.connector_check(cid)
+        return None
+    except PermissionError as e:
+        return JSONResponse({"error": str(e)}, status_code=403)
+
+
 async def list_tools(request: Request):
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -166,6 +175,12 @@ async def list_tools(request: Request):
             "connected": True,
             "accounts": [],
         })
+    allowed = instance_profile.connectors_allowed()
+    if allowed is not None:
+        # backup/topic-storage/mcp non sono connettori nativi gated
+        keep = set(allowed) | {"topic-storage"}
+        connectors = [c for c in connectors
+                      if c.get("provider") == "mcp" or c.get("id") in keep]
     return JSONResponse({"connectors": connectors})
 
 
@@ -258,6 +273,9 @@ def _account_from_email(email: str) -> str:
 
 
 async def gmail_auth(request: Request):
+    g = _connector_guard("gmail")
+    if g is not None:
+        return g
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
@@ -279,6 +297,9 @@ async def gmail_auth(request: Request):
 
 
 async def gmail_connect(request: Request):
+    g = _connector_guard("gmail")
+    if g is not None:
+        return g
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
@@ -339,6 +360,9 @@ async def gmail_connect(request: Request):
 
 
 async def gworkspace_auth(request: Request):
+    g = _connector_guard("google-workspace")
+    if g is not None:
+        return g
     """Avvia il consenso OAuth per il connettore Google Workspace (Drive ·
     Docs · Calendar). Stesso flusso di Gmail ma con scope Workspace."""
     if not _authorized(request):
@@ -361,6 +385,9 @@ async def gworkspace_auth(request: Request):
 
 
 async def gworkspace_connect(request: Request):
+    g = _connector_guard("google-workspace")
+    if g is not None:
+        return g
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
@@ -413,6 +440,9 @@ async def gworkspace_connect(request: Request):
 
 
 async def openai_connect(request: Request):
+    g = _connector_guard("openai-images")
+    if g is not None:
+        return g
     """Attiva l'integrazione Image generation: l'owner incolla la API key, che
     viene depositata nel vault come credenziale infra (no grant per-agente: la
     legge solo il gateway). Per disconnettere: body {"api_key": ""}."""
@@ -491,6 +521,9 @@ async def email_mailboxes(request: Request):
 
 
 async def email_mailbox_add(request: Request):
+    g = _connector_guard("mailboxes")
+    if g is not None:
+        return g
     """POST → aggiunge/aggiorna una casella IMAP/SMTP. Body: account, email,
     password, imap_server, smtp_server, [imap_port=993, smtp_port=587,
     display_name, sent_folder, smtp_user]. Creds nel vault (grant a clodia+ophelia)."""
@@ -533,6 +566,9 @@ async def email_mailbox_remove(request: Request):
 
 
 async def trello_connect(request: Request):
+    g = _connector_guard("trello")
+    if g is not None:
+        return g
     """Deposita le credenziali Trello nel vault. Body: {api_key, token}.
     api_key/token vuoti → disconnette (rimuove la credenziale)."""
     if not _authorized(request):
@@ -568,6 +604,9 @@ async def telegram_status(request: Request):
 
 
 async def telegram_connect(request: Request):
+    g = _connector_guard("telegram")
+    if g is not None:
+        return g
     """Connette un bot Telegram dedicato. Body: {token}. Valida con getMe,
     deposita il token nel vault (grant clodia) e memorizza l'@username. token
     vuoto → disconnette (rimuove la credenziale). Il token non transita mai dal
@@ -615,6 +654,9 @@ async def github_connect(request: Request):
         return JSONResponse({"error": "bad_json"}, status_code=400)
     pat = (body.get("pat") or body.get("token") or "").strip()
     if pat:
+        g = _connector_guard("github")
+        if g is not None:
+            return g
         # Anche GitHub è un MCP esterno: segue il gating integrations del
         # profilo (la DISCONNESSIONE — pat vuoto — resta sempre permessa).
         try:
