@@ -61,12 +61,42 @@ class Remote(abc.ABC):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Credential helper inline SCOPED a github.com: fornisce a git le credenziali per
+# i push/pull HTTPS senza mai mettere il PAT in un URL, in .git/config o in argv —
+# il valore vive SOLO in env `GIT_PAT`, letto dall'helper al volo. `x-access-token`
+# è lo username convenzionale GitHub per l'auth via token.
+_GH_CRED_HELPER = (
+    "!f() { test \"$1\" = get && "
+    "printf 'username=x-access-token\\npassword=%s\\n' \"$GIT_PAT\"; }; f"
+)
+
+
 class GitRemote(Remote):
     """Remote git: i verbi mappano su git, traccia l'intero albero di files_dir."""
 
+    def __init__(self, files_dir: str, github_token: str | None = None):
+        super().__init__(files_dir)
+        # Passato SOLO per i remote github.com (lo scoping evita di inviare il PAT
+        # ad altri host). None → nessuna credenziale iniettata.
+        self._gh_token = github_token
+
+    def _build(self, args) -> tuple[list[str], dict]:
+        """Comando git + env. `GIT_TERMINAL_PROMPT=0` → mai prompt interattivo (su
+        remote privati senza credenziali fallisce subito con errore chiaro invece di
+        'could not read Username'). Se c'è un token GitHub, lo passa via helper
+        scoped a github.com + env GIT_PAT."""
+        cmd = ["git"]
+        if self._gh_token:
+            cmd += ["-c", f"credential.https://github.com.helper={_GH_CRED_HELPER}"]
+        cmd += ["-C", str(self.files_dir), *args]
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        if self._gh_token:
+            env["GIT_PAT"] = self._gh_token
+        return cmd, env
+
     def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", "-C", str(self.files_dir), *args],
-                              capture_output=True, text=True, check=check)
+        cmd, env = self._build(args)
+        return subprocess.run(cmd, capture_output=True, text=True, check=check, env=env)
 
     def _has_git(self) -> bool:
         return (self.files_dir / ".git").is_dir()
@@ -291,9 +321,9 @@ def _walk_drive(ds, rel: str):
 
 
 def make_remote(rtype: str, files_dir: str, state_path: str | None = None,
-                drive_factory=None) -> Remote:
+                drive_factory=None, github_token: str | None = None) -> Remote:
     if rtype == "git":
-        return GitRemote(files_dir)
+        return GitRemote(files_dir, github_token=github_token)
     if rtype == "drive":
         return DriveRemote(files_dir, state_path or str(Path(files_dir).parent / ".remote-drive.json"),
                            drive_factory)

@@ -550,9 +550,24 @@ class TopicService:
         r = meta.get("remote") or {}
         if not r.get("type"):
             return None
+        # Solo per i remote git su github.com iniettiamo il PAT del vault (scoping:
+        # il token non deve raggiungere altri host).
+        gh_token = None
+        if r["type"] == "git" and "github.com" in ((r.get("config") or {}).get("url") or ""):
+            gh_token = self._github_token()
         return make_remote(r["type"], self._abs(tier, name, "files"),
                            self._abs(tier, name, ".remote-drive.json"),
-                           drive_factory=self._remote_drive_factory)
+                           drive_factory=self._remote_drive_factory,
+                           github_token=gh_token)
+
+    def _github_token(self) -> str | None:
+        """PAT GitHub dal vault (deposto da tools_api.github_connect come
+        {'value': pat}); None se assente."""
+        from .. import vault
+        try:
+            return (vault.read_internal("github_pat") or {}).get("value") or None
+        except Exception:  # noqa: BLE001
+            return None
 
     def _remote_or_err(self, tier: str, name: str):
         meta, _ = self._read_meta(tier, name)

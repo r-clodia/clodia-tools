@@ -8,7 +8,26 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from .remote import GitRemote, DriveRemote, RemoteConflict, make_remote
+from .remote import GitRemote, DriveRemote, RemoteConflict, make_remote, _GH_CRED_HELPER
+
+
+class GitAuthEnvTest(unittest.TestCase):
+    def test_terminal_prompt_disabled_always(self):
+        cmd, env = GitRemote("/tmp/x")._build(("pull",))
+        self.assertEqual(env.get("GIT_TERMINAL_PROMPT"), "0")   # mai prompt interattivo
+        self.assertNotIn("GIT_PAT", env)                        # nessun token senza github
+        self.assertNotIn("-c", cmd)
+
+    def test_github_token_injected_scoped(self):
+        cmd, env = GitRemote("/tmp/x", github_token="ghp_secret")._build(("pull",))
+        self.assertEqual(env.get("GIT_PAT"), "ghp_secret")      # token solo in env
+        self.assertEqual(env.get("GIT_TERMINAL_PROMPT"), "0")
+        # helper scoped a github.com, e il token NON compare in argv
+        self.assertIn("-c", cmd)
+        joined = " ".join(cmd)
+        self.assertIn("credential.https://github.com.helper=", joined)
+        self.assertNotIn("ghp_secret", joined)
+        self.assertIn(_GH_CRED_HELPER, joined)
 
 
 def _has_git() -> bool:
