@@ -28,6 +28,36 @@ _DBS = [d.strip() for d in (os.environ.get("CLODIA_BACKUP_DBS") or "").split(","
 _EXCLUDES = ["*.bak-*", "topics-store.bak-*", "**/__pycache__", "**/*.pyc"]
 
 
+def _declared_dbs() -> list[str]:
+    """Datastore dichiarati dai plugin installati (perimetro dinamico).
+
+    Scansiona CLODIA_DATA/plugins/*/plugin.yaml alla ricerca del campo
+    `datastores:` (dichiarazione curated del pack developer, propagata
+    dall'import a partire da plugin.json). Ogni entry con `backup: true`
+    (default) entra nello snapshot pre-restic; il path è relativo alla
+    datadir del plugin → `plugins/<nome>/<path>`. Ricalcolato a ogni run:
+    un pack importato dopo la configurazione del backup è coperto senza
+    toccare l'env.
+    """
+    import yaml
+
+    found: list[str] = []
+    for manifest in sorted(Path(DATADIR).glob("plugins/*/plugin.yaml")):
+        try:
+            meta = yaml.safe_load(manifest.read_text()) or {}
+        except Exception:
+            continue
+        if not isinstance(meta, dict):
+            continue
+        for ds in meta.get("datastores") or []:
+            if not isinstance(ds, dict) or not ds.get("path"):
+                continue
+            if ds.get("backup", True):
+                rel = Path("plugins") / manifest.parent.name / str(ds["path"])
+                found.append(str(rel))
+    return found
+
+
 def _cfg() -> dict | None:
     """Config backup dal vault, o None se non configurato."""
     if not vault.has_credential(CRED):
@@ -88,7 +118,8 @@ def status() -> dict:
     if not cfg:
         return {"configured": False}
     out = {"configured": True, "backend": cfg["backend"], "repository": cfg["repository"],
-           "schedule": cfg["schedule"], "retention": cfg["retention"]}
+           "schedule": cfg["schedule"], "retention": cfg["retention"],
+           "db_perimeter": {"env": _DBS, "declared": _declared_dbs()}}
     snaps = _run(["snapshots", "--json", "--latest", "1"], cfg, timeout=120)
     if snaps.returncode == 0:
         try:
@@ -113,13 +144,22 @@ def snapshots() -> list[dict]:
 
 
 def _snapshot_dbs(cfg: dict) -> None:
-    """Snapshot consistenti dei DB SQLite in /datadir/.db-snapshots (inclusi nel backup)."""
+    """Snapshot consistenti dei DB SQLite in /datadir/.db-snapshots (inclusi nel backup).
+
+    Perimetro = env CLODIA_BACKUP_DBS + datastore dichiarati dai plugin.
+    Nome snapshot dal path relativo (slash→__) per evitare collisioni fra
+    plugin che dichiarano db omonimi.
+    """
     dst = Path(DATADIR) / ".db-snapshots"
     dst.mkdir(exist_ok=True)
-    for db in _DBS:
+    seen: set[str] = set()
+    for db in [*_DBS, *_declared_dbs()]:
+        if db in seen:
+            continue
+        seen.add(db)
         src = Path(DATADIR) / db
         if src.exists():
-            out = dst / f"{src.name}"
+            out = dst / db.replace("/", "__")
             subprocess.run(["sqlite3", str(src), f".backup '{out}'"],
                            capture_output=True, text=True, timeout=300)
 
