@@ -462,6 +462,11 @@ class TopicService:
     def _summary_p(self, tier, name):
         return f"{self._dir(tier, name)}/summary.md"
 
+    def _recap_history_p(self, tier, name):
+        # Storia dei recap (TLDR) del topic — control-plane, NON in files/ → non
+        # sincronizzata dai remote git/drive.
+        return f"{self._dir(tier, name)}/.recap-history.jsonl"
+
     # ── verbi ──────────────────────────────────────────────────────────────
     def new(self, tier: str | None, name: str, meta: dict | None = None) -> dict:
         """Scaffold idempotente: se il topic esiste già ritorna il suo meta."""
@@ -695,6 +700,7 @@ class TopicService:
             "meta": meta, "summary": summary, "summary_version": summary_version,
             "tldr": _tldr(summary), "minutes": sorted(minutes),
             "updated_at": updated_at, "recent_files": recent_files,
+            "recap_history": self.recap_history(tier, name),
         }
 
     def read_file(self, tier: str, name: str, relpath: str) -> bytes:
@@ -715,9 +721,69 @@ class TopicService:
         con open(); se è cambiata → VersionConflict (il chiamante escala)."""
         if not self.s.exists(self._meta_p(tier, name)):
             raise TopicError(f"topic non trovato: {tier}/{name}")
+        # Se non c'è ancora storia ma esiste un summary, registra il recap PRECEDENTE
+        # (una tantum) col mtime del summary → la timeline mostra la transizione.
+        try:
+            hp = self._recap_history_p(tier, name)
+            sp = self._summary_p(tier, name)
+            if not self.s.exists(hp) and self.s.exists(sp):
+                prev = self.s.read(sp)
+                st = self.s.stat(sp)
+                pts = _iso(st.mtime) if st else None
+                self._append_recap(tier, name, _tldr(prev.data.decode("utf-8", "replace")), ts=pts)
+        except Exception:  # noqa: BLE001 — lo storico non deve mai rompere il save
+            pass
         new_v = self.s.write(self._summary_p(tier, name), (text or "").encode(),
                              if_version=base_version)
+        try:
+            self._append_recap(tier, name, _tldr(text))
+        except Exception:  # noqa: BLE001
+            pass
         return {"summary_version": new_v, "tldr": _tldr(text)}
+
+    def _read_recap_entries(self, tier: str, name: str) -> list[dict]:
+        p = self._recap_history_p(tier, name)
+        if not self.s.exists(p):
+            return []
+        out = []
+        for line in self.s.read(p).data.decode("utf-8", "replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except (json.JSONDecodeError, ValueError):
+                continue
+        return out
+
+    def _append_recap(self, tier: str, name: str, tldr: str, ts: str | None = None) -> None:
+        """Appende un recap alla storia SOLO se diverso dall'ultimo (no duplicati)."""
+        tldr = (tldr or "").strip()
+        if not tldr:
+            return
+        entries = self._read_recap_entries(tier, name)
+        if entries and (entries[-1].get("tldr") or "").strip() == tldr:
+            return
+        entry = {"ts": ts or _iso(_now().timestamp()), "tldr": tldr}
+        p = self._recap_history_p(tier, name)
+        existing = self.s.read(p).data.decode("utf-8", "replace") if self.s.exists(p) else ""
+        self.s.write(p, (existing + json.dumps(entry, ensure_ascii=False) + "\n").encode())
+
+    def recap_history(self, tier: str, name: str) -> list[dict]:
+        """Storia dei recap (TLDR), dal più recente. Se non c'è ancora storia ma
+        esiste un summary, restituisce l'entry corrente come seed (di sola lettura,
+        datato col mtime del summary)."""
+        entries = self._read_recap_entries(tier, name)
+        if entries:
+            return list(reversed(entries))
+        sp = self._summary_p(tier, name)
+        if self.s.exists(sp):
+            tldr = _tldr(self.s.read(sp).data.decode("utf-8", "replace"))
+            if tldr.strip():
+                st = self.s.stat(sp)
+                return [{"ts": _iso(st.mtime) if st else _iso(_now().timestamp()),
+                         "tldr": tldr, "seed": True}]
+        return []
 
     def add_minute(self, tier: str, name: str, text: str) -> dict:
         """Aggiunge una minuta come FILE NUOVO (append-only → niente contesa)."""
