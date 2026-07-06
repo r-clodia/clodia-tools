@@ -501,11 +501,16 @@ class TopicService:
         # Canale (Slack-like): owner = chi amministra il canale (invita/rimuove);
         # participants = agenti (umani/AI) abilitati a parlare nel canale.
         meta.setdefault("owner", meta.get("contact_agent", "clodia"))
-        # Partecipanti di default dell'edizione (terraformazione) + owner.
+        # Partecipanti di default dell'edizione (terraformazione): UNIONE con
+        # gli espliciti, non fallback — "sempre partecipanti ai topic nuovi"
+        # vale anche quando il chiamante (es. channel_create della webui)
+        # passa la propria lista [utente, contact_agent]. Rimuoverli dopo
+        # resta possibile (participant_remove).
         from .. import instance_profile as _iprof
         _defaults = _iprof.topic_default_participants()
-        base_participants = list(dict.fromkeys([meta["owner"], *_defaults]))
-        meta.setdefault("participants", base_participants)
+        explicit = meta.get("participants") or []
+        meta["participants"] = list(dict.fromkeys(
+            [meta["owner"], *explicit, *_defaults]))
         meta.setdefault("deadline", None)
         meta["created_at"] = _now().isoformat(timespec="seconds")
         self.s.write(mp, json.dumps(meta, ensure_ascii=False, indent=2).encode())
