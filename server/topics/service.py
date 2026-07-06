@@ -497,7 +497,8 @@ class TopicService:
             meta["channel"] = _clean_channel(ch)
         meta.setdefault("tags", [])
         meta.setdefault("people", [])
-        meta.setdefault("contact_agent", "clodia")
+        from .. import instance_profile as _iprof0
+        meta.setdefault("contact_agent", _iprof0.topic_default_contact_agent())
         # Canale (Slack-like): owner = chi amministra il canale (invita/rimuove);
         # participants = agenti (umani/AI) abilitati a parlare nel canale.
         meta.setdefault("owner", meta.get("contact_agent", "clodia"))
