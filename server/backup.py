@@ -19,8 +19,11 @@ from . import vault
 
 DATADIR = os.environ.get("CLODIA_DATA", "/datadir")
 CRED = "backup_config"  # credenziale infra nel vault (no grant per-agente)
-# Snapshot consistenti dei DB SQLite prima del backup.
-_DBS = ["contacts.db", "data/tomato/leads.db"]
+# Snapshot consistenti dei DB SQLite prima del backup (path relativi alla
+# datadir). Configurabile per-istanza: CLODIA_BACKUP_DBS="a.db,b/c.db".
+# Default vuoto: restic copre comunque l'intera datadir; lo snapshot serve
+# solo alla consistenza transazionale di DB scritti di frequente.
+_DBS = [d.strip() for d in (os.environ.get("CLODIA_BACKUP_DBS") or "").split(",") if d.strip()]
 # Esclusioni: backup vecchi, cache, snapshot DB temporanei (rigenerati).
 _EXCLUDES = ["*.bak-*", "topics-store.bak-*", "**/__pycache__", "**/*.pyc"]
 
