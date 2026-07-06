@@ -189,6 +189,13 @@ def topic_default_participants() -> list[str]:
     return [str(x) for x in (val or [])]
 
 
+def topic_default_contact_agent() -> str:
+    """Contact agent di default dei topic nuovi (terraformazione).
+    Chiave profilo: topics_defaults.contact_agent — default clodia."""
+    conf = load().get("topics_defaults") or {}
+    return str(conf.get("contact_agent") or "clodia")
+
+
 def topics_mode() -> str:
     return load()["features"]["topics"]
 
