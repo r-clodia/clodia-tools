@@ -61,6 +61,20 @@ def main() -> int:
     svc.add_minute("P2", "cliente-x", "deciso tiering unico")
     check("due minute", len(svc.open("P2", "cliente-x")["minutes"]) == 2)
 
+    # recap history: ogni CAMBIO di TLDR appende un'entry (newest-first), no duplicati
+    svc.new("P2", "recap-x", {"title": "Recap X"})
+    rv = svc.open("P2", "recap-x")["summary_version"]
+    rv = svc.save_summary("P2", "recap-x", "Primo recap.\n", base_version=rv)["summary_version"]
+    # stesso TLDR (cambia solo il corpo) → NON deve duplicare
+    rv = svc.save_summary("P2", "recap-x", "Primo recap.\n\n## note\n- x", base_version=rv)["summary_version"]
+    rv = svc.save_summary("P2", "recap-x", "Secondo recap.\n", base_version=rv)["summary_version"]
+    rh = svc.open("P2", "recap-x")["recap_history"]
+    tldrs = [e["tldr"] for e in rh]
+    check("recap_history newest-first", bool(tldrs) and tldrs[0] == "Secondo recap.")
+    check("recap_history contiene il primo recap", "Primo recap." in tldrs)
+    check("recap_history no duplicati TLDR", tldrs.count("Primo recap.") == 1)
+    check("recap_history ogni entry ha ts", all(e.get("ts") for e in rh))
+
     # list (tutti i tier) + action_points + tier
     lst = svc.list()
     names = {x["name"] for x in lst}
