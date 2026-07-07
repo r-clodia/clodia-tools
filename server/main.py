@@ -483,6 +483,20 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name", "filename", "content"]},
     ),
     Tool(
+        name="artifact.render",
+        description=("Aggiorna il CANVAS LIVE del topic con un artefatto HTML. Scrive lo "
+                     "snapshot in files/artifact.html (persistente e riapribile) e la "
+                     "finestra di anteprima del topic lo mostra aggiornato. Passa l'INTERO "
+                     "documento HTML in `html` a OGNI chiamata (snapshot completo, non un "
+                     "frammento/patch). Usalo per mostrare all'utente un artefatto vivo "
+                     "(cover, mockup, dashboard) che evolvi durante la conversazione."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "html": {"type": "string", "description": "documento HTML COMPLETO (snapshot del canvas)"},
+        }, "required": ["tier", "name", "html"]},
+    ),
+    Tool(
         name="topic.fetch",
         description=("Scarica una COPIA di un file del topic nel TUO scratch (path "
                      "locale), per trattarlo con le skill standard (xlsx/pdf/docx/…). "
@@ -1095,6 +1109,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_trello(name, arguments)
         elif name.startswith("topic."):
             result = _dispatch_topic(name, arguments)
+        elif name.startswith("artifact."):
+            result = _dispatch_artifact(arguments)
         elif name.startswith("profile."):
             result = _dispatch_profile(name, arguments, _ag)
         elif name.startswith("settings."):
@@ -1333,6 +1349,17 @@ def _dispatch_rag(name: str, a: dict):
         _rag_authorize(collection, write=True)
         return eu_corpus.remove(a["doc_name"], a.get("version"), collection)
     raise ValueError(f"unknown rag verb: {name}")
+
+
+def _dispatch_artifact(a: dict):
+    """artifact.render → snapshot del canvas live in files/artifact.html del topic
+    (persistente; la finestra di anteprima lo mostra col suo polling)."""
+    svc = _topics()
+    tier, name = a.get("tier"), a.get("name")
+    _require_topic_member(svc, tier, name)
+    data = (a.get("html") or "").encode("utf-8")
+    svc.put_file(tier, name, "artifact.html", data)
+    return {"ok": True, "path": "files/artifact.html", "bytes": len(data)}
 
 
 def _dispatch_topic(name: str, a: dict):
