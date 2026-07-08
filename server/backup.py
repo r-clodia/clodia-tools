@@ -13,12 +13,17 @@ import json
 import os
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import vault
 
 DATADIR = os.environ.get("CLODIA_DATA", "/datadir")
 CRED = "backup_config"  # credenziale infra nel vault (no grant per-agente)
+# Stato dell'ultimo run di backup (esito + istante), persistito nel vault: serve
+# a mostrare l'ultimo backup ESEGUITO anche quando FALLISCE (un fail non lascia
+# snapshot restic, quindi last_snapshot da solo non basta).
+LAST_RUN_CRED = "backup_last_run"
 # Snapshot consistenti dei DB SQLite prima del backup (path relativi alla
 # datadir). Configurabile per-istanza: CLODIA_BACKUP_DBS="a.db,b/c.db".
 # Default vuoto: restic copre comunque l'intera datadir; lo snapshot serve
@@ -113,6 +118,26 @@ def configure(body: dict) -> dict:
     return {"configured": True, "backend": cfg["backend"]}
 
 
+def _record_last_run(ok: bool, error: str = "") -> None:
+    """Persiste l'esito dell'ultimo run di backup nel vault (non è un segreto)."""
+    rec = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"), "ok": bool(ok)}
+    if error:
+        rec["error"] = error[:300]
+    try:
+        vault.deposit(LAST_RUN_CRED, rec, cred_type="backup_state", grant_agents=[])
+    except Exception:
+        pass
+
+
+def _last_run() -> dict | None:
+    if not vault.has_credential(LAST_RUN_CRED):
+        return None
+    try:
+        return vault.read_internal(LAST_RUN_CRED)
+    except Exception:
+        return None
+
+
 def status() -> dict:
     cfg = _cfg()
     if not cfg:
@@ -120,6 +145,11 @@ def status() -> dict:
     out = {"configured": True, "backend": cfg["backend"], "repository": cfg["repository"],
            "schedule": cfg["schedule"], "retention": cfg["retention"],
            "db_perimeter": {"env": _DBS, "declared": _declared_dbs()}}
+    # Ultimo backup ESEGUITO (anche fallito): dal nostro record.
+    lr = _last_run()
+    if lr:
+        out["last_run"] = {k: lr.get(k) for k in ("time", "ok", "error") if lr.get(k) is not None}
+    # Ultimo backup VALIDO: l'ultimo snapshot restic (restic tiene solo i successi).
     snaps = _run(["snapshots", "--json", "--latest", "1"], cfg, timeout=120)
     if snaps.returncode == 0:
         try:
@@ -169,24 +199,30 @@ def run_backup() -> dict:
     cfg = _cfg()
     if not cfg:
         raise RuntimeError("backup non configurato")
-    _snapshot_dbs(cfg)
-    excludes = []
-    for e in _EXCLUDES:
-        excludes += ["--exclude", e]
-    b = _run(["backup", DATADIR, "--tag", "platform", *excludes], cfg, timeout=3600)
-    result = {"backup_rc": b.returncode, "backup_err": b.stderr[-400:] if b.returncode else ""}
-    if b.returncode != 0:
-        raise RuntimeError(f"restic backup fallito: {b.stderr[:400]}")
-    ret = cfg["retention"]
-    f = _run(["forget", "--prune", "--tag", "platform",
-              "--keep-daily", str(ret.get("daily", 7)),
-              "--keep-weekly", str(ret.get("weekly", 4)),
-              "--keep-monthly", str(ret.get("monthly", 6))], cfg, timeout=1800)
-    result["forget_rc"] = f.returncode
-    c = _run(["check"], cfg, timeout=600)
-    result["check_rc"] = c.returncode
-    result["ok"] = b.returncode == 0 and c.returncode == 0
-    return result
+    try:
+        _snapshot_dbs(cfg)
+        excludes = []
+        for e in _EXCLUDES:
+            excludes += ["--exclude", e]
+        b = _run(["backup", DATADIR, "--tag", "platform", *excludes], cfg, timeout=3600)
+        result = {"backup_rc": b.returncode, "backup_err": b.stderr[-400:] if b.returncode else ""}
+        if b.returncode != 0:
+            raise RuntimeError(f"restic backup fallito: {b.stderr[:400]}")
+        ret = cfg["retention"]
+        f = _run(["forget", "--prune", "--tag", "platform",
+                  "--keep-daily", str(ret.get("daily", 7)),
+                  "--keep-weekly", str(ret.get("weekly", 4)),
+                  "--keep-monthly", str(ret.get("monthly", 6))], cfg, timeout=1800)
+        result["forget_rc"] = f.returncode
+        c = _run(["check"], cfg, timeout=600)
+        result["check_rc"] = c.returncode
+        result["ok"] = b.returncode == 0 and c.returncode == 0
+        _record_last_run(result["ok"], "" if result["ok"] else f"check_rc={c.returncode}")
+        return result
+    except Exception as e:
+        # Registra il FALLIMENTO (l'ultimo backup eseguito è fallito) poi rilancia.
+        _record_last_run(False, str(e))
+        raise
 
 
 def restore_test() -> dict:
