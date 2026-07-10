@@ -33,6 +33,8 @@ class Entry:
     size: int = 0
     mime: str | None = None   # mimeType del backend (Drive): riconosce i Google Docs nativi
     url: str | None = None    # webViewLink (Drive): per i Docs nativi mostrati come proxy/link
+    version: str | None = None  # md5 del contenuto dai METADATI (Drive: md5Checksum) →
+    # permette al pull incrementale di saltare i file identici SENZA scaricarli
 
 
 @dataclass

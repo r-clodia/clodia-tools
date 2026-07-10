@@ -101,6 +101,7 @@ class _FakeDrive:
     """DriveStorage in-memory: {path -> (bytes, mtime, mime, url)}."""
     def __init__(self):
         self.files = {}
+        self.reads = 0   # quante volte è stato SCARICATO un contenuto (per il test incrementale)
     def write(self, path, data, if_version=None):
         self.files[path] = (data, 1000.0, None, None); return "v"
     def add_native(self, path, url, mime="application/vnd.google-apps.document"):
@@ -108,6 +109,7 @@ class _FakeDrive:
         self.files[path] = (b"", 1000.0, mime, url)
     def read(self, path):
         from .storage import ReadResult
+        self.reads += 1
         _d, _m, mime, _u = self.files[path]
         if mime and mime.startswith("application/vnd.google-apps."):
             raise RuntimeError("HTTP 403: native doc non scaricabile via get_media")
@@ -121,11 +123,16 @@ class _FakeDrive:
         return Stat(version="v", size=len(d), mtime=m, kind="file", md5=hashlib.md5(d).hexdigest())
     def list(self, path):
         from .storage import Entry
+        import hashlib
         out = []
         for p in self.files:
             if "/" not in p and path == "":
                 _d, _m, mime, url = self.files[p]
-                out.append(Entry(name=p, kind="file", size=len(_d), mime=mime, url=url))
+                # version = md5 dei metadati (come Drive md5Checksum): il pull lo usa
+                # per saltare i file identici senza scaricarli.
+                ver = None if (mime and mime.startswith("application/vnd.google-apps.")) \
+                    else hashlib.md5(_d).hexdigest()
+                out.append(Entry(name=p, kind="file", size=len(_d), mime=mime, url=url, version=ver))
         return out
 
 
@@ -159,6 +166,29 @@ class DriveRemoteTest(unittest.TestCase):
             self.assertFalse((root / "state.json").is_file())
             self.assertTrue((files / "a.txt").is_file())
             self.assertTrue((files / "b.txt").is_file())
+
+    def test_pull_incremental_skips_unchanged(self):
+        """Il pull NON ri-scarica i file locali già identici (md5 dai metadati):
+        un pull ripetuto senza modifiche fa ZERO download."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            files = root / "files"; files.mkdir()
+            fake = _FakeDrive()
+            fake.write("doc.txt", b"HELLO")
+            r = DriveRemote(str(files), str(root / "state.json"),
+                            drive_factory=lambda acct, folder: fake)
+            r.enable({"folder": "F", "account": "acct"})
+            # 1° pull: file nuovo → 1 download
+            self.assertEqual(r.pull()["pulled"], 1)
+            self.assertEqual(fake.reads, 1)
+            self.assertEqual((files / "doc.txt").read_bytes(), b"HELLO")
+            # 2° pull SENZA modifiche → skip via md5: NESSUN download
+            self.assertEqual(r.pull()["pulled"], 0)
+            self.assertEqual(fake.reads, 1)   # <-- niente ri-download
+            # modifica remota → il pull ri-scarica SOLO quel file
+            fake.write("doc.txt", b"HELLO WORLD")
+            r.pull()
+            self.assertEqual(fake.reads, 2)   # scaricato perché l'md5 è cambiato
 
     def test_pull_native_doc_becomes_stub(self):
         """Doc nativo Google → NON crasha (403); si materializza uno stub

@@ -270,6 +270,13 @@ class DriveRemote(Remote):
                     st["sync"].append(stub_rel)
                 continue
             local = self.files_dir / rel
+            # PULL INCREMENTALE: se il file locale esiste ed è già identico al remoto
+            # (md5 dai METADATI Drive, senza scaricare), salta — niente download. Così
+            # un pull ripetuto NON ri-scarica l'intero tree ma solo i file nuovi/cambiati.
+            if local.exists() and entry.version and _md5(local.read_bytes()) == entry.version:
+                if rel not in st["sync"]:
+                    st["sync"].append(rel)
+                continue
             try:
                 remote = ds.read(rel)
             except Exception:  # noqa: BLE001 — non scaricabile → salta, non bloccare il pull
