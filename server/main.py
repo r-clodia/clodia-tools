@@ -701,6 +701,32 @@ _RUNTIME_TOOLS: list[Tool] = [
 # settings.* — superficie conversazionale per i settings della piattaforma
 # (oggi: backup). SOLO super-agent. MAI segreti (passphrase/credenziali si
 # impostano dalla pagina Settings via paste-key).
+_IMAGE_TOOLS: list[Tool] = [
+    Tool(
+        name="image.generate",
+        description=("Genera un'immagine PNG (OpenAI gpt-image) dal prompt e la salva "
+                     "nei file del topic (files/<filename>). Usa la API key OpenAI del "
+                     "vault (server-side, mai esposta). Ritorna il path del file salvato; "
+                     "scaricabile via /files/download per portarlo nella working copy."),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "tier": {"type": "string", "description": "tier del topic in cui salvare"},
+                "name": {"type": "string", "description": "nome del topic in cui salvare"},
+                "prompt": {"type": "string", "description": "prompt fully-baked dell'immagine"},
+                "filename": {"type": "string",
+                             "description": "nome file PNG di destinazione (es. cover.png)"},
+                "size": {"type": "string", "enum": ["1024x1024", "1536x1024", "1024x1536"],
+                         "description": "default 1024x1024"},
+                "quality": {"type": "string", "enum": ["low", "medium", "high", "auto"],
+                            "description": "default auto"},
+                "background": {"type": "string", "enum": ["opaque", "transparent", "auto"],
+                               "description": "default auto"},
+            },
+            "required": ["tier", "name", "prompt", "filename"],
+        }),
+]
+
 _SETTINGS_TOOLS: list[Tool] = [
     Tool(name="settings.backup_get",
          description="Backup della piattaforma (ISO 27001 A.8.13): configurazione SENZA segreti, stato e ultimo snapshot.",
@@ -895,8 +921,8 @@ def _dispatch_telegram(name: str, a: dict):
 
 def _native_tool_namespaces() -> list[str]:
     """Namespace dei tool nativi del gateway (per agents.list_tools)."""
-    tools = (_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS
-             + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
+    tools = (_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
+             + _RUNTIME_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
     ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in tools})
@@ -1026,7 +1052,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
+    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
     # Feature `rag` (profilo istanza): off → i verbi rag.*/eu_corpus.* non
     # esistono proprio (né in lista né al dispatch).
     if instance_profile.rag_enabled():
@@ -1109,6 +1135,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_trello(name, arguments)
         elif name.startswith("topic."):
             result = _dispatch_topic(name, arguments)
+        elif name.startswith("image."):
+            result = await _dispatch_image(arguments)
         elif name.startswith("artifact."):
             result = _dispatch_artifact(arguments)
         elif name.startswith("profile."):
@@ -1349,6 +1377,31 @@ def _dispatch_rag(name: str, a: dict):
         _rag_authorize(collection, write=True)
         return eu_corpus.remove(a["doc_name"], a.get("version"), collection)
     raise ValueError(f"unknown rag verb: {name}")
+
+
+async def _dispatch_image(a: dict):
+    """image.generate → genera un PNG e lo salva nei files/ del topic.
+    La API key OpenAI è letta server-side dal vault, mai esposta all'agente."""
+    from .tools import image as image_tool
+    if not image_tool.has_key():
+        return {"ok": False, "error": "nessuna API key OpenAI nel vault "
+                "(Tools → Image generation)."}
+    svc = _topics()
+    tier, name = a.get("tier"), a.get("name")
+    _require_topic_member(svc, tier, name)
+    prompt = (a.get("prompt") or "").strip()
+    if not prompt:
+        return {"ok": False, "error": "serve un prompt"}
+    filename = (a.get("filename") or "image.png").strip().lstrip("/")
+    if not filename.lower().endswith(".png"):
+        filename += ".png"
+    png = await asyncio.to_thread(
+        image_tool.generate, prompt,
+        size=a.get("size") or "1024x1024",
+        quality=a.get("quality") or "auto",
+        background=a.get("background") or "auto")
+    svc.put_file(tier, name, filename, png)
+    return {"ok": True, "path": f"files/{filename}", "bytes": len(png)}
 
 
 def _dispatch_artifact(a: dict):
