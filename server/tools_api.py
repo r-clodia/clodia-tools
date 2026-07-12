@@ -742,8 +742,75 @@ async def backup_restore_test(request: Request):
         return JSONResponse({"error": str(e)[:400]}, status_code=500)
 
 
+def _test_connector(cid: str) -> dict:
+    """Verifica REALE della connessione di un'integrazione (chiamata al provider).
+    Ritorna {ok: bool|None, detail}. ok=None → non testabile. Mai il segreto."""
+    import requests as _rq
+
+    def _c(name):
+        try:
+            return vault.read_internal(name) if vault.has_credential(name) else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    try:
+        if cid == "github":
+            b = _c("github_pat")
+            if not b:
+                return {"ok": False, "detail": "nessun PAT nel vault"}
+            r = _rq.get("https://api.github.com/user",
+                        headers={"Authorization": f"token {b.get('value','')}"}, timeout=15)
+            if r.status_code == 200:
+                return {"ok": True, "detail": f"autenticato come {r.json().get('login')}"}
+            return {"ok": False, "detail": f"GitHub {r.status_code}: {r.json().get('message','')}"}
+
+        if cid == "trello":
+            b = _c("trello")
+            if not b:
+                return {"ok": False, "detail": "nessuna credenziale nel vault"}
+            r = _rq.get("https://api.trello.com/1/members/me",
+                        params={"key": b.get("api_key",""), "token": b.get("token","")}, timeout=15)
+            return ({"ok": True, "detail": f"utente {r.json().get('username')}"} if r.status_code == 200
+                    else {"ok": False, "detail": f"Trello {r.status_code}"})
+
+        if cid == "telegram":
+            b = _c("telegram_bot_token")
+            tok = (b or {}).get("value") or (b or {}).get("token") or ""
+            if not tok:
+                return {"ok": False, "detail": "nessun bot token nel vault"}
+            r = _rq.get(f"https://api.telegram.org/bot{tok}/getMe", timeout=15)
+            j = r.json()
+            return ({"ok": True, "detail": f"bot @{j['result'].get('username')}"} if j.get("ok")
+                    else {"ok": False, "detail": j.get("description", "token non valido")})
+
+        if cid in ("openai-images", "openai"):
+            b = _c("openai_api_key")
+            key = (b or {}).get("value") or ""
+            if not key:
+                return {"ok": False, "detail": "nessuna API key nel vault"}
+            r = _rq.get("https://api.openai.com/v1/models",
+                        headers={"Authorization": f"Bearer {key}"}, timeout=15)
+            return ({"ok": True, "detail": "API key valida"} if r.status_code == 200
+                    else {"ok": False, "detail": f"OpenAI {r.status_code}"})
+
+        if cid == "topic-storage":
+            return {"ok": True, "detail": "storage locale sempre disponibile"}
+    except _rq.RequestException as e:
+        return {"ok": False, "detail": f"rete: {str(e)[:120]}"}
+
+    return {"ok": None, "detail": "test non disponibile per questa integrazione"}
+
+
+async def test_connector(request: Request):
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    cid = request.path_params["id"]
+    return JSONResponse(_test_connector(cid))
+
+
 routes = [
     Route("/tools", list_tools, methods=["GET"]),
+    Route("/tools/{id}/test", test_connector, methods=["POST"]),
     Route("/tools/trello/connect", trello_connect, methods=["POST"]),
     Route("/tools/email/mailboxes", email_mailboxes, methods=["GET"]),
     Route("/tools/email/mailboxes", email_mailbox_add, methods=["POST"]),
