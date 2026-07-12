@@ -785,7 +785,7 @@ def _test_connector(cid: str) -> dict:
 
         if cid in ("openai-images", "openai"):
             b = _c("openai_api_key")
-            key = (b or {}).get("value") or ""
+            key = (b or {}).get("api_key") or (b or {}).get("value") or ""
             if not key:
                 return {"ok": False, "detail": "nessuna API key nel vault"}
             r = _rq.get("https://api.openai.com/v1/models",
