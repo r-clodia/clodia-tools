@@ -109,10 +109,12 @@ def build_app() -> Starlette:
     from .telegram_api import routes as telegram_routes
     # Registrazione whitelist agent (auto-provisioning responder confinati).
     from .agents_api import routes as agents_routes
+    # Lettura credenziali git (PAT) dal vault per i workflow del backend.
+    from .vault_api import routes as vault_routes
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
                 *imagegen_routes, *topics_routes, *connectors_routes, *profile_routes,
-                *telegram_routes, *agents_routes],
+                *telegram_routes, *agents_routes, *vault_routes],
         lifespan=_lifespan)
 
 
