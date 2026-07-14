@@ -525,6 +525,24 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name", "filename", "src"]},
     ),
     Tool(
+        name="topic.attach",
+        description=("Allega al CANALE un file preparato nel TUO scratch e posta il "
+                     "messaggio che lo contiene, in un colpo solo. USA QUESTO per "
+                     "mandare un BINARIO (docx/pdf/xlsx/immagine) in un canale: il "
+                     "gateway legge i byte dal path locale (niente base64 nel modello, "
+                     "niente limite sul parametro), lo salva in files/ e pubblica un "
+                     "messaggio con l'allegato. `src` = path assoluto nel tuo scratch; "
+                     "`filename` opzionale (default = nome del file in src); `text` = "
+                     "testo opzionale del messaggio."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "src": {"type": "string", "description": "path assoluto del file nel tuo scratch"},
+            "filename": {"type": "string", "description": "nome file in files/ (default: basename di src)"},
+            "text": {"type": "string", "description": "testo del messaggio (opzionale)"},
+        }, "required": ["tier", "name", "src"]},
+    ),
+    Tool(
         name="topic.delete_file",
         description=("Sposta nel CESTINO (.trash/) un file o una cartella DENTRO files/ del "
                      "topic — NON cancella mai davvero: è sempre recuperabile. Solo sotto "
@@ -1251,7 +1269,7 @@ def _safe_scratch_path(p: str) -> str:
 # sono gestiti a parte (creazione / risultati filtrati per membership).
 _TOPIC_SCOPED_VERBS = {
     "open", "save_summary", "add_minute", "archive", "files", "read_file",
-    "write_file", "fetch", "put", "delete_file", "migrate_storage",
+    "write_file", "fetch", "put", "attach", "delete_file", "migrate_storage",
     "remote_enable", "remote_disable", "remote_add", "remote_commit",
     "remote_push", "remote_pull", "remote_status",
 }
@@ -1480,6 +1498,19 @@ def _dispatch_topic(name: str, a: dict):
         with open(src, "rb") as f:
             data = f.read()
         return svc.put_file(a["tier"], a["name"], a["filename"], data)
+    if verb == "attach":
+        # Come `put`, ma pensato per i CANALI: carica il binario dallo scratch in
+        # files/ e pubblica un messaggio con l'allegato — così l'agente manda un
+        # docx/pdf nel canale senza passare base64 come parametro (che si tronca).
+        src = _safe_scratch_path(a["src"])
+        fn = (a.get("filename") or _os.path.basename(src)).lstrip("/")
+        with open(src, "rb") as f:
+            data = f.read()
+        svc.put_file(a["tier"], a["name"], fn, data)
+        msg = svc.post_message(a["tier"], a["name"], agent_name(),
+                               a.get("text") or "", kind="ai", attachments=[fn])
+        return {"ok": True, "path": f"files/{fn}", "bytes": len(data),
+                "message_id": msg.get("id")}
     if verb == "delete_file":
         return svc.delete_file(a["tier"], a["name"], a["path"])
     if verb == "migrate_storage":
