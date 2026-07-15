@@ -466,6 +466,21 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name", "path"]},
     ),
     Tool(
+        name="topic.read_document",
+        description=("Estrae il TESTO di un documento del topic (PDF, DOCX, XLSX) — "
+                     "l'estrazione avviene server-side nel gateway, quindi ricevi TESTO "
+                     "leggibile, non base64. USA QUESTO per leggere un PDF/DOCX/XLSX "
+                     "invece di topic.read_file (che restituisce base64 binario). "
+                     "Ritorna {text, chars, pages, truncated}. Per PDF lunghi usa "
+                     "max_chars per limitare il testo."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "path": {"type": "string", "description": "path relativo al topic, es. files/report.pdf"},
+            "max_chars": {"type": "integer", "description": "max caratteri restituiti (default 60000)"},
+        }, "required": ["tier", "name", "path"]},
+    ),
+    Tool(
         name="topic.write_file",
         description=("Carica/sovrascrive un file nella cartella files/ del topic/canale "
                      "(es. un deliverable, o i file estratti da uno zip). filename può "
@@ -1251,7 +1266,7 @@ def _safe_scratch_path(p: str) -> str:
 # sono gestiti a parte (creazione / risultati filtrati per membership).
 _TOPIC_SCOPED_VERBS = {
     "open", "save_summary", "add_minute", "archive", "files", "read_file",
-    "write_file", "fetch", "put", "delete_file", "migrate_storage",
+    "read_document", "write_file", "fetch", "put", "delete_file", "migrate_storage",
     "remote_enable", "remote_disable", "remote_add", "remote_commit",
     "remote_push", "remote_pull", "remote_status",
 }
@@ -1415,6 +1430,37 @@ def _dispatch_artifact(a: dict):
     return {"ok": True, "path": "files/artifact.html", "bytes": len(data)}
 
 
+def _extract_document_text(filename: str, data: bytes) -> tuple[str, int | None]:
+    """Estrae testo da PDF/DOCX/XLSX (server-side). Ritorna (testo, n_pagine|None).
+    Fallback: prova a decodificare come testo UTF-8."""
+    import io
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext == "pdf":
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        pages = [(p.extract_text() or "") for p in reader.pages]
+        return "\n\n".join(pages), len(pages)
+    if ext == "docx":
+        from docx import Document
+        doc = Document(io.BytesIO(data))
+        parts = [p.text for p in doc.paragraphs]
+        for tbl in doc.tables:
+            for row in tbl.rows:
+                parts.append("\t".join(c.text for c in row.cells))
+        return "\n".join(parts), None
+    if ext in ("xlsx", "xlsm"):
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        out = []
+        for ws in wb.worksheets:
+            out.append(f"# Foglio: {ws.title}")
+            for row in ws.iter_rows(values_only=True):
+                out.append("\t".join("" if v is None else str(v) for v in row))
+        return "\n".join(out), None
+    # fallback testo
+    return data.decode("utf-8", errors="replace"), None
+
+
 def _dispatch_topic(name: str, a: dict):
     svc = _topics()
     verb = name.split(".", 1)[1]
@@ -1449,6 +1495,16 @@ def _dispatch_topic(name: str, a: dict):
             return {"path": a["path"], "encoding": "base64",
                     "content": _b64.b64encode(data).decode("ascii"),
                     "note": "file binario (PDF/immagine/...): decodifica da base64"}
+    if verb == "read_document":
+        data = svc.read_file(a["tier"], a["name"], a["path"])
+        cap = int(a.get("max_chars") or 60000)
+        try:
+            text, pages = _extract_document_text(a["path"].rsplit("/", 1)[-1], data)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"estrazione fallita: {str(e)[:160]}"}
+        trunc = len(text) > cap
+        return {"path": a["path"], "text": text[:cap], "chars": len(text),
+                "pages": pages, "truncated": trunc}
     if verb == "write_file":
         fn = a["filename"]
         enc = (a.get("encoding") or "text").lower()
