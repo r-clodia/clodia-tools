@@ -89,23 +89,17 @@ async def list_tools(request: Request):
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     names = vault.store_names()
-    gmail_accounts = [n[len("gmail_"):] for n in names if n.startswith("gmail_")]
-    gws_accounts = [n[len("gworkspace_"):] for n in names if n.startswith("gworkspace_")]
+    # Integrazione Google UNIFICATA: un solo consenso (Gmail + Drive + Docs +
+    # Calendar) → una sola credenziale google_<account> = un solo refresh token,
+    # niente cross-invalidation dei due consensi separati (gmail_/gworkspace_).
+    google_accounts = sorted(n[len("google_"):] for n in names if n.startswith("google_"))
     connectors = [{
-        "id": "gmail",
-        "label": "Gmail",
+        "id": "google",
+        "label": "Google",
         "provider": "google",
-        "connected": bool(gmail_accounts),
-        "accounts": gmail_accounts,
-    }, {
-        # Connettore nativo Google Workspace (Drive · Docs · Calendar),
-        # distinto da Gmail. Sempre elencato (native, non state-dependent).
-        "id": "google-workspace",
-        "label": "Google Workspace",
-        "provider": "google",
-        "scopes": "Drive · Docs · Calendar",
-        "connected": bool(gws_accounts),
-        "accounts": gws_accounts,
+        "scopes": "Gmail · Drive · Docs · Calendar",
+        "connected": bool(google_accounts),
+        "accounts": google_accounts,
     }]
     # Integrazione Image generation (OpenAI): attiva se la key è nel vault.
     connectors.append({
@@ -270,6 +264,87 @@ async def unregister_mcp(request: Request):
 
 def _account_from_email(email: str) -> str:
     return email.split("@")[0].replace(".", "_")
+
+
+async def google_auth(request: Request):
+    """Avvia il consenso Google UNIFICATO (Gmail + Drive + Docs + Calendar)."""
+    g = _connector_guard("google")
+    if g is not None:
+        return g
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        app = vault.read_internal(go.APP_CREDENTIAL)
+    except vault.VaultDenied:
+        return JSONResponse(
+            {"error": "app_not_configured",
+             "detail": f"manca la credenziale d'app '{go.APP_CREDENTIAL}' nella vault"},
+            status_code=409)
+    _gc_states()
+    state = _secrets.token_urlsafe(24)
+    _states[state] = {"exp": time.time() + _STATE_TTL}
+    url = go.consent_url(app["client_id"], app.get("redirect_uri", go.DEFAULT_REDIRECT),
+                         scope=go.UNIFIED_SCOPE, state=state, prompt="select_account consent")
+    return JSONResponse({"auth_url": url, "state": state,
+                         "redirect_uri": app.get("redirect_uri", go.DEFAULT_REDIRECT)})
+
+
+async def google_connect(request: Request):
+    """Scambia il code del consenso unificato → un solo refresh token con TUTTI
+    gli scope, salvato come google_<account>. I tool email.* e gdrive/gdocs/
+    gcalendar.* leggono questa credenziale (fallback ai legacy gmail_/gworkspace_)."""
+    g = _connector_guard("google")
+    if g is not None:
+        return g
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    code = (body.get("code") or "").strip()
+    state = body.get("state") or ""
+    if not code:
+        return JSONResponse({"error": "missing_code"}, status_code=400)
+    st = _states.pop(state, None)
+    if state and st is None:
+        return JSONResponse({"error": "invalid_or_expired_state"}, status_code=400)
+    try:
+        app = vault.read_internal(go.APP_CREDENTIAL)
+    except vault.VaultDenied:
+        return JSONResponse({"error": "app_not_configured"}, status_code=409)
+    if code.startswith("http"):
+        import urllib.parse
+        code = urllib.parse.parse_qs(urllib.parse.urlparse(code).query).get("code", [""])[0]
+    try:
+        res = go.exchange_code(app["client_id"], app["client_secret"], code,
+                               app.get("redirect_uri", go.DEFAULT_REDIRECT))
+    except Exception as e:
+        return JSONResponse({"error": "exchange_failed", "detail": str(e)[:200]}, status_code=502)
+    rt = res.get("refresh_token")
+    if not rt:
+        return JSONResponse(
+            {"error": "no_refresh_token",
+             "detail": "Google non ha restituito un refresh_token. App in Testing? "
+                       "Mettila In production e riprova."}, status_code=400)
+    try:
+        email = go.get_profile_email(res["access_token"])
+    except Exception as e_profile:  # noqa: BLE001
+        try:
+            email = go.get_userinfo_email(res["access_token"])
+        except Exception as e_ui:  # noqa: BLE001
+            return JSONResponse(
+                {"error": "profile_failed",
+                 "detail": f"profilo: {str(e_profile)[:140]} · userinfo: {str(e_ui)[:100]}"},
+                status_code=502)
+    account = _account_from_email(email)
+    vault.deposit(
+        f"google_{account}",
+        {"client_id": app["client_id"], "client_secret": app["client_secret"],
+         "refresh_token": rt, "email": email, "account": account, "scope": go.UNIFIED_SCOPE},
+        cred_type="oauth2_google", grant_agents=["clodia"],
+    )
+    return JSONResponse({"connected": True, "account": account, "email": email})
 
 
 async def gmail_auth(request: Request):
@@ -817,6 +892,8 @@ routes = [
     Route("/tools/email/mailboxes/{account}", email_mailbox_remove, methods=["DELETE"]),
     Route("/tools/google/app", google_app_status, methods=["GET"]),
     Route("/tools/google/app", google_app_config, methods=["POST"]),
+    Route("/tools/google/auth", google_auth, methods=["GET"]),
+    Route("/tools/google/connect", google_connect, methods=["POST"]),
     Route("/tools/gmail/auth", gmail_auth, methods=["GET"]),
     Route("/tools/gmail/connect", gmail_connect, methods=["POST"]),
     Route("/tools/gworkspace/auth", gworkspace_auth, methods=["GET"]),

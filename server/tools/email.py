@@ -28,6 +28,10 @@ _LEGACY_ACCOUNTS = {"demo", "studio"}
 
 
 def _gmail_cred(account: str) -> str:
+    # Preferisci la credenziale Google UNIFICATA (google_<account>, che include lo
+    # scope Gmail); fallback al legacy gmail_<account>.
+    if vault.has_credential(f"google_{account}"):
+        return f"google_{account}"
     return f"gmail_{account}"
 
 
@@ -40,7 +44,9 @@ def known_accounts() -> set:
     (mailbox_*) e i legacy da email_config.json."""
     accts = set(_LEGACY_ACCOUNTS)
     for n in vault.store_names():
-        if n.startswith("gmail_"):
+        if n.startswith("google_"):          # credenziale unificata (ha scope Gmail)
+            accts.add(n[len("google_"):])
+        elif n.startswith("gmail_"):
             accts.add(n[len("gmail_"):])
         elif n.startswith("mailbox_"):
             accts.add(n[len("mailbox_"):])

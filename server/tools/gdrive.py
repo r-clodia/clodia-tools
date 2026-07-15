@@ -35,10 +35,20 @@ _FIELDS = "id, name, mimeType, modifiedTime, size, webViewLink, parents, md5Chec
 _ALL_DRIVES = {"supportsAllDrives": True, "includeItemsFromAllDrives": True}
 
 
+def _drive_cred(account: str) -> str:
+    """Nome credenziale per Drive/Docs/Calendar: preferisci la Google UNIFICATA
+    (google_<account>, che include gli scope Workspace); fallback al legacy."""
+    return (f"google_{account}" if vault.has_credential(f"google_{account}")
+            else f"gworkspace_{account}")
+
+
 def gworkspace_accounts() -> list[str]:
-    """Account Workspace disponibili = credenziali gworkspace_<account> nel vault."""
-    return sorted(n[len("gworkspace_"):] for n in vault.store_names()
-                  if n.startswith("gworkspace_"))
+    """Account Workspace disponibili = credenziali google_<account> (unificata,
+    ha gli scope Drive/Docs/Calendar) o legacy gworkspace_<account> nel vault."""
+    names = vault.store_names()
+    accts = {n[len("google_"):] for n in names if n.startswith("google_")}
+    accts |= {n[len("gworkspace_"):] for n in names if n.startswith("gworkspace_")}
+    return sorted(accts)
 
 
 def _resolve_account(account: Optional[str]) -> str:
@@ -63,7 +73,7 @@ def _service(account: Optional[str] = None):
     from googleapiclient.discovery import build
 
     acct = _resolve_account(account)
-    b = vault.get_secret(agent_name(), f"gworkspace_{acct}")  # VaultDenied se no grant
+    b = vault.get_secret(agent_name(), _drive_cred(acct))  # VaultDenied se no grant
     creds = Credentials(
         token=None,
         refresh_token=b["refresh_token"],

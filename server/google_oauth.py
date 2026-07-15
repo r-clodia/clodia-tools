@@ -25,6 +25,17 @@ WORKSPACE_SCOPE = " ".join([
     "https://www.googleapis.com/auth/userinfo.email",
     "openid",
 ])
+# Scope UNIFICATO del connettore "Google": Gmail + Drive + Docs + Calendar in un
+# solo consenso → un solo refresh token per account (niente due grant che si
+# scalzano a vicenda). È l'unione di SCOPE (Gmail) e WORKSPACE_SCOPE.
+UNIFIED_SCOPE = " ".join([
+    "https://mail.google.com/",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "openid",
+])
 DEFAULT_REDIRECT = "http://127.0.0.1"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"

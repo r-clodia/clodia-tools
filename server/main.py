@@ -1019,14 +1019,18 @@ def _connector_allows(name: str, agent: str | None) -> bool:
     - trello.*  se l'agent ha un grant sulla credenziale 'trello'.
     Così la delega non dipende da config.yaml (effimero al rebuild)."""
     grants = _vault_grants(agent)
+    # La credenziale Google UNIFICATA (google_<account>) abilita SIA email.* SIA
+    # gdrive.* (ha entrambi gli scope); i legacy gmail_/gworkspace_ restano validi.
     if name.startswith("email.") and any(
-            c.startswith("gmail_") or c.startswith("mailbox_") for c in grants):
+            c.startswith("google_") or c.startswith("gmail_") or c.startswith("mailbox_")
+            for c in grants):
         return True
     if name.startswith("trello.") and "trello" in grants:
         return True
     if name.startswith("telegram.") and "telegram_bot_token" in grants:
         return True
-    if name.startswith("gdrive.") and any(c.startswith("gworkspace_") for c in grants):
+    if name.startswith("gdrive.") and any(
+            c.startswith("google_") or c.startswith("gworkspace_") for c in grants):
         return True
     return False
 
@@ -1042,7 +1046,8 @@ def _email_account(arguments: dict) -> str:
     if acct:
         return acct
     grants = _vault_grants(agent_name())
-    accts = sorted({c[len("gmail_"):] for c in grants if c.startswith("gmail_")}
+    accts = sorted({c[len("google_"):] for c in grants if c.startswith("google_")}
+                   | {c[len("gmail_"):] for c in grants if c.startswith("gmail_")}
                    | {c[len("mailbox_"):] for c in grants if c.startswith("mailbox_")})
     return accts[0] if len(accts) == 1 else "demo"
 
