@@ -9,3 +9,7 @@ PyYAML>=6.0
 # Backend gworkspace (Drive/Docs/Slides/Calendar): client ufficiale Google.
 google-api-python-client>=2.120.0
 google-auth>=2.29.0
+# Estrazione testo documenti (topic.read_document): PDF/DOCX/XLSX server-side.
+pypdf>=4.0.0
+python-docx>=1.1.0
+openpyxl>=3.1.0
