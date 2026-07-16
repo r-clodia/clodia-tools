@@ -33,6 +33,19 @@ def _get(path: str):
         return r.json()
 
 
+def _post(path: str, payload: dict):
+    with httpx.Client(timeout=_TIMEOUT) as c:
+        r = c.post(f"{AGENT_SERVER_URL}{path}", json=payload)
+        r.raise_for_status()
+        return r.json()
+
+
+def suggest_team(tier: str, description: str) -> dict:
+    """Proxy all'agent-server: proposta di squadra per un topic (read-only)."""
+    return _post("/clodia/channels/suggest-team",
+                 {"tier": tier or "SEAL-0", "description": description or ""})
+
+
 def _pick(d: dict, keys: tuple[str, ...]) -> dict:
     return {k: d.get(k) for k in keys if k in d}
 

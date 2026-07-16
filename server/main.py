@@ -623,6 +623,23 @@ _TOPIC_TOOLS: list[Tool] = [
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"}}, "required": ["tier", "name"]},
     ),
+    Tool(
+        name="topic.suggest_team",
+        description=("Proponi la SQUADRA di agenti per un topic, data una breve "
+                     "descrizione di cosa tratta. Ritorna gli agenti più "
+                     "specializzati (rilevanza) e meno costosi fra quelli idonei "
+                     "al tier (SEAL/clearance/provider): `candidates` ordinati con "
+                     "score+costo+expertise, `suggested` (specialisti proposti) e "
+                     "`coordinator` (super-agent, opzionale). Read-only: NON invita "
+                     "nessuno (l'invito lo conferma l'owner). Usalo quando l'owner "
+                     "descrive un nuovo topic per proporgli chi coinvolgere."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"],
+                     "description": "tier del topic (default SEAL-0)"},
+            "description": {"type": "string",
+                            "description": "di cosa tratta il topic, in linguaggio naturale"},
+        }, "required": ["description"]},
+    ),
 ]
 
 
@@ -1471,6 +1488,9 @@ def _dispatch_topic(name: str, a: dict):
     verb = name.split(".", 1)[1]
     if verb in _TOPIC_SCOPED_VERBS:
         _require_topic_member(svc, a.get("tier"), a.get("name"))
+    if verb == "suggest_team":
+        # proposta di squadra: proxy read-only all'agent-server (registry+rilevanza)
+        return runtime.suggest_team(a.get("tier") or "SEAL-0", a.get("description") or "")
     if verb == "new":
         # Profilo topics:single → solo il workspace unico (DM sempre permessi).
         instance_profile.topic_creation_check(a["name"])
