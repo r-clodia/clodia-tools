@@ -64,7 +64,10 @@ async def list_topics(request: Request):
         return err
     tier = request.query_params.get("tier") or None
     inc = request.query_params.get("include_archived", "").lower() in ("1", "true", "yes")
-    return JSONResponse({"topics": _service().list(tier, include_archived=inc)})
+    # list() apre ogni topic (I/O per topic): sincrono e ~O(topic). Offload su
+    # thread per non bloccare l'event loop del gateway (che serve anche l'MCP).
+    topics = await asyncio.to_thread(_service().list, tier, include_archived=inc)
+    return JSONResponse({"topics": topics})
 
 
 async def open_topic(request: Request):
@@ -74,7 +77,8 @@ async def open_topic(request: Request):
     tier = request.path_params["tier"]
     name = request.path_params["name"]
     try:
-        return JSONResponse(_service().open(tier, name))
+        data = await asyncio.to_thread(_service().open, tier, name)
+        return JSONResponse(data)
     except TopicError:
         return JSONResponse({"error": "not_found"}, status_code=404)
 
@@ -157,7 +161,8 @@ async def list_messages(request: Request):
     tier = request.path_params["tier"]; name = request.path_params["name"]
     limit = int(request.query_params.get("limit", "200") or 200)
     try:
-        return JSONResponse({"messages": _service().list_messages(tier, name, limit=limit)})
+        msgs = await asyncio.to_thread(_service().list_messages, tier, name, limit=limit)
+        return JSONResponse({"messages": msgs})
     except TopicError:
         return JSONResponse({"error": "not_found"}, status_code=404)
 
@@ -175,9 +180,10 @@ async def post_message(request: Request):
     if not author:
         return JSONResponse({"error": "author_required"}, status_code=400)
     try:
-        msg = _service().post_message(tier, name, author, body.get("text") or "",
-                                      kind=body.get("kind", "human"),
-                                      attachments=body.get("attachments") or [])
+        msg = await asyncio.to_thread(
+            _service().post_message, tier, name, author, body.get("text") or "",
+            kind=body.get("kind", "human"),
+            attachments=body.get("attachments") or [])
         return JSONResponse(msg)
     except TopicError:
         return JSONResponse({"error": "not_found"}, status_code=404)
