@@ -762,9 +762,11 @@ _JOBS_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {}}),
     Tool(name="jobs.propose",
          description=("PROPONE un nuovo job schedulato: NON lo crea. Registra una "
-                      "proposta e notifica l'owner con un link di approvazione "
-                      "one-time; il job nasce solo se l'owner approva. Usalo quando "
-                      "l'utente chiede di schedulare un'attività ricorrente "
+                      "proposta; il job nasce solo se l'owner approva. Il risultato "
+                      "include `render_marker`: presenta il job all'utente e includi "
+                      "quel marker in fondo al messaggio → comparirà un popup "
+                      "Approva/Annulla in chat (conferma sincrona, l'owner è presente). "
+                      "Usalo quando l'utente chiede di schedulare un'attività ricorrente "
                       "(report settimanale, promemoria, backup, ...). Fornisci una "
                       "descrizione della cadenza in linguaggio naturale (schedule_text) "
                       "oppure un cron a 5 campi (cron_expr)."),
