@@ -1236,7 +1236,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name.startswith("trello."):
             result = _dispatch_trello(name, arguments)
         elif name.startswith("topic."):
-            result = _dispatch_topic(name, arguments)
+            # offload su thread: _dispatch_topic tocca lo storage e (suggest_team/
+            # participants) fa httpx SINCRONO all'agent-server. Se girasse
+            # nell'event loop lo bloccherebbe → deadlock bilaterale con
+            # topics_client (agent-server → gateway, anch'esso sync). to_thread
+            # propaga i contextvars → agent_name() resta valido.
+            result = await asyncio.to_thread(_dispatch_topic, name, arguments)
         elif name.startswith("image."):
             result = await _dispatch_image(arguments)
         elif name.startswith("artifact."):
@@ -1250,11 +1255,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name.startswith("gdrive."):
             result = _dispatch_gdrive(name, arguments)
         elif name.startswith("runtime."):
-            result = _dispatch_runtime(name, arguments)
+            # proxy httpx SINCRONO all'agent-server → offload su thread (no blocco loop)
+            result = await asyncio.to_thread(_dispatch_runtime, name, arguments)
         elif name.startswith("jobs."):
-            result = _dispatch_jobs(name, arguments, _ag)
+            result = await asyncio.to_thread(_dispatch_jobs, name, arguments, _ag)
         elif name.startswith("agents."):
-            result = _dispatch_agents(name, arguments, _ag)
+            result = await asyncio.to_thread(_dispatch_agents, name, arguments, _ag)
         elif name == "eu_corpus.search":
             # alias morbido: eu_corpus.* == rag.* sulla collection eu-normativa.
             _rag_authorize("eu-normativa", write=False)
