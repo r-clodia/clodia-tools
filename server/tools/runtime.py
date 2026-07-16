@@ -46,6 +46,17 @@ def suggest_team(tier: str, description: str) -> dict:
                  {"tier": tier or "SEAL-0", "description": description or ""})
 
 
+def propose_job(name: str, prompt: str, requested_by: str,
+                schedule_text: str | None = None, cron_expr: str | None = None,
+                agent: str = "clodia", enabled: bool = True) -> dict:
+    """Proxy: PROPONE un job (l'owner approva via gate). Non crea nulla subito."""
+    return _post("/clodia/jobs/propose", {
+        "name": name, "prompt": prompt, "schedule_text": schedule_text,
+        "cron_expr": cron_expr, "agent": agent, "enabled": enabled,
+        "requested_by": requested_by,
+    })
+
+
 def _pick(d: dict, keys: tuple[str, ...]) -> dict:
     return {k: d.get(k) for k in keys if k in d}
 
