@@ -57,17 +57,31 @@ def propose_job(name: str, prompt: str, requested_by: str,
     })
 
 
+def set_participant(tier: str, name: str, agent: str, by: str, add: bool) -> dict:
+    """Proxy: aggiunge/rimuove un partecipante da un canale, per conto dell'agente
+    `by` (autorizzazione lato agent-server: owner|partecipante|super)."""
+    return _post(f"/clodia/channels/{tier}/{name}/participants/internal",
+                 {"agent": agent, "by": by, "add": add})
+
+
 def _pick(d: dict, keys: tuple[str, ...]) -> dict:
     return {k: d.get(k) for k in keys if k in d}
 
 
 def agents() -> dict:
-    """Gli agent definiti nell'istanza (con provider effettivo e stato)."""
+    """Gli agent dell'istanza con il quadro COMPLETO per decidere in autonomia
+    (chi coinvolgere, chi è idoneo a un tier, chi costa meno): identità, ruolo,
+    dominio (expertise), skill e knowledge (rag_read), clearance SEAL, provider
+    effettivo + il suo SEAL, modello, stato. Solo metadati, MAI segreti — la
+    decisione spetta all'agente, non al tool."""
     data = _get("/api/agents")
     rows = data.get("agents", []) if isinstance(data, dict) else data
-    out = [_pick(a, ("name", "display_name", "type", "role", "agent_sdk", "model",
-                     "provider", "providers", "provider_connected", "paused"))
-           for a in rows]
+    out = [_pick(a, (
+        "name", "display_name", "type", "role", "agent_sdk", "model",
+        "provider", "providers", "provider_connected", "provider_seal",
+        "paused", "clearance", "expertise", "skills", "capabilities",
+        "rag_read", "rank_label",
+    )) for a in rows]
     return {"count": len(out), "agents": out}
 
 
