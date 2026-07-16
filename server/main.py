@@ -730,6 +730,31 @@ _RUNTIME_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {}}),
 ]
 
+# jobs.* — gestione dei job schedulati. La CREAZIONE non è diretta: si PROPONE
+# e l'owner approva via link firmato (un job è esecuzione autonoma ricorrente →
+# superficie di privilegio, deve passare dall'umano).
+_JOBS_TOOLS: list[Tool] = [
+    Tool(name="jobs.list",
+         description="Elenca i job schedulati dell'istanza (cron + stato). Sola lettura.",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="jobs.propose",
+         description=("PROPONE un nuovo job schedulato: NON lo crea. Registra una "
+                      "proposta e notifica l'owner con un link di approvazione "
+                      "one-time; il job nasce solo se l'owner approva. Usalo quando "
+                      "l'utente chiede di schedulare un'attività ricorrente "
+                      "(report settimanale, promemoria, backup, ...). Fornisci una "
+                      "descrizione della cadenza in linguaggio naturale (schedule_text) "
+                      "oppure un cron a 5 campi (cron_expr)."),
+         inputSchema={"type": "object", "properties": {
+             "name": {"type": "string", "description": "nome univoco del job"},
+             "prompt": {"type": "string", "description": "cosa deve fare l'agente al fire del job"},
+             "schedule_text": {"type": "string", "description": "cadenza in linguaggio naturale (es. 'ogni lunedì alle 9')"},
+             "cron_expr": {"type": "string", "description": "in alternativa, cron a 5 campi"},
+             "agent": {"type": "string", "description": "agent (kind) che esegue il job al fire (default clodia)"},
+             "enabled": {"type": "boolean", "description": "attivo alla creazione (default true)"},
+         }, "required": ["name", "prompt"]}),
+]
+
 # settings.* — superficie conversazionale per i settings della piattaforma
 # (oggi: backup). SOLO super-agent. MAI segreti (passphrase/credenziali si
 # impostano dalla pagina Settings via paste-key).
@@ -954,7 +979,7 @@ def _dispatch_telegram(name: str, a: dict):
 def _native_tool_namespaces() -> list[str]:
     """Namespace dei tool nativi del gateway (per agents.list_tools)."""
     tools = (_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
-             + _RUNTIME_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
+             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
     ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in tools})
@@ -1009,6 +1034,21 @@ def _dispatch_runtime(name: str, arguments: dict):
     if sub == "current_user":
         return runtime.current_user()
     raise ValueError(f"unknown runtime tool: {name}")
+
+
+def _dispatch_jobs(name: str, a: dict, caller: str | None):
+    sub = name.split(NS_SEP_DOT, 1)[1]
+    if sub == "list":
+        return runtime.jobs()
+    if sub == "propose":
+        # l'agente PROPONE un job → l'owner approva via gate. `requested_by` è
+        # l'identità del chiamante, impostata qui (non fidarsi dell'input).
+        return runtime.propose_job(
+            name=a.get("name"), prompt=a.get("prompt"),
+            schedule_text=a.get("schedule_text"), cron_expr=a.get("cron_expr"),
+            agent=a.get("agent") or "clodia", enabled=a.get("enabled", True),
+            requested_by=caller or "agente")
+    raise ValueError(f"unknown jobs tool: {name}")
 
 
 # Super-agent nativi: hanno accesso a TUTTI i tool (inclusi i connettori/email
@@ -1089,7 +1129,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
+    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
     # Feature `rag` (profilo istanza): off → i verbi rag.*/eu_corpus.* non
     # esistono proprio (né in lista né al dispatch).
     if instance_profile.rag_enabled():
@@ -1186,6 +1226,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_gdrive(name, arguments)
         elif name.startswith("runtime."):
             result = _dispatch_runtime(name, arguments)
+        elif name.startswith("jobs."):
+            result = _dispatch_jobs(name, arguments, _ag)
         elif name.startswith("agents."):
             result = _dispatch_agents(name, arguments, _ag)
         elif name == "eu_corpus.search":
