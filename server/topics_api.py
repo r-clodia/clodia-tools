@@ -58,15 +58,33 @@ def _authorize(request: Request):
     return payload.get("agent"), None
 
 
+# Cache TTL brevissima della lista topic: la webui la polla di continuo e
+# service.list() apre OGNI topic (costoso, CPU-bound su 78 topic). Con un TTL di
+# pochi secondi N poll frequenti diventano 1 enumerazione, senza percepibile
+# staleness. Chiave = (tier, include_archived). Invalida su qualunque scrittura.
+_LIST_CACHE: dict = {}
+_LIST_TTL = float(os.environ.get("TOPICS_LIST_TTL", "6"))
+
+
+def _invalidate_list_cache() -> None:
+    _LIST_CACHE.clear()
+
+
 async def list_topics(request: Request):
     _, err = _authorize(request)
     if err:
         return err
     tier = request.query_params.get("tier") or None
     inc = request.query_params.get("include_archived", "").lower() in ("1", "true", "yes")
+    key = (tier, inc)
+    now = asyncio.get_event_loop().time()
+    hit = _LIST_CACHE.get(key)
+    if hit and (now - hit[0]) < _LIST_TTL:
+        return JSONResponse({"topics": hit[1]})
     # list() apre ogni topic (I/O per topic): sincrono e ~O(topic). Offload su
     # thread per non bloccare l'event loop del gateway (che serve anche l'MCP).
     topics = await asyncio.to_thread(_service().list, tier, include_archived=inc)
+    _LIST_CACHE[key] = (now, topics)
     return JSONResponse({"topics": topics})
 
 
@@ -108,6 +126,7 @@ async def archive_topic(request: Request):
         return err
     try:
         meta = _service().archive(request.path_params["tier"], request.path_params["name"])
+        _invalidate_list_cache()
         return JSONResponse({"archived": True, "meta": meta})
     except TopicError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
@@ -125,6 +144,7 @@ async def set_status(request: Request):
         res = _service().set_status(request.path_params["tier"],
                                     request.path_params["name"],
                                     (body or {}).get("status", ""))
+        _invalidate_list_cache()
         return JSONResponse(res)
     except TopicError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
@@ -149,6 +169,7 @@ async def create_topic(request: Request):
         return JSONResponse({"error": str(e)}, status_code=403)
     try:
         meta = _service().new(tier, name, body.get("meta") or {})
+        _invalidate_list_cache()
         return JSONResponse({"created": True, "meta": meta})
     except TopicError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
@@ -202,6 +223,7 @@ async def set_channel(request: Request):
         return JSONResponse({"error": "bad_json"}, status_code=400)
     try:
         meta = _service().set_channel(tier, name, body.get("channel"))
+        _invalidate_list_cache()
         return JSONResponse({"ok": True, "channel": meta.get("channel")})
     except TopicError as e:
         return JSONResponse({"error": str(e)[:200]}, status_code=400)
