@@ -1067,18 +1067,23 @@ class TopicService:
             for e in self.s.list(tr):
                 if e.kind != "dir":
                     continue
+                # Best-effort: un topic con contenuto corrotto/non-UTF8 non deve far
+                # fallire l'INTERA ricerca — lo si salta (con warning) e si prosegue.
                 try:
                     info = self.open(tr, e.name)
-                except TopicError:
+                    parts = [json.dumps(info["meta"], ensure_ascii=False), info["summary"]]
+                    for mn in info["minutes"]:
+                        try:
+                            parts.append(self.s.read(
+                                f"{self._dir(tr, e.name)}/minutes/{mn}"
+                            ).data.decode("utf-8", "replace"))
+                        except StorageError:
+                            pass
+                    if q in "\n".join(parts).lower():
+                        hits.append({"tier": tr, "name": e.name,
+                                     "title": info["meta"].get("title"), "tldr": info["tldr"]})
+                except (TopicError, UnicodeDecodeError, ValueError) as ex:
+                    LOG.warning("search: topic %s/%s saltato (contenuto non leggibile): %s",
+                                tr, e.name, str(ex)[:120])
                     continue
-                parts = [json.dumps(info["meta"], ensure_ascii=False), info["summary"]]
-                for mn in info["minutes"]:
-                    try:
-                        parts.append(self.s.read(
-                            f"{self._dir(tr, e.name)}/minutes/{mn}").data.decode())
-                    except StorageError:
-                        pass
-                if q in "\n".join(parts).lower():
-                    hits.append({"tier": tr, "name": e.name,
-                                 "title": info["meta"].get("title"), "tldr": info["tldr"]})
         return hits
