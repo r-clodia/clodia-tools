@@ -640,6 +640,29 @@ _TOPIC_TOOLS: list[Tool] = [
                             "description": "di cosa tratta il topic, in linguaggio naturale"},
         }, "required": ["description"]},
     ),
+    Tool(
+        name="topic.add_participant",
+        description=("Aggiunge un agente ai partecipanti di un topic/chat esistente "
+                     "(lo 'invita nella stanza'). Puoi usarlo se sei owner, "
+                     "partecipante o super-agent del topic. Decidi TU chi coinvolgere "
+                     "leggendo runtime.agents (expertise/skill/clearance/costo); "
+                     "l'idoneità SEAL è comunque applicata alla risposta."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string", "description": "slug del topic"},
+            "agent": {"type": "string", "description": "nome dell'agent/utente da aggiungere"},
+        }, "required": ["tier", "name", "agent"]},
+    ),
+    Tool(
+        name="topic.remove_participant",
+        description=("Rimuove un agente dai partecipanti di un topic/chat. Come "
+                     "add_participant: owner|partecipante|super."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "agent": {"type": "string"},
+        }, "required": ["tier", "name", "agent"]},
+    ),
 ]
 
 
@@ -704,7 +727,7 @@ _PROFILE_TOOLS: list[Tool] = [
 
 _RUNTIME_TOOLS: list[Tool] = [
     Tool(name="runtime.agents",
-         description="Introspezione runtime: gli agent dell'istanza (nome, tipo, provider effettivo, stato connessione, paused). Solo metadati.",
+         description="Introspezione runtime: gli agent dell'istanza col quadro COMPLETO per decidere chi coinvolgere (dominio/expertise, skill, knowledge RAG, clearance SEAL, provider effettivo + suo SEAL, modello, ruolo, stato). Solo metadati, mai segreti — la decisione è tua, non del tool.",
          inputSchema={"type": "object", "properties": {}}),
     Tool(name="runtime.jobs",
          description="Introspezione runtime: i job schedulati (cron/intervallo) e il loro stato.",
@@ -1533,6 +1556,13 @@ def _dispatch_topic(name: str, a: dict):
     if verb == "suggest_team":
         # proposta di squadra: proxy read-only all'agent-server (registry+rilevanza)
         return runtime.suggest_team(a.get("tier") or "SEAL-0", a.get("description") or "")
+    if verb in ("add_participant", "remove_participant"):
+        # gestione partecipanti: proxy all'agent-server, che autorizza `by` (il
+        # chiamante) come owner|partecipante|super. NON è fra gli scoped verbs:
+        # l'autorizzazione autoritativa è lato agent-server (ammette il super
+        # anche se non ancora partecipante).
+        return runtime.set_participant(a["tier"], a["name"], (a.get("agent") or "").strip(),
+                                       by=agent_name() or "", add=(verb == "add_participant"))
     if verb == "new":
         # Profilo topics:single → solo il workspace unico (DM sempre permessi).
         instance_profile.topic_creation_check(a["name"])
