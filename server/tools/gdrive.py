@@ -236,3 +236,21 @@ def rename(file_id: str, new_name: str, account: Optional[str] = None) -> dict:
     f = svc.files().update(fileId=file_id, body={"name": new_name},
                            fields=_FIELDS, supportsAllDrives=True).execute()
     return {"account": acct, "renamed": True, **_clean(f)}
+
+
+def move(file_id: str, folder_id: str, account: Optional[str] = None) -> dict:
+    """Sposta un file/cartella in un'altra cartella Drive: rimpiazza i parent
+    correnti con `folder_id` (files.update addParents/removeParents,
+    supportsAllDrives → ok anche sui Shared Drive)."""
+    tool_allowed("gdrive.move")
+    if not (folder_id or "").strip():
+        raise ValueError("'folder_id' non può essere vuoto")
+    svc, acct = _service(account)
+    cur = svc.files().get(fileId=file_id, fields="parents",
+                          supportsAllDrives=True).execute()
+    prev = ",".join(cur.get("parents") or [])
+    f = svc.files().update(fileId=file_id, addParents=folder_id.strip(),
+                           removeParents=prev or None,
+                           fields=_FIELDS, supportsAllDrives=True).execute()
+    return {"account": acct, "moved": True, "from": prev or None,
+            "to": folder_id.strip(), **_clean(f)}
