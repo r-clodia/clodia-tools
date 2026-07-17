@@ -51,6 +51,8 @@ class Remote(abc.ABC):
     @abc.abstractmethod
     def add(self, path: str) -> None: ...
     @abc.abstractmethod
+    def unstage(self, path: str = "") -> None: ...
+    @abc.abstractmethod
     def commit(self, msg: str = "") -> None: ...
     @abc.abstractmethod
     def push(self) -> dict: ...
@@ -131,6 +133,16 @@ class GitRemote(Remote):
 
     def add(self, path: str) -> None:
         self._git("add", path if path else "-A")
+
+    def unstage(self, path: str = "") -> None:
+        """Toglie dallo staging (index) — path vuoto = tutto. Equivalente di
+        `git restore --staged`; su repo senza commit (HEAD assente) fallback a
+        `rm --cached` che riporta i nuovi file a untracked."""
+        args = ["reset", "-q", "HEAD", "--", path] if path else ["reset", "-q", "HEAD"]
+        r = self._git(*args, check=False)
+        if r.returncode != 0:
+            self._git("rm", "-r", "-q", "--cached", "--ignore-unmatch",
+                      path or ".", check=False)
 
     def commit(self, msg: str = "") -> None:
         self._git("add", "-A")
@@ -250,6 +262,20 @@ class DriveRemote(Remote):
             local = self.files_dir / p
             if local.is_file():   # baseline: il locale È l'ultimo sync
                 st["hashes"][p] = _md5(local.read_bytes())
+        self._save(st)
+
+    def unstage(self, path: str = "") -> None:
+        """Toglie dalla push-list — path vuoto = tutto. Se il file non è mai
+        stato sincronizzato (nessuna baseline hash) l'add lo aveva anche
+        tracciato: l'unstage lo riporta a 'solo locale' (fuori dalla sync-list)."""
+        st = self._load()
+        targets = [path] if path else list(st.get("push") or [])
+        hashes = st.get("hashes") or {}
+        for rel in targets:
+            if rel in st["push"]:
+                st["push"].remove(rel)
+            if rel not in hashes and rel in st["sync"]:
+                st["sync"].remove(rel)
         self._save(st)
 
     def commit(self, msg: str = "") -> None:

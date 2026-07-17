@@ -649,6 +649,11 @@ class TopicService:
         self._remote_or_err(tier, name).add(path)
         return {"ok": True}
 
+    def remote_unstage(self, tier: str, name: str, path: str = "") -> dict:
+        """Toglie dallo staging (path vuoto = tutto)."""
+        self._remote_or_err(tier, name).unstage(path or "")
+        return {"ok": True}
+
     def remote_commit(self, tier: str, name: str, msg: str = "") -> dict:
         self._remote_or_err(tier, name).commit(msg)
         return {"ok": True}

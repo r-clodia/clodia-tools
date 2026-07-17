@@ -251,6 +251,8 @@ async def remote(request: Request):
             return JSONResponse(svc.remote_disable(tier, name))
         if action == "add":
             return JSONResponse(svc.remote_add(tier, name, body.get("path")))
+        if action == "unstage":
+            return JSONResponse(svc.remote_unstage(tier, name, body.get("path") or ""))
         if action == "commit":
             return JSONResponse(svc.remote_commit(tier, name, body.get("message", "")))
         if action == "push":
