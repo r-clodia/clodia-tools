@@ -158,12 +158,32 @@ def read_message(email_id: str, account: str = "demo", folder: str = "INBOX") ->
 
 def get_attachment(email_id: str, filename: str, account: str = "demo",
                    folder: str = "INBOX") -> dict:
-    """Contenuto base64 di un allegato (componibile con topic.write_file/profile)."""
+    """Contenuto base64 di un allegato (componibile con topic.write_file/profile).
+    Per i binari grandi (PDF, immagini) usare email.save_attachment: il base64
+    di un file reale non passa intero dal contesto del modello."""
     tool_allowed("email.get_attachment")
     if not filename:
         raise ValueError("'filename' must be provided")
     return _run_json(account, ["get-attachment", str(email_id), "--filename", filename,
                                "--folder", folder])
+
+
+def get_attachment_bytes(email_id: str, filename: str, account: str = "demo",
+                         folder: str = "INBOX") -> tuple[bytes, dict]:
+    """Byte DECODIFICATI di un allegato + metadati — nessun base64 verso il
+    modello. Backend di email.save_attachment (il gate whitelist usa quel nome;
+    la scrittura su scratch la fa main.py con il path validato)."""
+    tool_allowed("email.save_attachment")
+    if not filename:
+        raise ValueError("'filename' must be provided")
+    r = _run_json(account, ["get-attachment", str(email_id), "--filename", filename,
+                            "--folder", folder])
+    if not isinstance(r, dict) or not r.get("data"):
+        raise ValueError(f"allegato '{filename}' non trovato nel messaggio {email_id}")
+    import base64
+    raw = base64.b64decode(r["data"])
+    return raw, {"filename": r.get("filename") or filename,
+                 "content_type": r.get("content_type")}
 
 def search(query: str, account: str = "demo", folder: str = "INBOX", limit: int = 20) -> dict:
     """Cerca messaggi via query IMAP (es. FROM \"x@y.it\")."""

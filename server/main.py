@@ -108,7 +108,8 @@ _EMAIL_TOOLS: list[Tool] = [
     Tool(
         name="email.get_attachment",
         description=("Contenuto di un allegato di un messaggio, in base64 (per nome file). "
-                     "Componibile con topic.write_file(encoding='base64') o gli allegati profilo. "
+                     "SOLO per allegati piccoli/testuali: per PDF, immagini e binari usa "
+                     "email.save_attachment (il base64 non passa dal modello). "
                      "Usa email.read per scoprire i nomi degli allegati."),
         inputSchema={
             "type": "object",
@@ -119,6 +120,25 @@ _EMAIL_TOOLS: list[Tool] = [
                 "folder": {"type": "string", "description": "IMAP folder, default INBOX"},
             },
             "required": ["email_id", "filename"],
+        },
+    ),
+    Tool(
+        name="email.save_attachment",
+        description=("Scarica un allegato e lo SCRIVE su file nel tuo scratch (`dest` "
+                     "assoluto): i byte NON passano dal contesto del modello — usa QUESTO "
+                     "per PDF, immagini e binari. Flusso tipico: email.save_attachment → "
+                     "topic.put per depositarlo nei file di un topic. "
+                     "Usa email.read per scoprire i nomi degli allegati."),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "email_id": {"type": "string", "description": "IMAP message id"},
+                "filename": {"type": "string", "description": "nome esatto dell'allegato (da email.read)"},
+                "dest": {"type": "string", "description": "path assoluto di destinazione nel tuo scratch"},
+                "account": {"type": "string"},
+                "folder": {"type": "string", "description": "IMAP folder, default INBOX"},
+            },
+            "required": ["email_id", "filename", "dest"],
         },
     ),
     Tool(
@@ -1217,6 +1237,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
             )
+        elif name == "email.save_attachment":
+            # I byte dell'allegato NON passano dal modello: decodifica server-side
+            # e scrittura nello scratch validato (come topic.fetch).
+            dest = _safe_scratch_path(arguments["dest"])
+            raw, meta = email.get_attachment_bytes(
+                arguments["email_id"],
+                arguments["filename"],
+                account=_email_account(arguments),
+                folder=arguments.get("folder", "INBOX"),
+            )
+            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+            with open(dest, "wb") as f:
+                f.write(raw)
+            result = {"local_path": dest, "size": len(raw), **meta}
         elif name == "email.search":
             result = email.search(
                 arguments["query"],
