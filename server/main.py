@@ -800,6 +800,95 @@ _JOBS_TOOLS: list[Tool] = [
          }, "required": ["name", "prompt"]}),
 ]
 
+# packs.* — import/rimozione dei pack e loro dipendenze. Riservati a sysadmin.
+_PACKS_TOOLS: list[Tool] = [
+    Tool(name="packs.list",
+         description="Elenca i pack installati (nome, versione, plugin/seed contenuti).",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="packs.show",
+         description="Dettaglio di un pack installato per nome.",
+         inputSchema={"type": "object", "properties": {
+             "name": {"type": "string"}}, "required": ["name"]}),
+    Tool(name="packs.import_url",
+         description=("Importa un pack da URL (repo pubblico / zip remoto). L'import da "
+                      "file .zip caricato resta un'operazione della UI (upload)."),
+         inputSchema={"type": "object", "properties": {
+             "url": {"type": "string"}}, "required": ["url"]}),
+    Tool(name="packs.remove",
+         description="Rimuove un pack installato per nome.",
+         inputSchema={"type": "object", "properties": {
+             "name": {"type": "string"}}, "required": ["name"]}),
+]
+
+# workflows.* — controllo delle run dei workflow (start/stop/terminate). Sysadmin.
+_WORKFLOWS_TOOLS: list[Tool] = [
+    Tool(name="workflows.list",
+         description="Elenca i workflow disponibili (per plugin) e le run recenti.",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="workflows.status",
+         description="Stato di una run di workflow per run_id.",
+         inputSchema={"type": "object", "properties": {
+             "run_id": {"type": "string"}}, "required": ["run_id"]}),
+    Tool(name="workflows.start",
+         description="Avvia una run di un workflow (plugin/name). params è una stringa opzionale.",
+         inputSchema={"type": "object", "properties": {
+             "plugin": {"type": "string"}, "name": {"type": "string"},
+             "title": {"type": "string"}, "params": {"type": "string"}},
+             "required": ["plugin", "name"]}),
+    Tool(name="workflows.cancel",
+         description="Ferma/termina una run in esecuzione per run_id (con nota opzionale).",
+         inputSchema={"type": "object", "properties": {
+             "run_id": {"type": "string"}, "note": {"type": "string"}},
+             "required": ["run_id"]}),
+    Tool(name="workflows.delete_run",
+         description="Elimina il record di una run di workflow per run_id.",
+         inputSchema={"type": "object", "properties": {
+             "run_id": {"type": "string"}}, "required": ["run_id"]}),
+]
+
+# providers.* — pausa/riattiva i provider di inferenza. MAI segreti/chiavi. Sysadmin.
+_PROVIDERS_TOOLS: list[Tool] = [
+    Tool(name="providers.list",
+         description="Elenca i provider di inferenza e il loro stato (id/nome/meccanismo/connesso/pausa). MAI segreti.",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="providers.pause",
+         description="Mette in pausa un provider (escluso dalla selezione; gli agent ripiegano sul prossimo). Non tocca la chiave.",
+         inputSchema={"type": "object", "properties": {
+             "provider_id": {"type": "string"}}, "required": ["provider_id"]}),
+    Tool(name="providers.resume",
+         description="Riattiva un provider in pausa.",
+         inputSchema={"type": "object", "properties": {
+             "provider_id": {"type": "string"}}, "required": ["provider_id"]}),
+]
+
+# integrations.* — osservazione dei connettori/integration (stato di connessione).
+_INTEGRATIONS_TOOLS: list[Tool] = [
+    Tool(name="integrations.list",
+         description=("Osserva le integration/connettori e il loro stato di connessione "
+                      "(id/nome/provider/connected). NON legge i dati che veicolano."),
+         inputSchema={"type": "object", "properties": {}}),
+]
+
+# mcp.* — registra/rimuove/elenca i server MCP montati (gateway-local). Sysadmin.
+_MCP_TOOLS: list[Tool] = [
+    Tool(name="mcp.list",
+         description="Elenca i server MCP disponibili (backend montati + namespace nativi).",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="mcp.add",
+         description=("Registra uno o più server MCP da un config in stile mcp.json "
+                      "(oggetto con chiave `mcpServers`). I segreti (secrets: {NAME: val}) "
+                      "sono depositati nel vault, mai nel config. Stessa diligenza "
+                      "supply-chain dei pack."),
+         inputSchema={"type": "object", "properties": {
+             "config": {"type": "object", "description": "config con mcpServers"},
+             "secrets": {"type": "object", "description": "segreti {NAME: valore} da mettere nel vault"}},
+             "required": ["config"]}),
+    Tool(name="mcp.remove",
+         description="Smonta un server MCP montato per nome (slug).",
+         inputSchema={"type": "object", "properties": {
+             "name": {"type": "string"}}, "required": ["name"]}),
+]
+
 # settings.* — superficie conversazionale per i settings della piattaforma
 # (oggi: backup). SOLO super-agent. MAI segreti (passphrase/credenziali si
 # impostano dalla pagina Settings via paste-key).
@@ -1041,7 +1130,8 @@ def _dispatch_telegram(name: str, a: dict):
 def _native_tool_namespaces() -> list[str]:
     """Namespace dei tool nativi del gateway (per agents.list_tools)."""
     tools = (_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
-             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
+             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
+             + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
     ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in tools})
@@ -1105,12 +1195,82 @@ def _dispatch_jobs(name: str, a: dict, caller: str | None):
     if sub == "propose":
         # l'agente PROPONE un job → l'owner approva via gate. `requested_by` è
         # l'identità del chiamante, impostata qui (non fidarsi dell'input).
+        # NB: NESSUN create/delete diretto — anche gli agent di piattaforma
+        # (sysadmin) passano dal gate owner. La creazione autonoma ricorrente è
+        # superficie di privilegio: deve confermarla l'owner (Prima Legge).
         return runtime.propose_job(
             name=a.get("name"), prompt=a.get("prompt"),
             schedule_text=a.get("schedule_text"), cron_expr=a.get("cron_expr"),
             agent=a.get("agent") or "clodia", enabled=a.get("enabled", True),
             requested_by=caller or "agente")
     raise ValueError(f"unknown jobs tool: {name}")
+
+
+def _dispatch_packs(name: str, a: dict):
+    from .tools import platform_ops as ops
+    sub = name.split(NS_SEP_DOT, 1)[1]
+    if sub == "list":
+        return ops.packs_list()
+    if sub == "show":
+        return ops.packs_show(a["name"])
+    if sub == "import_url":
+        return ops.packs_import_url(a["url"])
+    if sub == "remove":
+        return ops.packs_remove(a["name"])
+    raise ValueError(f"unknown packs tool: {name}")
+
+
+def _dispatch_workflows(name: str, a: dict):
+    from .tools import platform_ops as ops
+    sub = name.split(NS_SEP_DOT, 1)[1]
+    if sub == "list":
+        return ops.workflows_list()
+    if sub == "status":
+        return ops.workflows_status(a["run_id"])
+    if sub == "start":
+        return ops.workflows_start(a["plugin"], a["name"],
+                                   title=a.get("title", ""), params=a.get("params", ""))
+    if sub == "cancel":
+        return ops.workflows_cancel(a["run_id"], note=a.get("note", ""))
+    if sub == "delete_run":
+        return ops.workflows_delete_run(a["run_id"])
+    raise ValueError(f"unknown workflows tool: {name}")
+
+
+def _dispatch_providers(name: str, a: dict):
+    from .tools import platform_ops as ops
+    sub = name.split(NS_SEP_DOT, 1)[1]
+    if sub == "list":
+        return ops.providers_list()
+    if sub == "pause":
+        return ops.providers_pause(a["provider_id"])
+    if sub == "resume":
+        return ops.providers_resume(a["provider_id"])
+    raise ValueError(f"unknown providers tool: {name}")
+
+
+def _dispatch_integrations(name: str, a: dict):
+    from .tools import platform_ops as ops
+    sub = name.split(NS_SEP_DOT, 1)[1]
+    if sub == "list":
+        return ops.integrations_list()
+    raise ValueError(f"unknown integrations tool: {name}")
+
+
+def _dispatch_mcp(name: str, a: dict):
+    """mcp.* — montaggio server MCP (gateway-local, via tools_api core)."""
+    from . import tools_api
+    sub = name.split(NS_SEP_DOT, 1)[1]
+    if sub == "list":
+        return runtime.mcp_servers()
+    if sub == "add":
+        try:
+            return tools_api.register_mcp_core(a["config"], a.get("secrets") or {})
+        except tools_api.McpRegisterError as e:
+            raise PermissionError(str(e)) if getattr(e, "status", 400) == 403 else ValueError(str(e))
+    if sub == "remove":
+        return tools_api.unregister_mcp_core(a["name"])
+    raise ValueError(f"unknown mcp tool: {name}")
 
 
 # Super-agent nativi: hanno accesso a TUTTI i tool (inclusi i connettori/email
@@ -1191,7 +1351,8 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS)
+    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
+                  + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     # Feature `rag` (profilo istanza): off → i verbi rag.*/eu_corpus.* non
     # esistono proprio (né in lista né al dispatch).
     if instance_profile.rag_enabled():
@@ -1310,6 +1471,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = await asyncio.to_thread(_dispatch_runtime, name, arguments)
         elif name.startswith("jobs."):
             result = await asyncio.to_thread(_dispatch_jobs, name, arguments, _ag)
+        elif name.startswith("packs."):
+            result = await asyncio.to_thread(_dispatch_packs, name, arguments)
+        elif name.startswith("workflows."):
+            result = await asyncio.to_thread(_dispatch_workflows, name, arguments)
+        elif name.startswith("providers."):
+            result = await asyncio.to_thread(_dispatch_providers, name, arguments)
+        elif name.startswith("integrations."):
+            result = await asyncio.to_thread(_dispatch_integrations, name, arguments)
+        elif name.startswith("mcp."):
+            result = await asyncio.to_thread(_dispatch_mcp, name, arguments)
         elif name.startswith("agents."):
             result = await asyncio.to_thread(_dispatch_agents, name, arguments, _ag)
         elif name == "eu_corpus.search":

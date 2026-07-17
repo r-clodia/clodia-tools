@@ -178,26 +178,28 @@ async def list_tools(request: Request):
     return JSONResponse({"connectors": connectors})
 
 
-async def register_mcp(request: Request):
-    """Registra uno o più MCP server da mcp.json (UI Add-MCP). I placeholder
-    ${NAME} presenti nel config vengono sostituiti con ${VAULT:mcp_<server>_<NAME>}
-    e i valori segreti depositati nel vault (mai nel config.yaml)."""
-    if not _authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "bad_json"}, status_code=400)
-    cfg = body.get("config")
+class McpRegisterError(ValueError):
+    """Errore di registrazione MCP con status HTTP suggerito."""
+    def __init__(self, msg: str, status: int = 400):
+        super().__init__(msg)
+        self.status = status
+
+
+def register_mcp_core(config, secrets: dict | None = None) -> dict:
+    """Core riutilizzabile della registrazione MCP (UI Add-MCP e tool mcp.add).
+    I placeholder ${NAME} nel config vengono sostituiti con
+    ${VAULT:mcp_<server>_<NAME>} e i segreti depositati nel vault (mai nel
+    config.yaml). Solleva McpRegisterError su input non valido."""
+    cfg = config
     if isinstance(cfg, str):
         try:
             cfg = json.loads(cfg)
         except Exception:
-            return JSONResponse({"error": "config non è JSON valido"}, status_code=400)
+            raise McpRegisterError("config non è JSON valido")
     servers = (cfg or {}).get("mcpServers") if isinstance(cfg, dict) else None
     if not isinstance(servers, dict) or not servers:
-        return JSONResponse({"error": "manca l'oggetto mcpServers nel config"}, status_code=400)
-    secrets_in = body.get("secrets") or {}
+        raise McpRegisterError("manca l'oggetto mcpServers nel config")
+    secrets_in = secrets or {}
 
     backends = list(whitelist.CONFIG.get("mcp_backends") or [])
     agents = whitelist.CONFIG.setdefault("agents", {})
@@ -206,14 +208,13 @@ async def register_mcp(request: Request):
     for name, spec in servers.items():
         slug = _slugify(name)
         if not slug or slug in _NATIVE_PREFIXES:
-            return JSONResponse({"error": f"nome backend non valido/riservato: {name!r} → {slug!r}"},
-                                status_code=400)
+            raise McpRegisterError(f"nome backend non valido/riservato: {name!r} → {slug!r}")
         # Feature `integrations` (profilo istanza): off = nessun mount di MCP
         # esterni; fixed = solo la whitelist dell'edizione (i tool del pack).
         try:
             instance_profile.integrations_check(slug)
         except PermissionError as e:
-            return JSONResponse({"error": str(e)}, status_code=403)
+            raise McpRegisterError(str(e), status=403)
         if spec.get("url"):
             backend = {"name": slug, "label": name, "transport": "http", "url": spec["url"]}
             if spec.get("headers"):
@@ -224,8 +225,7 @@ async def register_mcp(request: Request):
             if spec.get("env"):
                 backend["env"] = spec["env"]
         else:
-            return JSONResponse({"error": f"server '{name}': serve 'url' (http) o 'command' (stdio)"},
-                                status_code=400)
+            raise McpRegisterError(f"server '{name}': serve 'url' (http) o 'command' (stdio)")
         # Secret: deposita nel vault (infra, no grant) e sostituisci nel config.
         for sname, sval in secrets_in.items():
             if not sval:
@@ -243,14 +243,11 @@ async def register_mcp(request: Request):
     whitelist.save_config()
     whitelist.reload_config()
     proxy.clear_cache()
-    return JSONResponse({"registered": registered})
+    return {"registered": registered}
 
 
-async def unregister_mcp(request: Request):
-    """Rimuove un MCP server montato (config + grant clodia)."""
-    if not _authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    name = request.path_params["name"]
+def unregister_mcp_core(name: str) -> dict:
+    """Core della rimozione MCP (config + grant clodia). Riutilizzato da mcp.remove."""
     cfg = whitelist.CONFIG
     cfg["mcp_backends"] = [b for b in (cfg.get("mcp_backends") or []) if b.get("name") != name]
     at = cfg.get("agents", {}).get("clodia", {}).get("allowed_tools", [])
@@ -259,7 +256,28 @@ async def unregister_mcp(request: Request):
     whitelist.save_config()
     whitelist.reload_config()
     proxy.clear_cache()
-    return JSONResponse({"unregistered": name})
+    return {"unregistered": name}
+
+
+async def register_mcp(request: Request):
+    """Registra uno o più MCP server da mcp.json (UI Add-MCP)."""
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    try:
+        return JSONResponse(register_mcp_core(body.get("config"), body.get("secrets") or {}))
+    except McpRegisterError as e:
+        return JSONResponse({"error": str(e)}, status_code=e.status)
+
+
+async def unregister_mcp(request: Request):
+    """Rimuove un MCP server montato (config + grant clodia)."""
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return JSONResponse(unregister_mcp_core(request.path_params["name"]))
 
 
 def _account_from_email(email: str) -> str:
