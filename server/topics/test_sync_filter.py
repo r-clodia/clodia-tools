@@ -1,8 +1,30 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from server.topics.sync_filter import (
     SyncFilter, _parse, INCLUDED, SKIP_INCLUDE, SKIP_IGNORE, SKIP_HARD_DENY,
 )
+
+
+class TestFromFilesDir(unittest.TestCase):
+    def test_reads_dotless_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "remoteinclude").write_text("*.csv\n", encoding="utf-8")
+            (d / "remoteignore").write_text("tmp/**\n", encoding="utf-8")
+            f = SyncFilter.from_files_dir(d)
+            self.assertTrue(f.has_include)
+            self.assertEqual(f.evaluate("a.csv"), INCLUDED)
+            self.assertEqual(f.evaluate("tmp/x.csv"), SKIP_IGNORE)  # include ma poi ignore
+            self.assertEqual(f.evaluate("a.pdf"), SKIP_INCLUDE)
+
+    def test_dotfile_alias_still_works(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / ".remoteignore").write_text("*.pdf\n", encoding="utf-8")
+            f = SyncFilter.from_files_dir(d)
+            self.assertEqual(f.evaluate("x.pdf"), SKIP_IGNORE)
 
 
 def _f(include: str = "", ignore: str = "") -> SyncFilter:
@@ -24,9 +46,11 @@ class TestMatcher(unittest.TestCase):
         self.assertEqual(f.evaluate(".env"), SKIP_HARD_DENY)
         self.assertEqual(f.evaluate(".env.local"), SKIP_HARD_DENY)
         self.assertEqual(f.evaluate(".trash/old.pdf"), SKIP_HARD_DENY)
-        # i file di config del protocollo sono control-plane
+        # i file di config del protocollo sono control-plane (entrambe le forme)
         self.assertEqual(f.evaluate(".remoteinclude"), SKIP_HARD_DENY)
         self.assertEqual(f.evaluate(".remoteignore"), SKIP_HARD_DENY)
+        self.assertEqual(f.evaluate("remoteinclude"), SKIP_HARD_DENY)
+        self.assertEqual(f.evaluate("remoteignore"), SKIP_HARD_DENY)
 
     def test_include_allowlist(self):
         f = _f(include="lead-pipeline/latest/**\n*.md")

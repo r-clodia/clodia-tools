@@ -1,8 +1,11 @@
-"""Protocollo `.remoteinclude` / `.remoteignore` per il sync remoto dei topic.
+"""Protocollo `remoteinclude` / `remoteignore` per il sync remoto dei topic.
 
 Filtro esplicito, sintassi stile `.gitignore`, per non pullare/pushare file
 pesanti, temporanei o sensibili (spec 18 lug 2026). Nomi dedicati (non `.git*`)
 per evitare ambiguità con Git reale.
+
+Nomi CANONICI senza punto (il topic storage rifiuta i dotfile in `files/`); i
+dotfile `.remoteinclude`/`.remoteignore` restano riconosciuti come alias.
 
 Ordine di valutazione, per ogni path relativo alla root `files/` del topic (SENZA
 il prefisso `files/`):
@@ -20,8 +23,15 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-INCLUDE_FILE = ".remoteinclude"
-IGNORE_FILE = ".remoteignore"
+# Nomi CANONICI senza punto: il topic storage rifiuta i dotfile in `files/`
+# (put_file vieta i segmenti che iniziano con `.`, riservati al control-plane
+# — .messages/.trash/.remote-drive.json). Senza punto i file sono anche
+# visibili/editabili nella vista file della UI. I dotfile restano riconosciuti
+# come ALIAS (per storage che li permettono e per la spec originale).
+INCLUDE_FILE = "remoteinclude"
+IGNORE_FILE = "remoteignore"
+INCLUDE_ALIASES = ("remoteinclude", ".remoteinclude")
+IGNORE_ALIASES = ("remoteignore", ".remoteignore")
 
 # Stati loggabili (spec «Applicazione a pull e push»).
 INCLUDED = "included"
@@ -40,7 +50,10 @@ _HARD_DENY = [
     ".git/**", "**/.git/**",
     "*.key", "*.pem", "*.p12", "*.pfx",
     "*.env", ".env*",
-    INCLUDE_FILE, IGNORE_FILE,       # control-plane: mai sincronizzato
+    # i file di config del protocollo (entrambe le forme) = control-plane:
+    # mai sincronizzati, in nessuna direzione.
+    "remoteinclude", ".remoteinclude", "remoteignore", ".remoteignore",
+    "**/remoteinclude", "**/.remoteinclude", "**/remoteignore", "**/.remoteignore",
     "**/.remote-drive.json",
 ]
 
@@ -130,14 +143,22 @@ class SyncFilter:
         self._include = include        # [] = nessun include → tutto candidabile
         self._ignore = ignore
 
+    @staticmethod
+    def _read_first(d: Path, names) -> str:
+        """Testo del primo file di config esistente fra i nomi accettati
+        (canonico senza punto prima, poi l'alias dotfile)."""
+        for n in names:
+            p = d / n
+            if p.is_file():
+                return p.read_text(encoding="utf-8")
+        return ""
+
     @classmethod
     def from_files_dir(cls, files_dir) -> "SyncFilter":
         d = Path(files_dir)
-        inc = d / INCLUDE_FILE
-        ign = d / IGNORE_FILE
         return cls(
-            _parse(inc.read_text(encoding="utf-8")) if inc.is_file() else [],
-            _parse(ign.read_text(encoding="utf-8")) if ign.is_file() else [],
+            _parse(cls._read_first(d, INCLUDE_ALIASES)),
+            _parse(cls._read_first(d, IGNORE_ALIASES)),
         )
 
     @property
