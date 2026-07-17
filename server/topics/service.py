@@ -587,9 +587,36 @@ class TopicService:
             raise TopicError("il topic non ha un remote configurato (topic.remote_enable)")
         return rem
 
+    def _remote_display_name(self, rtype: str, config: dict) -> str | None:
+        """Nome umano del remote per la UI: nome della cartella Drive o del repo
+        git. Best-effort: su errore (Drive irraggiungibile, URL anomalo) → None."""
+        try:
+            if rtype == "drive" and config.get("folder"):
+                svc = self._drive_service(config.get("account"))
+                got = svc.files().get(fileId=config["folder"], fields="name",
+                                      supportsAllDrives=True).execute()
+                return got.get("name") or None
+            if rtype == "git" and config.get("url"):
+                tail = str(config["url"]).rstrip("/").split("/")[-1]
+                tail = tail.split(":")[-1]           # git@host:org/repo(.git)
+                return re.sub(r"\.git$", "", tail) or None
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
     def remote_status(self, tier: str, name: str) -> dict:
-        meta, _ = self._read_meta(tier, name)
+        meta, ver = self._read_meta(tier, name)
         rem = self._remote_for(tier, name, meta)
+        # Backfill lazy del nome remoto sui topic pre-esistenti (config senza
+        # `name`): risolto qui una volta e persistito. Best-effort.
+        r = meta.get("remote") or {}
+        if rem is not None and r and "name" not in (r.get("config") or {}):
+            display = self._remote_display_name(r["type"], r.get("config") or {})
+            try:
+                r["config"]["name"] = display
+                self._write_meta(tier, name, meta, base_version=ver)
+            except Exception:  # noqa: BLE001 — race sul meta: riproverà al prossimo status
+                pass
         return rem.status() if rem else {"enabled": False}
 
     def remote_enable(self, tier: str, name: str, rtype: str, config: dict | None = None) -> dict:
@@ -599,7 +626,8 @@ class TopicService:
         config = dict(config or {})
         if rtype == "drive":
             config.update(self._provision_drive_folder(config, name))  # risolve/crea la cartella
-        keep = ("url", "branch", "folder", "account", "user_name", "user_email", "message")
+        config["name"] = self._remote_display_name(rtype, config)
+        keep = ("url", "branch", "folder", "account", "user_name", "user_email", "message", "name")
         meta["remote"] = {"type": rtype, "config": {k: v for k, v in config.items() if k in keep}}
         meta["storage"] = self.s.capability().name   # storage torna esplicitamente local
         meta.pop("storage_config", None)
