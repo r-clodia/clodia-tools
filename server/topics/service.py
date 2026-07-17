@@ -655,8 +655,8 @@ class TopicService:
         return {"ok": True}
 
     def remote_commit(self, tier: str, name: str, msg: str = "") -> dict:
-        self._remote_or_err(tier, name).commit(msg)
-        return {"ok": True}
+        res = self._remote_or_err(tier, name).commit(msg) or {}
+        return {"ok": True, **res}
 
     def remote_push(self, tier: str, name: str) -> dict:
         return self._remote_or_err(tier, name).push()

@@ -25,6 +25,9 @@ import os
 import subprocess
 from pathlib import Path
 
+from . import sync_filter as sf
+from .sync_filter import SyncFilter
+
 
 class RemoteError(RuntimeError):
     pass
@@ -36,6 +39,20 @@ class RemoteConflict(RemoteError):
 
 def _md5(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
+
+
+# Report di sync stile spec `.remoteinclude`/`.remoteignore`: liste per-stato +
+# conteggi. Usato da pull/push del DriveRemote.
+_REPORT_STATES = (sf.SYNCED, sf.CONFLICT, sf.SKIP_INCLUDE, sf.SKIP_IGNORE,
+                  sf.SKIP_HARD_DENY, sf.ERROR)
+
+
+def _empty_report() -> dict:
+    return {s: [] for s in _REPORT_STATES}
+
+
+def _finalize(rep: dict) -> dict:
+    return {**rep, "counts": {s: len(rep[s]) for s in _REPORT_STATES}}
 
 
 class Remote(abc.ABC):
@@ -53,7 +70,7 @@ class Remote(abc.ABC):
     @abc.abstractmethod
     def unstage(self, path: str = "") -> None: ...
     @abc.abstractmethod
-    def commit(self, msg: str = "") -> None: ...
+    def commit(self, msg: str = "") -> dict: ...
     @abc.abstractmethod
     def push(self) -> dict: ...
     @abc.abstractmethod
@@ -117,9 +134,9 @@ class GitRemote(Remote):
         url = (config.get("url") or "").strip()
         if url and not self._has_origin():
             self._git("remote", "add", "origin", url)
-        self._git("add", "-A")
-        # commit iniziale solo se c'è qualcosa da committare
-        if self._git("status", "--porcelain").stdout.strip():
+        # stage FILTRATO (rispetta .remoteinclude/.remoteignore fin dal 1° commit)
+        self._filtered_stage()
+        if self._git("diff", "--cached", "--quiet", check=False).returncode != 0:
             self._git("commit", "-q", "-m", config.get("message") or "enable git remote")
         if url:
             self._git("push", "-q", "-u", "origin", "main", check=False)
@@ -144,10 +161,35 @@ class GitRemote(Remote):
             self._git("rm", "-r", "-q", "--cached", "--ignore-unmatch",
                       path or ".", check=False)
 
-    def commit(self, msg: str = "") -> None:
-        self._git("add", "-A")
-        if self._git("status", "--porcelain").stdout.strip():
+    def _filtered_stage(self) -> dict:
+        """Stage selettivo secondo `.remoteinclude`/`.remoteignore`: aggiunge i
+        soli path inclusi, toglie dall'index quelli filtrati. Senza file di
+        config il filtro permette tutto → equivale a `git add -A`. Ritorna il
+        report per-stato."""
+        flt = SyncFilter.from_files_dir(self.files_dir)
+        rep = _empty_report()
+        porcelain = self._git("status", "--porcelain", "--untracked-files=all").stdout.splitlines()
+        for line in porcelain:
+            if len(line) < 4:
+                continue
+            rel = line[3:].strip()
+            if " -> " in rel:
+                rel = rel.split(" -> ", 1)[1]
+            rel = rel.strip('"')
+            verdict = flt.evaluate(rel)
+            if verdict == sf.INCLUDED:
+                self._git("add", "--", rel, check=False)
+                rep[sf.SYNCED].append(rel)
+            else:
+                self._git("rm", "-q", "--cached", "--ignore-unmatch", "--", rel, check=False)
+                rep[verdict].append(rel)
+        return _finalize(rep)
+
+    def commit(self, msg: str = "") -> dict:
+        report = self._filtered_stage()
+        if self._git("diff", "--cached", "--quiet", check=False).returncode != 0:
             self._git("commit", "-q", "-m", msg or "update")
+        return {"report": report}
 
     def push(self) -> dict:
         if not self._has_origin():
@@ -278,37 +320,54 @@ class DriveRemote(Remote):
                 st["sync"].remove(rel)
         self._save(st)
 
-    def commit(self, msg: str = "") -> None:
-        return  # no-op per Drive
+    def commit(self, msg: str = "") -> dict:
+        return {"report": _finalize(_empty_report())}  # no-op per Drive
 
     def push(self) -> dict:
         st = self._load()
         pending = list(st.get("push") or [])
         if not pending:
-            return {"pushed": 0}
+            return {"pushed": 0, "report": _empty_report()}
+        flt = SyncFilter.from_files_dir(self.files_dir)
+        rep = _empty_report()
         ds = self._ds(st)
-        done = []
+        done = []          # tolti dalla push-list (pushati, rimossi o filtrati)
         for rel in pending:
             if rel.endswith(".gdrive.json"):
                 done.append(rel); continue   # stub proxy di un Doc nativo → non si ri-carica su Drive
+            verdict = flt.evaluate(rel)
+            if verdict != sf.INCLUDED:
+                rep[verdict].append(rel)     # filtrato: esce dalla push-list, niente upload
+                done.append(rel)
+                continue
             local = self.files_dir / rel
             if not local.is_file():
                 done.append(rel); continue   # rimosso localmente: lo togliamo dalla push-list (push-only, non cancella su Drive)
-            data = local.read_bytes()
-            ds.write(rel, data)
-            st["hashes"][rel] = _md5(data)   # il locale appena pushato È l'ultimo sync
-            done.append(rel)
+            try:
+                data = local.read_bytes()
+                ds.write(rel, data)
+                st["hashes"][rel] = _md5(data)   # il locale appena pushato È l'ultimo sync
+                rep[sf.SYNCED].append(rel)
+                done.append(rel)
+            except Exception as e:  # noqa: BLE001 — un file non blocca gli altri
+                rep[sf.ERROR].append({"path": rel, "error": str(e)[:160]})
         st["push"] = [f for f in st["push"] if f not in done]
         self._save(st)
-        return {"pushed": len([r for r in done])}
+        return {"pushed": len(rep[sf.SYNCED]), "report": _finalize(rep)}
 
     def pull(self) -> dict:
         st = self._load()
         ds = self._ds(st)
+        flt = SyncFilter.from_files_dir(self.files_dir)
+        rep = _empty_report()
         pulled = 0
-        conflicts = []
-        skipped = []
         for rel, entry in _walk_drive(ds, ""):
+            # Filtro `.remoteinclude`/`.remoteignore`: un path escluso non si
+            # pulla (e non entra in sync-list). Valutato sul path logico del file.
+            verdict = flt.evaluate(rel)
+            if verdict != sf.INCLUDED:
+                rep[verdict].append(rel)
+                continue
             # Doc nativo Google (Documenti/Fogli/Presentazioni): NON è scaricabile
             # come binario (get_media → HTTP 403). Si materializza uno stub proxy
             # locale `<name>.gdrive.json` col link, coerente col mirror local-first
@@ -325,6 +384,7 @@ class DriveRemote(Remote):
                 if stub_rel not in st["sync"]:
                     st["sync"].append(stub_rel)
                 st["hashes"][stub_rel] = _md5(data)
+                rep[sf.SYNCED].append(stub_rel)
                 continue
             local = self.files_dir / rel
             # PULL INCREMENTALE: se il file locale esiste ed è già identico al remoto
@@ -334,11 +394,12 @@ class DriveRemote(Remote):
                 if rel not in st["sync"]:
                     st["sync"].append(rel)
                 st["hashes"][rel] = entry.version
+                rep[sf.SYNCED].append(rel)
                 continue
             try:
                 remote = ds.read(rel)
-            except Exception:  # noqa: BLE001 — non scaricabile → salta, non bloccare il pull
-                skipped.append(rel)
+            except Exception as e:  # noqa: BLE001 — non scaricabile → non bloccare il pull
+                rep[sf.ERROR].append({"path": rel, "error": str(e)[:160]})
                 continue
             if not local.exists():
                 local.parent.mkdir(parents=True, exist_ok=True)
@@ -347,11 +408,15 @@ class DriveRemote(Remote):
                     st["sync"].append(rel)   # nuovo → sync-list, NON push-list
                 st["hashes"][rel] = _md5(remote.data)
                 pulled += 1
+                rep[sf.SYNCED].append(rel)
             else:
                 if _md5(local.read_bytes()) == _md5(remote.data):
                     st["hashes"][rel] = _md5(remote.data)
+                    rep[sf.SYNCED].append(rel)
                     continue  # identico
-                # last-writer-wins per-file: chi è più recente vince (mtime).
+                # divergenza: NON sovrascrivere ciecamente. last-writer-wins per
+                # mtime; se il locale è più recente è un conflitto (spec: blocca
+                # il singolo file, non l'intero sync).
                 rstat = ds.stat(rel)
                 r_m = rstat.mtime if rstat else 0
                 l_m = local.stat().st_mtime
@@ -359,10 +424,14 @@ class DriveRemote(Remote):
                     local.write_bytes(remote.data)   # remoto più recente → aggiorna locale
                     st["hashes"][rel] = _md5(remote.data)
                     pulled += 1
+                    rep[sf.SYNCED].append(rel)
                 else:
-                    conflicts.append(rel)            # locale più recente → non distruggo, sarà pushato
+                    rep[sf.CONFLICT].append(rel)     # locale più recente → non distruggo
         self._save(st)
-        return {"pulled": pulled, "conflicts": conflicts, "skipped": skipped}
+        report = _finalize(rep)
+        # Retrocompat: manteniamo le chiavi storiche pulled/conflicts/skipped.
+        return {"pulled": pulled, "conflicts": rep[sf.CONFLICT],
+                "skipped": [e["path"] for e in rep[sf.ERROR]], "report": report}
 
     def status(self) -> dict:
         st = self._load()
@@ -376,11 +445,14 @@ class DriveRemote(Remote):
             sync = set(st.get("sync") or [])
             push = set(st.get("push") or [])
             hashes = st.get("hashes") or {}
+            flt = SyncFilter.from_files_dir(self.files_dir)
             for p in sorted(self.files_dir.rglob("*")):
                 if not p.is_file():
                     continue
                 rel = str(p.relative_to(self.files_dir))
-                if rel.startswith((".git/", ".trash/")) or "/.git/" in rel:
+                # Hard-deny (segreti, control-plane, cestino) fuori dal quadro:
+                # non sono sincronizzabili, non hanno stato di sync.
+                if flt.evaluate(rel) == sf.SKIP_HARD_DENY:
                     continue
                 if rel not in sync:
                     files[rel] = "unsynced"

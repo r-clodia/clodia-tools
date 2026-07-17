@@ -73,6 +73,26 @@ class GitRemoteTest(unittest.TestCase):
             self.assertTrue((a / "doc.txt").is_file())
             self.assertTrue((a / "note.md").is_file())
 
+    def test_git_commit_filters_by_remoteignore(self):
+        """Su git il filtro agisce sullo staging del commit: i path esclusi non
+        entrano nel commit (e quindi non vengono pushati)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = root / "topic" / "files"; a.mkdir(parents=True)
+            (a / ".remoteignore").write_text("*.pdf\n", encoding="utf-8")
+            (a / "keep.md").write_text("ok", encoding="utf-8")
+            (a / "drop.pdf").write_text("PDF", encoding="utf-8")
+            (a / "secret.key").write_text("KEY", encoding="utf-8")
+            r = make_remote("git", str(a))
+            r.enable({})   # git locale senza origin
+            r.commit("first")
+            tracked = subprocess.run(["git", "-C", str(a), "ls-files"],
+                                     capture_output=True, text=True).stdout.split()
+            self.assertIn("keep.md", tracked)
+            self.assertNotIn("drop.pdf", tracked)      # filtrato da .remoteignore
+            self.assertNotIn("secret.key", tracked)    # hard deny
+            self.assertNotIn(".remoteignore", tracked)  # control-plane
+
     def test_pull_conflict_escala(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -218,6 +238,57 @@ class DriveRemoteTest(unittest.TestCase):
             self.assertIn("piano.doc.gdrive.json", r._load()["sync"])
             # pull idempotente: seconda volta nessun nuovo file
             self.assertEqual(r.pull()["pulled"], 0)
+
+    def test_pull_respects_remoteinclude_ignore(self):
+        """Il filtro .remoteinclude/.remoteignore blocca il pull dei path esclusi;
+        il report riporta gli stati per-file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            files = root / "files"; files.mkdir()
+            (files / ".remoteinclude").write_text("*.csv\n*.md\n", encoding="utf-8")
+            (files / ".remoteignore").write_text("*.tmp\n", encoding="utf-8")
+            fake = _FakeDrive()
+            fake.write("dati.csv", b"a,b")          # incluso
+            fake.write("nota.md", b"# nota")         # incluso
+            fake.write("preventivo.pdf", b"%PDF")    # fuori allowlist
+            fake.write("scratch.tmp", b"tmp")        # ignorato (ma anche fuori allowlist)
+            r = DriveRemote(str(files), str(root / "state.json"),
+                            drive_factory=lambda acct, folder: fake)
+            r.enable({"folder": "F", "account": "acct"})
+            res = r.pull()
+            self.assertEqual(res["pulled"], 2)
+            self.assertTrue((files / "dati.csv").is_file())
+            self.assertTrue((files / "nota.md").is_file())
+            self.assertFalse((files / "preventivo.pdf").exists())
+            self.assertFalse((files / "scratch.tmp").exists())
+            rep = res["report"]
+            self.assertEqual(rep["counts"]["synced"], 2)
+            self.assertIn("preventivo.pdf", rep["skipped_by_include"])
+            # .remoteinclude/.remoteignore sono control-plane: non compaiono nello status
+            self.assertNotIn(".remoteinclude", r.status()["files"])
+
+    def test_push_skips_hard_deny_and_filtered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            files = root / "files"; files.mkdir()
+            (files / ".remoteignore").write_text("*.pdf\n", encoding="utf-8")
+            (files / "ok.csv").write_text("x", encoding="utf-8")
+            (files / "big.pdf").write_text("PDF", encoding="utf-8")
+            (files / "secret.key").write_text("KEY", encoding="utf-8")
+            fake = _FakeDrive()
+            r = DriveRemote(str(files), str(root / "state.json"),
+                            drive_factory=lambda acct, folder: fake)
+            r.enable({"folder": "F", "account": "acct"})
+            r.add("ok.csv"); r.add("big.pdf"); r.add("secret.key")
+            res = r.push()
+            self.assertEqual(res["pushed"], 1)          # solo ok.csv
+            self.assertIn("ok.csv", fake.files)
+            self.assertNotIn("big.pdf", fake.files)     # filtrato da .remoteignore
+            self.assertNotIn("secret.key", fake.files)  # hard deny
+            rep = res["report"]
+            self.assertIn("big.pdf", rep["skipped_by_ignore"])
+            self.assertIn("secret.key", rep["skipped_by_hard_deny"])
+            self.assertEqual(r.status()["pending"], 0)  # push-list svuotata
 
 
 if __name__ == "__main__":
