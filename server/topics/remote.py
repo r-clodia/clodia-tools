@@ -158,8 +158,30 @@ class GitRemote(Remote):
     def status(self) -> dict:
         if not self._has_git():
             return {"type": "git", "enabled": False}
-        dirty = len([l for l in self._git("status", "--porcelain").stdout.splitlines() if l.strip()])
-        return {"type": "git", "enabled": True, "origin": self._has_origin(), "dirty": dirty}
+        # Stato PER-FILE (vocabolario comune git/drive, consumato dalla UI):
+        # synced (tracked pulito), modified (worktree sporco), staged (in index),
+        # unsynced (untracked).
+        porcelain = self._git("status", "--porcelain", "--untracked-files=all").stdout.splitlines()
+        files: dict[str, str] = {}
+        for line in porcelain:
+            if len(line) < 4:
+                continue
+            x, y, rel = line[0], line[1], line[3:].strip()
+            if " -> " in rel:                     # rename: "R  old -> new"
+                rel = rel.split(" -> ", 1)[1]
+            if x == "?":
+                files[rel] = "unsynced"
+            elif x != " ":
+                files[rel] = "staged"
+            elif y != " ":
+                files[rel] = "modified"
+        for rel in self._git("ls-files").stdout.splitlines():
+            files.setdefault(rel, "synced")
+        dirty = len([l for l in porcelain if l.strip()])
+        counts = {s: sum(1 for v in files.values() if v == s)
+                  for s in ("synced", "modified", "staged", "unsynced")}
+        return {"type": "git", "enabled": True, "origin": self._has_origin(), "dirty": dirty,
+                "files": files, "counts": counts}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -176,13 +198,16 @@ class DriveRemote(Remote):
     # ── stato (config + liste) ──────────────────────────────────────────────
     def _load(self) -> dict:
         if not self.state_path.is_file():
-            return {"config": {}, "sync": [], "push": []}
+            return {"config": {}, "sync": [], "push": [], "hashes": {}}
         try:
             d = json.loads(self.state_path.read_text(encoding="utf-8"))
             d.setdefault("config", {}); d.setdefault("sync", []); d.setdefault("push", [])
+            # md5 dell'ULTIMA versione sincronizzata per-file: è ciò che permette
+            # lo stato 'modified' (locale ≠ ultimo sync) senza interrogare Drive.
+            d.setdefault("hashes", {})
             return d
         except (OSError, json.JSONDecodeError):
-            return {"config": {}, "sync": [], "push": []}
+            return {"config": {}, "sync": [], "push": [], "hashes": {}}
 
     def _save(self, st: dict) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -222,6 +247,9 @@ class DriveRemote(Remote):
         for p in paths:
             if p not in st["sync"]:
                 st["sync"].append(p)
+            local = self.files_dir / p
+            if local.is_file():   # baseline: il locale È l'ultimo sync
+                st["hashes"][p] = _md5(local.read_bytes())
         self._save(st)
 
     def commit(self, msg: str = "") -> None:
@@ -240,7 +268,9 @@ class DriveRemote(Remote):
             local = self.files_dir / rel
             if not local.is_file():
                 done.append(rel); continue   # rimosso localmente: lo togliamo dalla push-list (push-only, non cancella su Drive)
-            ds.write(rel, local.read_bytes())
+            data = local.read_bytes()
+            ds.write(rel, data)
+            st["hashes"][rel] = _md5(data)   # il locale appena pushato È l'ultimo sync
             done.append(rel)
         st["push"] = [f for f in st["push"] if f not in done]
         self._save(st)
@@ -268,6 +298,7 @@ class DriveRemote(Remote):
                     pulled += 1
                 if stub_rel not in st["sync"]:
                     st["sync"].append(stub_rel)
+                st["hashes"][stub_rel] = _md5(data)
                 continue
             local = self.files_dir / rel
             # PULL INCREMENTALE: se il file locale esiste ed è già identico al remoto
@@ -276,6 +307,7 @@ class DriveRemote(Remote):
             if local.exists() and entry.version and _md5(local.read_bytes()) == entry.version:
                 if rel not in st["sync"]:
                     st["sync"].append(rel)
+                st["hashes"][rel] = entry.version
                 continue
             try:
                 remote = ds.read(rel)
@@ -287,9 +319,11 @@ class DriveRemote(Remote):
                 local.write_bytes(remote.data)
                 if rel not in st["sync"]:
                     st["sync"].append(rel)   # nuovo → sync-list, NON push-list
+                st["hashes"][rel] = _md5(remote.data)
                 pulled += 1
             else:
                 if _md5(local.read_bytes()) == _md5(remote.data):
+                    st["hashes"][rel] = _md5(remote.data)
                     continue  # identico
                 # last-writer-wins per-file: chi è più recente vince (mtime).
                 rstat = ds.stat(rel)
@@ -297,6 +331,7 @@ class DriveRemote(Remote):
                 l_m = local.stat().st_mtime
                 if r_m > l_m:
                     local.write_bytes(remote.data)   # remoto più recente → aggiorna locale
+                    st["hashes"][rel] = _md5(remote.data)
                     pulled += 1
                 else:
                     conflicts.append(rel)            # locale più recente → non distruggo, sarà pushato
@@ -306,9 +341,36 @@ class DriveRemote(Remote):
     def status(self) -> dict:
         st = self._load()
         cfg = st.get("config") or {}
-        return {"type": "drive", "enabled": bool(cfg.get("folder")),
+        enabled = bool(cfg.get("folder"))
+        # Stato PER-FILE (stesso vocabolario di GitRemote.status): synced (in
+        # sync-list, locale == ultimo sync), staged (in push-list), modified
+        # (in sync-list ma locale cambiato), unsynced (solo locale).
+        files: dict[str, str] = {}
+        if enabled and self.files_dir.is_dir():
+            sync = set(st.get("sync") or [])
+            push = set(st.get("push") or [])
+            hashes = st.get("hashes") or {}
+            for p in sorted(self.files_dir.rglob("*")):
+                if not p.is_file():
+                    continue
+                rel = str(p.relative_to(self.files_dir))
+                if rel.startswith((".git/", ".trash/")) or "/.git/" in rel:
+                    continue
+                if rel not in sync:
+                    files[rel] = "unsynced"
+                elif rel in push:
+                    files[rel] = "staged"
+                else:
+                    h = hashes.get(rel)
+                    # senza baseline (stato legacy) assumiamo synced: la baseline
+                    # arriva col prossimo push/pull.
+                    files[rel] = "synced" if (h is None or _md5(p.read_bytes()) == h) else "modified"
+        counts = {s: sum(1 for v in files.values() if v == s)
+                  for s in ("synced", "modified", "staged", "unsynced")}
+        return {"type": "drive", "enabled": enabled,
                 "folder": cfg.get("folder"), "account": cfg.get("account"),
-                "synced": len(st.get("sync") or []), "pending": len(st.get("push") or [])}
+                "synced": len(st.get("sync") or []), "pending": len(st.get("push") or []),
+                "files": files, "counts": counts}
 
 
 # I Google Docs nativi (Documenti/Fogli/Presentazioni) non hanno contenuto
