@@ -223,3 +223,16 @@ def share(file_id: str, email: str, role: str = "writer",
                            supportsAllDrives=True).execute()
     return {"account": acct, "shared": True, "permission_id": perm.get("id"),
             "email": email, "role": role, **_clean(meta)}
+
+
+def rename(file_id: str, new_name: str, account: Optional[str] = None) -> dict:
+    """Rinomina un file/cartella Drive (files.update; funziona anche sui
+    Shared Drive via supportsAllDrives)."""
+    tool_allowed("gdrive.rename")
+    new_name = (new_name or "").strip()
+    if not new_name:
+        raise ValueError("'new_name' non può essere vuoto")
+    svc, acct = _service(account)
+    f = svc.files().update(fileId=file_id, body={"name": new_name},
+                           fields=_FIELDS, supportsAllDrives=True).execute()
+    return {"account": acct, "renamed": True, **_clean(f)}

@@ -887,6 +887,12 @@ _GDRIVE_TOOLS: list[Tool] = [
              "file_id": {"type": "string"}, "email": {"type": "string"},
              "role": {"type": "string"}, "account": {"type": "string"}},
              "required": ["file_id", "email"]}),
+    Tool(name="gdrive.rename",
+         description="Rinomina un file/cartella Drive (anche sui Shared Drive).",
+         inputSchema={"type": "object", "properties": {
+             "file_id": {"type": "string"}, "new_name": {"type": "string"},
+             "account": {"type": "string"}},
+             "required": ["file_id", "new_name"]}),
 ]
 
 # telegram.* — invio + inbound con lease per-chat. Un agente scrive solo a chat
@@ -1002,6 +1008,8 @@ def _dispatch_gdrive(name: str, a: dict):
     if verb == "share":
         return gd.share(a["file_id"], a["email"], role=a.get("role", "writer"),
                         account=a.get("account"))
+    if verb == "rename":
+        return gd.rename(a["file_id"], a["new_name"], account=a.get("account"))
     raise ValueError(f"unknown gdrive verb: {name}")
 
 
