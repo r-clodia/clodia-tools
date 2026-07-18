@@ -411,6 +411,54 @@ def send(chat_id: str, text: str) -> dict:
     return {"ok": True, "chat_id": cid, "message_id": res.get("message_id")}
 
 
+def _post_multipart(token: str, method: str, fields: dict,
+                    file_field: str, filename: str, filedata: bytes, mime: str) -> dict:
+    """POST multipart/form-data all'API Telegram (per sendDocument/sendPhoto).
+    Stdlib pura: costruisce il body a mano con un boundary casuale."""
+    boundary = "----clodia" + os.urandom(16).hex()
+    parts = []
+    for k, v in fields.items():
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode())
+    parts.append((f"--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; "
+                  f"filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n").encode())
+    parts.append(filedata)
+    parts.append(f"\r\n--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+    url = _API_BASE.format(token=token, method=method)
+    req = urllib.request.Request(url, data=body, headers={
+        "Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:200]
+        raise RuntimeError(f"telegram {method} HTTP {e.code}: {detail}") from e
+    if not payload.get("ok"):
+        raise RuntimeError(f"telegram {method}: {payload.get('description')}")
+    return payload["result"]
+
+
+def send_file(chat_id: str, filename: str, content_b64: str, caption: str = "") -> dict:
+    """Invia un file a una chat/gruppo come allegato (sendDocument) o, se è
+    un'immagine, come foto (sendPhoto). LEASE-FREE. `chat_id` accetta id o nome."""
+    import base64
+    import mimetypes
+    tool_allowed("telegram.send")
+    data = base64.b64decode(content_b64)
+    cid = _resolve_chat(chat_id)
+    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    as_photo = mime.startswith("image/") and not filename.lower().endswith((".svg", ".gif"))
+    method, field = ("sendPhoto", "photo") if as_photo else ("sendDocument", "document")
+    fields = {"chat_id": str(cid)}
+    if caption:
+        fields["caption"] = caption
+    with _LOCK:
+        token = _token()
+    res = _post_multipart(token, method, fields, field, filename, data, mime)
+    return {"ok": True, "chat_id": cid, "message_id": res.get("message_id"),
+            "as_photo": as_photo}
+
+
 def lease_release(chat_id: str) -> dict:
     """Rilascia anticipatamente il lease su una chat (no-op se non lo detieni)."""
     tool_allowed("telegram.lease_release")
