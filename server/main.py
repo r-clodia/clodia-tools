@@ -1014,8 +1014,9 @@ _TELEGRAM_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {
              "chat_id": {"type": "string"}}, "required": ["chat_id"]}),
     Tool(name="telegram.send",
-         description=("Invia un messaggio a una chat. Consentito SOLO verso una chat che ha "
-                      "già scritto al bot e di cui detieni il lease."),
+         description=("Invia un messaggio a una chat/gruppo (lease-free: sei l'unico "
+                      "mittente). Vincolo Telegram: la chat deve aver già contattato il "
+                      "bot, o il bot dev'essere membro del gruppo."),
          inputSchema={"type": "object", "properties": {
              "chat_id": {"type": "string"}, "text": {"type": "string"}},
              "required": ["chat_id", "text"]}),
