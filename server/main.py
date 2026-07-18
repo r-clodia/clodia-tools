@@ -1024,13 +1024,16 @@ _TELEGRAM_TOOLS: list[Tool] = [
     Tool(name="telegram.send_file",
          description=("Invia un FILE del topic a una chat/gruppo Telegram come allegato "
                       "(o come foto se è un'immagine). Solo tu (messaggero) puoi spedire. "
-                      "`chat_id` accetta id o nome gruppo."),
+                      "Passa `chat_id` (id o NOME del gruppo) e `path` (il file dentro il "
+                      "topic, es. `files/foo.png`): il TOPIC si ricava dal gruppo. `tier`/"
+                      "`name` solo se il file è in un topic diverso da quello del gruppo."),
          inputSchema={"type": "object", "properties": {
              "chat_id": {"type": "string", "description": "chat_id o nome del gruppo"},
-             "tier": {"type": "string"}, "name": {"type": "string"},
-             "path": {"type": "string", "description": "path del file nel topic, es. files/foo.pdf"},
+             "path": {"type": "string", "description": "path del file nel topic, es. files/foo.png"},
+             "tier": {"type": "string", "description": "opzionale (override topic)"},
+             "name": {"type": "string", "description": "opzionale: nome del topic (override)"},
              "caption": {"type": "string"}},
-             "required": ["chat_id", "tier", "name", "path"]}),
+             "required": ["chat_id", "path"]}),
     Tool(name="telegram.lease_release",
          description="Rilascia anticipatamente il lease su una chat (no-op se non lo detieni).",
          inputSchema={"type": "object", "properties": {
@@ -1182,12 +1185,21 @@ def _dispatch_telegram(name: str, a: dict):
         return tg.send(a["chat_id"], a["text"])
     if verb == "send_file":
         # Legge il file dal topic (compartimento: dev'essere participant) e lo invia.
+        # Il TOPIC si ricava dal gruppo (binding chat→topic), così basta chat + path;
+        # `tier`/`name` sono override opzionali per topic diversi da quello del gruppo.
         import base64
         import os as _os
-        tier, tname, path = a["tier"], a["name"], a["path"]
+        from .tools import telegram_bindings as _tb
+        cid = tg._resolve_chat(a["chat_id"])
+        tier, tname = a.get("tier"), a.get("name")
+        if not (tier and tname):
+            b = _tb.get(cid)
+            if not b:
+                raise ValueError(f"chat {cid} non legata a un topic: passa tier+name del topic")
+            tier, tname = b["tier"], b["topic"]
         _require_topic_member(_topics(), tier, tname)
-        data = _topics().read_file(tier, tname, path)
-        return tg.send_file(a["chat_id"], _os.path.basename(path),
+        data = _topics().read_file(tier, tname, a["path"])
+        return tg.send_file(cid, _os.path.basename(a["path"]),
                             base64.b64encode(data).decode("ascii"), a.get("caption", ""))
     if verb == "lease_release":
         return tg.lease_release(a["chat_id"])
