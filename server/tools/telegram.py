@@ -157,6 +157,42 @@ def send_internal(chat_id: str, text: str) -> dict:
     return {"ok": True, "chat_id": str(chat_id), "message_id": res.get("message_id")}
 
 
+def poll_updates(timeout: int = 25) -> list:
+    """LONG-POLL: getUpdates con timeout lungo — Telegram trattiene la connessione
+    e risponde nell'ISTANTE in cui arriva un messaggio (latenza ~zero, meno carico
+    dei poll ripetuti). Ritorna i messaggi nuovi di TUTTE le chat, avanzando
+    l'offset. È l'UNICO consumer getUpdates del bot: non usare drain/inbox/poll in
+    parallelo (Telegram ammette un solo getUpdates per bot → 409)."""
+    with _LOCK:
+        offset = _load_state()["offset"]
+        token = _token_internal()
+    # getUpdates FUORI dal lock: blocca fino a `timeout`s senza congelare send/stato.
+    updates = api_call(token, "getUpdates",
+                       {"offset": offset, "timeout": timeout, "limit": 100},
+                       timeout=timeout + 10)
+    out = []
+    with _LOCK:
+        st = _load_state()
+        for upd in updates or []:
+            st["offset"] = max(st["offset"], int(upd["update_id"]) + 1)
+            msg = upd.get("message") or upd.get("edited_message")
+            if not msg or "chat" not in msg:
+                continue
+            frm = msg.get("from") or {}
+            out.append({
+                "chat_id": str(msg["chat"]["id"]),
+                "message_id": msg.get("message_id"),
+                "from": " ".join(x for x in (frm.get("first_name"), frm.get("last_name")) if x)
+                        or (frm.get("username") or str(frm.get("id"))),
+                "from_id": frm.get("id"),
+                "from_username": frm.get("username"),
+                "text": msg.get("text") or msg.get("caption") or "",
+            })
+        st["last_error"] = None
+        _save_state(st)
+    return out
+
+
 def _chat_title(chat: dict) -> str:
     if chat.get("title"):
         return chat["title"]
