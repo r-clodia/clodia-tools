@@ -152,9 +152,10 @@ def send_internal(chat_id: str, text: str) -> dict:
     unico consumer del binding chat↔topic)."""
     if not str(text).strip():
         raise ValueError("'text' non può essere vuoto")
+    cid = _resolve_chat(chat_id)           # accetta chat_id numerico o nome gruppo
     res = api_call(_token_internal(), "sendMessage",
-                   {"chat_id": int(chat_id), "text": str(text)})
-    return {"ok": True, "chat_id": str(chat_id), "message_id": res.get("message_id")}
+                   {"chat_id": int(cid), "text": str(text)})
+    return {"ok": True, "chat_id": cid, "message_id": res.get("message_id")}
 
 
 def poll_updates(timeout: int = 25) -> list:
@@ -186,6 +187,7 @@ def poll_updates(timeout: int = 25) -> list:
                                 and rfrm.get("username") == bot_uname)
             out.append({
                 "chat_id": str(msg["chat"]["id"]),
+                "chat_title": _chat_title(msg["chat"]),
                 "message_id": msg.get("message_id"),
                 "from": " ".join(x for x in (frm.get("first_name"), frm.get("last_name")) if x)
                         or (frm.get("username") or str(frm.get("id"))),
@@ -206,6 +208,26 @@ def _chat_title(chat: dict) -> str:
     if chat.get("username"):
         name = f"{name} (@{chat['username']})".strip()
     return name or str(chat.get("id"))
+
+
+def _resolve_chat(chat: str) -> str:
+    """Risolve un riferimento chat a un chat_id. Accetta un chat_id numerico
+    (es. `-5279916551`) oppure il NOME/titolo del gruppo (match case-insensitive,
+    anche parziale) fra le chat note. Così la delega può usare il nome leggibile."""
+    c = str(chat).strip()
+    if c.lstrip("-").isdigit():
+        return c
+    low = c.lower()
+    with _LOCK:
+        chats = _load_state().get("chats", {})
+    # match esatto sul titolo, poi parziale
+    for cid, meta in chats.items():
+        if str(meta.get("title", "")).lower() == low:
+            return cid
+    for cid, meta in chats.items():
+        if low and low in str(meta.get("title", "")).lower():
+            return cid
+    raise ValueError(f"chat '{chat}' non trovata (né chat_id numerico né titolo noto)")
 
 
 def _refresh(st: dict, token: str) -> int:
@@ -343,9 +365,9 @@ def send(chat_id: str, text: str) -> dict:
     esclusivo — sarebbe solo attrito. Vale il vincolo di Telegram: si può scrivere
     solo a chi ha già contattato il bot (o a un gruppo di cui il bot è membro)."""
     tool_allowed("telegram.send")
-    cid = str(chat_id)
     if not text:
         raise ValueError("'text' non può essere vuoto")
+    cid = _resolve_chat(chat_id)           # accetta chat_id numerico o nome gruppo
     with _LOCK:
         token = _token()
     res = api_call(token, "sendMessage", {"chat_id": int(cid), "text": text})
