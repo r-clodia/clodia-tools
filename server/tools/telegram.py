@@ -173,12 +173,17 @@ def poll_updates(timeout: int = 25) -> list:
     out = []
     with _LOCK:
         st = _load_state()
+        bot_uname = st.get("bot_username")
         for upd in updates or []:
             st["offset"] = max(st["offset"], int(upd["update_id"]) + 1)
             msg = upd.get("message") or upd.get("edited_message")
             if not msg or "chat" not in msg:
                 continue
             frm = msg.get("from") or {}
+            # Reply a un messaggio del BOT stesso → conta come menzione diretta.
+            rfrm = (msg.get("reply_to_message") or {}).get("from") or {}
+            reply_to_bot = bool(rfrm.get("is_bot") and bot_uname
+                                and rfrm.get("username") == bot_uname)
             out.append({
                 "chat_id": str(msg["chat"]["id"]),
                 "message_id": msg.get("message_id"),
@@ -187,6 +192,7 @@ def poll_updates(timeout: int = 25) -> list:
                 "from_id": frm.get("id"),
                 "from_username": frm.get("username"),
                 "text": msg.get("text") or msg.get("caption") or "",
+                "reply_to_bot": reply_to_bot,
             })
         st["last_error"] = None
         _save_state(st)
