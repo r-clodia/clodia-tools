@@ -97,8 +97,26 @@ async def poll(request: Request):
         return JSONResponse({"error": str(e)[:200]}, status_code=502)
 
 
+async def download(request: Request):
+    """POST /internal/telegram/download {file_id} → scarica un file da Telegram e
+    ritorna {content_b64, size}. Il relay lo salva nello storage del topic."""
+    _agent, err = _authorize(request)
+    if err:
+        return err
+    body = await request.json()
+    file_id = str(body.get("file_id") or "").strip()
+    if not file_id:
+        return JSONResponse({"error": "file_id richiesto"}, status_code=400)
+    try:
+        return JSONResponse(await asyncio.to_thread(tg.download_file, file_id))
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("telegram download errore: %s", e)
+        return JSONResponse({"error": str(e)[:200]}, status_code=502)
+
+
 routes = [
     Route("/internal/telegram/updates", updates, methods=["POST"]),
     Route("/internal/telegram/send", send, methods=["POST"]),
     Route("/internal/telegram/poll", poll, methods=["POST"]),
+    Route("/internal/telegram/download", download, methods=["POST"]),
 ]
