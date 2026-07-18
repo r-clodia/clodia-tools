@@ -555,12 +555,33 @@ class TopicService:
         self._write_meta(tier, name, meta, base_version=ver)
         return meta
 
+    def _chat_owner_topic(self, chat_id: str, exclude: tuple | None = None):
+        """(tier, name) del topic che già ascolta `chat_id`, o None. Garantisce
+        l'invariante UNA chat → UN solo topic (evita il drain distruttivo condiviso:
+        chi draga per primo consuma il messaggio, gli altri lo perdono)."""
+        cid = str(chat_id)
+        for row in self.list(None, include_archived=True):
+            ch = row.get("channel") or {}
+            if cid in (ch.get("listens") or []):
+                key = (row.get("tier"), row.get("name"))
+                if key != exclude:
+                    return key
+        return None
+
     def channel_listen(self, tier: str, name: str, chat_id: str,
-                       listen: bool = True) -> dict:
+                       listen: bool = True, messenger: str | None = None) -> dict:
         """Aggiunge/rimuove una chat_id dall'insieme `listens` del channel
         Telegram del topic (modello telegram-proxy). Crea il channel telegram se
-        assente (applicando la SEAL-cap). `listen=False` → unlisten. Ritorna il
-        meta aggiornato. Il relay inbound serve i topic con `listens` non vuoto."""
+        assente (applicando la SEAL-cap). `listen=False` → unlisten. `messenger` =
+        istanza messaggero che ha stabilito il binding. Ritorna il meta aggiornato.
+        Invariante: una chat può essere ascoltata da UN solo topic."""
+        cid = str(chat_id)
+        if listen:
+            owner = self._chat_owner_topic(cid, exclude=(tier, name))
+            if owner is not None:
+                raise TopicError(
+                    f"chat {cid} già in ascolto sul topic {owner[0]}/{owner[1]}: "
+                    f"fai prima telegram.unlisten lì (una chat → un solo topic)")
         meta, ver = self._read_meta(tier, name)
         ch = dict(meta.get("channel") or {})
         if not ch:
@@ -569,10 +590,11 @@ class TopicService:
             raise TopicError(f"channel del topic {tier}/{name} non è telegram")
         _check_channel_cap(ch, meta.get("tier", tier))
         cur = list(ch.get("listens") or [])
-        cid = str(chat_id)
         if listen:
             if cid not in cur:
                 cur.append(cid)
+            if messenger:
+                ch["messenger"] = messenger
         else:
             cur = [c for c in cur if c != cid]
         ch["listens"] = cur
