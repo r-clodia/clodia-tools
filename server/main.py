@@ -1172,15 +1172,27 @@ def _dispatch_telegram(name: str, a: dict):
     if verb == "lease_release":
         return tg.lease_release(a["chat_id"])
     if verb in ("listen", "unlisten"):
-        # Verbi topic-scoped: enforcement compartimento+livello come i topic.* —
-        # il messaggero dev'essere partecipante del topic che collega/scollega.
+        # Binding sull'ISTANZA del messaggero (telegram-bindings.json), NON nel
+        # meta del topic. Il messaggero dev'essere partecipante del topic in cui
+        # ripeterà. Enforcement compartimento come i topic.*.
+        from .tools import telegram_bindings as tb
+        from .topics.service import _check_channel_cap
+        cid = str(a["chat_id"])
         tier, tname = a["tier"], a["name"]
         _require_topic_member(_topics(), tier, tname)
-        meta = _topics().channel_listen(tier, tname, a["chat_id"],
-                                        listen=(verb == "listen"),
-                                        messenger=(agent_name() if verb == "listen" else None))
-        return {"ok": True, "tier": tier, "name": tname,
-                "listens": (meta.get("channel") or {}).get("listens", [])}
+        if verb == "unlisten":
+            return {"ok": True, "chat_id": cid, "removed": tb.remove(cid)}
+        # listen: SEAL-cap (telegram cappa a SEAL-1) + una chat → un solo binding.
+        meta = _topics().open(tier, tname).get("meta", {})
+        _check_channel_cap({"type": "telegram"}, meta.get("tier", tier))
+        ex = tb.get(cid)
+        if ex and (ex.get("tier"), ex.get("topic")) != (tier, tname):
+            raise ValueError(
+                f"chat {cid} già collegata a {ex.get('tier')}/{ex.get('topic')}: "
+                f"fai prima telegram.unlisten lì (una chat → un solo topic)")
+        tb.set_binding(cid, agent_name(), tier, tname)
+        return {"ok": True, "chat_id": cid, "instance": agent_name(),
+                "topic": f"{tier}/{tname}"}
     raise ValueError(f"unknown telegram verb: {name}")
 
 
