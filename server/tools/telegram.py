@@ -158,6 +158,42 @@ def send_internal(chat_id: str, text: str) -> dict:
     return {"ok": True, "chat_id": cid, "message_id": res.get("message_id")}
 
 
+def _extract_file(msg: dict):
+    """Se il messaggio Telegram ha un allegato (documento/foto/video/audio/voce),
+    ritorna {file_id, file_name, mime}; altrimenti None."""
+    if msg.get("document"):
+        d = msg["document"]
+        return {"file_id": d["file_id"],
+                "file_name": d.get("file_name") or f"document_{str(d['file_id'])[:10]}",
+                "mime": d.get("mime_type")}
+    if msg.get("photo"):
+        p = msg["photo"][-1]   # la risoluzione più alta
+        return {"file_id": p["file_id"],
+                "file_name": f"photo_{str(p['file_id'])[:10]}.jpg", "mime": "image/jpeg"}
+    for key, ext in (("video", "mp4"), ("audio", "mp3"), ("voice", "ogg"),
+                     ("animation", "mp4")):
+        if msg.get(key):
+            m = msg[key]
+            return {"file_id": m["file_id"],
+                    "file_name": m.get("file_name") or f"{key}_{str(m['file_id'])[:10]}.{ext}",
+                    "mime": m.get("mime_type")}
+    return None
+
+
+def download_file(file_id: str) -> dict:
+    """Scarica un file di Telegram (getFile + download). Ritorna {content_b64, size}."""
+    import base64
+    token = _token_internal()
+    info = api_call(token, "getFile", {"file_id": file_id})
+    fpath = info.get("file_path")
+    if not fpath:
+        raise RuntimeError("getFile senza file_path")
+    url = f"https://api.telegram.org/file/bot{token}/{fpath}"
+    with urllib.request.urlopen(url, timeout=60) as resp:
+        data = resp.read()
+    return {"content_b64": base64.b64encode(data).decode("ascii"), "size": len(data)}
+
+
 def poll_updates(timeout: int = 25) -> list:
     """LONG-POLL: getUpdates con timeout lungo — Telegram trattiene la connessione
     e risponde nell'ISTANTE in cui arriva un messaggio (latenza ~zero, meno carico
@@ -194,6 +230,7 @@ def poll_updates(timeout: int = 25) -> list:
                 "from_id": frm.get("id"),
                 "from_username": frm.get("username"),
                 "text": msg.get("text") or msg.get("caption") or "",
+                "file": _extract_file(msg),
                 "reply_to_bot": reply_to_bot,
             })
         st["last_error"] = None
