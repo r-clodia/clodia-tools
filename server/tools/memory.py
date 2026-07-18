@@ -17,7 +17,9 @@ from pathlib import Path
 
 from ..whitelist import agent_name
 
-_DEFAULT_FILE = "memory.md"
+# Convenzione di piattaforma (come Clodia Primal e l'endpoint /memories della
+# webui): l'indice/note dell'agente è `MEMORY.md` (+ eventuali altri file .md).
+_DEFAULT_FILE = "MEMORY.md"
 # Cap difensivo sulla dimensione di un singolo file di memory (evita di gonfiare
 # il contesto LLM che la carica sempre).
 _MAX_BYTES = 64 * 1024
