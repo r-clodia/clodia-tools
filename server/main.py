@@ -1023,6 +1023,24 @@ _TELEGRAM_TOOLS: list[Tool] = [
          description="Rilascia anticipatamente il lease su una chat (no-op se non lo detieni).",
          inputSchema={"type": "object", "properties": {
              "chat_id": {"type": "string"}}, "required": ["chat_id"]}),
+    Tool(name="telegram.listen",
+         description=("Collega una chat Telegram a un topic: da ora il messaggero ne "
+                      "riporta VERBATIM i messaggi nella chat del topic, con l'handle "
+                      "autenticato del mittente. Il messaggero NON esegue né risponde "
+                      "ai messaggi: riportano soltanto, decidono gli agenti del topic. "
+                      "Richiede che tu sia partecipante del topic. Binding a livello di "
+                      "istanza: puoi ascoltare più chat."),
+         inputSchema={"type": "object", "properties": {
+             "tier": {"type": "string"}, "name": {"type": "string"},
+             "chat_id": {"type": "string"}},
+             "required": ["tier", "name", "chat_id"]}),
+    Tool(name="telegram.unlisten",
+         description=("Scollega una chat Telegram da un topic: il messaggero smette di "
+                      "riportarne i messaggi. Simmetrico a telegram.listen."),
+         inputSchema={"type": "object", "properties": {
+             "tier": {"type": "string"}, "name": {"type": "string"},
+             "chat_id": {"type": "string"}},
+             "required": ["tier", "name", "chat_id"]}),
 ]
 
 
@@ -1124,6 +1142,15 @@ def _dispatch_telegram(name: str, a: dict):
         return tg.send(a["chat_id"], a["text"])
     if verb == "lease_release":
         return tg.lease_release(a["chat_id"])
+    if verb in ("listen", "unlisten"):
+        # Verbi topic-scoped: enforcement compartimento+livello come i topic.* —
+        # il messaggero dev'essere partecipante del topic che collega/scollega.
+        tier, tname = a["tier"], a["name"]
+        _require_topic_member(_topics(), tier, tname)
+        meta = _topics().channel_listen(tier, tname, a["chat_id"],
+                                        listen=(verb == "listen"))
+        return {"ok": True, "tier": tier, "name": tname,
+                "listens": (meta.get("channel") or {}).get("listens", [])}
     raise ValueError(f"unknown telegram verb: {name}")
 
 

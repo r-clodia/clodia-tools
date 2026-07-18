@@ -58,14 +58,26 @@ def _tier_rank(t: str | None) -> int:
 # Telegram = SEAL-1 (FZ-LLC Dubai, server non-UE, gruppi non-E2E). Un topic con
 # quel channel non può superare il cap. webui = nessun cap (default).
 _CHANNEL_SEAL_CAP = {"telegram": 1}
-_CHANNEL_FIELDS = ("type", "chat_id", "bot_ref")
+# type/chat_id/bot_ref = legacy; listens/participants/messenger = modello
+# telegram-proxy (18 lug): `listens` = chat_id ascoltate dall'istanza messaggero
+# partecipe del topic (binding 1:N); `participants` = mappa telegram_uid→diritti
+# (command|dialogue) per il giudizio degli agenti; `messenger` = nome dell'istanza.
+_CHANNEL_FIELDS = ("type", "chat_id", "bot_ref", "listens", "participants", "messenger")
 
 
 def _clean_channel(ch: dict) -> dict:
-    """Tiene solo i campi ammessi del channel; normalizza chat_id a stringa."""
+    """Tiene solo i campi ammessi del channel; normalizza gli id a stringa."""
     out = {k: ch.get(k) for k in _CHANNEL_FIELDS if ch.get(k) is not None}
     if "chat_id" in out:
         out["chat_id"] = str(out["chat_id"])
+    if "listens" in out:
+        # lista di chat_id, stringhe, deduplicata, ordine stabile.
+        out["listens"] = list(dict.fromkeys(str(c) for c in (out["listens"] or [])))
+    if "participants" in out:
+        # mappa uid(str) → "command"|"dialogue"; scarta valori non ammessi.
+        out["participants"] = {
+            str(uid): rights for uid, rights in (out["participants"] or {}).items()
+            if rights in ("command", "dialogue")}
     out.setdefault("bot_ref", "telegram_bot_token")
     return out
 
@@ -540,6 +552,31 @@ class TopicService:
         else:
             _check_channel_cap(channel, meta.get("tier", tier))
             meta["channel"] = _clean_channel(channel)
+        self._write_meta(tier, name, meta, base_version=ver)
+        return meta
+
+    def channel_listen(self, tier: str, name: str, chat_id: str,
+                       listen: bool = True) -> dict:
+        """Aggiunge/rimuove una chat_id dall'insieme `listens` del channel
+        Telegram del topic (modello telegram-proxy). Crea il channel telegram se
+        assente (applicando la SEAL-cap). `listen=False` → unlisten. Ritorna il
+        meta aggiornato. Il relay inbound serve i topic con `listens` non vuoto."""
+        meta, ver = self._read_meta(tier, name)
+        ch = dict(meta.get("channel") or {})
+        if not ch:
+            ch = {"type": "telegram"}
+        if ch.get("type") != "telegram":
+            raise TopicError(f"channel del topic {tier}/{name} non è telegram")
+        _check_channel_cap(ch, meta.get("tier", tier))
+        cur = list(ch.get("listens") or [])
+        cid = str(chat_id)
+        if listen:
+            if cid not in cur:
+                cur.append(cid)
+        else:
+            cur = [c for c in cur if c != cid]
+        ch["listens"] = cur
+        meta["channel"] = _clean_channel(ch)
         self._write_meta(tier, name, meta, base_version=ver)
         return meta
 
