@@ -296,26 +296,15 @@ def poll(chat_id: str) -> dict:
 
 
 def send(chat_id: str, text: str) -> dict:
-    """Invia un messaggio a una chat. Consentito SOLO verso una chat che ha già
-    scritto (presente in inbox) e di cui il chiamante detiene il lease."""
+    """Invia un messaggio a una chat. LEASE-FREE (modello telegram-proxy, 18 lug):
+    il messaggero è l'UNICO mittente della colonia, quindi non serve il lease
+    esclusivo — sarebbe solo attrito. Vale il vincolo di Telegram: si può scrivere
+    solo a chi ha già contattato il bot (o a un gruppo di cui il bot è membro)."""
     tool_allowed("telegram.send")
     cid = str(chat_id)
-    me = agent_name()
     if not text:
         raise ValueError("'text' non può essere vuoto")
     with _LOCK:
-        st = _load_state()
-        chat = st["chats"].get(cid)
-        if chat is None:
-            raise ValueError(
-                f"chat '{cid}' sconosciuta: si può scrivere solo a chi ha già "
-                f"contattato il bot (vedi telegram.inbox)")
-        lease = _lease_active(chat)
-        if not lease or lease["holder"] != me:
-            raise PermissionError(
-                f"per scrivere a '{cid}' devi detenere il lease "
-                f"(telegram.lease_acquire); attuale: "
-                f"{lease['holder'] if lease else 'nessuno'}")
         token = _token()
     res = api_call(token, "sendMessage", {"chat_id": int(cid), "text": text})
     return {"ok": True, "chat_id": cid, "message_id": res.get("message_id")}

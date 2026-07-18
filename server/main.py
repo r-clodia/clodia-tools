@@ -1014,8 +1014,9 @@ _TELEGRAM_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {
              "chat_id": {"type": "string"}}, "required": ["chat_id"]}),
     Tool(name="telegram.send",
-         description=("Invia un messaggio a una chat. Consentito SOLO verso una chat che ha "
-                      "già scritto al bot e di cui detieni il lease."),
+         description=("Invia un messaggio a una chat/gruppo (lease-free: sei l'unico "
+                      "mittente). Vincolo Telegram: la chat deve aver già contattato il "
+                      "bot, o il bot dev'essere membro del gruppo."),
          inputSchema={"type": "object", "properties": {
              "chat_id": {"type": "string"}, "text": {"type": "string"}},
              "required": ["chat_id", "text"]}),
@@ -1023,6 +1024,52 @@ _TELEGRAM_TOOLS: list[Tool] = [
          description="Rilascia anticipatamente il lease su una chat (no-op se non lo detieni).",
          inputSchema={"type": "object", "properties": {
              "chat_id": {"type": "string"}}, "required": ["chat_id"]}),
+    Tool(name="telegram.listen",
+         description=("Collega una chat Telegram a un topic: da ora il messaggero ne "
+                      "riporta VERBATIM i messaggi nella chat del topic, con l'handle "
+                      "autenticato del mittente. Il messaggero NON esegue né risponde "
+                      "ai messaggi: riportano soltanto, decidono gli agenti del topic. "
+                      "Richiede che tu sia partecipante del topic. Binding a livello di "
+                      "istanza: puoi ascoltare più chat."),
+         inputSchema={"type": "object", "properties": {
+             "tier": {"type": "string"}, "name": {"type": "string"},
+             "chat_id": {"type": "string"}},
+             "required": ["tier", "name", "chat_id"]}),
+    Tool(name="telegram.unlisten",
+         description=("Scollega una chat Telegram da un topic: il messaggero smette di "
+                      "riportarne i messaggi. Simmetrico a telegram.listen."),
+         inputSchema={"type": "object", "properties": {
+             "tier": {"type": "string"}, "name": {"type": "string"},
+             "chat_id": {"type": "string"}},
+             "required": ["tier", "name", "chat_id"]}),
+]
+
+
+# memory.* — seed memory scrivibile dell'agente (universale, non richiede grant).
+_MEMORY_TOOLS: list[Tool] = [
+    Tool(name="memory.read",
+         description=("Legge un file della tua seed memory (default `memory.md`, la tua "
+                      "memoria di note/esperienza sempre disponibile). La memory è "
+                      "condivisa fra le tue istanze."),
+         inputSchema={"type": "object", "properties": {
+             "filename": {"type": "string", "description": "default memory.md"}}}),
+    Tool(name="memory.write",
+         description=("Scrive (sovrascrive) un file della tua seed memory. Usa per "
+                      "aggiornare note durature o dati strutturati (es. una whitelist "
+                      "JSON). Cap 64KB per file."),
+         inputSchema={"type": "object", "properties": {
+             "content": {"type": "string"},
+             "filename": {"type": "string", "description": "default memory.md"}},
+             "required": ["content"]}),
+    Tool(name="memory.append",
+         description="Aggiunge una nota in coda a un file della seed memory (default memory.md).",
+         inputSchema={"type": "object", "properties": {
+             "content": {"type": "string"},
+             "filename": {"type": "string", "description": "default memory.md"}},
+             "required": ["content"]}),
+    Tool(name="memory.list",
+         description="Elenca i file nella tua seed memory.",
+         inputSchema={"type": "object", "properties": {}}),
 ]
 
 
@@ -1124,13 +1171,49 @@ def _dispatch_telegram(name: str, a: dict):
         return tg.send(a["chat_id"], a["text"])
     if verb == "lease_release":
         return tg.lease_release(a["chat_id"])
+    if verb in ("listen", "unlisten"):
+        # Binding sull'ISTANZA del messaggero (telegram-bindings.json), NON nel
+        # meta del topic. Il messaggero dev'essere partecipante del topic in cui
+        # ripeterà. Enforcement compartimento come i topic.*.
+        from .tools import telegram_bindings as tb
+        from .topics.service import _check_channel_cap
+        cid = str(a["chat_id"])
+        tier, tname = a["tier"], a["name"]
+        _require_topic_member(_topics(), tier, tname)
+        if verb == "unlisten":
+            return {"ok": True, "chat_id": cid, "removed": tb.remove(cid)}
+        # listen: SEAL-cap (telegram cappa a SEAL-1) + una chat → un solo binding.
+        meta = _topics().open(tier, tname).get("meta", {})
+        _check_channel_cap({"type": "telegram"}, meta.get("tier", tier))
+        ex = tb.get(cid)
+        if ex and (ex.get("tier"), ex.get("topic")) != (tier, tname):
+            raise ValueError(
+                f"chat {cid} già collegata a {ex.get('tier')}/{ex.get('topic')}: "
+                f"fai prima telegram.unlisten lì (una chat → un solo topic)")
+        tb.set_binding(cid, agent_name(), tier, tname)
+        return {"ok": True, "chat_id": cid, "instance": agent_name(),
+                "topic": f"{tier}/{tname}"}
     raise ValueError(f"unknown telegram verb: {name}")
+
+
+def _dispatch_memory(name: str, a: dict):
+    from .tools import memory as mem
+    verb = name.split(NS_SEP_DOT, 1)[1]
+    if verb == "read":
+        return mem.read(a.get("filename"))
+    if verb == "write":
+        return mem.write(a["content"], a.get("filename"))
+    if verb == "append":
+        return mem.append(a["content"], a.get("filename"))
+    if verb == "list":
+        return mem.list_files()
+    raise ValueError(f"unknown memory verb: {name}")
 
 
 def _native_tool_namespaces() -> list[str]:
     """Namespace dei tool nativi del gateway (per agents.list_tools)."""
     tools = (_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
-             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
+             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
              + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
@@ -1331,9 +1414,17 @@ def _email_account(arguments: dict) -> str:
     return accts[0] if len(accts) == 1 else "demo"
 
 
+# Namespace UNIVERSALI: disponibili a OGNI agente senza grant per-agente.
+# `memory` = la seed memory dell'agente stesso (scoped alla sua sola cartella),
+# accumulo di esperienza scrivibile da tutti (inclusi i nativi).
+_UNIVERSAL_NS = {"memory"}
+
+
 def _tool_allowed(name: str, allowed: set) -> bool:
     """True se il tool è in whitelist. Supporta il wildcard ``<backend>.*`` che
     concede TUTTI i tool di un backend MCP montato (usato dall'Add-MCP UI)."""
+    if NS_SEP_DOT in name and name.split(NS_SEP_DOT, 1)[0] in _UNIVERSAL_NS:
+        return True
     if name in allowed:
         return True
     if NS_SEP_DOT in name and f"{name.split(NS_SEP_DOT, 1)[0]}.*" in allowed:
@@ -1351,7 +1442,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
+    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
                   + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     # Feature `rag` (profilo istanza): off → i verbi rag.*/eu_corpus.* non
     # esistono proprio (né in lista né al dispatch).
@@ -1464,6 +1555,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_settings(name, arguments, _ag)
         elif name.startswith("telegram."):
             result = _dispatch_telegram(name, arguments)
+        elif name.startswith("memory."):
+            result = _dispatch_memory(name, arguments)
         elif name.startswith("gdrive."):
             result = _dispatch_gdrive(name, arguments)
         elif name.startswith("runtime."):
