@@ -9,6 +9,7 @@ chiamante.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -75,7 +76,29 @@ async def send(request: Request):
         return JSONResponse({"error": str(e)[:200]}, status_code=502)
 
 
+async def poll(request: Request):
+    """POST /internal/telegram/poll {timeout} → LONG-POLL: blocca fino a che arriva
+    un messaggio (o scade timeout) e ritorna i messaggi nuovi di tutte le chat.
+    Il relay del backend lo chiama in loop → latenza quasi zero."""
+    _agent, err = _authorize(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    timeout = max(1, min(50, int(body.get("timeout", 25))))
+    try:
+        # getUpdates blocca `timeout`s → in un thread per non congelare l'event loop.
+        msgs = await asyncio.to_thread(tg.poll_updates, timeout)
+        return JSONResponse({"messages": msgs, "count": len(msgs)})
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("telegram poll errore: %s", e)
+        return JSONResponse({"error": str(e)[:200]}, status_code=502)
+
+
 routes = [
     Route("/internal/telegram/updates", updates, methods=["POST"]),
     Route("/internal/telegram/send", send, methods=["POST"]),
+    Route("/internal/telegram/poll", poll, methods=["POST"]),
 ]
