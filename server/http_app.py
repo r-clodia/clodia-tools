@@ -61,9 +61,15 @@ class _AuthMiddleware:
         ttok = whitelist.set_current_token(token or None)
         # clearance firmata → enforcement clearance≥tier sui topic
         ctok = whitelist.set_current_clearance(payload.get("clearance") or None)
+        # RBAC umana (PDP unico): claim firmati dall'agent-server per le chiamate
+        # ON-BEHALF di un umano → autorizzazione per ruolo, non per carrier-agent.
+        obtok = whitelist.set_current_on_behalf(bool(payload.get("on_behalf")))
+        hrtok = whitelist.set_current_human_role(payload.get("human_role") or None)
         try:
             await self.handler(scope, receive, send)
         finally:
+            whitelist.reset_current_human_role(hrtok)
+            whitelist.reset_current_on_behalf(obtok)
             whitelist.reset_current_clearance(ctok)
             whitelist.reset_current_token(ttok)
             whitelist.reset_current_principal(ptok)
@@ -113,10 +119,13 @@ def build_app() -> Starlette:
     from .vault_api import routes as vault_routes
     # Grant SUDO (M-sudo): un admin approvatore eleva un sudoer time-boxed.
     from .sudo_api import routes as sudo_routes
+    # Facade tool (M-authz): PDP unico agenti+umani — la webui inoltra qui.
+    from .tool_api import routes as tool_routes
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
                 *imagegen_routes, *topics_routes, *connectors_routes, *profile_routes,
-                *telegram_routes, *agents_routes, *vault_routes, *sudo_routes],
+                *telegram_routes, *agents_routes, *vault_routes, *sudo_routes,
+                *tool_routes],
         lifespan=_lifespan)
 
 
