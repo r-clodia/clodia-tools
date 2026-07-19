@@ -114,3 +114,44 @@ def verify_session_token(token: str) -> dict:
     if int(payload.get("exp", 0)) < time.time():
         raise PermissionError("token scaduto")
     return payload
+
+
+# ── Capability token SUDO (ccap1) ────────────────────────────────────────────
+# Un capability-token è la prova crittografica di un'approvazione umana: "l'agente
+# X può fare sudo fino a T". A DIFFERENZA del session-token (firmato dall'agente
+# stesso), è firmato dalla **CA** — così l'agente NON può auto-emetterselo. Il
+# gateway ha solo la CA PUBBLICA: verifica ma non conia (il minter è l'agent-server,
+# unico detentore della CA privata). Formato: "ccap1.<body>.<sig>".
+CAP_PREFIX = "ccap1"
+
+
+def _ca_public_key() -> Ed25519PublicKey:
+    ca_path = _ca_crt()
+    if not ca_path.is_file():
+        raise PermissionError("CA cert non disponibile")
+    pub = x509.load_pem_x509_certificate(ca_path.read_bytes()).public_key()
+    if not isinstance(pub, Ed25519PublicKey):
+        raise PermissionError("CA non Ed25519")
+    return pub
+
+
+def verify_capability(token: str) -> dict:
+    """Valida un capability-token SUDO firmato dalla CA. Ritorna il payload
+    {cap, agent, instance, jti, iat, exp, by}. Solleva PermissionError su
+    firma/scadenza/formato. NON controlla la revoca (jti): la fa il chiamante."""
+    try:
+        prefix, body, sig = token.strip().split(".")
+        if prefix != CAP_PREFIX:
+            raise ValueError("prefisso capability sconosciuto")
+        payload = json.loads(_b64d(body))
+    except Exception as e:
+        raise PermissionError(f"capability malformata: {e}")
+    try:
+        _ca_public_key().verify(_b64d(sig), body.encode())
+    except Exception:
+        raise PermissionError("firma capability non valida (non firmata dalla CA)")
+    if payload.get("cap") != "sudo":
+        raise PermissionError("capability non-sudo")
+    if int(payload.get("exp", 0)) < time.time():
+        raise PermissionError("capability scaduta")
+    return payload

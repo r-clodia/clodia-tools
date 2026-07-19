@@ -14,10 +14,15 @@ Store persistente: `$CLODIA_DATA/clodia-tools-sudo.json` — mappa
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Optional
+
+from . import pki_verify
+
+LOG = logging.getLogger("clodia-tools.sudo")
 
 # Gruppo SUDOER: agenti ELEGGIBILI a escalation sudo. NON sono super permanenti:
 # in base sono least-privilege; possono elevare (con approvazione admin) alle
@@ -104,40 +109,105 @@ def _prune(d: dict, now: float) -> bool:
     return bool(dead)
 
 
+# ── Revoca capability (jti) ──────────────────────────────────────────────────
+# Un capability-token è firmato → non lo si può "de-firmare". Per revocarlo prima
+# della scadenza si iscrive il suo `jti` in una lista di revoca che il gateway
+# consulta ad ogni check. TTL corto + revoca = pieno controllo pur restando su un
+# artefatto crittografico.
+def _revoked_path() -> Path:
+    return Path(os.environ.get("CLODIA_DATA", "/datadir")) / "clodia-tools-sudo-revoked.json"
+
+
+def _load_revoked() -> set:
+    p = _revoked_path()
+    if not p.is_file():
+        return set()
+    try:
+        return set(json.loads(p.read_text(encoding="utf-8")).get("jti", []))
+    except Exception:
+        return set()
+
+
+def _revoke_jti(jti: str) -> None:
+    if not jti:
+        return
+    s = _load_revoked()
+    s.add(jti)
+    p = _revoked_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"jti": sorted(s)}, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(p)
+
+
 def grant(agent: str, instance: str, minutes: int, by: str,
-          scope: Optional[list] = None) -> dict:
-    """Concede sudo a (agent, instance) per `minutes`. `by` = admin approvante.
-    Idempotente: sovrascrive un grant esistente per la stessa coppia."""
-    minutes = max(1, min(int(minutes or 15), 120))  # cap 2h
+          scope: Optional[list] = None, token: Optional[str] = None) -> dict:
+    """Registra un grant sudo per (agent, instance). Se `token` è una **capability
+    firmata dalla CA** (nuovo modello), la si VERIFICA e se ne memorizza jti+exp
+    autoritativi dal payload firmato — l'autorizzazione è così un artefatto
+    crittografico legato all'approvazione umana, non un record mutabile.
+    `by` = admin approvante. Idempotente sulla coppia (agent, instance)."""
     now = time.time()
     d = _load()
     _prune(d, now)
-    entry = {"exp": now + minutes * 60, "by": by, "at": now,
-             "scope": list(scope) if scope else []}
+    if token:
+        payload = pki_verify.verify_capability(token)  # solleva se firma/scadenza KO
+        if payload.get("agent") != agent:
+            raise PermissionError("capability intestata ad altro agente")
+        exp = float(payload.get("exp", 0))
+        jti = str(payload.get("jti") or "")
+        by = str(payload.get("by") or by)  # il `by` firmato è autoritativo
+        entry = {"exp": exp, "by": by, "at": now, "jti": jti, "token": token,
+                 "scope": list(scope) if scope else []}
+    else:
+        # Fallback legacy (nessuna firma) — record semplice, in via di dismissione.
+        minutes = max(1, min(int(minutes or 15), 120))
+        entry = {"exp": now + minutes * 60, "by": by, "at": now,
+                 "scope": list(scope) if scope else []}
     d[_key(agent, instance)] = entry
     _save(d)
-    return {"agent": agent, "instance": instance, "expires_in_s": minutes * 60,
-            "by": by, "scope": entry["scope"]}
+    return {"agent": agent, "instance": instance,
+            "expires_in_s": int(entry["exp"] - now), "by": entry["by"],
+            "signed": bool(token), "scope": entry["scope"]}
 
 
 def revoke(agent: str, instance: str) -> bool:
     d = _load()
     k = _key(agent, instance)
-    if k in d:
-        d.pop(k, None)
-        _save(d)
-        return True
-    return False
+    v = d.get(k)
+    if v is None:
+        return False
+    _revoke_jti(str(v.get("jti") or ""))  # iscrive il jti nella lista di revoca
+    d.pop(k, None)
+    _save(d)
+    return True
 
 
 def active(agent: str, instance: str) -> bool:
-    """True se (agent, instance) ha un grant sudo attivo e non scaduto."""
+    """True se (agent, instance) ha un grant sudo attivo. Per i grant firmati:
+    ri-verifica la firma CA della capability + scadenza + jti non revocato — così
+    un grant manomesso nello store NON viene accettato."""
     now = time.time()
     d = _load()
     if _prune(d, now):
         _save(d)
     v = d.get(_key(agent, instance))
-    return bool(v) and float(v.get("exp", 0)) > now
+    if not v:
+        return False
+    tok = v.get("token")
+    if tok:
+        try:
+            payload = pki_verify.verify_capability(tok)  # firma CA + exp
+        except PermissionError as e:
+            LOG.warning("capability sudo di %s@%s non valida: %s", agent, instance, e)
+            return False
+        if payload.get("agent") != agent:
+            return False
+        if str(payload.get("jti") or "") in _load_revoked():
+            return False
+        return True
+    # legacy (record non firmato)
+    return float(v.get("exp", 0)) > now
 
 
 def status(agent: Optional[str] = None) -> list:
