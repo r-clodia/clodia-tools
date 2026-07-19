@@ -55,7 +55,13 @@ async def grant(request: Request):
             status_code=400)
     instance = (body.get("instance") or "-").strip() or "-"
     minutes = body.get("minutes", 15)
-    res = sudo.grant(agent, instance, minutes, by=approver, scope=body.get("scope"))
+    try:
+        res = sudo.grant(agent, instance, minutes, by=approver,
+                         scope=body.get("scope"), token=body.get("token"))
+    except PermissionError as e:
+        # capability firmata assente/non valida → rifiuta il grant (fail-closed)
+        LOG.warning("SUDO grant rifiutato %s@%s: %s", agent, instance, e)
+        return JSONResponse({"error": "bad_capability", "detail": str(e)}, status_code=400)
     sudo.resolve_request(agent, instance)  # l'approvazione consuma la richiesta pending
     LOG.info("SUDO concesso a %s@%s per %ss da %s", agent, instance,
              res.get("expires_in_s"), approver)
