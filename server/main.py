@@ -12,7 +12,8 @@ from . import instance_profile
 from . import proxy
 from .tools import email, fs, logs, runtime
 from .tools import eu_corpus
-from .whitelist import agent_config, agent_name, current_clearance, current_principal
+from .whitelist import (agent_config, agent_name, current_clearance, current_human_role,
+                        current_principal, is_on_behalf)
 
 import os as _os
 from .topics.service import TopicService, TopicError
@@ -1434,6 +1435,18 @@ def _is_super(name: str | None) -> bool:
     return (name or "") in _SUPER_AGENTS
 
 
+def _human_tool_allowed(name: str) -> bool:
+    """RBAC UMANA (chiamata on-behalf): il gateway è il PDP unico anche per gli
+    umani. Un tool `super-only` (packs/providers/mcp/agents/settings/pki/ca…,
+    stessa lista di M-sudo) richiede ruolo **admin**; tutto il resto è concesso a
+    qualunque umano autenticato. Il ruolo è un claim FIRMATO dall'agent-server →
+    non forgiabile dal modello. Chiude la Broken Access Control del path REST."""
+    from . import sudo as _sudo
+    if _sudo.is_super_only(name):
+        return (current_human_role() or "user") == "admin"
+    return True
+
+
 def _vault_grants(agent: str | None) -> set:
     if not agent:
         return set()
@@ -1523,6 +1536,10 @@ async def list_tools() -> list[Tool]:
     except Exception:
         proxied = []
     me = agent_name()
+    if is_on_behalf():
+        # Umano: vede i tool consentiti dal suo RUOLO (admin = tutti; user = solo
+        # non super-only). Stesso PDP del dispatch.
+        return [t for t in (native + proxied) if _human_tool_allowed(t.name)]
     if _is_super(me):
         return native + proxied  # super-agent: accesso a tutto
     return [t for t in (native + proxied)
@@ -1538,7 +1555,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # tool dei connettori (email.*, trello.*) sono concessi anche a chi ha il
         # relativo grant nel vault (delega per-agent, persistente).
         _ag = agent_name()
-        if not _is_super(_ag) and not _tool_allowed(
+        if is_on_behalf():
+            # Richiesta ON-BEHALF di un umano: autorizza sul RUOLO umano (PDP
+            # unico), NON sul carrier-agent. Un umano non-admin non può invocare
+            # i tool super-only anche se il carrier è clodia (super).
+            if not _human_tool_allowed(name):
+                raise PermissionError(
+                    f"tool '{name}' riservato agli admin (umano '{current_principal()}' "
+                    f"ruolo '{current_human_role() or 'user'}')")
+        elif not _is_super(_ag) and not _tool_allowed(
                 name, set(agent_config().get("allowed_tools", []))) \
                 and not _connector_allows(name, _ag):
             raise PermissionError(

@@ -139,6 +139,42 @@ def current_principal() -> str | None:
     return _CURRENT_PRINCIPAL.get()
 
 
+# ── RBAC umana (unificazione PDP) ────────────────────────────────────────────
+# Quando la chiamata è ON-BEHALF di un UMANO (webui → agent-server → gateway),
+# il gateway autorizza sul RUOLO dell'umano, non sull'agent-carrier. `on_behalf`
+# distingue questo caso; `human_role` è il ruolo firmato (admin|user). Entrambi
+# provengono da claim firmati dall'agent-server (trusted): un modello non può
+# forgiarli.
+_CURRENT_ON_BEHALF: ContextVar[bool] = ContextVar("mcp_current_on_behalf", default=False)
+_CURRENT_HUMAN_ROLE: ContextVar[str | None] = ContextVar("mcp_current_human_role", default=None)
+
+
+def set_current_on_behalf(v: bool) -> object:
+    return _CURRENT_ON_BEHALF.set(bool(v))
+
+
+def reset_current_on_behalf(token: object) -> None:
+    _CURRENT_ON_BEHALF.reset(token)  # type: ignore[arg-type]
+
+
+def is_on_behalf() -> bool:
+    """True se la richiesta è ON-BEHALF di un umano (autorizzare per ruolo)."""
+    return _CURRENT_ON_BEHALF.get()
+
+
+def set_current_human_role(r: str | None) -> object:
+    return _CURRENT_HUMAN_ROLE.set(r)
+
+
+def reset_current_human_role(token: object) -> None:
+    _CURRENT_HUMAN_ROLE.reset(token)  # type: ignore[arg-type]
+
+
+def current_human_role() -> str | None:
+    """Ruolo umano firmato (admin|user) della richiesta on-behalf, o None."""
+    return _CURRENT_HUMAN_ROLE.get()
+
+
 # Token ckt1 grezzo della richiesta corrente. Serve per INOLTRARLO al backend
 # quando il gateway deve compiere, per conto del caller, un'operazione che il
 # backend autorizza per principal-agent (es. agents.* → PATCH /api/agents/*/caps).

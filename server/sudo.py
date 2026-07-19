@@ -60,8 +60,14 @@ SUPER_ONLY_PREFIXES = (
     "pki.", "ca.",   # emissione identità PKI / operazioni CA
 )
 # Verbi specifici super-only anche fuori dai prefissi sopra (es. delete espliciti).
+# workflows.* di lifecycle (start/cancel/delete/terminate) = azioni di piattaforma
+# (spawnano agenti, consumano risorse) → admin-only; le decisioni in-run
+# (answer/approve/reject) restano governate dalla membership del run.
 SUPER_ONLY_EXACT = frozenset({
     "workflows.terminate",
+    "workflows.start",
+    "workflows.cancel",
+    "workflows.delete",
 })
 
 _GRACE = 0  # nessun grace: alla scadenza il potere decade netto
