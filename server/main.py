@@ -1745,15 +1745,14 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
 
 
 def _sudo_cross_topic(caller: str) -> bool:
-    """Un super-agent può andare cross-topic SOLO con un grant sudo attivo
-    (approvato da un admin). Fix del confused-deputy: super NON è più un bypass
-    del compartimento. (instance-boxing per-sessione: il plumbing dell'id-istanza
-    arriva in una fase successiva; per ora chiave istanza '-')."""
-    if not _is_super(caller):
-        return False
+    """Un SUDOER (clodia/ophelia/sysadmin) può andare cross-topic / fare azioni
+    super-only SOLO con un grant sudo attivo (approvato da un admin). Non-sudoer
+    o sudoer senza grant → False. Fix confused-deputy: nessun bypass permanente.
+    (instance-boxing per-sessione: il plumbing dell'id-istanza arriva dopo; per
+    ora chiave istanza '-'.)"""
     try:
         from . import sudo
-        return sudo.active(caller, "-")
+        return sudo.is_sudoer(caller) and sudo.active(caller, "-")
     except Exception:  # noqa: BLE001
         return False
 
