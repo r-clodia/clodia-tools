@@ -10,7 +10,7 @@ from mcp.types import TextContent, Tool
 from . import __version__
 from . import instance_profile
 from . import proxy
-from .tools import email, fs, runtime
+from .tools import email, fs, logs, runtime
 from .tools import eu_corpus
 from .whitelist import agent_config, agent_name, current_clearance
 
@@ -258,6 +258,23 @@ _FS_TOOLS: list[Tool] = [
                 }
             },
             "required": ["path"],
+        },
+    ),
+]
+
+_LOGS_TOOLS: list[Tool] = [
+    Tool(
+        name="logs.tail",
+        description=(
+            "Read-only: le ultime righe del log del server (agent-server) per la "
+            "diagnosi. Segreti redatti. Solo log di piattaforma, MAI contenuti dei topic."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "lines": {"type": "integer", "description": "Numero di righe (default 100, max 500)."},
+                "level": {"type": "string", "description": "Filtro livello opzionale: INFO|WARNING|ERROR."},
+            },
         },
     ),
 ]
@@ -1244,7 +1261,7 @@ def _dispatch_memory(name: str, a: dict):
 
 def _native_tool_namespaces() -> list[str]:
     """Namespace dei tool nativi del gateway (per agents.list_tools)."""
-    tools = (_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
+    tools = (_FS_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
              + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
              + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     if instance_profile.rag_enabled():
@@ -1474,7 +1491,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
+    native = list(_FS_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
                   + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     # Feature `rag` (profilo istanza): off → i verbi rag.*/eu_corpus.* non
     # esistono proprio (né in lista né al dispatch).
@@ -1508,6 +1525,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 f"tool '{name}' non in whitelist per agent '{_ag}'")
         if name == "fs.list_dir":
             result = fs.list_dir(arguments["path"])
+        elif name == "logs.tail":
+            result = logs.tail(arguments.get("lines", 100), arguments.get("level", ""))
         elif name == "email.send":
             result = email.send(
                 arguments["to"],
