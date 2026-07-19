@@ -1951,10 +1951,12 @@ def _dispatch_topic(name: str, a: dict):
         # proposta di squadra: proxy read-only all'agent-server (registry+rilevanza)
         return runtime.suggest_team(a.get("tier") or "SEAL-0", a.get("description") or "")
     if verb in ("add_participant", "remove_participant"):
-        # gestione partecipanti: proxy all'agent-server, che autorizza `by` (il
-        # chiamante) come owner|partecipante|super. NON è fra gli scoped verbs:
-        # l'autorizzazione autoritativa è lato agent-server (ammette il super
-        # anche se non ancora partecipante).
+        # Gestione partecipanti = operazione di compartimento: la applichiamo la
+        # STESSA ACL degli altri verbi scoped. Fix confused-deputy: un super NON
+        # può più aggiungere/togliere partecipanti a un topic di cui né l'umano
+        # del turno né l'agente sono membri (giovanni non può auto-invitarsi a un
+        # topic in cui non è) — serve essere già membro, o super+sudo.
+        _require_topic_member(_topics(), a["tier"], a["name"])
         return runtime.set_participant(a["tier"], a["name"], (a.get("agent") or "").strip(),
                                        by=agent_name() or "", add=(verb == "add_participant"))
     if verb == "new":
