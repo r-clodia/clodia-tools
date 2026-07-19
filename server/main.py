@@ -279,6 +279,26 @@ _LOGS_TOOLS: list[Tool] = [
     ),
 ]
 
+_SUDO_TOOLS: list[Tool] = [
+    Tool(
+        name="sudo.request",
+        description=(
+            "Richiedi l'ELEVAZIONE a sudo per un'operazione riservata (super-only: "
+            "cross-topic, gestione partecipanti, install pack/provider/mcp, ...). "
+            "NON attiva sudo da solo: crea una richiesta che l'OWNER approva o nega "
+            "da un popup nella webUI. Spiega bene il MOTIVO. Riservato ai sudoer."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string", "description": "Perché serve l'elevazione (mostrato all'owner)."},
+                "minutes": {"type": "integer", "description": "Durata richiesta (default 15, max 120)."},
+            },
+            "required": ["reason"],
+        },
+    ),
+]
+
 
 _EU_CORPUS_TOOLS: list[Tool] = [
     Tool(
@@ -1261,7 +1281,7 @@ def _dispatch_memory(name: str, a: dict):
 
 def _native_tool_namespaces() -> list[str]:
     """Namespace dei tool nativi del gateway (per agents.list_tools)."""
-    tools = (_FS_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
+    tools = (_FS_TOOLS + _LOGS_TOOLS + _SUDO_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
              + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
              + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     if instance_profile.rag_enabled():
@@ -1491,7 +1511,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
+    native = list(_FS_TOOLS + _LOGS_TOOLS + _SUDO_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
                   + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     # Feature `rag` (profilo istanza): off → i verbi rag.*/eu_corpus.* non
     # esistono proprio (né in lista né al dispatch).
@@ -1527,6 +1547,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = fs.list_dir(arguments["path"])
         elif name == "logs.tail":
             result = logs.tail(arguments.get("lines", 100), arguments.get("level", ""))
+        elif name == "sudo.request":
+            from . import sudo as _sudo
+            result = _sudo.request_sudo(
+                agent_name(), "-", arguments.get("reason", ""),
+                arguments.get("minutes", 15), human=current_principal())
         elif name == "email.send":
             result = email.send(
                 arguments["to"],

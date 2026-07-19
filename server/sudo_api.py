@@ -56,9 +56,34 @@ async def grant(request: Request):
     instance = (body.get("instance") or "-").strip() or "-"
     minutes = body.get("minutes", 15)
     res = sudo.grant(agent, instance, minutes, by=approver, scope=body.get("scope"))
+    sudo.resolve_request(agent, instance)  # l'approvazione consuma la richiesta pending
     LOG.info("SUDO concesso a %s@%s per %ss da %s", agent, instance,
              res.get("expires_in_s"), approver)
     return JSONResponse({"ok": True, **res})
+
+
+async def deny(request: Request):
+    """POST /internal/sudo/deny {agent, instance?} — nega una richiesta pending."""
+    approver, err = _authorize_approver(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    agent = (body.get("agent") or "").strip()
+    instance = (body.get("instance") or "-").strip() or "-"
+    removed = sudo.resolve_request(agent, instance)
+    LOG.info("SUDO richiesta NEGATA %s@%s da %s: %s", agent, instance, approver, removed)
+    return JSONResponse({"ok": True, "denied": removed})
+
+
+async def pending(request: Request):
+    """GET /internal/sudo/pending — richieste di escalation in attesa (per il popup owner)."""
+    approver, err = _authorize_approver(request)
+    if err:
+        return err
+    return JSONResponse({"requests": sudo.list_requests()})
 
 
 async def revoke(request: Request):
@@ -88,6 +113,8 @@ async def status(request: Request):
 
 routes = [
     Route("/internal/sudo/grant", grant, methods=["POST"]),
+    Route("/internal/sudo/deny", deny, methods=["POST"]),
     Route("/internal/sudo/revoke", revoke, methods=["POST"]),
     Route("/internal/sudo/status", status, methods=["GET"]),
+    Route("/internal/sudo/pending", pending, methods=["GET"]),
 ]
