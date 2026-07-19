@@ -1951,10 +1951,16 @@ def _dispatch_topic(name: str, a: dict):
         # proposta di squadra: proxy read-only all'agent-server (registry+rilevanza)
         return runtime.suggest_team(a.get("tier") or "SEAL-0", a.get("description") or "")
     if verb in ("add_participant", "remove_participant"):
-        # gestione partecipanti: proxy all'agent-server, che autorizza `by` (il
-        # chiamante) come owner|partecipante|super. NON è fra gli scoped verbs:
-        # l'autorizzazione autoritativa è lato agent-server (ammette il super
-        # anche se non ancora partecipante).
+        # Gestione partecipanti = azione SUDO (admin), come agents.*: un agente
+        # può farlo SOLO se super CON grant sudo attivo. Una clodia non-sudoer
+        # NON può aggiungere/togliere partecipanti → chiude l'auto-invito
+        # (giovanni non può chiedere a clodia di aggiungersi a un topic).
+        # L'owner UMANO gestisce i partecipanti dalla webui (endpoint dedicato,
+        # non questo tool), quindi i flussi legittimi non si rompono.
+        if not _sudo_cross_topic(agent_name()):
+            raise PermissionError(
+                "gestione partecipanti: azione riservata (super con sudo attivo). "
+                "L'owner invita/rimuove i partecipanti dalla webui.")
         return runtime.set_participant(a["tier"], a["name"], (a.get("agent") or "").strip(),
                                        by=agent_name() or "", add=(verb == "add_participant"))
     if verb == "new":
