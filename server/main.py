@@ -12,7 +12,7 @@ from . import instance_profile
 from . import proxy
 from .tools import email, fs, logs, runtime
 from .tools import eu_corpus
-from .whitelist import agent_config, agent_name, current_clearance
+from .whitelist import agent_config, agent_name, current_clearance, current_principal
 
 import os as _os
 from .topics.service import TopicService, TopicError
@@ -1744,24 +1744,42 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
     return caller == meta.get("owner") or caller in (meta.get("participants") or [])
 
 
+def _sudo_cross_topic(caller: str) -> bool:
+    """Un super-agent può andare cross-topic SOLO con un grant sudo attivo
+    (approvato da un admin). Fix del confused-deputy: super NON è più un bypass
+    del compartimento. (instance-boxing per-sessione: il plumbing dell'id-istanza
+    arriva in una fase successiva; per ora chiave istanza '-')."""
+    if not _is_super(caller):
+        return False
+    try:
+        from . import sudo
+        return sudo.active(caller, "-")
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _require_topic_member(svc, tier, name) -> None:
-    """ACL compartimento: il caller dev'essere participant/owner del topic. I
-    super-agent bypassano (accesso pieno). Enforcement per-(agent,topic): dà il
-    confinamento reale, complementare alla clearance≥tier (vedi
-    project_topic_access_two_axis)."""
+    """ACL compartimento (need-to-know). Consentito SSE:
+      - l'UMANO del turno (current_principal) è participant/owner del target, OPPURE
+      - l'AGENTE è participant/owner del target (autonomo/legittimo), OPPURE
+      - l'agente è super CON un grant SUDO attivo (cross-topic autorizzato).
+    Il super NON bypassa più incondizionatamente (fix confused-deputy: un agente
+    non deve leggere/copiare un topic di cui né il richiedente umano né l'agente
+    sono partecipanti). Vedi project_topic_access_two_axis."""
     caller = agent_name()
-    if _is_super(caller):
-        return
+    principal = current_principal()
     try:
         meta = svc.open(tier, name).get("meta", {})
     except Exception:  # noqa: BLE001 — topic inesistente/illeggibile → nega
         raise PermissionError(f"topic {tier}/{name}: accesso negato")
-    if not _topic_is_member(meta, caller):
+    human_ok = bool(principal) and _topic_is_member(meta, principal)
+    agent_ok = _topic_is_member(meta, caller)
+    if not (human_ok or agent_ok or _sudo_cross_topic(caller)):
         raise PermissionError(
-            f"agent '{caller}' non è participant del topic {tier}/{name} "
-            f"(accesso negato: compartimento need-to-know)")
-    # asse livello: clearance(caller) ≥ tier(topic). Clearance dal claim firmato
-    # nel token (None → SEAL-0). Difesa in profondità oltre al compartimento.
+            f"accesso negato al topic {tier}/{name}: né l'umano '{principal}' né "
+            f"l'agente '{caller}' sono partecipanti (compartimento need-to-know; "
+            f"cross-topic richiede sudo)")
+    # asse livello: clearance ≥ tier (difesa in profondità oltre al compartimento).
     tier_t = meta.get("tier", tier)
     if _rank(current_clearance()) < _rank(tier_t):
         raise PermissionError(
@@ -1770,15 +1788,17 @@ def _require_topic_member(svc, tier, name) -> None:
 
 
 def _filter_member_rows(rows: list, caller: str) -> list:
-    """Filtra righe-topic ai soli topic di cui il caller è participant/owner.
-    Super → tutte. Righe senza participants/owner (shape diversa) lasciate."""
-    if _is_super(caller):
+    """Filtra righe-topic allo scope need-to-know: topic di cui l'UMANO del turno
+    o l'AGENTE è participant/owner. Super con sudo attivo → tutte. Righe senza
+    participants/owner (shape diversa) lasciate."""
+    if _sudo_cross_topic(caller):
         return rows
+    principal = current_principal()
     out = []
     for r in rows:
         if not isinstance(r, dict) or ("participants" not in r and "owner" not in r):
             out.append(r)
-        elif _topic_is_member(r, caller):
+        elif (bool(principal) and _topic_is_member(r, principal)) or _topic_is_member(r, caller):
             out.append(r)
     return out
 
