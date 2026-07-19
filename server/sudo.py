@@ -19,6 +19,31 @@ import time
 from pathlib import Path
 from typing import Optional
 
+# Gruppo SUDOER: agenti ELEGGIBILI a escalation sudo. NON sono super permanenti:
+# in base sono least-privilege; possono elevare (con approvazione admin) alle
+# operazioni super-only. Configurabile via env (CSV). Default: clodia, ophelia,
+# sysadmin. Sostituisce il concetto di "_SUPER_AGENTS" (bypass permanente).
+SUDOERS = {"clodia", "ophelia", "sysadmin", *(
+    a.strip() for a in os.environ.get("CLODIA_SUDOERS", "").split(",") if a.strip()
+)}
+
+# APPROVATORI: umani (principal) autorizzati a concedere sudo. Interim "admin
+# singolo" (bootstrap): l'owner/superadmin. Multi-admin arriverà col bootstrap-auth.
+APPROVERS = {"davide", "owner", "superadmin", *(
+    a.strip() for a in os.environ.get("CLODIA_SUDO_APPROVERS", "").split(",") if a.strip()
+)}
+
+
+def is_sudoer(agent: Optional[str]) -> bool:
+    """True se l'agente è nel gruppo sudoer (eleggibile a escalation)."""
+    return (agent or "") in SUDOERS
+
+
+def is_approver(principal: Optional[str]) -> bool:
+    """True se il principal UMANO può approvare/concedere sudo (admin)."""
+    return (principal or "") in APPROVERS
+
+
 # Namespace/prefissi dei tool "super-only": mutazioni irreversibili o ad alto
 # privilegio della piattaforma. Tutto il resto è BASE (lavoro quotidiano).
 SUPER_ONLY_PREFIXES = (
