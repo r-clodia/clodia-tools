@@ -212,8 +212,13 @@ def active(agent: str, instance: str) -> bool:
         if str(payload.get("jti") or "") in _load_revoked():
             return False
         return True
-    # legacy (record non firmato)
-    return float(v.get("exp", 0)) > now
+    # NIENTE fallback legacy: un grant SENZA capability firmata dalla CA non è
+    # valido. Così scrivere a mano un'entry nello store (vettore filesystem, es.
+    # bash in un container non ancora sandboxato) NON concede sudo — servirebbe
+    # una firma CA valida, che il runtime non deve poter produrre. Difesa in
+    # profondità in attesa della sandbox keyless (M3).
+    LOG.warning("grant sudo di %s@%s privo di capability firmata → rifiutato", agent, instance)
+    return False
 
 
 def status(agent: Optional[str] = None) -> list:
