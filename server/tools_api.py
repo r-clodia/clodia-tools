@@ -63,11 +63,48 @@ _UI_TOKEN = os.environ.get("CLODIA_TOOLS_UI_TOKEN")
 _STATE_TTL = 600
 _states: dict[str, dict] = {}   # state → {account, email, exp}
 
+_ADMIN_ROLES = ("superadmin", "admin")
+
+
+def _is_human_admin(name: str) -> bool:
+    """True se il principal è un human con ruolo admin/superadmin. Il gateway
+    legge il ruolo da /datadir/agents/<name>/agent.yaml (montaggio condiviso con
+    l'agent-server) — stessa fonte di verità di admin.is_admin lato backend."""
+    if not name:
+        return False
+    from pathlib import Path
+    ay = Path(os.environ.get("CLODIA_DATA", "/datadir")) / "agents" / name / "agent.yaml"
+    if not ay.is_file():
+        return False
+    try:
+        import yaml
+        d = yaml.safe_load(ay.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return False
+    return d.get("type") == "human" and str(d.get("role") or "") in _ADMIN_ROLES
+
 
 def _authorized(request: Request) -> bool:
-    if not _UI_TOKEN:
-        return True
-    return request.headers.get("authorization", "") == f"Bearer {_UI_TOKEN}"
+    """Gestione integrations/credenziali/backup = **territorio ADMIN**. Autorizza
+    se: (a) trusted-core via UI token, oppure (b) ckt1 valido di un ADMIN — umano
+    admin (claim on_behalf/human_role o ruolo in agent.yaml) o super-agent
+    (clodia/ophelia). Chiude il buco: prima, con UI_TOKEN assente, era aperto a
+    chiunque loggato (un non-admin poteva rimuovere un MCP)."""
+    hdr = request.headers.get("authorization", "")
+    if _UI_TOKEN and hdr == f"Bearer {_UI_TOKEN}":
+        return True  # trusted-core (chiamanti interni/headless)
+    token = hdr[7:] if hdr.lower().startswith("bearer ") else ""
+    if not token:
+        return False
+    from .pki_verify import verify_session_token
+    try:
+        p = verify_session_token(token)
+    except Exception:
+        return False
+    if p.get("on_behalf"):
+        return (p.get("human_role") or "user") == "admin"
+    ag = str(p.get("agent") or "")
+    return ag in ("clodia", "ophelia") or _is_human_admin(ag)
 
 
 def _gc_states() -> None:
