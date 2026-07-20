@@ -515,12 +515,12 @@ class TopicService:
         # participants = agenti (umani/AI) abilitati a parlare nel canale.
         meta.setdefault("owner", meta.get("contact_agent", "clodia"))
         # Partecipanti di default dell'edizione (terraformazione): UNIONE con
-        # gli espliciti, non fallback — "sempre partecipanti ai topic nuovi"
-        # vale anche quando il chiamante (es. channel_create della webui)
-        # passa la propria lista [utente, contact_agent]. Rimuoverli dopo
-        # resta possibile (participant_remove).
+        # gli espliciti — "sempre partecipanti ai topic nuovi". ECCEZIONE: i DM
+        # (chat 1:1 umano↔agente) sono a DUE e basta → NON si aggiungono i default
+        # (altrimenti clodia si intrufola in ogni DM, es. dm-avvocato--davide).
         from .. import instance_profile as _iprof
-        _defaults = _iprof.topic_default_participants()
+        is_dm = (meta.get("kind") == "dm") or (meta.get("type") == "dm")
+        _defaults = [] if is_dm else _iprof.topic_default_participants()
         explicit = meta.get("participants") or []
         meta["participants"] = list(dict.fromkeys(
             [meta["owner"], *explicit, *_defaults]))
