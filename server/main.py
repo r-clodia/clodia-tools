@@ -1507,8 +1507,11 @@ def _vault_grants(agent: str | None) -> set:
 
 def _connector_allows(name: str, agent: str | None) -> bool:
     """Accesso a un tool di connettore derivato dai grant vault (persistente):
-    - email.*   se l'agent ha un grant su un account gmail_<account>;
-    - trello.*  se l'agent ha un grant sulla credenziale 'trello'.
+    - email.*      se l'agent ha un grant su un account gmail_<account>;
+    - trello.*     se l'agent ha un grant sulla credenziale 'trello'.
+    - gdrive.*     se l'agent ha un grant google_/gworkspace_;
+    - gcalendar.*  idem (stessa credenziale Google Workspace);
+    - gdocs.*      idem.
     Così la delega non dipende da config.yaml (effimero al rebuild)."""
     grants = _vault_grants(agent)
     # La credenziale Google UNIFICATA (google_<account>) abilita SIA email.* SIA
@@ -1521,8 +1524,8 @@ def _connector_allows(name: str, agent: str | None) -> bool:
         return True
     if name.startswith("telegram.") and "telegram_bot_token" in grants:
         return True
-    if name.startswith("gdrive.") and any(
-            c.startswith("google_") or c.startswith("gworkspace_") for c in grants):
+    _gws_grant = any(c.startswith("google_") or c.startswith("gworkspace_") for c in grants)
+    if name.startswith(("gdrive.", "gcalendar.", "gdocs.")) and _gws_grant:
         return True
     return False
 
