@@ -1029,6 +1029,77 @@ _GDRIVE_TOOLS: list[Tool] = [
              "required": ["file_id", "folder_id"]}),
 ]
 
+# gcalendar.* — Google Calendar sulla stessa credenziale Workspace (scope calendar
+# già incluso). Orari ISO8601/RFC3339 (es. 2026-07-22T15:00:00+02:00).
+_GCALENDAR_TOOLS: list[Tool] = [
+    Tool(name="gcalendar.list_calendars",
+         description="Elenca i calendari accessibili con l'account Workspace.",
+         inputSchema={"type": "object", "properties": {"account": {"type": "string"}}}),
+    Tool(name="gcalendar.list_events",
+         description=("Elenca eventi di un calendario in una finestra temporale. "
+                      "time_min/time_max ISO8601; query = testo libero opzionale."),
+         inputSchema={"type": "object", "properties": {
+             "calendar_id": {"type": "string", "description": "default 'primary'"},
+             "time_min": {"type": "string"}, "time_max": {"type": "string"},
+             "query": {"type": "string"}, "limit": {"type": "integer"},
+             "account": {"type": "string"}}}),
+    Tool(name="gcalendar.create_event",
+         description=("Crea un evento. start/end ISO8601 (dateTime) o date (YYYY-MM-DD "
+                      "se all_day=true). attendees = lista di email."),
+         inputSchema={"type": "object", "properties": {
+             "summary": {"type": "string"}, "start": {"type": "string"},
+             "end": {"type": "string"}, "calendar_id": {"type": "string"},
+             "description": {"type": "string"}, "location": {"type": "string"},
+             "attendees": {"type": "array", "items": {"type": "string"}},
+             "all_day": {"type": "boolean"}, "account": {"type": "string"}},
+             "required": ["summary", "start", "end"]}),
+    Tool(name="gcalendar.update_event",
+         description="Modifica un evento esistente (solo i campi passati).",
+         inputSchema={"type": "object", "properties": {
+             "event_id": {"type": "string"}, "calendar_id": {"type": "string"},
+             "summary": {"type": "string"}, "start": {"type": "string"},
+             "end": {"type": "string"}, "description": {"type": "string"},
+             "location": {"type": "string"}, "account": {"type": "string"}},
+             "required": ["event_id"]}),
+    Tool(name="gcalendar.delete_event",
+         description="Elimina un evento dal calendario.",
+         inputSchema={"type": "object", "properties": {
+             "event_id": {"type": "string"}, "calendar_id": {"type": "string"},
+             "account": {"type": "string"}}, "required": ["event_id"]}),
+    Tool(name="gcalendar.freebusy",
+         description="Ritorna gli intervalli occupati (busy) in una finestra temporale.",
+         inputSchema={"type": "object", "properties": {
+             "time_min": {"type": "string"}, "time_max": {"type": "string"},
+             "calendar_id": {"type": "string"}, "account": {"type": "string"}},
+             "required": ["time_min", "time_max"]}),
+]
+
+# gdocs.* — Google Docs sulla stessa credenziale Workspace (scope documents).
+_GDOCS_TOOLS: list[Tool] = [
+    Tool(name="gdocs.create",
+         description="Crea un Google Doc (opz. con testo iniziale). Ritorna id + url.",
+         inputSchema={"type": "object", "properties": {
+             "title": {"type": "string"}, "text": {"type": "string"},
+             "account": {"type": "string"}}, "required": ["title"]}),
+    Tool(name="gdocs.read",
+         description="Legge il testo di un Google Doc (estratto plain-text).",
+         inputSchema={"type": "object", "properties": {
+             "document_id": {"type": "string"}, "account": {"type": "string"}},
+             "required": ["document_id"]}),
+    Tool(name="gdocs.append_text",
+         description="Aggiunge testo in fondo a un Google Doc.",
+         inputSchema={"type": "object", "properties": {
+             "document_id": {"type": "string"}, "text": {"type": "string"},
+             "account": {"type": "string"}}, "required": ["document_id", "text"]}),
+    Tool(name="gdocs.replace_text",
+         description="Sostituisce tutte le occorrenze di `find` con `replace` nel Doc.",
+         inputSchema={"type": "object", "properties": {
+             "document_id": {"type": "string"}, "find": {"type": "string"},
+             "replace": {"type": "string"}, "match_case": {"type": "boolean"},
+             "account": {"type": "string"}},
+             "required": ["document_id", "find", "replace"]}),
+]
+
 # telegram.* — invio + inbound con lease per-chat. Un agente scrive solo a chat
 # che hanno già scritto e di cui detiene il lease; chat diverse → lease
 # indipendenti. Il bot token vive nel vault, mai nel modello.
@@ -1237,6 +1308,52 @@ def _dispatch_gdrive(name: str, a: dict):
     raise ValueError(f"unknown gdrive verb: {name}")
 
 
+def _dispatch_gcalendar(name: str, a: dict):
+    from .tools import gcalendar as gc
+    verb = name.split(NS_SEP_DOT, 1)[1]
+    if verb == "list_calendars":
+        return gc.list_calendars(account=a.get("account"))
+    if verb == "list_events":
+        return gc.list_events(calendar_id=a.get("calendar_id", "primary"),
+                              time_min=a.get("time_min"), time_max=a.get("time_max"),
+                              query=a.get("query"), limit=a.get("limit", 25),
+                              account=a.get("account"))
+    if verb == "create_event":
+        return gc.create_event(a["summary"], a["start"], a["end"],
+                               calendar_id=a.get("calendar_id", "primary"),
+                               description=a.get("description"), location=a.get("location"),
+                               attendees=a.get("attendees"), all_day=a.get("all_day", False),
+                               account=a.get("account"))
+    if verb == "update_event":
+        return gc.update_event(a["event_id"], calendar_id=a.get("calendar_id", "primary"),
+                               summary=a.get("summary"), start=a.get("start"),
+                               end=a.get("end"), description=a.get("description"),
+                               location=a.get("location"), account=a.get("account"))
+    if verb == "delete_event":
+        return gc.delete_event(a["event_id"], calendar_id=a.get("calendar_id", "primary"),
+                               account=a.get("account"))
+    if verb == "freebusy":
+        return gc.freebusy(a["time_min"], a["time_max"],
+                           calendar_id=a.get("calendar_id", "primary"),
+                           account=a.get("account"))
+    raise ValueError(f"unknown gcalendar verb: {name}")
+
+
+def _dispatch_gdocs(name: str, a: dict):
+    from .tools import gdocs as gdo
+    verb = name.split(NS_SEP_DOT, 1)[1]
+    if verb == "create":
+        return gdo.create(a["title"], text=a.get("text"), account=a.get("account"))
+    if verb == "read":
+        return gdo.read(a["document_id"], account=a.get("account"))
+    if verb == "append_text":
+        return gdo.append_text(a["document_id"], a["text"], account=a.get("account"))
+    if verb == "replace_text":
+        return gdo.replace_text(a["document_id"], a["find"], a["replace"],
+                                match_case=a.get("match_case", True), account=a.get("account"))
+    raise ValueError(f"unknown gdocs verb: {name}")
+
+
 def _dispatch_telegram(name: str, a: dict):
     from .tools import telegram as tg
     verb = name.split(NS_SEP_DOT, 1)[1]
@@ -1331,7 +1448,8 @@ def _dispatch_memory(name: str, a: dict):
 def _native_tool_namespaces() -> list[str]:
     """Namespace dei tool nativi del gateway (per agents.list_tools)."""
     tools = (_FS_TOOLS + _LOGS_TOOLS + _SUDO_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
-             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
+             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS
+             + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _AGENT_TOOLS
              + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
@@ -1575,7 +1693,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _LOGS_TOOLS + _SUDO_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _AGENT_TOOLS
+    native = list(_FS_TOOLS + _LOGS_TOOLS + _SUDO_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _AGENT_TOOLS
                   + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     # Feature `rag` (profilo istanza): off → i verbi rag.*/eu_corpus.* non
     # esistono proprio (né in lista né al dispatch).
@@ -1712,6 +1830,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_memory(name, arguments)
         elif name.startswith("gdrive."):
             result = _dispatch_gdrive(name, arguments)
+        elif name.startswith("gcalendar."):
+            result = _dispatch_gcalendar(name, arguments)
+        elif name.startswith("gdocs."):
+            result = _dispatch_gdocs(name, arguments)
         elif name.startswith("runtime."):
             # proxy httpx SINCRONO all'agent-server → offload su thread (no blocco loop)
             result = await asyncio.to_thread(_dispatch_runtime, name, arguments)
