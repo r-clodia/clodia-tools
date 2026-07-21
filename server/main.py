@@ -1120,8 +1120,35 @@ _MEMORY_TOOLS: list[Tool] = [
              "filename": {"type": "string", "description": "default memory.md"}},
              "required": ["content"]}),
     Tool(name="memory.list",
-         description="Elenca i file nella tua seed memory.",
+         description="Elenca i file di NOTE (testo) nella tua seed memory.",
          inputSchema={"type": "object", "properties": {}}),
+    # Document store per-seed: DOCUMENTI (PDF/docx/dataset…) che sopravvivono agli
+    # spawn, in agents/<seed>/files/. NON caricati in automatico: leggili su richiesta.
+    Tool(name="memory.put_document",
+         description=("Salva un DOCUMENTO (PDF, docx, xlsx, dataset, immagine…) nella tua "
+                      "libreria personale del seed (persistente, sopravvive agli spawn). "
+                      "content_b64 = contenuto in base64. Max 25MB."),
+         inputSchema={"type": "object", "properties": {
+             "filename": {"type": "string"}, "content_b64": {"type": "string"}},
+             "required": ["filename", "content_b64"]}),
+    Tool(name="memory.list_documents",
+         description="Elenca i DOCUMENTI nella tua libreria del seed (nome + dimensione).",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="memory.read_document",
+         description=("Legge un DOCUMENTO della tua libreria estraendone il TESTO "
+                      "(PDF/docx/xlsx/txt/md → testo per l'uso). `max_chars` opzionale."),
+         inputSchema={"type": "object", "properties": {
+             "filename": {"type": "string"}, "max_chars": {"type": "integer"}},
+             "required": ["filename"]}),
+    Tool(name="memory.get_document",
+         description=("Recupera un DOCUMENTO della libreria come base64 grezzo (per "
+                      "ri-allegarlo o passarlo a un tool che accetta binari)."),
+         inputSchema={"type": "object", "properties": {
+             "filename": {"type": "string"}}, "required": ["filename"]}),
+    Tool(name="memory.delete_document",
+         description="Rimuove un documento dalla tua libreria del seed.",
+         inputSchema={"type": "object", "properties": {
+             "filename": {"type": "string"}}, "required": ["filename"]}),
 ]
 
 
@@ -1277,6 +1304,27 @@ def _dispatch_memory(name: str, a: dict):
         return mem.append(a["content"], a.get("filename"))
     if verb == "list":
         return mem.list_files()
+    # ── Document store per-seed ──────────────────────────────────────────────
+    if verb == "put_document":
+        return mem.put_document(a["filename"], a["content_b64"])
+    if verb == "list_documents":
+        return mem.list_documents()
+    if verb == "read_document":
+        fn, data = mem.read_document_bytes(a["filename"])
+        cap = int(a.get("max_chars") or 60000)
+        try:
+            text, pages = _extract_document_text(fn, data)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"estrazione fallita: {str(e)[:160]}"}
+        return {"file": fn, "text": text[:cap], "chars": len(text),
+                "pages": pages, "truncated": len(text) > cap}
+    if verb == "get_document":
+        import base64 as _b64
+        fn, data = mem.read_document_bytes(a["filename"])
+        return {"file": fn, "bytes": len(data), "encoding": "base64",
+                "content_b64": _b64.b64encode(data).decode("ascii")}
+    if verb == "delete_document":
+        return mem.delete_document(a["filename"])
     raise ValueError(f"unknown memory verb: {name}")
 
 

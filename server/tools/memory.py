@@ -80,3 +80,58 @@ def list_files() -> dict:
     d = memory_dir()
     files = sorted(f.name for f in d.iterdir() if f.is_file() and not f.name.endswith(".tmp"))
     return {"dir": str(d), "files": files}
+
+
+# ── Document store per-seed ──────────────────────────────────────────────────
+# Oltre alle note testuali (memory.*), un seed può accumulare DOCUMENTI (PDF,
+# docx, dataset…) che sopravvivono agli spawn, in `agents/<seed>/files/`. NON
+# vengono mai caricati in automatico nel contesto (troppo grandi): si leggono su
+# richiesta (read_document → testo estratto; get_document → base64 grezzo).
+_MAX_DOC_BYTES = 25 * 1024 * 1024  # 25MB per documento
+
+
+def files_dir(name: str | None = None) -> Path:
+    seed = _seed_of(name or agent_name())
+    base = os.environ.get("CLODIA_DATA", "/datadir")
+    d = Path(base) / "agents" / seed / "files"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def put_document(filename: str, content_b64: str) -> dict:
+    import base64
+    fn = _safe_file(filename)
+    data = base64.b64decode(content_b64 or "")
+    if len(data) > _MAX_DOC_BYTES:
+        raise ValueError(f"documento troppo grande ({len(data)}B > {_MAX_DOC_BYTES}B)")
+    p = files_dir() / fn
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(p)
+    return {"file": fn, "bytes": len(data), "ok": True}
+
+
+def list_documents() -> dict:
+    d = files_dir()
+    docs = sorted(({"name": f.name, "bytes": f.stat().st_size}
+                   for f in d.iterdir() if f.is_file() and not f.name.endswith(".tmp")),
+                  key=lambda x: x["name"])
+    return {"dir": str(d), "documents": docs}
+
+
+def read_document_bytes(filename: str) -> tuple[str, bytes]:
+    """Ritorna (nome, bytes) di un documento del seed. Solleva se assente."""
+    fn = _safe_file(filename)
+    p = files_dir() / fn
+    if not p.is_file():
+        raise FileNotFoundError(f"documento '{fn}' non trovato nella tua libreria")
+    return fn, p.read_bytes()
+
+
+def delete_document(filename: str) -> dict:
+    fn = _safe_file(filename)
+    p = files_dir() / fn
+    existed = p.is_file()
+    if existed:
+        p.unlink()
+    return {"file": fn, "deleted": existed}
