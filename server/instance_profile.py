@@ -181,11 +181,12 @@ def connector_check(cid: str) -> None:
 
 def topic_default_participants() -> list[str]:
     """Partecipanti di default dei topic APPENA creati (terraformazione).
-    Chiave profilo: topics_defaults.participants — default [clodia]."""
+    Chiave profilo: topics_defaults.participants — default [clodia, segretario]
+    (il segretario verbalizza/mantiene lo stato di ogni topic sin dalla nascita)."""
     conf = load().get("topics_defaults") or {}
     val = conf.get("participants")
     if val is None:
-        return ["clodia"]
+        return ["clodia", "segretario"]
     return [str(x) for x in (val or [])]
 
 
