@@ -63,6 +63,29 @@ agents:
     - email.reply
     - telegram.*
     - fs.list_dir
+  # Impiegato Tomato (agent di dominio, normal): back-office virtuale Tomato Srl.
+  # Accede a email (info@tomato.blue) e Google Drive Tomato.
+  # Il grant vault per la credenziale google_info_tomato_blue va assegnato
+  # a runtime: webui → Tools → Integrations → Edit grant, oppure:
+  #   python3 -m server.colony.vault set-grant <cred> impiegato-tomato fetch
+  impiegato-tomato:
+    allowed_paths:
+    - .
+    allowed_shell_cmds: []
+    denied_shell_patterns: []
+    allowed_tools:
+    - email.send
+    - email.folders
+    - email.list
+    - email.read
+    - email.search
+    - email.reply
+    - email.get_attachment
+    - email.save_attachment
+    - gdrive.*
+    - fs.list_dir
+    - topic.*
+    - runtime.*
   # NB: i responder confinati dei canali (eco-<topic>) sono CLONI per-topic
   # registrati a RUNTIME dal backend (channel_responder → /internal/agents/whitelist),
   # non qui: sono istanza-specifici. Il backend li ri-registra a ogni tick, così
