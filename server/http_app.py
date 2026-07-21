@@ -123,11 +123,14 @@ def build_app() -> Starlette:
     from .sudo_api import routes as sudo_routes
     # Facade tool (M-authz): PDP unico agenti+umani — la webui inoltra qui.
     from .tool_api import routes as tool_routes
+    # Minting (trust-anchor): il gateway conia i token; l'orchestrator li chiede
+    # via /internal/mint (auth secret di bootstrap). Le chiavi private stanno solo qui.
+    from .mint_api import routes as mint_routes
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
                 *imagegen_routes, *topics_routes, *connectors_routes, *profile_routes,
                 *telegram_routes, *agents_routes, *vault_routes, *sudo_routes,
-                *tool_routes],
+                *tool_routes, *mint_routes],
         lifespan=_lifespan)
 
 
