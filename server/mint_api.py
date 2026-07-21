@@ -77,6 +77,11 @@ async def mint(request: Request):
                 return JSONResponse({"error": "pubkey mancante"}, status_code=400)
             path = pki_mint.issue_cert_for_pubkey(agent, pubkey, force=bool(b.get("force")))
             return JSONResponse({"cert_path": path, "ok": True})
+        if kind == "issue-identity":
+            # Emissione COMPLETA (keypair + cert) di un agent nativo/seed: la
+            # privkey resta nel gateway (secrets/agents/<agent>/identity.key).
+            path = pki_mint.issue_agent_identity(agent, force=bool(b.get("force")))
+            return JSONResponse({"cert_path": path, "ok": True})
         return JSONResponse({"error": f"kind ignoto: {kind}"}, status_code=400)
     except PermissionError as e:
         LOG.warning("mint negato per %s: %s", agent, e)
