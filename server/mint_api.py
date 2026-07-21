@@ -71,6 +71,12 @@ async def mint(request: Request):
                 agent, b.get("instance") or "-", int(b.get("minutes") or 15),
                 by=b.get("by") or "", cap=b.get("cap") or "sudo")
             return JSONResponse(res)
+        if kind == "issue-cert":
+            pubkey = b.get("pubkey_pem") or b.get("pubkey") or ""
+            if not pubkey:
+                return JSONResponse({"error": "pubkey mancante"}, status_code=400)
+            path = pki_mint.issue_cert_for_pubkey(agent, pubkey, force=bool(b.get("force")))
+            return JSONResponse({"cert_path": path, "ok": True})
         return JSONResponse({"error": f"kind ignoto: {kind}"}, status_code=400)
     except PermissionError as e:
         LOG.warning("mint negato per %s: %s", agent, e)
