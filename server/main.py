@@ -1787,6 +1787,12 @@ _BINARY_EXTS = {
     "bin", "exe", "woff", "woff2", "ttf", "otf",
 }
 
+# Soglia oltre la quale i byte NON devono viaggiare come base64 nei parametri di
+# una tool-call (ARG_MAX, troncamento, token bruciati): sopra questo, read_file/
+# write_file rifiutano e indirizzano a topic.fetch/topic.put (transfer via scratch,
+# mediato dal gateway). ~128KB grezzi ≈ ~170KB di base64.
+_B64_INLINE_CAP = 128 * 1024
+
 
 def _decode_b64_strict(content: str, filename: str) -> bytes:
     """Decodifica base64 in modo robusto: tollera whitespace/newline e padding
@@ -2086,6 +2092,15 @@ def _dispatch_topic(name: str, a: dict):
         try:
             return {"path": a["path"], "encoding": "utf-8", "content": data.decode("utf-8")}
         except UnicodeDecodeError:
+            # File binario: NON riversare base64 grossi nel contesto (si tronca, brucia
+            # token, spesso fallisce). Sopra soglia → indirizza a topic.fetch (copia nello
+            # scratch, byte fuori dal modello). Vedi anche topic.read_document per il testo.
+            if len(data) > _B64_INLINE_CAP:
+                return {"ok": False, "path": a["path"], "size": len(data),
+                        "error": (f"file binario di {len(data)} byte: troppo grande per "
+                                  "read_file (base64 nel contesto). USA topic.fetch(tier, name, "
+                                  f"path='{a['path']}', dest=<path nel tuo scratch>) e lavora sul "
+                                  "file locale; per il solo testo usa topic.read_document.")}
             import base64 as _b64
             return {"path": a["path"], "encoding": "base64",
                     "content": _b64.b64encode(data).decode("ascii"),
@@ -2110,6 +2125,14 @@ def _dispatch_topic(name: str, a: dict):
         # Travel_reimbursement.xlsx: base64 scritto come testo → file corrotto.
         if enc == "base64" or ext in _BINARY_EXTS:
             data = _decode_b64_strict(a["content"], fn)
+            # Base64 grosso nei parametri = anti-pattern (ARG_MAX/troncamento): se hai
+            # già il file nello scratch, caricalo con topic.put (il gateway legge i byte
+            # dal path, niente base64 nel modello).
+            if len(data) > _B64_INLINE_CAP:
+                return {"ok": False, "filename": fn, "size": len(data),
+                        "error": (f"payload di {len(data)} byte troppo grande per write_file. "
+                                  "Scrivi il file nel tuo scratch e usa topic.put(tier, name, "
+                                  f"filename='{fn}', src=<path nel tuo scratch>).")}
         else:
             data = (a["content"] or "").encode("utf-8")
         return svc.put_file(a["tier"], a["name"], fn, data)
