@@ -12,8 +12,8 @@ from . import instance_profile
 from . import proxy
 from .tools import email, fs, logs, runtime
 from .tools import eu_corpus
-from .whitelist import (agent_config, agent_name, current_clearance, current_human_role,
-                        current_principal, is_on_behalf)
+from .whitelist import (agent_config, agent_name, current_chat, current_clearance,
+                        current_human_role, current_principal, is_on_behalf)
 
 import os as _os
 from .topics.service import TopicService, TopicError
@@ -1576,7 +1576,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             from . import sudo as _sudo
             result = _sudo.request_sudo(
                 agent_name(), "-", arguments.get("reason", ""),
-                arguments.get("minutes", 15), human=current_principal())
+                arguments.get("minutes", 15), human=current_principal(),
+                chat=current_chat())
         elif name == "email.send":
             result = email.send(
                 arguments["to"],

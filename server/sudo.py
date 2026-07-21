@@ -265,9 +265,10 @@ def _req_save(d: dict) -> None:
 
 
 def request_sudo(agent: str, instance: str, reason: str, minutes: int,
-                 human: Optional[str] = None) -> dict:
+                 human: Optional[str] = None, chat: Optional[str] = None) -> dict:
     """Un SUDOER chiede l'escalation. Crea/aggiorna una richiesta PENDING per la
-    coppia (agent, instance). `human` = principal umano del turno (chi ha chiesto)."""
+    coppia (agent, instance). `human` = principal umano del turno (chi ha chiesto).
+    `chat` = chat_id d'origine → l'approvazione posterà lì l'esito."""
     if not is_sudoer(agent):
         raise PermissionError(f"'{agent}' non è nel gruppo sudoer")
     now = time.time()
@@ -278,7 +279,7 @@ def request_sudo(agent: str, instance: str, reason: str, minutes: int,
     entry = {"agent": agent, "instance": instance or "-",
              "reason": (reason or "").strip()[:300],
              "minutes": max(1, min(int(minutes or 15), 120)),
-             "human": human, "at": now}
+             "human": human, "chat": chat, "at": now}
     d[_key(agent, instance)] = entry
     _req_save(d)
     return {"pending": True, **entry}
@@ -295,7 +296,8 @@ def list_requests() -> list:
         _req_save(d)
     return [{"agent": v["agent"], "instance": v.get("instance", "-"),
              "reason": v.get("reason", ""), "minutes": v.get("minutes", 15),
-             "human": v.get("human"), "age_s": int(now - float(v.get("at", 0)))}
+             "human": v.get("human"), "chat": v.get("chat"),
+             "age_s": int(now - float(v.get("at", 0)))}
             for v in d.values()]
 
 

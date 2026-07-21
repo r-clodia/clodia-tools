@@ -175,6 +175,23 @@ def current_human_role() -> str | None:
     return _CURRENT_HUMAN_ROLE.get()
 
 
+# chat_id della sessione dell'agente chiamante (dal claim `chat` del token) — per
+# postare in chat le decisioni sudo (approvato/negato).
+_CURRENT_CHAT: ContextVar[str | None] = ContextVar("mcp_current_chat", default=None)
+
+
+def set_current_chat(c: str | None) -> object:
+    return _CURRENT_CHAT.set(c)
+
+
+def reset_current_chat(token: object) -> None:
+    _CURRENT_CHAT.reset(token)  # type: ignore[arg-type]
+
+
+def current_chat() -> str | None:
+    return _CURRENT_CHAT.get()
+
+
 # Token ckt1 grezzo della richiesta corrente. Serve per INOLTRARLO al backend
 # quando il gateway deve compiere, per conto del caller, un'operazione che il
 # backend autorizza per principal-agent (es. agents.* → PATCH /api/agents/*/caps).
