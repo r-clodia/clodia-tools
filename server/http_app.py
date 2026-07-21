@@ -82,6 +82,18 @@ class _AuthMiddleware:
 async def _lifespan(_app):
     async with _sm.run():
         LOG.info("clodia-tools MCP HTTP: session manager attivo")
+        # M3++: in modalità runtime-keyless (CLODIA_ORCHESTRATOR_SECRET set) il
+        # gateway è il trust-anchor → bootstrap PKI qui (CA + identità native),
+        # idempotente. L'entrypoint di agent-server la salta in questa modalità.
+        import os as _os
+        if (_os.environ.get("CLODIA_ORCHESTRATOR_SECRET") or "").strip():
+            try:
+                from . import pki_mint
+                res = pki_mint.bootstrap()
+                LOG.info("PKI bootstrap (trust-anchor): CA=%s, identità=%s",
+                         res.get("ca"), res.get("issued"))
+            except Exception as e:  # noqa: BLE001 — mai bloccare il boot
+                LOG.warning("PKI bootstrap gateway fallito: %s", e)
         # Profilo topics:single → assicura il topic-workspace unico al boot
         # (TopicService.new è idempotente: se esiste, no-op).
         try:

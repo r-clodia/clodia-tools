@@ -122,6 +122,115 @@ def mint_capability(agent: str, instance: str, minutes: int, by: str,
     return {"token": f"{CAP_PREFIX}.{body}.{sig}", "jti": jti, "exp": payload["exp"]}
 
 
+CA_COMMON_NAME = "Clodia Colony CA"
+
+
+def _write_private(path: Path, key: Ed25519PrivateKey) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()))
+    os.chmod(path, 0o600)
+
+
+def _ca_initialized() -> bool:
+    return _ca_key_path().is_file() and _ca_crt_path().is_file()
+
+
+def init_ca(force: bool = False) -> Path:
+    """Crea la CA della colonia se assente (idempotente). Rispecchia
+    colony.pki.init_ca — nel modello M3++ è il GATEWAY il trust-anchor."""
+    if _ca_initialized() and not force:
+        return _ca_crt_path()
+    key = Ed25519PrivateKey.generate()
+    name = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, CA_COMMON_NAME),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, COLONY_ORG),
+    ])
+    now = datetime.now(timezone.utc)
+    cert = (x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=5))
+            .not_valid_after(now + timedelta(days=CERT_DAYS * 2))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+            .sign(key, algorithm=None))
+    _write_private(_ca_key_path(), key)
+    _ca_crt_path().parent.mkdir(parents=True, exist_ok=True)
+    _ca_crt_path().write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    return _ca_crt_path()
+
+
+def issue_agent_identity(agent: str, force: bool = False) -> str:
+    """Genera keypair + cert per un agent (identity.key lato server). Rispecchia
+    colony.pki.issue_agent_identity. Non rigenera un'identità a chiave esterna
+    (cert presente senza identity.key = umano/masterkey)."""
+    cert_path = _certs_dir() / f"{agent}.crt"
+    key_path = _agent_key_path(agent)
+    if cert_path.is_file() and not key_path.is_file() and not force:
+        return str(cert_path)  # identità a chiave esterna: non toccare
+    if key_path.is_file() and cert_path.is_file() and not force:
+        return str(cert_path)  # già emessa
+    ca_key = _load_private(_ca_key_path())
+    ca_cert = x509.load_pem_x509_certificate(_ca_crt_path().read_bytes())
+    key = Ed25519PrivateKey.generate()
+    now = datetime.now(timezone.utc)
+    cert = (x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.COMMON_NAME, agent),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, COLONY_ORG),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=5))
+            .not_valid_after(now + timedelta(days=CERT_DAYS))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .sign(ca_key, algorithm=None))
+    _write_private(key_path, key)
+    _certs_dir().mkdir(parents=True, exist_ok=True)
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    return str(cert_path)
+
+
+def _native_agents() -> list[str]:
+    """Agent NON-human dal catalogo (`${CLODIA_DATA}/agents/<name>/agent.yaml`).
+    Gli umani generano il keypair nel browser → mai issuance server-side."""
+    import yaml
+    base = Path(os.environ.get("CLODIA_DATA", "/datadir")) / "agents"
+    out: list[str] = []
+    if not base.is_dir():
+        return out
+    for d in sorted(base.iterdir()):
+        y = d / "agent.yaml"
+        if not y.is_file():
+            continue
+        try:
+            spec = yaml.safe_load(y.read_text()) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        if str(spec.get("type") or "").strip() == "human":
+            continue
+        out.append(spec.get("name") or d.name)
+    return out
+
+
+def bootstrap() -> dict:
+    """init-ca + issue-all (idempotente): il gateway, unico detentore delle
+    chiavi, garantisce CA + identità dei native agent al boot. Sostituisce la
+    bootstrap PKI che girava nell'entrypoint di agent-server (M3++)."""
+    init_ca()
+    issued = []
+    for name in _native_agents():
+        try:
+            issue_agent_identity(name)
+            issued.append(name)
+        except Exception:  # noqa: BLE001
+            pass
+    return {"ca": str(_ca_crt_path()), "issued": issued}
+
+
 def issue_cert_for_pubkey(name: str, pubkey_pem: str, force: bool = False) -> str:
     """Firma un cert CA per una pubkey ed25519 generata esternamente (browser/
     masterkey per i principal umani). Il gateway NON vede mai la privkey. Scrive
