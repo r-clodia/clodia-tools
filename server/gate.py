@@ -27,12 +27,25 @@ LOG = logging.getLogger("clodia-tools.gate")
 # Verbi/prefissi GATED: default ≈ i vecchi super-only (mutazioni di piattaforma).
 # Configurabile via env CLODIA_GATED_VERBS (CSV di prefissi/verbi; un prefisso
 # finisce con '.'). Vuoto = usa i default.
+# Gate SOLO i verbi MUTANTI (non le letture). Prefissi per famiglie in cui ogni
+# verbo è sensibile (settings/pki/ca); elenco esatto per le famiglie che hanno
+# anche letture (agents/mcp/packs/providers → list/show NON gated).
 _DEFAULT_GATED_PREFIXES = (
-    "packs.", "providers.", "mcp.", "agents.", "settings.", "pki.", "ca.",
+    "settings.", "pki.", "ca.",
 )
 _DEFAULT_GATED_EXACT = frozenset({
-    "workflows.terminate", "workflows.start", "workflows.cancel", "workflows.delete",
-    # gestione partecipanti di un topic (auto-invito / confused-deputy): supervisione umana
+    # agents: mutazioni delle capability (grant/revoke); list/show/list_* NON gated
+    "agents.grant_rule", "agents.grant_skill", "agents.grant_tool",
+    "agents.revoke_rule", "agents.revoke_skill", "agents.revoke_tool",
+    # mcp: add/remove nuova superficie di codice; mcp.list NON gated
+    "mcp.add", "mcp.remove",
+    # packs: install/remove esegue codice terzi; packs.list/show NON gated
+    "packs.import_url", "packs.remove",
+    # providers: pausa/ripresa (egress dati); providers.list NON gated
+    "providers.pause", "providers.resume",
+    # workflows: lifecycle distruttivo (il verbo reale del delete è delete_run)
+    "workflows.start", "workflows.cancel", "workflows.delete_run",
+    # gestione partecipanti di un topic (auto-invito / confused-deputy)
     "topic.add_participant", "topic.remove_participant",
 })
 
