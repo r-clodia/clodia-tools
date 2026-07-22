@@ -1737,6 +1737,22 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 and not _connector_allows(name, _ag):
             raise PermissionError(
                 f"tool '{name}' non in whitelist per agent '{_ag}'")
+        # M-gate: un verbo GATED richiede conferma umana AD OGNI uso — anche per i
+        # super-agent (niente più bypass) e anche on-behalf di un umano. Il gate
+        # NON concede nulla: il richiedente è già autorizzato sopra. Per gli AGENTI
+        # serve un consenso ccap1 (one-shot, consumato all'uso); assente → si crea
+        # una richiesta e si sospende. Per gli UMANI la conferma è il dialog lato UI
+        # (sono già l'autorità autenticata): qui non blocchiamo oltre la RBAC.
+        from . import gate as _gate
+        if _gate.is_gated(name) and not is_on_behalf():
+            _inst = "-"
+            if not _gate.active(_ag, _inst, name):
+                _gate.request(_ag, _inst, name, context=current_chat(),
+                              human=current_principal(), chat=current_chat())
+                raise PermissionError(
+                    f"gate: '{name}' richiede conferma umana — richiesta creata "
+                    "nel contesto; riprova dopo l'approvazione")
+            _gate.consume(_ag, _inst, name)  # one-shot: il consenso vale per questa azione
         if name == "fs.list_dir":
             result = fs.list_dir(arguments["path"])
         elif name == "logs.tail":
