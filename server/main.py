@@ -1269,9 +1269,11 @@ def _dispatch_profile(name: str, a: dict, caller: str | None):
 
 
 def _dispatch_settings(name: str, arguments: dict, agent: str | None):
-    # SOLO super-agent: settings.* tocca la configurazione di piattaforma.
-    if not _is_super(agent):
-        raise PermissionError("settings.* riservato ai super-agent")
+    # Autorizzazione GIÀ fatta a monte in call_tool: super-agent (bypass) OPPURE
+    # verbo nella whitelist `tool_permissions` dell'agente (per-verbo) + M-gate.
+    # NIENTE guard super-only qui: era ridondante e SBAGLIATO — ri-bloccava anche
+    # chi ha il grant puntuale (es. sysadmin ha `settings.backup_run` per il
+    # backup pre-flight delle migrazioni dati dei pack, ma non backup_set/get).
     from . import backup
     sub = name.split(NS_SEP_DOT, 1)[1]
     if sub == "backup_get":
