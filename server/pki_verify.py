@@ -150,8 +150,11 @@ def verify_capability(token: str) -> dict:
         _ca_public_key().verify(_b64d(sig), body.encode())
     except Exception:
         raise PermissionError("firma capability non valida (non firmata dalla CA)")
-    if payload.get("cap") != "sudo":
-        raise PermissionError("capability non-sudo")
+    # NON si vincola più `cap` a "sudo": la capability porta il proprio scope
+    # (`sudo` per M-sudo, `gate:<verb>` per M-gate). La firma CA garantisce
+    # l'autenticità; è il CHIAMANTE a pretendere il `cap` che gli serve.
+    if not str(payload.get("cap") or "").strip():
+        raise PermissionError("capability senza cap")
     if int(payload.get("exp", 0)) < time.time():
         raise PermissionError("capability scaduta")
     return payload

@@ -209,6 +209,8 @@ def active(agent: str, instance: str) -> bool:
             return False
         if payload.get("agent") != agent:
             return False
+        if str(payload.get("cap") or "sudo") != "sudo":
+            return False  # una capability gate:<verb> NON vale come sudo
         if str(payload.get("jti") or "") in _load_revoked():
             return False
         return True
