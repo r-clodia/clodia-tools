@@ -57,6 +57,13 @@ def propose_job(name: str, prompt: str, requested_by: str,
     })
 
 
+def restart_agent(agent: str) -> dict:
+    """Proxy: RIAVVIA le sessioni vive di un agente (ferma i subprocess; la chat
+    rimaterializza il seed al prossimo messaggio). Ops di sysadmin per sbloccare
+    un agente col runtime impuntato. I dati persistono."""
+    return _post("/clodia/runtime/restart-agent", {"agent": agent})
+
+
 def set_participant(tier: str, name: str, agent: str, by: str, add: bool) -> dict:
     """Proxy: aggiunge/rimuove un partecipante da un canale, per conto dell'agente
     `by` (autorizzazione lato agent-server: owner|partecipante|super)."""

@@ -809,6 +809,11 @@ _RUNTIME_TOOLS: list[Tool] = [
     Tool(name="runtime.current_user",
          description="Chi è l'utente umano con cui stai parlando: l'owner/superadmin dell'istanza (+ gli altri principal umani). Usalo per sapere a chi ti stai rivolgendo.",
          inputSchema={"type": "object", "properties": {}}),
+    Tool(name="runtime.restart_agent",
+         description="OPS: riavvia le sessioni vive di un agente — ferma i suoi subprocess/runtime; alla prossima interazione la chat rimaterializza il seed da zero. Da usare per sbloccare un agente col runtime impuntato (es. sessione opencode persa, loop). I dati/la history persistono. Capacità di ops (sysadmin).",
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string", "description": "nome del seed da riavviare (es. 'impiegato-tomato')"}},
+             "required": ["agent"]}),
 ]
 
 # jobs.* — gestione dei job schedulati. La CREAZIONE non è diretta: si PROPONE
@@ -1504,6 +1509,8 @@ def _dispatch_runtime(name: str, arguments: dict):
         return runtime.providers()
     if sub == "current_user":
         return runtime.current_user()
+    if sub == "restart_agent":
+        return runtime.restart_agent(arguments.get("agent"))
     raise ValueError(f"unknown runtime tool: {name}")
 
 
