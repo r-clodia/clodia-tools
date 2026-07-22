@@ -1607,8 +1607,8 @@ def _human_tool_allowed(name: str) -> bool:
     stessa lista di M-sudo) richiede ruolo **admin**; tutto il resto è concesso a
     qualunque umano autenticato. Il ruolo è un claim FIRMATO dall'agent-server →
     non forgiabile dal modello. Chiude la Broken Access Control del path REST."""
-    from . import sudo as _sudo
-    if _sudo.is_super_only(name):
+    from . import gate as _gate
+    if _gate.is_gated(name):
         return (current_human_role() or "user") == "admin"
     return True
 
@@ -1715,6 +1715,55 @@ async def list_tools() -> list[Tool]:
             if _tool_allowed(t.name, allowed) or _connector_allows(t.name, me)]
 
 
+async def _require_gate_consent(agent: str, gate_key: str, *, consume: bool) -> None:
+    """Block-and-wait sul consenso di gate per (agent, gate_key). Se assente crea
+    la richiesta (popup) e ATTENDE la decisione umana (~180s), poi procede; solleva
+    su diniego o timeout. `consume`=True → one-shot (verbi); False → time-boxed
+    (cross-topic: l'intera operazione sul topic vale finché dura il consenso)."""
+    from . import gate as _gate
+    inst = "-"
+    if not _gate.active(agent, inst, gate_key):
+        _gate.request(agent, inst, gate_key, context=current_chat(),
+                      human=current_principal(), chat=current_chat())
+        import asyncio as _aio
+        approved = False
+        for _ in range(90):  # ~180s
+            await _aio.sleep(2)
+            if _gate.active(agent, inst, gate_key):
+                approved = True
+                break
+            if not _gate.request_pending(agent, inst, gate_key):
+                raise PermissionError(f"gate: '{gate_key}' negato dall'operatore")
+        if not approved:
+            _gate.resolve_request(agent, inst, gate_key)
+            raise PermissionError(f"gate: '{gate_key}' non approvato entro il tempo limite")
+    if consume:
+        _gate.consume(agent, inst, gate_key)
+
+
+def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
+    """Chiave di gate per l'accesso CROSS-TOPIC: se `name` è un verbo topic-scoped
+    e l'agente (né il principal umano del turno) NON è participant/owner del topic
+    target → ritorna 'topic-access:<tier>/<name>'. Altrimenti None (membro → nessun
+    gate). Sostituisce _sudo_cross_topic."""
+    if NS_SEP_DOT not in name:
+        return None
+    ns, verb = name.split(NS_SEP_DOT, 1)
+    if ns != "topic" or verb not in _TOPIC_SCOPED_VERBS:
+        return None
+    tier, tname = arguments.get("tier"), arguments.get("name")
+    if not (tier and tname):
+        return None
+    try:
+        meta = _topics().open(tier, tname).get("meta", {})
+    except Exception:  # noqa: BLE001 — topic inesistente → lascia decidere al dispatch
+        return None
+    principal = current_principal()
+    member = _topic_is_member(meta, agent) or (
+        bool(principal) and _topic_is_member(meta, principal))
+    return None if member else f"topic-access:{meta.get('tier', tier)}/{tname}"
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     try:
@@ -1737,35 +1786,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 and not _connector_allows(name, _ag):
             raise PermissionError(
                 f"tool '{name}' non in whitelist per agent '{_ag}'")
-        # M-gate: un verbo GATED richiede conferma umana AD OGNI uso — anche per i
-        # super-agent (niente più bypass) e anche on-behalf di un umano. Il gate
-        # NON concede nulla: il richiedente è già autorizzato sopra. Per gli AGENTI
-        # serve un consenso ccap1 (one-shot, consumato all'uso); assente → si crea
-        # una richiesta e si sospende. Per gli UMANI la conferma è il dialog lato UI
-        # (sono già l'autorità autenticata): qui non blocchiamo oltre la RBAC.
-        from . import gate as _gate
-        if _gate.is_gated(name) and not is_on_behalf():
-            _inst = "-"
-            if not _gate.active(_ag, _inst, name):
-                # Crea la richiesta (popup lato UI) e ATTENDE la decisione umana:
-                # la tool-call si blocca fino all'approvazione (poi procede da sé),
-                # al diniego, o al timeout. Niente re-trigger fragile dell'agente.
-                _gate.request(_ag, _inst, name, context=current_chat(),
-                              human=current_principal(), chat=current_chat())
-                import asyncio as _aio
-                _approved = False
-                for _ in range(90):  # ~180s: finestra per il consenso umano
-                    await _aio.sleep(2)
-                    if _gate.active(_ag, _inst, name):
-                        _approved = True
-                        break
-                    if not _gate.request_pending(_ag, _inst, name):
-                        raise PermissionError(f"gate: '{name}' negato dall'operatore")
-                if not _approved:
-                    _gate.resolve_request(_ag, _inst, name)
-                    raise PermissionError(
-                        f"gate: '{name}' non approvato entro il tempo limite")
-            _gate.consume(_ag, _inst, name)  # one-shot: il consenso vale per questa azione
+        # M-gate: conferma umana su azioni sotto supervisione — UN SOLO meccanismo.
+        # (a) VERBI gated (packs/mcp/agents/…): consenso one-shot per-verbo.
+        # (b) CROSS-TOPIC: un agente che tocca un topic di cui NON è participant
+        #     richiede un consenso per-topic (time-boxed, così l'intera operazione
+        #     cross-topic procede). Sostituisce il vecchio sudo cross-topic.
+        # Il gate non concede nulla di nuovo: il richiedente è già autorizzato sopra.
+        if not is_on_behalf():
+            from . import gate as _gate
+            if _gate.is_gated(name):
+                await _require_gate_consent(_ag, name, consume=True)
+            _ck = _cross_topic_gate_key(name, arguments, _ag)
+            if _ck:
+                await _require_gate_consent(_ag, _ck, consume=False)
         if name == "fs.list_dir":
             result = fs.list_dir(arguments["path"])
         elif name == "logs.tail":
@@ -2003,19 +2036,6 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
     return caller == meta.get("owner") or caller in (meta.get("participants") or [])
 
 
-def _sudo_cross_topic(caller: str) -> bool:
-    """Un SUDOER (clodia/ophelia/sysadmin) può andare cross-topic / fare azioni
-    super-only SOLO con un grant sudo attivo (approvato da un admin). Non-sudoer
-    o sudoer senza grant → False. Fix confused-deputy: nessun bypass permanente.
-    (instance-boxing per-sessione: il plumbing dell'id-istanza arriva dopo; per
-    ora chiave istanza '-'.)"""
-    try:
-        from . import sudo
-        return sudo.is_sudoer(caller) and sudo.active(caller, "-")
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def _require_topic_member(svc, tier, name) -> None:
     """ACL compartimento (need-to-know). Consentito SSE:
       - l'UMANO del turno (current_principal) è participant/owner del target, OPPURE
@@ -2032,13 +2052,17 @@ def _require_topic_member(svc, tier, name) -> None:
         raise PermissionError(f"topic {tier}/{name}: accesso negato")
     human_ok = bool(principal) and _topic_is_member(meta, principal)
     agent_ok = _topic_is_member(meta, caller)
-    if not (human_ok or agent_ok or _sudo_cross_topic(caller)):
+    tier_t = meta.get("tier", tier)
+    # cross-topic: consentito con un CONSENSO GATE attivo per questo topic
+    # (topic-access:<tier>/<name>), concesso via popup (M-gate). Sostituisce sudo.
+    from . import gate as _gate
+    cross_ok = _gate.active(caller, "-", f"topic-access:{tier_t}/{name}")
+    if not (human_ok or agent_ok or cross_ok):
         raise PermissionError(
             f"accesso negato al topic {tier}/{name}: né l'umano '{principal}' né "
             f"l'agente '{caller}' sono partecipanti (compartimento need-to-know; "
-            f"cross-topic richiede sudo)")
+            f"il cross-topic richiede un consenso gate)")
     # asse livello: clearance ≥ tier (difesa in profondità oltre al compartimento).
-    tier_t = meta.get("tier", tier)
     if _rank(current_clearance()) < _rank(tier_t):
         raise PermissionError(
             f"agent '{caller}': clearance insufficiente per il tier {tier_t} del "
@@ -2047,10 +2071,9 @@ def _require_topic_member(svc, tier, name) -> None:
 
 def _filter_member_rows(rows: list, caller: str) -> list:
     """Filtra righe-topic allo scope need-to-know: topic di cui l'UMANO del turno
-    o l'AGENTE è participant/owner. Super con sudo attivo → tutte. Righe senza
+    o l'AGENTE è participant/owner. Nessun bypass "vedi tutto" (il cross-topic è
+    per-topic via gate, non un lasciapassare globale). Righe senza
     participants/owner (shape diversa) lasciate."""
-    if _sudo_cross_topic(caller):
-        return rows
     principal = current_principal()
     out = []
     for r in rows:
@@ -2215,10 +2238,9 @@ def _dispatch_topic(name: str, a: dict):
         # (giovanni non può chiedere a clodia di aggiungersi a un topic).
         # L'owner UMANO gestisce i partecipanti dalla webui (endpoint dedicato,
         # non questo tool), quindi i flussi legittimi non si rompono.
-        if not _sudo_cross_topic(agent_name()):
-            raise PermissionError(
-                "gestione partecipanti: azione riservata (super con sudo attivo). "
-                "L'owner invita/rimuove i partecipanti dalla webui.")
+        # M-gate: topic.add_participant/remove_participant sono verbi GATED → il
+        # gate di call_tool ha già richiesto la conferma umana (block-and-wait)
+        # prima di arrivare qui. Nessun controllo aggiuntivo.
         return runtime.set_participant(a["tier"], a["name"], (a.get("agent") or "").strip(),
                                        by=agent_name() or "", add=(verb == "add_participant"))
     if verb == "new":

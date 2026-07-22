@@ -32,6 +32,8 @@ _DEFAULT_GATED_PREFIXES = (
 )
 _DEFAULT_GATED_EXACT = frozenset({
     "workflows.terminate", "workflows.start", "workflows.cancel", "workflows.delete",
+    # gestione partecipanti di un topic (auto-invito / confused-deputy): supervisione umana
+    "topic.add_participant", "topic.remove_participant",
 })
 
 
