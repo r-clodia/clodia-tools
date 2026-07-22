@@ -1747,11 +1747,24 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if _gate.is_gated(name) and not is_on_behalf():
             _inst = "-"
             if not _gate.active(_ag, _inst, name):
+                # Crea la richiesta (popup lato UI) e ATTENDE la decisione umana:
+                # la tool-call si blocca fino all'approvazione (poi procede da sé),
+                # al diniego, o al timeout. Niente re-trigger fragile dell'agente.
                 _gate.request(_ag, _inst, name, context=current_chat(),
                               human=current_principal(), chat=current_chat())
-                raise PermissionError(
-                    f"gate: '{name}' richiede conferma umana — richiesta creata "
-                    "nel contesto; riprova dopo l'approvazione")
+                import asyncio as _aio
+                _approved = False
+                for _ in range(90):  # ~180s: finestra per il consenso umano
+                    await _aio.sleep(2)
+                    if _gate.active(_ag, _inst, name):
+                        _approved = True
+                        break
+                    if not _gate.request_pending(_ag, _inst, name):
+                        raise PermissionError(f"gate: '{name}' negato dall'operatore")
+                if not _approved:
+                    _gate.resolve_request(_ag, _inst, name)
+                    raise PermissionError(
+                        f"gate: '{name}' non approvato entro il tempo limite")
             _gate.consume(_ag, _inst, name)  # one-shot: il consenso vale per questa azione
         if name == "fs.list_dir":
             result = fs.list_dir(arguments["path"])

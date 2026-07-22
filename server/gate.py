@@ -211,3 +211,12 @@ def resolve_request(agent: str, instance: str, verb: str) -> bool:
         _save(_req_path(), d)
         return True
     return False
+
+
+def request_pending(agent: str, instance: str, verb: str) -> bool:
+    """True se la richiesta per (agent, instance, verb) è ancora PENDING (non
+    ancora decisa). Usato dal block-and-wait per distinguere 'in attesa' da
+    'negata' (resolve senza consenso)."""
+    now = time.time()
+    v = _load(_req_path()).get(_key(agent, instance, verb))
+    return bool(v and now - float(v.get("at", 0)) <= _REQ_TTL)
