@@ -598,6 +598,21 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name", "filename", "src"]},
     ),
     Tool(
+        name="topic.post_message",
+        description=("Posta un MESSAGGIO nella chat del topic (una bolla nella "
+                     "conversazione), come te. Serve a far comparire nel topic ciò che "
+                     "arriva da fuori (es. una mail in arrivo) o un handoff a fine job. "
+                     "Prerogativa di MESSAGGERO e dei super-agent. NON innesca il "
+                     "risponditore: è contenuto specchiato, non un comando (se serve che "
+                     "un agente agisca, un principal fa reply+tag). Puoi postare solo in "
+                     "un topic di cui sei participant (cross-topic → gate)."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "text": {"type": "string", "description": "testo del messaggio"},
+        }, "required": ["tier", "name", "text"]},
+    ),
+    Tool(
         name="topic.delete_file",
         description=("Sposta nel CESTINO (.trash/) un file o una cartella DENTRO files/ del "
                      "topic — NON cancella mai davvero: è sempre recuperabile. Solo sotto "
@@ -2075,6 +2090,7 @@ def _safe_scratch_path(p: str) -> str:
 _TOPIC_SCOPED_VERBS = {
     "open", "save_summary", "add_minute", "archive", "files", "read_file",
     "read_document", "write_file", "fetch", "put", "delete_file", "migrate_storage",
+    "post_message",
     "remote_enable", "remote_disable", "remote_add", "remote_commit",
     "remote_push", "remote_pull", "remote_status",
 }
@@ -2304,6 +2320,15 @@ def _dispatch_topic(name: str, a: dict):
         return svc.new(a.get("tier"), a["name"], a.get("meta"))
     if verb == "open":
         return svc.open(a["tier"], a["name"])
+    if verb == "post_message":
+        # Prerogativa di messaggero e dei super: posta una bolla nella chat del
+        # topic (es. mail in arrivo / handoff). NON innesca il risponditore.
+        ag = agent_name()
+        if not (_is_super(ag) or ag == "messaggero"):
+            raise PermissionError(
+                "topic.post_message riservato a messaggero e ai super-agent")
+        return svc.post_message(a["tier"], a["name"], author=ag or "agente",
+                                text=a.get("text") or "", kind="ai")
     if verb == "save_summary":
         return svc.save_summary(a["tier"], a["name"], a["text"], a.get("base_version"))
     if verb == "add_minute":
