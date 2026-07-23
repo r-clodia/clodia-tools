@@ -1793,8 +1793,22 @@ async def _require_gate_consent(agent: str, gate_key: str, *, consume: bool) -> 
     from . import gate as _gate
     inst = "-"
     if not _gate.active(agent, inst, gate_key):
-        _gate.request(agent, inst, gate_key, context=current_chat(),
-                      human=current_principal(), chat=current_chat())
+        req = _gate.request(agent, inst, gate_key, context=current_chat(),
+                            human=current_principal(), chat=current_chat())
+        # UX inline: se l'azione parte da un CANALE (chat=chan:tier:name:...),
+        # posta un marker nel canale → il webui rende la card Approva/Nega
+        # NELLA conversazione (come job-proposal), non nel popup staccato. I gate
+        # senza contesto-canale restano gestiti dal popup di fallback.
+        _ch = current_chat() or ""
+        if _ch.startswith("chan:"):
+            try:
+                _parts = _ch.split(":")
+                _tier, _name = _parts[1], _parts[2]
+                # kind=ai (non system): i system sono filtrati dal render del webui.
+                _topics().post_message(_tier, _name, author="gate",
+                                       text=f"<!-- gate={req.get('id')} -->", kind="ai")
+            except Exception:  # noqa: BLE001 — il gate resta valido anche senza marker
+                pass
         import asyncio as _aio
         approved = False
         for _ in range(90):  # ~180s
