@@ -98,10 +98,10 @@ def files_dir(name: str | None = None) -> Path:
     return d
 
 
-def put_document(filename: str, content_b64: str) -> dict:
-    import base64
+def put_document_bytes(filename: str, data: bytes) -> dict:
+    """Salva `data` (byte grezzi) come documento del seed. Usato da `memory.put`
+    (byte letti dallo scratch dal gateway → niente base64 nel modello)."""
     fn = _safe_file(filename)
-    data = base64.b64decode(content_b64 or "")
     if len(data) > _MAX_DOC_BYTES:
         raise ValueError(f"documento troppo grande ({len(data)}B > {_MAX_DOC_BYTES}B)")
     p = files_dir() / fn
@@ -109,6 +109,11 @@ def put_document(filename: str, content_b64: str) -> dict:
     tmp.write_bytes(data)
     tmp.replace(p)
     return {"file": fn, "bytes": len(data), "ok": True}
+
+
+def put_document(filename: str, content_b64: str) -> dict:
+    import base64
+    return put_document_bytes(filename, base64.b64decode(content_b64 or ""))
 
 
 def list_documents() -> dict:

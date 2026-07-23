@@ -1203,10 +1203,30 @@ _MEMORY_TOOLS: list[Tool] = [
     Tool(name="memory.put_document",
          description=("Salva un DOCUMENTO (PDF, docx, xlsx, dataset, immagine…) nella tua "
                       "libreria personale del seed (persistente, sopravvive agli spawn). "
-                      "content_b64 = contenuto in base64. Max 25MB."),
+                      "content_b64 = contenuto in base64. Max 25MB. ⚠️ SOLO per file "
+                      "PICCOLI: per binari o file grandi usa memory.put (byte dallo "
+                      "scratch, niente base64 nel modello)."),
          inputSchema={"type": "object", "properties": {
              "filename": {"type": "string"}, "content_b64": {"type": "string"}},
              "required": ["filename", "content_b64"]}),
+    Tool(name="memory.put",
+         description=("Salva un file (anche BINARIO/GRANDE) nella tua libreria del seed "
+                      "leggendo i BYTE dal tuo scratch — niente base64 nel modello (come "
+                      "topic.put). USA QUESTO per PDF/immagini/file grandi. src = path "
+                      "assoluto del file nel tuo scratch; filename = nome nella libreria."),
+         inputSchema={"type": "object", "properties": {
+             "filename": {"type": "string"}, "src": {"type": "string",
+                 "description": "path assoluto del file nel tuo scratch"}},
+             "required": ["filename", "src"]}),
+    Tool(name="memory.fetch",
+         description=("Scarica un DOCUMENTO della tua libreria nel TUO scratch (byte su "
+                      "file, niente base64 nel modello — come topic.fetch). USA QUESTO al "
+                      "posto di memory.get_document per binari/file grandi. filename = "
+                      "nome nella libreria; dest = path assoluto nel tuo scratch."),
+         inputSchema={"type": "object", "properties": {
+             "filename": {"type": "string"}, "dest": {"type": "string",
+                 "description": "path assoluto di destinazione nel tuo scratch"}},
+             "required": ["filename", "dest"]}),
     Tool(name="memory.list_documents",
          description="Elenca i DOCUMENTI nella tua libreria del seed (nome + dimensione).",
          inputSchema={"type": "object", "properties": {}}),
@@ -1218,7 +1238,9 @@ _MEMORY_TOOLS: list[Tool] = [
              "required": ["filename"]}),
     Tool(name="memory.get_document",
          description=("Recupera un DOCUMENTO della libreria come base64 grezzo (per "
-                      "ri-allegarlo o passarlo a un tool che accetta binari)."),
+                      "ri-allegarlo o passarlo a un tool che accetta binari). ⚠️ SOLO "
+                      "file PICCOLI: per binari/file grandi usa memory.fetch (byte nello "
+                      "scratch)."),
          inputSchema={"type": "object", "properties": {
              "filename": {"type": "string"}}, "required": ["filename"]}),
     Tool(name="memory.delete_document",
@@ -1431,6 +1453,21 @@ def _dispatch_memory(name: str, a: dict):
     # ── Document store per-seed ──────────────────────────────────────────────
     if verb == "put_document":
         return mem.put_document(a["filename"], a["content_b64"])
+    if verb == "put":
+        # Byte dallo scratch dell'agent → libreria del seed (niente base64 nel
+        # modello). Il gateway legge il file locale; path validato sotto spawns/.
+        src = _safe_scratch_path(a["src"])
+        with open(src, "rb") as f:
+            data = f.read()
+        return mem.put_document_bytes(a["filename"], data)
+    if verb == "fetch":
+        # Documento del seed → file nello scratch dell'agent (niente base64).
+        fn, data = mem.read_document_bytes(a["filename"])
+        dest = _safe_scratch_path(a["dest"])
+        _os.makedirs(_os.path.dirname(dest) or ".", exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(data)
+        return {"file": fn, "bytes": len(data), "dest": dest, "ok": True}
     if verb == "list_documents":
         return mem.list_documents()
     if verb == "read_document":
