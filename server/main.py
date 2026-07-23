@@ -853,7 +853,7 @@ _JOBS_TOOLS: list[Tool] = [
              "prompt": {"type": "string", "description": "cosa deve fare l'agente al fire del job"},
              "schedule_text": {"type": "string", "description": "cadenza in linguaggio naturale (es. 'ogni lunedì alle 9')"},
              "cron_expr": {"type": "string", "description": "in alternativa, cron a 5 campi"},
-             "agent": {"type": "string", "description": "agent (kind) che esegue il job al fire (default clodia)"},
+             "agent": {"type": "string", "description": "agent (kind) che esegue il job al fire. Default: l'agente chiamante (te stesso). Indicane un altro solo se il job deve girare per conto di qualcun altro."},
              "enabled": {"type": "boolean", "description": "attivo alla creazione (default true)"},
          }, "required": ["name", "prompt"]}),
 ]
@@ -1588,7 +1588,10 @@ def _dispatch_jobs(name: str, a: dict, caller: str | None):
         return runtime.propose_job(
             name=a.get("name"), prompt=a.get("prompt"),
             schedule_text=a.get("schedule_text"), cron_expr=a.get("cron_expr"),
-            agent=a.get("agent") or "clodia", enabled=a.get("enabled", True),
+            # default = l'agente CHIAMANTE (non clodia): chi propone un job
+            # ricorrente di norma lo esegue lui stesso (es. messaggero/check-email).
+            # Evita che l'executor "scivoli" a clodia quando l'agent è omesso.
+            agent=a.get("agent") or caller or "clodia", enabled=a.get("enabled", True),
             requested_by=caller or "agente")
     raise ValueError(f"unknown jobs tool: {name}")
 
