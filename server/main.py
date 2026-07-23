@@ -829,6 +829,17 @@ _RUNTIME_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {
              "agent": {"type": "string", "description": "nome del seed da riavviare (es. 'impiegato-tomato')"}},
              "required": ["agent"]}),
+    Tool(name="runtime.inspect_topic",
+         description=("OPS/STEWARD: ispeziona UN topic specifico (di norma quello da cui "
+                      "l'utente ti sta chiamando nel widget). Ritorna metadati (titolo, "
+                      "stato, owner), gli AGENTI del topic e gli ULTIMI messaggi. NB: "
+                      "vincolato alla tua clearance — se la tua SEAL effettiva è < tier "
+                      "del topic ricevi 403 (il topic è invisibile). Usalo per capire il "
+                      "contesto in cui stai assistendo l'utente (chi c'è, cosa si sono detti)."),
+         inputSchema={"type": "object", "properties": {
+             "tier": {"type": "string", "description": "tier del topic (es. SEAL-1)"},
+             "name": {"type": "string", "description": "nome del topic"}},
+             "required": ["tier", "name"]}),
 ]
 
 # jobs.* — gestione dei job schedulati. La CREAZIONE non è diretta: si PROPONE
@@ -1552,7 +1563,7 @@ def _dispatch_agents(name: str, a: dict, caller: str | None):
     raise ValueError(f"unknown agents verb: {name}")
 
 
-def _dispatch_runtime(name: str, arguments: dict):
+def _dispatch_runtime(name: str, arguments: dict, caller: str | None = None):
     sub = name.split(NS_SEP_DOT, 1)[1]
     if sub == "agents":
         return runtime.agents()
@@ -1572,6 +1583,9 @@ def _dispatch_runtime(name: str, arguments: dict):
         return runtime.current_user()
     if sub == "restart_agent":
         return runtime.restart_agent(arguments.get("agent"))
+    if sub == "inspect_topic":
+        return runtime.inspect_topic(arguments.get("tier"), arguments.get("name"),
+                                     by=caller or "")
     raise ValueError(f"unknown runtime tool: {name}")
 
 
@@ -1985,7 +1999,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_gdocs(name, arguments)
         elif name.startswith("runtime."):
             # proxy httpx SINCRONO all'agent-server → offload su thread (no blocco loop)
-            result = await asyncio.to_thread(_dispatch_runtime, name, arguments)
+            result = await asyncio.to_thread(_dispatch_runtime, name, arguments, _ag)
         elif name.startswith("jobs."):
             result = await asyncio.to_thread(_dispatch_jobs, name, arguments, _ag)
         elif name.startswith("packs."):

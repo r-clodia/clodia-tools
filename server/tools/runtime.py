@@ -64,6 +64,15 @@ def restart_agent(agent: str) -> dict:
     return _post("/clodia/runtime/restart-agent", {"agent": agent})
 
 
+def inspect_topic(tier: str, name: str, by: str) -> dict:
+    """Proxy: introspezione di UN topic per uno steward (sysadmin) chiamato dal
+    widget. Metadati + agenti + ultimi messaggi, MA solo entro la clearance del
+    chiamante: topic sopra la sua SEAL → 403 (invisibile). L'asse participant è
+    bypassato (lo steward non è partecipante), quello clearance NO."""
+    return _post("/clodia/runtime/inspect-topic",
+                 {"tier": tier, "name": name, "by": by})
+
+
 def channel_trigger(tier: str, name: str, text: str, by: str) -> dict:
     """Proxy: innesca il risponditore del topic su un messaggio appena iniettato
     (di norma con @menzione → il responder è l'agente taggato). Fire-and-forget
