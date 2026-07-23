@@ -861,6 +861,13 @@ _PACKS_TOOLS: list[Tool] = [
          description="Rimuove un pack installato per nome.",
          inputSchema={"type": "object", "properties": {
              "name": {"type": "string"}}, "required": ["name"]}),
+    Tool(name="packs.setup_done",
+         description=("Marca il SETUP di un pack come COMPLETATO: smarca il flag "
+                      "'setup_pending' (la UI toglie il bottone «Finish setup»). Chiamalo "
+                      "SOLO al termine del task di setup del pack (deps installate, MCP "
+                      "montati, RAG provisionato e verificato)."),
+         inputSchema={"type": "object", "properties": {
+             "name": {"type": "string"}}, "required": ["name"]}),
 ]
 
 # workflows.* — controllo delle run dei workflow (start/stop/terminate). Sysadmin.
@@ -1582,6 +1589,8 @@ def _dispatch_packs(name: str, a: dict):
         return ops.packs_import_url(a["url"])
     if sub == "remove":
         return ops.packs_remove(a["name"])
+    if sub == "setup_done":
+        return ops.packs_setup_done(a["name"])
     raise ValueError(f"unknown packs tool: {name}")
 
 

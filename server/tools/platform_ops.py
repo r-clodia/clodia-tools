@@ -65,6 +65,12 @@ def packs_remove(name: str):
     return _req("DELETE", f"/clodia/packs/{name}")
 
 
+def packs_setup_done(name: str):
+    """Marca il setup del pack come completato (smarca setup_pending). Da chiamare
+    a fine del task di setup (deps + MCP + RAG provisionati e verificati)."""
+    return _req("POST", f"/clodia/packs/{name}/setup-done", {})
+
+
 # ── Workflows ───────────────────────────────────────────────────────────────
 
 def workflows_list():
