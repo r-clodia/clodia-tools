@@ -602,10 +602,10 @@ _TOPIC_TOOLS: list[Tool] = [
         description=("Posta un MESSAGGIO nella chat del topic (una bolla nella "
                      "conversazione), come te. Serve a far comparire nel topic ciò che "
                      "arriva da fuori (es. una mail in arrivo) o un handoff a fine job. "
-                     "Prerogativa di MESSAGGERO e dei super-agent. NON innesca il "
-                     "risponditore: è contenuto specchiato, non un comando (se serve che "
-                     "un agente agisca, un principal fa reply+tag). Puoi postare solo in "
-                     "un topic di cui sei participant (cross-topic → gate)."),
+                     "Prerogativa di MESSAGGERO e dei super-agent. Se includi una "
+                     "@menzione (es. `@messaggero …`), innesca l'agente taggato che "
+                     "prende in carico il messaggio; senza menzione è solo una bolla. "
+                     "Puoi postare solo in un topic di cui sei participant (cross-topic → gate)."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
@@ -2322,13 +2322,23 @@ def _dispatch_topic(name: str, a: dict):
         return svc.open(a["tier"], a["name"])
     if verb == "post_message":
         # Prerogativa di messaggero e dei super: posta una bolla nella chat del
-        # topic (es. mail in arrivo / handoff). NON innesca il risponditore.
+        # topic (es. mail in arrivo / handoff). Se il testo ha una @menzione,
+        # innesca il risponditore → l'agente taggato prende in carico il messaggio.
         ag = agent_name()
         if not (_is_super(ag) or ag == "messaggero"):
             raise PermissionError(
                 "topic.post_message riservato a messaggero e ai super-agent")
-        return svc.post_message(a["tier"], a["name"], author=ag or "agente",
-                                text=a.get("text") or "", kind="ai")
+        text = a.get("text") or ""
+        res = svc.post_message(a["tier"], a["name"], author=ag or "agente",
+                               text=text, kind="ai")
+        import re as _re
+        if _re.search(r"@[a-z0-9][a-z0-9_-]{0,30}", text):
+            try:
+                runtime.channel_trigger(a["tier"], a["name"], text, by=ag or "")
+                res["triggered"] = True
+            except Exception as e:  # noqa: BLE001 — il post resta valido anche se il trigger fallisce
+                res["trigger_error"] = str(e)[:120]
+        return res
     if verb == "save_summary":
         return svc.save_summary(a["tier"], a["name"], a["text"], a.get("base_version"))
     if verb == "add_minute":

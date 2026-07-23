@@ -64,6 +64,14 @@ def restart_agent(agent: str) -> dict:
     return _post("/clodia/runtime/restart-agent", {"agent": agent})
 
 
+def channel_trigger(tier: str, name: str, text: str, by: str) -> dict:
+    """Proxy: innesca il risponditore del topic su un messaggio appena iniettato
+    (di norma con @menzione → il responder è l'agente taggato). Fire-and-forget
+    lato agent-server."""
+    return _post(f"/clodia/channels/{tier}/{name}/trigger/internal",
+                 {"text": text, "by": by})
+
+
 def set_participant(tier: str, name: str, agent: str, by: str, add: bool) -> dict:
     """Proxy: aggiunge/rimuove un partecipante da un canale, per conto dell'agente
     `by` (autorizzazione lato agent-server: owner|partecipante|super)."""
