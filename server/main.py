@@ -1826,9 +1826,27 @@ async def _require_gate_consent(agent: str, gate_key: str, *, consume: bool) -> 
                                        text=f"<!-- gate={req.get('id')} -->", kind="ai")
             except Exception:  # noqa: BLE001 — il gate resta valido anche senza marker
                 pass
+        # Gate NON presidiato (nessun contesto-canale, es. turno di un job agentico):
+        # oggi resterebbe silenzioso e scadrebbe → notifica best-effort a Davide via
+        # Telegram (chat configurata in env) con i dettagli, così può approvarlo dalla
+        # webui. Finestra d'attesa più lunga per l'async. (Additivo: try/except non
+        # tocca la decisione del gate.)
+        import os as _os
+        loops = int(_os.environ.get("GATE_WAIT_LOOPS", "90"))  # 90 = ~180s
+        if not _ch.startswith("chan:"):
+            loops = int(_os.environ.get("GATE_WAIT_LOOPS_ASYNC", "300"))  # ~10 min
+            _notify_chat = (_os.environ.get("GATE_NOTIFY_TELEGRAM_CHAT") or "").strip()
+            if _notify_chat:
+                try:
+                    from .tools import telegram as _tg
+                    _tg.send(_notify_chat,
+                             f"🔐 Gate in attesa: '{agent}' vuole usare `{gate_key}` "
+                             f"(azione non presidiata). Approva/nega dalla sezione gate della webui.")
+                except Exception:  # noqa: BLE001 — notifica best-effort
+                    pass
         import asyncio as _aio
         approved = False
-        for _ in range(90):  # ~180s
+        for _ in range(loops):
             await _aio.sleep(2)
             if _gate.active(agent, inst, gate_key):
                 approved = True
