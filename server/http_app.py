@@ -140,11 +140,13 @@ def build_app() -> Starlette:
     from .mint_api import routes as mint_routes
     # M-gate: consenso umano sui verbi gated (sostituisce sudo_api).
     from .gate_api import routes as gate_routes
+    # Job logici: esecuzione verbi allowlisted senza turno LLM né gate.
+    from .logic_api import routes as logic_routes
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
                 *imagegen_routes, *topics_routes, *connectors_routes, *profile_routes,
                 *telegram_routes, *agents_routes, *vault_routes, *sudo_routes,
-                *tool_routes, *mint_routes, *gate_routes],
+                *tool_routes, *mint_routes, *gate_routes, *logic_routes],
         lifespan=_lifespan)
 
 
