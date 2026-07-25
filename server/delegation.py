@@ -85,6 +85,47 @@ def find_covering(agent: str, verb: str) -> dict | None:
     return None
 
 
+def list_active() -> list[dict]:
+    """Deleghe permanenti VALIDE (firma+scadenza ok) → [{principal, scope, exp}]."""
+    out: list[dict] = []
+    try:
+        lines = _STORE.read_text("utf-8").splitlines()
+    except FileNotFoundError:
+        return out
+    for ln in lines:
+        try:
+            tok = json.loads(ln).get("token")
+        except Exception:  # noqa: BLE001
+            continue
+        d = verify(tok)
+        if d:
+            out.append(d)
+    return out
+
+
+def revoke(principal: str, verb: str) -> bool:
+    """Rimuove le deleghe di `principal` che coprono `verb` (revoca lato store).
+    Ritorna True se ne ha tolta almeno una."""
+    try:
+        lines = _STORE.read_text("utf-8").splitlines()
+    except FileNotFoundError:
+        return False
+    kept, removed = [], False
+    for ln in lines:
+        try:
+            row = json.loads(ln)
+        except Exception:  # noqa: BLE001
+            continue
+        d = verify(row.get("token") or "")
+        if d and d.get("principal") == principal and (d.get("scope") or {}).get("verb") == verb:
+            removed = True
+            continue
+        kept.append(ln)
+    if removed:
+        _STORE.write_text("\n".join(kept) + ("\n" if kept else ""), "utf-8")
+    return removed
+
+
 def _mint(signer: str, scope: dict, ttl: int = 90 * 24 * 3600) -> str:
     """SOLO test/CLI: conia una delega firmata con la chiave di `signer` (in prod
     firma l'utente client-side). `scope` es. {"verb": "settings.backup_run"}."""

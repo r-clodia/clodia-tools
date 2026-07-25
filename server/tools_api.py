@@ -862,6 +862,40 @@ async def backup_run(request: Request):
         return JSONResponse({"error": str(e)[:400]}, status_code=500)
 
 
+async def delegation_list(request: Request):
+    """Deleghe permanenti attive (async·A). Admin."""
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import delegation
+    return JSONResponse({"delegations": delegation.list_active()})
+
+
+async def delegation_register(request: Request):
+    """Registra una delega FIRMATA dall'utente (client-side). Admin. Il token è
+    ri-verificato (firma vs cert CA + scope): non ci si fida del client."""
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        b = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    from . import delegation
+    v = delegation.register((b.get("token") or "").strip())
+    if not v:
+        return JSONResponse({"error": "delega non valida (firma/scope/scadenza)"}, status_code=400)
+    return JSONResponse({"ok": True, **v})
+
+
+async def delegation_revoke(request: Request):
+    """Revoca le deleghe di un principal su un verbo. Admin."""
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    b = await request.json()
+    from . import delegation
+    return JSONResponse({"revoked": delegation.revoke(
+        (b.get("principal") or "").strip(), (b.get("verb") or "").strip())})
+
+
 async def backup_restore_test(request: Request):
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -939,6 +973,9 @@ async def test_connector(request: Request):
 
 
 routes = [
+    Route("/clodia/delegations", delegation_list, methods=["GET"]),
+    Route("/clodia/delegations", delegation_register, methods=["POST"]),
+    Route("/clodia/delegations/revoke", delegation_revoke, methods=["POST"]),
     Route("/tools", list_tools, methods=["GET"]),
     Route("/tools/{id}/test", test_connector, methods=["POST"]),
     Route("/tools/trello/connect", trello_connect, methods=["POST"]),
