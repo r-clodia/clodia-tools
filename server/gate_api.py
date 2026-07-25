@@ -1,4 +1,4 @@
-"""Endpoint interni M-gate (sostituisce sudo_api).
+"""Endpoint interni M-gate.
 
 Il consenso a un verbo *gated* è un artefatto crittografico: una capability
 `ccap1` firmata dalla CA (`cap = gate:<verb>`), coniata dal flusso di
