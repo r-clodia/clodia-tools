@@ -917,10 +917,14 @@ class TopicService:
     def add_participant(self, tier: str, name: str, agent: str) -> dict:
         meta, v = self._read_meta(tier, name)
         parts = meta.setdefault("participants", [])
-        if agent not in parts:
+        added = agent not in parts
+        if added:
             parts.append(agent)
             self._write_meta(tier, name, meta, v)
-        return {"participants": parts}
+            self.post_message(
+                tier, name, "system", f"{agent} è entrato nel topic", kind="system"
+            )
+        return {"participants": parts, "added": added}
 
     def remove_participant(self, tier: str, name: str, agent: str) -> dict:
         meta, v = self._read_meta(tier, name)
@@ -933,7 +937,7 @@ class TopicService:
     def post_message(self, tier: str, name: str, author: str, text: str,
                      kind: str = "human", attachments: list[str] | None = None) -> dict:
         """Posta un messaggio nel canale (append-only file in `.messages/` →
-        niente contesa). `kind` = human|ai. `attachments` = nomi file in files/."""
+        niente contesa). `kind` = human|ai|system. `attachments` = nomi file in files/."""
         if not self.s.exists(self._meta_p(tier, name)):
             raise TopicError(f"topic non trovato: {tier}/{name}")
         now = _now()
