@@ -1802,6 +1802,37 @@ async def list_tools() -> list[Tool]:
             if _tool_allowed(t.name, allowed) or _connector_allows(t.name, me)]
 
 
+def _gate_notify_principal(agent: str, gate_key: str, principal: str | None) -> bool:
+    """Notifica best-effort un gate in attesa al PRINCIPAL sui suoi canali di contatto
+    (telegram/email dalla scheda agent). Se il principal non è umano/assente, ripiega
+    sul superadmin umano dell'istanza. Non solleva mai (best-effort)."""
+    try:
+        import httpx as _hx
+        from .tools.runtime import AGENT_SERVER_URL
+        with _hx.Client(timeout=6.0) as c:
+            data = c.get(f"{AGENT_SERVER_URL}/api/agents").json()
+        rows = data.get("agents", data) if isinstance(data, dict) else data
+        by_name = {a.get("name"): a for a in rows}
+        target = by_name.get(principal) if principal else None
+        if not target or target.get("type") != "human":
+            target = next((a for a in rows if a.get("type") == "human"
+                           and a.get("role") == "superadmin"),
+                          next((a for a in rows if a.get("type") == "human"), None))
+        if not target:
+            return False
+        ch = target.get("contact_channels") or {}
+        tg_id = ch.get("telegram") or target.get("telegram")
+        msg = (f"🔐 Gate in attesa: '{agent}' vuole usare `{gate_key}` (azione non "
+               f"presidiata). Approva/nega dalla sezione gate della webui.")
+        if tg_id:
+            from .tools import telegram as _tg
+            _tg.send(str(tg_id), msg)
+            return True
+    except Exception:  # noqa: BLE001 — notifica best-effort, mai bloccante
+        pass
+    return False
+
+
 async def _require_gate_consent(agent: str, gate_key: str, *, consume: bool) -> None:
     """Block-and-wait sul consenso di gate per (agent, gate_key). Se assente crea
     la richiesta (popup) e ATTENDE la decisione umana (~180s), poi procede; solleva
@@ -1827,23 +1858,15 @@ async def _require_gate_consent(agent: str, gate_key: str, *, consume: bool) -> 
             except Exception:  # noqa: BLE001 — il gate resta valido anche senza marker
                 pass
         # Gate NON presidiato (nessun contesto-canale, es. turno di un job agentico):
-        # oggi resterebbe silenzioso e scadrebbe → notifica best-effort a Davide via
-        # Telegram (chat configurata in env) con i dettagli, così può approvarlo dalla
-        # webui. Finestra d'attesa più lunga per l'async. (Additivo: try/except non
-        # tocca la decisione del gate.)
+        # oggi resterebbe silenzioso e scadrebbe → notifica best-effort al PRINCIPAL
+        # (Davide) sui suoi CANALI DI CONTATTO (telegram/email dalla scheda agent),
+        # così può approvarlo dalla webui. Finestra d'attesa più lunga per l'async.
+        # (Additivo: try/except non tocca la decisione del gate.)
         import os as _os
         loops = int(_os.environ.get("GATE_WAIT_LOOPS", "90"))  # 90 = ~180s
         if not _ch.startswith("chan:"):
             loops = int(_os.environ.get("GATE_WAIT_LOOPS_ASYNC", "300"))  # ~10 min
-            _notify_chat = (_os.environ.get("GATE_NOTIFY_TELEGRAM_CHAT") or "").strip()
-            if _notify_chat:
-                try:
-                    from .tools import telegram as _tg
-                    _tg.send(_notify_chat,
-                             f"🔐 Gate in attesa: '{agent}' vuole usare `{gate_key}` "
-                             f"(azione non presidiata). Approva/nega dalla sezione gate della webui.")
-                except Exception:  # noqa: BLE001 — notifica best-effort
-                    pass
+            _gate_notify_principal(agent, gate_key, current_principal())
         import asyncio as _aio
         approved = False
         for _ in range(loops):
