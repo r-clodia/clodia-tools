@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from .local_fs import LocalFsStorage
 from .service import TopicService
@@ -11,7 +12,9 @@ from .service import TopicService
 class ChannelTests(unittest.TestCase):
     def setUp(self) -> None:
         self.svc = TopicService(LocalFsStorage(tempfile.mkdtemp()))
-        self.svc.new("P1", "ch", {"title": "Canale", "owner": "owner"})
+        # Il profilo dell'istanza locale non deve alterare le aspettative unit.
+        with patch("server.instance_profile.topic_default_participants", return_value=[]):
+            self.svc.new("P1", "ch", {"title": "Canale", "owner": "owner"})
 
     def test_owner_and_default_participant(self) -> None:
         meta = self.svc.open("P1", "ch")["meta"]
@@ -19,9 +22,16 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(meta["participants"], ["owner"])
 
     def test_participants_add_remove(self) -> None:
-        self.svc.add_participant("P1", "ch", "clodia")
-        self.svc.add_participant("P1", "ch", "clodia")  # idempotente
+        first = self.svc.add_participant("P1", "ch", "clodia")
+        again = self.svc.add_participant("P1", "ch", "clodia")  # idempotente
         self.assertEqual(self.svc.open("P1", "ch")["meta"]["participants"], ["owner", "clodia"])
+        self.assertTrue(first["added"])
+        self.assertFalse(again["added"])
+        messages = self.svc.list_messages("P1", "ch")
+        self.assertEqual(
+            [(m["author"], m["kind"], m["text"]) for m in messages],
+            [("system", "system", "clodia è entrato nel topic")],
+        )
         self.svc.remove_participant("P1", "ch", "owner")
         self.assertEqual(self.svc.open("P1", "ch")["meta"]["participants"], ["clodia"])
 
