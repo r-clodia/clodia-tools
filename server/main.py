@@ -1840,6 +1840,20 @@ async def _require_gate_consent(agent: str, gate_key: str, *, consume: bool) -> 
     (cross-topic: l'intera operazione sul topic vale finché dura il consenso)."""
     from . import gate as _gate
     inst = "-"
+    # DELEGA PERMANENTE (async·A): se esiste una delega firmata dall'utente il cui
+    # scope copre questa azione (verb == gate_key), è già autorizzata → unlock senza
+    # richiesta né blocco. Modello: delega → verifica firma (CA) → covers → unlock.
+    try:
+        from . import delegation as _deleg
+        _d = _deleg.find_covering(agent, gate_key)
+        if _d:
+            import logging as _lg
+            _lg.getLogger("clodia-tools").info(
+                "gate '%s' autorizzato da delega permanente di '%s'",
+                gate_key, _d.get("principal"))
+            return
+    except Exception:  # noqa: BLE001 — la delega è additiva: su errore, gate normale
+        pass
     if not _gate.active(agent, inst, gate_key):
         req = _gate.request(agent, inst, gate_key, context=current_chat(),
                             human=current_principal(), chat=current_chat())

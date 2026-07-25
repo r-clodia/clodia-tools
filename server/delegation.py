@@ -17,9 +17,15 @@ vs il suo cert emesso dalla CA), poi controlla che lo scope copra l'azione gated
 from __future__ import annotations
 
 import json
+import os
+import pathlib
 import time
 
 from . import pki_verify as _pv
+
+# Store delle deleghe PERMANENTI (async·A): token raw, ri-verificati al lookup
+# (così scadenza/revoca/tamper vengono colti). Gateway datadir.
+_STORE = pathlib.Path(os.environ.get("CLODIA_DATA") or "/datadir") / "delegations" / "active.jsonl"
 
 
 def verify(token: str) -> dict | None:
@@ -46,6 +52,37 @@ def covers(deleg: dict, agent: str, verb: str) -> bool:
     if sc.get("agent") and sc.get("agent") != agent:
         return False
     return True
+
+
+def register(token: str) -> dict | None:
+    """Registra una delega permanente (async·A). Ritorna {principal, scope, exp}
+    se valida, altrimenti None. Il token grezzo è ri-verificato a ogni lookup."""
+    v = verify(token)
+    if not v:
+        return None
+    _STORE.parent.mkdir(parents=True, exist_ok=True)
+    with _STORE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"token": token, "principal": v["principal"],
+                            "scope": v["scope"]}, ensure_ascii=False) + "\n")
+    return v
+
+
+def find_covering(agent: str, verb: str) -> dict | None:
+    """Prima delega permanente VALIDA (firma+scadenza ok) il cui scope copre
+    (agent, verb). None se nessuna. Chiamato dal gate: se presente → unlock."""
+    try:
+        lines = _STORE.read_text("utf-8").splitlines()
+    except FileNotFoundError:
+        return None
+    for ln in lines:
+        try:
+            tok = json.loads(ln).get("token")
+        except Exception:  # noqa: BLE001
+            continue
+        d = verify(tok)  # ri-verifica → scaduta/manomessa scartata
+        if d and covers(d, agent, verb):
+            return d
+    return None
 
 
 def _mint(signer: str, scope: dict, ttl: int = 90 * 24 * 3600) -> str:
