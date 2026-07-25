@@ -11,6 +11,7 @@ from . import __version__
 from . import instance_profile
 from . import proxy
 from .tools import email, fs, logs, runtime
+from .tools import web_post
 from .tools import eu_corpus
 from .whitelist import (agent_config, agent_name, current_chat, current_clearance,
                         current_human_role, current_principal, is_on_behalf)
@@ -259,6 +260,34 @@ _FS_TOOLS: list[Tool] = [
                 }
             },
             "required": ["path"],
+        },
+    ),
+]
+
+_WEB_TOOLS: list[Tool] = [
+    Tool(
+        name="web.post",
+        description=(
+            "Invia una richiesta HTTP POST dopo approvazione umana per questa "
+            "singola invocazione. Non segue redirect; payload e risposta sono limitati."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL http/https di destinazione"},
+                "json": {"description": "payload JSON (alternativo a body)"},
+                "body": {"type": "string", "description": "payload testuale (alternativo a json)"},
+                "headers": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": "header opzionali; Host e hop-by-hop sono vietati",
+                },
+                "timeout_seconds": {
+                    "type": "number", "minimum": 0.1, "maximum": 10,
+                    "description": "timeout, massimo 10 secondi",
+                },
+            },
+            "required": ["url"],
         },
     ),
 ]
@@ -1524,7 +1553,7 @@ def _dispatch_memory(name: str, a: dict):
 
 def _native_tool_namespaces() -> list[str]:
     """Namespace dei tool nativi del gateway (per agents.list_tools)."""
-    tools = (_FS_TOOLS + _LOGS_TOOLS + _SUDO_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
+    tools = (_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _SUDO_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
              + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS
              + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _AGENT_TOOLS
              + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
@@ -1780,7 +1809,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _LOGS_TOOLS + _SUDO_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _AGENT_TOOLS
+    native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _SUDO_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _AGENT_TOOLS
                   + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     # Feature `rag` (profilo istanza): off → i verbi rag.*/eu_corpus.* non
     # esistono proprio (né in lista né al dispatch).
@@ -1833,7 +1862,10 @@ def _gate_notify_principal(agent: str, gate_key: str, principal: str | None) -> 
     return False
 
 
-async def _require_gate_consent(agent: str, gate_key: str, *, consume: bool) -> None:
+async def _require_gate_consent(
+    agent: str, gate_key: str, *, consume: bool, reason: str = "",
+    allow_delegation: bool = True,
+) -> None:
     """Block-and-wait sul consenso di gate per (agent, gate_key). Se assente crea
     la richiesta (popup) e ATTENDE la decisione umana (~180s), poi procede; solleva
     su diniego o timeout. `consume`=True → one-shot (verbi); False → time-boxed
@@ -1843,20 +1875,22 @@ async def _require_gate_consent(agent: str, gate_key: str, *, consume: bool) -> 
     # DELEGA PERMANENTE (async·A): se esiste una delega firmata dall'utente il cui
     # scope copre questa azione (verb == gate_key), è già autorizzata → unlock senza
     # richiesta né blocco. Modello: delega → verifica firma (CA) → covers → unlock.
-    try:
-        from . import delegation as _deleg
-        _d = _deleg.find_covering(agent, gate_key)
-        if _d:
-            import logging as _lg
-            _lg.getLogger("clodia-tools").info(
-                "gate '%s' autorizzato da delega permanente di '%s'",
-                gate_key, _d.get("principal"))
-            return
-    except Exception:  # noqa: BLE001 — la delega è additiva: su errore, gate normale
-        pass
+    if allow_delegation:
+        try:
+            from . import delegation as _deleg
+            _d = _deleg.find_covering(agent, gate_key)
+            if _d:
+                import logging as _lg
+                _lg.getLogger("clodia-tools").info(
+                    "gate '%s' autorizzato da delega permanente di '%s'",
+                    gate_key, _d.get("principal"))
+                return
+        except Exception:  # noqa: BLE001 — la delega è additiva: su errore, gate normale
+            pass
     if not _gate.active(agent, inst, gate_key):
         req = _gate.request(agent, inst, gate_key, context=current_chat(),
-                            human=current_principal(), chat=current_chat())
+                            human=current_principal(), chat=current_chat(),
+                            reason=reason)
         # UX inline: se l'azione parte da un CANALE (chat=chan:tier:name:...),
         # posta un marker nel canale → il webui rende la card Approva/Nega
         # NELLA conversazione (come job-proposal), non nel popup staccato. I gate
@@ -1951,12 +1985,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not is_on_behalf():
             from . import gate as _gate
             if _gate.is_gated(name):
-                await _require_gate_consent(_ag, name, consume=True)
+                reason = web_post.gate_summary(arguments) if name == "web.post" else ""
+                await _require_gate_consent(
+                    _ag, name, consume=True, reason=reason,
+                    allow_delegation=name != "web.post",
+                )
             _ck = _cross_topic_gate_key(name, arguments, _ag)
             if _ck:
                 await _require_gate_consent(_ag, _ck, consume=False)
         if name == "fs.list_dir":
             result = fs.list_dir(arguments["path"])
+        elif name == "web.post":
+            result = await asyncio.to_thread(web_post.post, arguments, agent=_ag or "")
         elif name == "logs.tail":
             result = logs.tail(arguments.get("lines", 100), arguments.get("level", ""))
         elif name == "sudo.request":

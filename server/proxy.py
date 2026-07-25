@@ -29,7 +29,7 @@ from . import vault
 from .whitelist import CONFIG
 
 NS_SEP = "."
-_NATIVE_PREFIXES = {"trello", "fs", "email", "agent"}
+_NATIVE_PREFIXES = {"trello", "fs", "email", "agent", "web"}
 
 # Placeholder per i secret dei backend: ${VAULT:<credential>} risolto a runtime
 # dalla vault (read_internal) → il valore reale NON sta mai nel config.yaml.

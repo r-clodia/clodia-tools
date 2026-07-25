@@ -36,6 +36,13 @@ Se l'agente chiamante non è dichiarato in `config.yaml`, il server **rifiuta tu
 - `fs.list_dir(path)` — elenca file in una directory, **dopo verifica whitelist path**
 - (in arrivo: `fs.read`, `fs.write`, `fs.edit`, `shell.exec`, `web.render_html`, `web.screenshot`)
 
+**HTTP controllato**:
+- `web.post(url, json?|body?, headers?, timeout_seconds?)` — invia una POST
+  esclusivamente dopo un consenso M-gate one-shot. Non accetta credenziali
+  nell'URL o header hop-by-hop, non segue redirect, limita richiesta/risposta e
+  registra destinazione ed esito in `web-post-audit.log`. Le deleghe permanenti
+  non possono bypassare il gate di questo verbo.
+
 **Trello** (wrapper di `tools/system/trello/trello_client.py`, credenziali in `secrets/`):
 - `trello.list_boards`, `trello.show_board`, `trello.list_lists`, `trello.list_cards`, `trello.show_card`, `trello.list_comments`, `trello.resolve_member` — sola lettura
 - `trello.move_card`, `trello.comment_card`, `trello.update_card`, `trello.create_card`, `trello.assign_member`, `trello.unassign_member` — scrittura

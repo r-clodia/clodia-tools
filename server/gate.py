@@ -47,6 +47,8 @@ _DEFAULT_GATED_EXACT = frozenset({
     "workflows.start", "workflows.cancel", "workflows.delete_run",
     # gestione partecipanti di un topic (auto-invito / confused-deputy)
     "topic.add_participant", "topic.remove_participant",
+    # HTTP egress mutante: consenso umano obbligatorio per ogni singola POST.
+    "web.post",
 })
 
 
