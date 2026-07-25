@@ -20,6 +20,8 @@ from ..whitelist import agent_name
 # Convenzione di piattaforma (come Clodia Primal e l'endpoint /memories della
 # webui): l'indice/note dell'agente è `MEMORY.md` (+ eventuali altri file .md).
 _DEFAULT_FILE = "MEMORY.md"
+_DOCUMENTS_START = "<!-- clodia:documents:start -->"
+_DOCUMENTS_END = "<!-- clodia:documents:end -->"
 # Cap difensivo sulla dimensione di un singolo file di memory (evita di gonfiare
 # il contesto LLM che la carica sempre).
 _MAX_BYTES = 64 * 1024
@@ -47,6 +49,50 @@ def _safe_file(filename: str | None) -> str:
     return fn
 
 
+def _replace_document_block(body: str, block: str) -> str:
+    start = body.find(_DOCUMENTS_START)
+    end = body.find(_DOCUMENTS_END)
+    if start >= 0 and end >= start:
+        end += len(_DOCUMENTS_END)
+        merged = body[:start].rstrip() + "\n\n" + block + body[end:]
+    else:
+        merged = body.rstrip() + ("\n\n" if body.strip() else "") + block
+    return merged.rstrip() + "\n"
+
+
+def _document_rows(name: str | None = None) -> list[dict]:
+    d = files_dir(name)
+    return sorted(
+        (
+            {"name": f.name, "bytes": f.stat().st_size}
+            for f in d.iterdir()
+            if f.is_file() and not f.name.endswith(".tmp")
+        ),
+        key=lambda item: item["name"],
+    )
+
+
+def _sync_document_index(name: str | None = None) -> None:
+    """Mantiene in MEMORY.md solo i metadati dei documenti del seed."""
+    rows = _document_rows(name)
+    lines = [f"- `{row['name']}` — {row['bytes']} B" for row in rows]
+    block = (
+        f"{_DOCUMENTS_START}\n"
+        "## Documenti\n\n"
+        + ("\n".join(lines) if lines else "_Nessun documento conservato._")
+        + f"\n{_DOCUMENTS_END}"
+    )
+    memory_path = memory_dir(name) / _DEFAULT_FILE
+    previous = (
+        memory_path.read_text(encoding="utf-8")
+        if memory_path.is_file()
+        else "# Memory Index\n"
+    )
+    tmp = memory_path.with_suffix(".tmp")
+    tmp.write_text(_replace_document_block(previous, block), encoding="utf-8")
+    tmp.replace(memory_path)
+
+
 def read(filename: str | None = None) -> dict:
     d = memory_dir()
     p = d / _safe_file(filename)
@@ -65,6 +111,8 @@ def write(content: str, filename: str | None = None) -> dict:
     tmp = p.with_suffix(p.suffix + ".tmp")
     tmp.write_text(content or "", encoding="utf-8")
     tmp.replace(p)
+    if p.name == _DEFAULT_FILE:
+        _sync_document_index()
     return {"file": p.name, "bytes": len(data), "ok": True}
 
 
@@ -108,6 +156,7 @@ def put_document_bytes(filename: str, data: bytes) -> dict:
     tmp = p.with_suffix(p.suffix + ".tmp")
     tmp.write_bytes(data)
     tmp.replace(p)
+    _sync_document_index()
     return {"file": fn, "bytes": len(data), "ok": True}
 
 
@@ -118,9 +167,8 @@ def put_document(filename: str, content_b64: str) -> dict:
 
 def list_documents() -> dict:
     d = files_dir()
-    docs = sorted(({"name": f.name, "bytes": f.stat().st_size}
-                   for f in d.iterdir() if f.is_file() and not f.name.endswith(".tmp")),
-                  key=lambda x: x["name"])
+    docs = _document_rows()
+    _sync_document_index()
     return {"dir": str(d), "documents": docs}
 
 
@@ -139,4 +187,5 @@ def delete_document(filename: str) -> dict:
     existed = p.is_file()
     if existed:
         p.unlink()
+    _sync_document_index()
     return {"file": fn, "deleted": existed}
