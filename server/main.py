@@ -1865,7 +1865,7 @@ async def _require_gate_consent(agent: str, gate_key: str, *, consume: bool) -> 
         import os as _os
         loops = int(_os.environ.get("GATE_WAIT_LOOPS", "90"))  # 90 = ~180s
         if not _ch.startswith("chan:"):
-            loops = int(_os.environ.get("GATE_WAIT_LOOPS_ASYNC", "300"))  # ~10 min
+            loops = int(_os.environ.get("GATE_WAIT_LOOPS_ASYNC", "3600"))  # ~2 ore (loop 2s)
             _gate_notify_principal(agent, gate_key, current_principal())
         import asyncio as _aio
         approved = False
