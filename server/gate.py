@@ -1,4 +1,4 @@
-"""M-gate — supervisione umana sui verbi *gated* (sostituisce M-sudo).
+"""M-gate — supervisione umana sui verbi *gated*.
 
 Un verbo *gated* richiede una **conferma umana** a ogni esecuzione, chiunque la
 inneschi. Il gate NON concede tool nuovi: è un checkpoint su azioni **già
@@ -6,10 +6,9 @@ permesse** dalla RBAC (chi non è autorizzato resta negato, nessun gate). Chi
 approva presta la PROPRIA autorità → può approvare solo i verbi per cui la sua
 RBAC lo autorizza (owner=tutto; utente=sottoinsieme). Vedi `m-gate.md`.
 
-Questo modulo è la **policy** del gate. La macchina delle capability (ccap1
-firmate dalla CA: grant/active/revoke/status/jti) è riusata da `sudo` (store
-generico, non sudo-specifico) finché non la si rinomina. `is_gated` sostituisce
-`is_super_only`; non esistono più gruppi SUDOERS/APPROVERS.
+Questo modulo contiene sia la **policy** sia la macchina delle capability ccap1
+firmate dalla CA (grant/active/revoke/status/jti). Non esistono gruppi di agenti
+eleggibili all'elevazione: il controllo è sempre scoped al verbo.
 """
 from __future__ import annotations
 
@@ -78,8 +77,8 @@ def gated_verbs_spec() -> dict:
 
 # ── Store dei CONSENSI (capability ccap1 firmate dalla CA) ───────────────────
 # Un consenso è per (agent, instance, verb): l'umano approva l'uso di QUEL verbo
-# da parte di QUELL'istanza. Riusa la stessa macchina crittografica di M-sudo
-# (ccap1 + jti + revoca) ma scoped al verbo (cap = "gate:<verb>").
+# da parte di QUELL'istanza, con ccap1 + jti + revoca e scope sul verbo
+# (cap = "gate:<verb>").
 def _data() -> Path:
     return Path(os.environ.get("CLODIA_DATA", "/datadir"))
 

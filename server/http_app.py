@@ -131,21 +131,19 @@ def build_app() -> Starlette:
     from .agents_api import routes as agents_routes
     # Lettura credenziali git (PAT) dal vault per i workflow del backend.
     from .vault_api import routes as vault_routes
-    # Grant SUDO (M-sudo): un admin approvatore eleva un sudoer time-boxed.
-    from .sudo_api import routes as sudo_routes
     # Facade tool (M-authz): PDP unico agenti+umani — la webui inoltra qui.
     from .tool_api import routes as tool_routes
     # Minting (trust-anchor): il gateway conia i token; l'orchestrator li chiede
     # via /internal/mint (auth secret di bootstrap). Le chiavi private stanno solo qui.
     from .mint_api import routes as mint_routes
-    # M-gate: consenso umano sui verbi gated (sostituisce sudo_api).
+    # M-gate: consenso umano sui verbi gated.
     from .gate_api import routes as gate_routes
     # Job logici: esecuzione verbi allowlisted senza turno LLM né gate.
     from .logic_api import routes as logic_routes
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
                 *imagegen_routes, *topics_routes, *connectors_routes, *profile_routes,
-                *telegram_routes, *agents_routes, *vault_routes, *sudo_routes,
+                *telegram_routes, *agents_routes, *vault_routes,
                 *tool_routes, *mint_routes, *gate_routes, *logic_routes],
         lifespan=_lifespan)
 

@@ -309,27 +309,6 @@ _LOGS_TOOLS: list[Tool] = [
     ),
 ]
 
-_SUDO_TOOLS: list[Tool] = [
-    Tool(
-        name="sudo.request",
-        description=(
-            "Richiedi l'ELEVAZIONE a sudo per un'operazione riservata (super-only: "
-            "cross-topic, gestione partecipanti, install pack/provider/mcp, ...). "
-            "NON attiva sudo da solo: crea una richiesta che l'OWNER approva o nega "
-            "da un popup nella webUI. Spiega bene il MOTIVO. Riservato ai sudoer."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "reason": {"type": "string", "description": "Perché serve l'elevazione (mostrato all'owner)."},
-                "minutes": {"type": "integer", "description": "Durata richiesta (default 15, max 120)."},
-            },
-            "required": ["reason"],
-        },
-    ),
-]
-
-
 _EU_CORPUS_TOOLS: list[Tool] = [
     Tool(
         name="eu_corpus.search",
@@ -1553,7 +1532,7 @@ def _dispatch_memory(name: str, a: dict):
 
 def _native_tool_namespaces() -> list[str]:
     """Namespace dei tool nativi del gateway (per agents.list_tools)."""
-    tools = (_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _SUDO_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
+    tools = (_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
              + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS
              + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _AGENT_TOOLS
              + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
@@ -1720,7 +1699,7 @@ def _is_super(name: str | None) -> bool:
 def _human_tool_allowed(name: str) -> bool:
     """RBAC UMANA (chiamata on-behalf): il gateway è il PDP unico anche per gli
     umani. Un tool `super-only` (packs/providers/mcp/agents/settings/pki/ca…,
-    stessa lista di M-sudo) richiede ruolo **admin**; tutto il resto è concesso a
+    definita da M-gate) richiede ruolo **admin**; tutto il resto è concesso a
     qualunque umano autenticato. Il ruolo è un claim FIRMATO dall'agent-server →
     non forgiabile dal modello. Chiude la Broken Access Control del path REST."""
     from . import gate as _gate
@@ -1809,7 +1788,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", []))
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _SUDO_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _AGENT_TOOLS
+    native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _AGENT_TOOLS
                   + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     # Feature `rag` (profilo istanza): off → i verbi rag.*/eu_corpus.* non
     # esistono proprio (né in lista né al dispatch).
@@ -1999,12 +1978,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = await asyncio.to_thread(web_post.post, arguments, agent=_ag or "")
         elif name == "logs.tail":
             result = logs.tail(arguments.get("lines", 100), arguments.get("level", ""))
-        elif name == "sudo.request":
-            from . import sudo as _sudo
-            result = _sudo.request_sudo(
-                agent_name(), "-", arguments.get("reason", ""),
-                arguments.get("minutes", 15), human=current_principal(),
-                chat=current_chat())
         elif name == "email.send":
             result = email.send(
                 arguments["to"],
@@ -2237,7 +2210,7 @@ def _require_topic_member(svc, tier, name) -> None:
     """ACL compartimento (need-to-know). Consentito SSE:
       - l'UMANO del turno (current_principal) è participant/owner del target, OPPURE
       - l'AGENTE è participant/owner del target (autonomo/legittimo), OPPURE
-      - l'agente è super CON un grant SUDO attivo (cross-topic autorizzato).
+      - esiste un consenso M-gate cross-topic attivo.
     Il super NON bypassa più incondizionatamente (fix confused-deputy: un agente
     non deve leggere/copiare un topic di cui né il richiedente umano né l'agente
     sono partecipanti). Vedi project_topic_access_two_axis."""
@@ -2429,15 +2402,10 @@ def _dispatch_topic(name: str, a: dict):
         # proposta di squadra: proxy read-only all'agent-server (registry+rilevanza)
         return runtime.suggest_team(a.get("tier") or "SEAL-0", a.get("description") or "")
     if verb in ("add_participant", "remove_participant"):
-        # Gestione partecipanti = azione SUDO (admin), come agents.*: un agente
-        # può farlo SOLO se super CON grant sudo attivo. Una clodia non-sudoer
-        # NON può aggiungere/togliere partecipanti → chiude l'auto-invito
-        # (giovanni non può chiedere a clodia di aggiungersi a un topic).
-        # L'owner UMANO gestisce i partecipanti dalla webui (endpoint dedicato,
-        # non questo tool), quindi i flussi legittimi non si rompono.
-        # M-gate: topic.add_participant/remove_participant sono verbi GATED → il
+        # topic.add_participant/remove_participant sono verbi GATED → il
         # gate di call_tool ha già richiesto la conferma umana (block-and-wait)
-        # prima di arrivare qui. Nessun controllo aggiuntivo.
+        # prima di arrivare qui. L'owner umano usa invece l'endpoint webui
+        # dedicato, già autorizzato sul suo ruolo.
         return runtime.set_participant(a["tier"], a["name"], (a.get("agent") or "").strip(),
                                        by=agent_name() or "", add=(verb == "add_participant"))
     if verb == "new":

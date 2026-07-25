@@ -151,7 +151,7 @@ def verify_capability(token: str) -> dict:
     except Exception:
         raise PermissionError("firma capability non valida (non firmata dalla CA)")
     # NON si vincola più `cap` a "sudo": la capability porta il proprio scope
-    # (`sudo` per M-sudo, `gate:<verb>` per M-gate). La firma CA garantisce
+    # (`gate:<verb>` per M-gate). La firma CA garantisce
     # l'autenticità; è il CHIAMANTE a pretendere il `cap` che gli serve.
     if not str(payload.get("cap") or "").strip():
         raise PermissionError("capability senza cap")
