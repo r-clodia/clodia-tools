@@ -17,6 +17,8 @@ import os
 
 import httpx
 
+from .. import whitelist
+
 # Stesso agent-server di runtime.py (service-name sulla rete compose).
 AGENT_SERVER_URL = os.environ.get("AGENT_SERVER_URL", "http://agent-server:7842")
 
@@ -24,9 +26,15 @@ _TIMEOUT = httpx.Timeout(connect=4.0, read=20.0, write=10.0, pool=4.0)
 
 
 def _req(method: str, path: str, payload: dict | None = None):
+    # Gli endpoint di controllo riverificano l'autorizzazione nel backend.
+    # Inoltriamo il token ckt1 già verificato dal gateway, senza coniarne uno
+    # nuovo, come avviene per le scritture agents.*.
+    token = whitelist.current_token()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     with httpx.Client(timeout=_TIMEOUT) as c:
         r = c.request(method, f"{AGENT_SERVER_URL}{path}",
-                      json=payload if payload is not None else None)
+                      json=payload if payload is not None else None,
+                      headers=headers)
         r.raise_for_status()
         # alcuni endpoint (204/delete) possono non avere body JSON
         if r.status_code == 204 or not (r.content or b"").strip():
