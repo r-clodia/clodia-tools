@@ -64,6 +64,7 @@ async def mint(request: Request):
                 on_behalf=bool(b.get("on_behalf")),
                 human_role=b.get("human_role") or None,
                 chat=b.get("chat") or None,
+                scoped_tools=b.get("scoped_tools") or None,
             )
             return JSONResponse({"token": token})
         if kind == "capability":

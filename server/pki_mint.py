@@ -78,9 +78,13 @@ def mint_session_token(agent: str, execution_id: str = "",
                        clearance: str | None = None,
                        on_behalf: bool = False,
                        human_role: str | None = None,
-                       chat: str | None = None) -> str:
+                       chat: str | None = None,
+                       scoped_tools: list[str] | None = None) -> str:
     """Conia un token di sessione ckt1 firmato con l'identity key dell'agente.
     Identico a colony.pki.mint_session_token, ma le chiavi stanno QUI (gateway)."""
+    scoped_tools = list(dict.fromkeys(scoped_tools or []))
+    if any(t in ("*", "agents") or t.startswith("agents.") for t in scoped_tools):
+        raise PermissionError("scoped_tools non può concedere wildcard o tool agents.*")
     key_path = _agent_key_path(agent)
     if not key_path.is_file():
         raise PermissionError(f"agent '{agent}' senza identità (nessuna identity.key nel gateway)")
@@ -96,6 +100,8 @@ def mint_session_token(agent: str, execution_id: str = "",
         payload["clearance"] = clearance
     if chat:
         payload["chat"] = chat
+    if scoped_tools:
+        payload["scoped_tools"] = scoped_tools
     if on_behalf:
         payload["on_behalf"] = True
         payload["human_role"] = human_role or "user"

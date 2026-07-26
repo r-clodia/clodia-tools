@@ -36,6 +36,7 @@ _DEFAULT_GATED_EXACT = frozenset({
     # agents: mutazioni delle capability (grant/revoke); list/show/list_* NON gated
     "agents.grant_rule", "agents.grant_skill", "agents.grant_tool",
     "agents.revoke_rule", "agents.revoke_skill", "agents.revoke_tool",
+    "agents.grant_scoped", "agents.revoke_scoped",
     # mcp: add/remove nuova superficie di codice; mcp.list NON gated
     "mcp.add", "mcp.remove",
     # packs: install/remove esegue codice terzi; packs.list/show NON gated
@@ -148,26 +149,30 @@ def grant(agent: str, instance: str, verb: str, token: str) -> dict:
             "expires_in_s": int(float(payload.get("exp", 0)) - now)}
 
 
-def active(agent: str, instance: str, verb: str) -> bool:
-    """True se esiste un consenso valido per (agent, instance, verb): ri-verifica
-    firma CA + scadenza + jti non revocato + cap=gate:<verb>."""
+def details(agent: str, instance: str, verb: str) -> dict | None:
+    """Return a valid signed consent and payload, or None."""
     d = _load(_store_path())
     v = d.get(_key(agent, instance, verb))
     if not v:
-        return False
+        return None
     tok = v.get("token")
     if not tok:
-        return False
+        return None
     try:
         payload = pki_verify.verify_capability(tok)
     except PermissionError as e:
         LOG.warning("consenso gate %s@%s:%s non valido: %s", agent, instance, verb, e)
-        return False
+        return None
     if payload.get("agent") != agent or str(payload.get("cap") or "") != cap_for(verb):
-        return False
+        return None
     if str(payload.get("jti") or "") in _revoked():
-        return False
-    return True
+        return None
+    return {**v, "payload": payload}
+
+
+def active(agent: str, instance: str, verb: str) -> bool:
+    """True se esiste un consenso valido per (agent, instance, verb)."""
+    return details(agent, instance, verb) is not None
 
 
 def consume(agent: str, instance: str, verb: str) -> None:

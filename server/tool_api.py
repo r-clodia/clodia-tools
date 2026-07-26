@@ -60,10 +60,14 @@ class _Ctx:
             whitelist.set_current_clearance(p.get("clearance") or None),
             whitelist.set_current_on_behalf(bool(p.get("on_behalf"))),
             whitelist.set_current_human_role(p.get("human_role") or None),
+            whitelist.set_current_chat(p.get("chat") or None),
+            whitelist.set_current_scoped_tools(p.get("scoped_tools") or None),
         ]
         return self
 
     def __exit__(self, *exc):
+        whitelist.reset_current_scoped_tools(self._toks[7])
+        whitelist.reset_current_chat(self._toks[6])
         whitelist.reset_current_human_role(self._toks[5])
         whitelist.reset_current_on_behalf(self._toks[4])
         whitelist.reset_current_clearance(self._toks[3])
