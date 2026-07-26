@@ -1217,24 +1217,24 @@ _TELEGRAM_TOOLS: list[Tool] = [
 # memory.* — seed memory scrivibile dell'agente (universale, non richiede grant).
 _MEMORY_TOOLS: list[Tool] = [
     Tool(name="memory.read",
-         description=("Legge un file della tua seed memory (default `memory.md`, la tua "
+         description=("Legge un file della tua seed memory (default `MEMORY.md`, la tua "
                       "memoria di note/esperienza sempre disponibile). La memory è "
                       "condivisa fra le tue istanze."),
          inputSchema={"type": "object", "properties": {
-             "filename": {"type": "string", "description": "default memory.md"}}}),
+             "filename": {"type": "string", "description": "default MEMORY.md"}}}),
     Tool(name="memory.write",
          description=("Scrive (sovrascrive) un file della tua seed memory. Usa per "
                       "aggiornare note durature o dati strutturati (es. una whitelist "
                       "JSON). Cap 64KB per file."),
          inputSchema={"type": "object", "properties": {
              "content": {"type": "string"},
-             "filename": {"type": "string", "description": "default memory.md"}},
+             "filename": {"type": "string", "description": "default MEMORY.md"}},
              "required": ["content"]}),
     Tool(name="memory.append",
-         description="Aggiunge una nota in coda a un file della seed memory (default memory.md).",
+         description="Aggiunge una nota in coda a un file della seed memory (default MEMORY.md).",
          inputSchema={"type": "object", "properties": {
              "content": {"type": "string"},
-             "filename": {"type": "string", "description": "default memory.md"}},
+             "filename": {"type": "string", "description": "default MEMORY.md"}},
              "required": ["content"]}),
     Tool(name="memory.list",
          description="Elenca i file di NOTE (testo) nella tua seed memory.",
