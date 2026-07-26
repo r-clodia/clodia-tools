@@ -5,7 +5,7 @@ Ogni agente (inclusi i nativi) può leggere/scrivere la propria **seed memory**:
 `<seed>-N` (è del seed, non dell'istanza). Universale: non richiede grant
 per-agente (è la memoria dell'agente stesso, scoped alla sua sola cartella).
 
-File di default: `memory.md` (note/esperienza, sempre in contesto lato runtime).
+File di default: `MEMORY.md` (note/esperienza, sempre in contesto lato runtime).
 L'agente può anche tenere file strutturati (es. il messaggero: whitelist Telegram
 in `telegram_whitelist.json`), letti dai sottosistemi che ne hanno bisogno.
 """
@@ -46,6 +46,13 @@ def _safe_file(filename: str | None) -> str:
     # Nessun path traversal: solo un nome file semplice.
     if "/" in fn or "\\" in fn or fn.startswith("."):
         raise ValueError(f"nome file memory non valido: {filename!r}")
+    # Canonicalizzazione case: il file canonico (iniettato nel system prompt,
+    # letto da /memories e dal parsing whitelist) è `MEMORY.md` maiuscolo. Su FS
+    # case-sensitive (Linux) un `memory.md`/`Memory.md` esplicito creerebbe un
+    # secondo file ORFANO, mai iniettato (bug clodia-platform#40). Collassiamo
+    # ogni variante di case al canonico.
+    if fn != _DEFAULT_FILE and fn.lower() == _DEFAULT_FILE.lower():
+        fn = _DEFAULT_FILE
     return fn
 
 
