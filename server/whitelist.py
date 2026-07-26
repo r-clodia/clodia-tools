@@ -178,6 +178,8 @@ def current_human_role() -> str | None:
 # chat_id della sessione dell'agente chiamante (dal claim `chat` del token) — per
 # postare in chat le decisioni sudo (approvato/negato).
 _CURRENT_CHAT: ContextVar[str | None] = ContextVar("mcp_current_chat", default=None)
+_CURRENT_SCOPED_TOOLS: ContextVar[tuple[str, ...]] = ContextVar(
+    "mcp_current_scoped_tools", default=())
 
 
 def set_current_chat(c: str | None) -> object:
@@ -190,6 +192,18 @@ def reset_current_chat(token: object) -> None:
 
 def current_chat() -> str | None:
     return _CURRENT_CHAT.get()
+
+
+def set_current_scoped_tools(tools: list[str] | None) -> object:
+    return _CURRENT_SCOPED_TOOLS.set(tuple(dict.fromkeys(tools or [])))
+
+
+def reset_current_scoped_tools(token: object) -> None:
+    _CURRENT_SCOPED_TOOLS.reset(token)  # type: ignore[arg-type]
+
+
+def current_scoped_tools() -> tuple[str, ...]:
+    return _CURRENT_SCOPED_TOOLS.get()
 
 
 # Token ckt1 grezzo della richiesta corrente. Serve per INOLTRARLO al backend

@@ -53,6 +53,22 @@ def _patch_caps(name: str, body: dict) -> dict:
         return r.json()
 
 
+def _request(method: str, path: str, body: dict | None = None) -> dict:
+    tok = whitelist.current_token()
+    headers = {"Authorization": f"Bearer {tok}"} if tok else {}
+    with httpx.Client(timeout=_TIMEOUT) as c:
+        r = c.request(method, f"{AGENT_SERVER_URL}{path}", json=body, headers=headers)
+        if r.status_code >= 400:
+            try:
+                detail = r.json().get("detail") or r.text
+            except Exception:  # noqa: BLE001
+                detail = r.text
+            if r.status_code == 403:
+                raise PermissionError(detail)
+            raise ValueError(detail)
+        return r.json()
+
+
 def _all_agents() -> list[dict]:
     d = _get("/api/agents")
     return d.get("agents", []) if isinstance(d, dict) else (d or [])
@@ -140,3 +156,32 @@ def grant_rule(name: str, rule: str) -> dict:
 
 def revoke_rule(name: str, rule: str) -> dict:
     return _modify(name, "rules", remove=[rule])
+
+
+def grant_scoped(name: str, body: dict, approval_token: str) -> dict:
+    payload = dict(body)
+    payload.pop("agent", None)
+    if not payload.get("scope_id"):
+        chat = whitelist.current_chat() or ""
+        if payload.get("scope_kind", "topic") == "topic" and chat.startswith("chan:"):
+            parts = chat.split(":")
+            if len(parts) >= 3:
+                payload["scope_id"] = f"{parts[1]}/{parts[2]}"
+        elif payload.get("scope_kind") == "chat" and chat:
+            payload["scope_id"] = chat
+    if not payload.get("scope_id"):
+        raise ValueError("scope_id richiesto fuori da una chat di canale")
+    payload.setdefault("scope_kind", "topic")
+    payload["approval_token"] = approval_token
+    return _request("POST", f"/api/agents/{name}/scoped-overrides", payload)
+
+
+def list_scoped(name: str) -> dict:
+    return _request("GET", f"/api/agents/{name}/scoped-overrides")
+
+
+def revoke_scoped(name: str, override_id: str, approval_token: str) -> dict:
+    return _request(
+        "DELETE", f"/api/agents/{name}/scoped-overrides/{override_id}",
+        {"approval_token": approval_token},
+    )

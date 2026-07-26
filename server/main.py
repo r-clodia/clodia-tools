@@ -14,7 +14,8 @@ from .tools import email, fs, logs, runtime
 from .tools import web_post
 from .tools import eu_corpus
 from .whitelist import (agent_config, agent_name, current_chat, current_clearance,
-                        current_human_role, current_principal, is_on_behalf)
+                        current_human_role, current_principal, current_scoped_tools,
+                        is_on_behalf)
 
 import os as _os
 from .topics.service import TopicService, TopicError
@@ -241,6 +242,28 @@ _AGENT_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {
              "agent": {"type": "string"}, "rule": {"type": "string"}},
              "required": ["agent", "rule"]}),
+    Tool(name="agents.grant_scoped",
+         description="Concede temporaneamente skill, regole, tool o runtime a un agent nello scope indicato.",
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string"},
+             "scope_kind": {"type": "string", "enum": ["topic", "chat", "run"], "default": "topic"},
+             "scope_id": {"type": "string"},
+             "ttl_minutes": {"type": "integer", "minimum": 1, "maximum": 120, "default": 15},
+             "capabilities": {"type": "array", "items": {"type": "string"}},
+             "rules": {"type": "array", "items": {"type": "string"}},
+             "tools": {"type": "array", "items": {"type": "string"}},
+             "model": {"type": "string"}, "provider": {"type": "string"},
+             "reason": {"type": "string"}},
+             "required": ["agent"]}),
+    Tool(name="agents.list_scoped",
+         description="Elenca gli override runtime attivi di un agent.",
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string"}}, "required": ["agent"]}),
+    Tool(name="agents.revoke_scoped",
+         description="Revoca immediatamente un override runtime scoped.",
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string"}, "override_id": {"type": "string"}},
+             "required": ["agent", "override_id"]}),
 ]
 
 
@@ -1542,7 +1565,8 @@ def _native_tool_namespaces() -> list[str]:
     return ns
 
 
-def _dispatch_agents(name: str, a: dict, caller: str | None):
+def _dispatch_agents(name: str, a: dict, caller: str | None,
+                     gate_approval: dict | None = None):
     from .tools import agents_admin as adm
     verb = name.split(NS_SEP_DOT, 1)[1]
     if verb == "list":
@@ -1568,6 +1592,18 @@ def _dispatch_agents(name: str, a: dict, caller: str | None):
         return adm.grant_rule(a["agent"], a["rule"])
     if verb == "revoke_rule":
         return adm.revoke_rule(a["agent"], a["rule"])
+    if verb == "grant_scoped":
+        token = (gate_approval or {}).get("token")
+        if not token:
+            raise PermissionError("agents.grant_scoped richiede approvazione firmata one-shot")
+        return adm.grant_scoped(a["agent"], a, token)
+    if verb == "list_scoped":
+        return adm.list_scoped(a["agent"])
+    if verb == "revoke_scoped":
+        token = (gate_approval or {}).get("token")
+        if not token:
+            raise PermissionError("agents.revoke_scoped richiede approvazione firmata one-shot")
+        return adm.revoke_scoped(a["agent"], a["override_id"], token)
     raise ValueError(f"unknown agents verb: {name}")
 
 
@@ -1785,7 +1821,7 @@ NS_SEP_DOT = "."
 async def list_tools() -> list[Tool]:
     """Return only the tools allowed for the calling agent (native + proxied)."""
     try:
-        allowed = set(agent_config().get("allowed_tools", []))
+        allowed = set(agent_config().get("allowed_tools", [])) | set(current_scoped_tools())
     except PermissionError:
         return []
     native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _AGENT_TOOLS
@@ -1844,7 +1880,7 @@ def _gate_notify_principal(agent: str, gate_key: str, principal: str | None) -> 
 async def _require_gate_consent(
     agent: str, gate_key: str, *, consume: bool, reason: str = "",
     allow_delegation: bool = True,
-) -> None:
+) -> dict | None:
     """Block-and-wait sul consenso di gate per (agent, gate_key). Se assente crea
     la richiesta (popup) e ATTENDE la decisione umana (~180s), poi procede; solleva
     su diniego o timeout. `consume`=True → one-shot (verbi); False → time-boxed
@@ -1863,7 +1899,7 @@ async def _require_gate_consent(
                 _lg.getLogger("clodia-tools").info(
                     "gate '%s' autorizzato da delega permanente di '%s'",
                     gate_key, _d.get("principal"))
-                return
+                return {"delegated": True, "principal": _d.get("principal")}
         except Exception:  # noqa: BLE001 — la delega è additiva: su errore, gate normale
             pass
     if not _gate.active(agent, inst, gate_key):
@@ -1906,8 +1942,12 @@ async def _require_gate_consent(
         if not approved:
             _gate.resolve_request(agent, inst, gate_key)
             raise PermissionError(f"gate: '{gate_key}' non approvato entro il tempo limite")
+    approval = _gate.details(agent, inst, gate_key)
+    if not approval:
+        raise PermissionError(f"gate: capability per '{gate_key}' non disponibile")
     if consume:
         _gate.consume(agent, inst, gate_key)
+    return approval
 
 
 def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
@@ -1951,7 +1991,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     f"tool '{name}' riservato agli admin (umano '{current_principal()}' "
                     f"ruolo '{current_human_role() or 'user'}')")
         elif not _is_super(_ag) and not _tool_allowed(
-                name, set(agent_config().get("allowed_tools", []))) \
+                name, set(agent_config().get("allowed_tools", [])) | set(current_scoped_tools())) \
                 and not _connector_allows(name, _ag):
             raise PermissionError(
                 f"tool '{name}' non in whitelist per agent '{_ag}'")
@@ -1961,13 +2001,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         #     richiede un consenso per-topic (time-boxed, così l'intera operazione
         #     cross-topic procede). Sostituisce il vecchio sudo cross-topic.
         # Il gate non concede nulla di nuovo: il richiedente è già autorizzato sopra.
+        gate_approval = None
         if not is_on_behalf():
             from . import gate as _gate
             if _gate.is_gated(name):
                 reason = web_post.gate_summary(arguments) if name == "web.post" else ""
-                await _require_gate_consent(
+                gate_approval = await _require_gate_consent(
                     _ag, name, consume=True, reason=reason,
-                    allow_delegation=name != "web.post",
+                    allow_delegation=name not in {
+                        "web.post", "agents.grant_scoped", "agents.revoke_scoped"},
                 )
             _ck = _cross_topic_gate_key(name, arguments, _ag)
             if _ck:
@@ -2081,7 +2123,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name.startswith("mcp."):
             result = await asyncio.to_thread(_dispatch_mcp, name, arguments)
         elif name.startswith("agents."):
-            result = await asyncio.to_thread(_dispatch_agents, name, arguments, _ag)
+            result = await asyncio.to_thread(
+                _dispatch_agents, name, arguments, _ag, gate_approval)
         elif name == "eu_corpus.search":
             # alias morbido: eu_corpus.* == rag.* sulla collection eu-normativa.
             _rag_authorize("eu-normativa", write=False)

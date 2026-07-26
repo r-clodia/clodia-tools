@@ -66,9 +66,11 @@ class _AuthMiddleware:
         obtok = whitelist.set_current_on_behalf(bool(payload.get("on_behalf")))
         hrtok = whitelist.set_current_human_role(payload.get("human_role") or None)
         chtok = whitelist.set_current_chat(payload.get("chat") or None)
+        stok = whitelist.set_current_scoped_tools(payload.get("scoped_tools") or None)
         try:
             await self.handler(scope, receive, send)
         finally:
+            whitelist.reset_current_scoped_tools(stok)
             whitelist.reset_current_chat(chtok)
             whitelist.reset_current_human_role(hrtok)
             whitelist.reset_current_on_behalf(obtok)
