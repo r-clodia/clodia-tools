@@ -474,7 +474,22 @@ _TOPIC_TOOLS: list[Tool] = [
                      "description": "classe/sovranità del topic — scala SEAL (default SEAL-0 Public)"},
             "name": {"type": "string", "description": "slug a-z0-9_-"},
             "meta": {"type": "object"},
+            "hook_enabled": {
+                "type": "boolean",
+                "description": "crea il webhook del topic (default true)"},
         }, "required": ["name"]},
+    ),
+    Tool(
+        name="topic.invoke_hook",
+        description=(
+            "Invoca localmente l'hook di un topic senza segreto. Il chiamante deve "
+            "essere participant; messaggero può invocare qualunque topic. Il payload "
+            "viene accodato come @caller e sveglia il caller."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "payload": {"type": "string"},
+        }, "required": ["tier", "name", "payload"]},
     ),
     Tool(
         name="topic.open",
@@ -2282,6 +2297,26 @@ def _require_topic_member(svc, tier, name) -> None:
             f"topic {tier}/{name} (accesso negato: livello)")
 
 
+def _require_local_hook_caller(svc, tier, name) -> str:
+    """ACL stretta dell'hook locale: niente principal umano né gate cross-topic."""
+    caller = agent_name()
+    if not caller:
+        raise PermissionError("invocazione hook locale riservata agli agenti")
+    if caller == "messaggero":
+        return caller
+    try:
+        meta = svc.open(tier, name).get("meta", {})
+    except Exception:  # noqa: BLE001
+        raise PermissionError(f"topic {tier}/{name}: accesso negato")
+    if not _topic_is_member(meta, caller):
+        raise PermissionError(
+            f"agent '{caller}' non è participant di {tier}/{name}")
+    if _rank(current_clearance()) < _rank(meta.get("tier", tier)):
+        raise PermissionError(
+            f"agent '{caller}': clearance insufficiente per {tier}/{name}")
+    return caller
+
+
 def _filter_member_rows(rows: list, caller: str) -> list:
     """Filtra righe-topic allo scope need-to-know: topic di cui l'UMANO del turno
     o l'AGENTE è participant/owner. Nessun bypass "vedi tutto" (il cross-topic è
@@ -2454,7 +2489,18 @@ def _dispatch_topic(name: str, a: dict):
     if verb == "new":
         # Profilo topics:single → solo il workspace unico (DM sempre permessi).
         instance_profile.topic_creation_check(a["name"])
-        return svc.new(a.get("tier"), a["name"], a.get("meta"))
+        hook_enabled = bool(a.get("hook_enabled", True))
+        meta = svc.new(
+            a.get("tier"), a["name"],
+            {**(a.get("meta") or {}), "hook_enabled": hook_enabled})
+        if hook_enabled:
+            runtime.ensure_topic_hook(
+                meta["tier"], a["name"], by=agent_name() or "platform")
+        return meta
+    if verb == "invoke_hook":
+        caller = _require_local_hook_caller(svc, a["tier"], a["name"])
+        return runtime.invoke_topic_hook(
+            a["tier"], a["name"], a.get("payload") or "", caller=caller)
     if verb == "open":
         return svc.open(a["tier"], a["name"])
     if verb == "post_message":
