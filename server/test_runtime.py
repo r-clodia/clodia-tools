@@ -24,6 +24,21 @@ class RuntimeIntrospectionTests(unittest.TestCase):
         # solo i campi whitelisted: nessun campo extra/segreto passa
         self.assertNotIn("secret_field", out["agents"][0])
 
+    def test_rag_grants_come_from_core_agent_spec(self) -> None:
+        runtime._get = lambda path: {"agents": [
+            {"name": "esperto-bandi",
+             "rag_read": ["eu-normativa", " eu-normativa "],
+             "rag_write": ["bandi-interni"]},
+        ]}
+        grants = runtime.rag_grants("esperto-bandi")
+        self.assertEqual(grants["rag_read"], {"eu-normativa"})
+        self.assertEqual(grants["rag_write"], {"bandi-interni"})
+
+    def test_rag_grants_fail_closed_for_unknown_agent(self) -> None:
+        runtime._get = lambda path: {"agents": []}
+        with self.assertRaises(PermissionError):
+            runtime.rag_grants("missing")
+
     def test_providers_no_secrets(self) -> None:
         runtime._get = lambda path: {"providers": [
             {"id": "anthropic-api", "name": "Anthropic API", "mechanism": "apikey",
