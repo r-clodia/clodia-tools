@@ -127,9 +127,41 @@ def agents() -> dict:
         "name", "display_name", "type", "role", "agent_sdk", "model",
         "provider", "providers", "provider_connected", "provider_seal",
         "paused", "clearance", "expertise", "skills", "capabilities",
-        "rag_read", "rank_label",
+        "rag_read", "rag_write", "rank_label",
     )) for a in rows]
     return {"count": len(out), "agents": out}
+
+
+def rag_grants(agent: str) -> dict[str, set[str]]:
+    """Grant RAG autorevoli dell'AgentSpec nel core.
+
+    L'enforcement non deve leggere la whitelist locale del gateway: quella
+    descrive tool e filesystem, mentre rag_read/rag_write sono capability
+    amministrate dal core. La query resta live per rendere immediate le revoche.
+    """
+    data = _get("/api/agents")
+    rows = data.get("agents", []) if isinstance(data, dict) else data
+    row = next(
+        (item for item in (rows or [])
+         if isinstance(item, dict) and item.get("name") == agent),
+        None,
+    )
+    if row is None:
+        raise PermissionError(
+            f"impossibile risolvere i grant RAG dell'agent '{agent}'")
+
+    def _collections(key: str) -> set[str]:
+        values = row.get(key) or []
+        if not isinstance(values, (list, tuple, set)):
+            raise PermissionError(
+                f"grant RAG '{key}' non valido per l'agent '{agent}'")
+        return {value.strip() for value in values
+                if isinstance(value, str) and value.strip()}
+
+    return {
+        "rag_read": _collections("rag_read"),
+        "rag_write": _collections("rag_write"),
+    }
 
 
 def jobs() -> dict:

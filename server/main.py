@@ -2332,27 +2332,38 @@ def _filter_member_rows(rows: list, caller: str) -> list:
     return out
 
 
-def _rag_readable(cfg: dict) -> set:
+def _rag_grants(agent: str) -> dict[str, set[str]]:
+    """Grant live dal core; qualunque errore nega l'accesso (fail closed)."""
+    try:
+        return runtime.rag_grants(agent)
+    except PermissionError:
+        raise
+    except Exception as e:  # noqa: BLE001 — backend irraggiungibile/malformato
+        raise PermissionError(
+            f"impossibile verificare i grant RAG dell'agent '{agent}'") from e
+
+
+def _rag_readable(grants: dict[str, set[str]]) -> set[str]:
     """Collection su cui l'agent ha lettura (read grant OR write grant)."""
-    return set(cfg.get("rag_read") or []) | set(cfg.get("rag_write") or [])
+    return set(grants.get("rag_read") or []) | set(grants.get("rag_write") or [])
 
 
 def _rag_authorize(collection: str, write: bool) -> None:
     """Reference monitor per-collection: grant read/write (arg-aware, dal
-    config.yaml del gateway) + tiering (clearance ≥ tier della collection).
+    AgentSpec autorevole nel core) + tiering (clearance ≥ tier della collection).
     Super-agent → bypass dei grant, MA il vincolo del profilo (rag off/single)
     è strutturale e vale per tutti. Solleva PermissionError su violazione."""
     instance_profile.rag_check_collection(collection)
     ag = agent_name()
     if _is_super(ag):
         return
-    cfg = agent_config()
+    grants = _rag_grants(ag)
     if write:
-        if collection not in set(cfg.get("rag_write") or []):
+        if collection not in grants["rag_write"]:
             raise PermissionError(
                 f"agent '{ag}' senza grant di SCRITTURA sulla collection '{collection}'")
     else:
-        if collection not in _rag_readable(cfg):
+        if collection not in _rag_readable(grants):
             raise PermissionError(
                 f"agent '{ag}' senza grant di LETTURA sulla collection '{collection}'")
     # asse livello: clearance(agent) ≥ tier(collection). Difesa in profondità.
@@ -2375,7 +2386,7 @@ def _dispatch_rag(name: str, a: dict):
             res = {"collections": [c for c in res.get("collections", [])
                                    if c.get("collection") == only]}
         if not _is_super(agent_name()):
-            allowed = _rag_readable(agent_config())
+            allowed = _rag_readable(_rag_grants(agent_name()))
             res = {"collections": [c for c in res.get("collections", [])
                                    if c.get("collection") in allowed]}
         return res
