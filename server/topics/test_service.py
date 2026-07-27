@@ -33,10 +33,18 @@ def main() -> int:
     # default tier P0 quando non specificato
     m0 = svc.new(None, "idea-libera")
     check("new: default tier P0", m0["tier"] == "P0")
+    check("new: hook automatico", m0["hook_enabled"] is True)
 
     # new idempotente
     again = svc.new("P2", "cliente-x")
     check("new idempotente", again["created_at"] == m["created_at"])
+
+    # Lo slug è globale perché coincide con l'id dell'hook.
+    try:
+        svc.new("P1", "cliente-x")
+        check("slug globale tra tier", False)
+    except TopicError:
+        check("slug globale tra tier", True)
 
     # open: tldr = title + tier_name
     o = svc.open("P2", "cliente-x")

@@ -484,6 +484,12 @@ class TopicService:
         """Scaffold idempotente: se il topic esiste già ritorna il suo meta."""
         tier = _normalize_tier(tier or DEFAULT_TIER)
         mp = self._meta_p(tier, name)
+        # Lo slug è anche l'id del webhook: deve identificare un solo topic in
+        # tutta la piattaforma, indipendentemente dal tier.
+        for other_tier in VALID_TIER:
+            if other_tier != tier and self.s.exists(self._meta_p(other_tier, name)):
+                raise TopicError(
+                    f"nome topic globale già usato: {other_tier}/{name}")
         if self.s.exists(mp):
             return self.open(tier, name)["meta"]
         meta = dict(meta or {})
@@ -492,6 +498,7 @@ class TopicService:
         # tier = unica classe del topic + livello di privacy per l'enforcement.
         meta["tier"] = tier
         meta.setdefault("status", "active")
+        meta.setdefault("hook_enabled", True)
         # Storage dei FILE del topic (control-plane = sempre local). Default local;
         # se richiesto drive (meta.storage_config.type=drive) si lega/crea la cartella.
         # Modello remote-pluggable (2 lug): lo storage è SEMPRE locale; "drive"

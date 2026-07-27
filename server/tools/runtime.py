@@ -33,9 +33,17 @@ def _get(path: str):
         return r.json()
 
 
-def _post(path: str, payload: dict):
+def _post(path: str, payload: dict, *, auth: bool = False):
+    # auth=True: inoltra il session token ckt1 del chiamante corrente, così
+    # agent-server verifica l'identità firmata (via _principal_from_request) e
+    # non deve fidarsi di un campo auto-dichiarato nel body.
+    headers = {}
+    if auth:
+        token = whitelist.current_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
     with httpx.Client(timeout=_TIMEOUT) as c:
-        r = c.post(f"{AGENT_SERVER_URL}{path}", json=payload)
+        r = c.post(f"{AGENT_SERVER_URL}{path}", json=payload, headers=headers)
         r.raise_for_status()
         return r.json()
 
@@ -79,6 +87,21 @@ def channel_trigger(tier: str, name: str, text: str, by: str) -> dict:
     lato agent-server."""
     return _post(f"/clodia/channels/{tier}/{name}/trigger/internal",
                  {"text": text, "by": by})
+
+
+def ensure_topic_hook(tier: str, name: str, by: str) -> dict:
+    """Assicura l'hook automatico associato allo slug del topic."""
+    return _post("/clodia/hooks/internal/ensure",
+                 {"tier": tier, "name": name, "by": by})
+
+
+def invoke_topic_hook(tier: str, name: str, payload: str, caller: str) -> dict:
+    """Invoca localmente l'hook, senza segreto. L'identità del caller NON viaggia
+    nel body (sarebbe impersonabile): il gateway inoltra il session token firmato
+    del chiamante e agent-server ne deriva l'identità autenticata. Il participant
+    -check del gateway resta come pre-verifica (difesa in profondità)."""
+    return _post(f"/clodia/hooks/{tier}/{name}/invoke/internal",
+                 {"payload": payload}, auth=True)
 
 
 def set_participant(tier: str, name: str, agent: str, by: str, add: bool) -> dict:
