@@ -1967,9 +1967,9 @@ async def _require_gate_consent(
 
 def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
     """Chiave di gate per l'accesso CROSS-TOPIC: se `name` è un verbo topic-scoped
-    e l'agente (né il principal umano del turno) NON è participant/owner del topic
-    target → ritorna 'topic-access:<tier>/<name>'. Altrimenti None (membro → nessun
-    gate). Sostituisce _sudo_cross_topic."""
+    e l'agente NON è participant/owner del topic target → ritorna
+    'topic-access:<tier>/<name>'. La membership del principal umano non concede
+    accesso implicito all'agente: il consenso passa sempre dal gate esplicito."""
     if NS_SEP_DOT not in name:
         return None
     ns, verb = name.split(NS_SEP_DOT, 1)
@@ -1982,10 +1982,8 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
         meta = _topics().open(tier, tname).get("meta", {})
     except Exception:  # noqa: BLE001 — topic inesistente → lascia decidere al dispatch
         return None
-    principal = current_principal()
-    member = _topic_is_member(meta, agent) or (
-        bool(principal) and _topic_is_member(meta, principal))
-    return None if member else f"topic-access:{meta.get('tier', tier)}/{tname}"
+    return (None if _topic_is_member(meta, agent)
+            else f"topic-access:{meta.get('tier', tier)}/{tname}")
 
 
 @app.call_tool()
@@ -2015,7 +2013,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # (b) CROSS-TOPIC: un agente che tocca un topic di cui NON è participant
         #     richiede un consenso per-topic (time-boxed, così l'intera operazione
         #     cross-topic procede). Sostituisce il vecchio sudo cross-topic.
-        # Il gate non concede nulla di nuovo: il richiedente è già autorizzato sopra.
+        # Il gate non concede nuovi tool: per il cross-topic apre soltanto il
+        # compartimento target, sempre entro clearance e whitelist già verificate.
         gate_approval = None
         if not is_on_behalf():
             from . import gate as _gate
@@ -2265,30 +2264,28 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
 
 
 def _require_topic_member(svc, tier, name) -> None:
-    """ACL compartimento (need-to-know). Consentito SSE:
-      - l'UMANO del turno (current_principal) è participant/owner del target, OPPURE
-      - l'AGENTE è participant/owner del target (autonomo/legittimo), OPPURE
-      - esiste un consenso M-gate cross-topic attivo.
-    Il super NON bypassa più incondizionatamente (fix confused-deputy: un agente
-    non deve leggere/copiare un topic di cui né il richiedente umano né l'agente
-    sono partecipanti). Vedi project_topic_access_two_axis."""
+    """ACL compartimento (need-to-know).
+
+    Consentito solo se l'AGENTE è participant/owner del target oppure esiste un
+    consenso M-gate cross-topic attivo. La membership del principal umano non è
+    un bypass: altrimenti un owner di molti topic annullerebbe il compartimento
+    per qualunque agente che opera per suo conto.
+    """
     caller = agent_name()
-    principal = current_principal()
     try:
         meta = svc.open(tier, name).get("meta", {})
     except Exception:  # noqa: BLE001 — topic inesistente/illeggibile → nega
         raise PermissionError(f"topic {tier}/{name}: accesso negato")
-    human_ok = bool(principal) and _topic_is_member(meta, principal)
     agent_ok = _topic_is_member(meta, caller)
     tier_t = meta.get("tier", tier)
     # cross-topic: consentito con un CONSENSO GATE attivo per questo topic
     # (topic-access:<tier>/<name>), concesso via popup (M-gate). Sostituisce sudo.
     from . import gate as _gate
     cross_ok = _gate.active(caller, "-", f"topic-access:{tier_t}/{name}")
-    if not (human_ok or agent_ok or cross_ok):
+    if not (agent_ok or cross_ok):
         raise PermissionError(
-            f"accesso negato al topic {tier}/{name}: né l'umano '{principal}' né "
-            f"l'agente '{caller}' sono partecipanti (compartimento need-to-know; "
+            f"accesso negato al topic {tier}/{name}: l'agente '{caller}' non è "
+            "partecipante (compartimento need-to-know; "
             f"il cross-topic richiede un consenso gate)")
     # asse livello: clearance ≥ tier (difesa in profondità oltre al compartimento).
     if _rank(current_clearance()) < _rank(tier_t):
@@ -2318,16 +2315,17 @@ def _require_local_hook_caller(svc, tier, name) -> str:
 
 
 def _filter_member_rows(rows: list, caller: str) -> list:
-    """Filtra righe-topic allo scope need-to-know: topic di cui l'UMANO del turno
-    o l'AGENTE è participant/owner. Nessun bypass "vedi tutto" (il cross-topic è
-    per-topic via gate, non un lasciapassare globale). Righe senza
-    participants/owner (shape diversa) lasciate."""
-    principal = current_principal()
+    """Filtra allo scope need-to-know dell'AGENTE.
+
+    La membership umana non amplia l'elenco: l'accesso aggiuntivo è per-topic e
+    passa dal gate, non diventa un lasciapassare globale. Righe con shape diversa
+    (senza participants/owner) restano invariate.
+    """
     out = []
     for r in rows:
         if not isinstance(r, dict) or ("participants" not in r and "owner" not in r):
             out.append(r)
-        elif (bool(principal) and _topic_is_member(r, principal)) or _topic_is_member(r, caller):
+        elif _topic_is_member(r, caller):
             out.append(r)
     return out
 
