@@ -22,7 +22,12 @@ from contextlib import asynccontextmanager
 
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client, StdioServerParameters
-from mcp.client.streamable_http import streamablehttp_client
+try:  # mcp <2
+    from mcp.client.streamable_http import streamablehttp_client
+except ImportError:  # mcp >=2 ha rinominato il simbolo
+    from mcp.client.streamable_http import (
+        streamable_http_client as streamablehttp_client,
+    )
 from mcp.types import Tool
 
 from . import vault
