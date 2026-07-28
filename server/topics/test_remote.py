@@ -157,138 +157,48 @@ class _FakeDrive:
 
 
 class DriveRemoteTest(unittest.TestCase):
-    def test_two_lists_and_push_pull(self):
+    def test_drive_is_live_and_sync_verbs_are_noops(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             files = root / "files"; files.mkdir()
-            (files / "a.txt").write_text("AAA", encoding="utf-8")
             fake = _FakeDrive()
+            fake.write("remote.txt", b"REMOTE")
             r = DriveRemote(str(files), str(root / "state.json"),
                             drive_factory=lambda acct, folder: fake)
             r.enable({"folder": "F", "account": "acct"})
-            # add → sync+push; commit no-op; push → carica e svuota push-list
-            r.add("a.txt")
-            self.assertEqual(r.status()["pending"], 1)
-            r.commit("x")
-            self.assertEqual(r.push()["pushed"], 1)
-            self.assertEqual(r.status()["pending"], 0)          # push-list svuotata
-            self.assertEqual(r.status()["synced"], 1)
-            self.assertIn("a.txt", fake.files)                   # arrivato su Drive
-            # pull di un file NUOVO dal remote → entra in sync ma NON in push
-            fake.write("b.txt", b"BBB")
-            res = r.pull()
-            self.assertEqual(res["pulled"], 1)
-            self.assertTrue((files / "b.txt").is_file())
-            self.assertEqual(r.status()["synced"], 2)
-            self.assertEqual(r.status()["pending"], 0)           # i pull NON vanno in push-list
-            # disable → stato rimosso, file preservati
+
+            r.add("ignored.txt")
+            r.unstage()
+            self.assertTrue(r.commit("x")["noop"])
+            self.assertTrue(r.push()["noop"])
+            self.assertTrue(r.pull()["noop"])
+            status = r.status()
+            self.assertEqual(status["mode"], "live")
+            self.assertTrue(status["last_write_wins"])
+            self.assertEqual(status["files"], {"remote.txt": "synced"})
+            self.assertEqual(status["pending"], 0)
+            self.assertEqual(list(files.iterdir()), [])
+
             r.disable()
             self.assertFalse((root / "state.json").is_file())
-            self.assertTrue((files / "a.txt").is_file())
-            self.assertTrue((files / "b.txt").is_file())
 
-    def test_pull_incremental_skips_unchanged(self):
-        """Il pull NON ri-scarica i file locali già identici (md5 dai metadati):
-        un pull ripetuto senza modifiche fa ZERO download."""
+    def test_enable_discards_legacy_sync_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             files = root / "files"; files.mkdir()
             fake = _FakeDrive()
-            fake.write("doc.txt", b"HELLO")
+            state = root / "state.json"
+            state.write_text(
+                '{"config":{"folder":"OLD"},"sync":["a"],"push":["a"],"hashes":{}}',
+                encoding="utf-8",
+            )
             r = DriveRemote(str(files), str(root / "state.json"),
                             drive_factory=lambda acct, folder: fake)
             r.enable({"folder": "F", "account": "acct"})
-            # 1° pull: file nuovo → 1 download
-            self.assertEqual(r.pull()["pulled"], 1)
-            self.assertEqual(fake.reads, 1)
-            self.assertEqual((files / "doc.txt").read_bytes(), b"HELLO")
-            # 2° pull SENZA modifiche → skip via md5: NESSUN download
-            self.assertEqual(r.pull()["pulled"], 0)
-            self.assertEqual(fake.reads, 1)   # <-- niente ri-download
-            # modifica remota → il pull ri-scarica SOLO quel file
-            fake.write("doc.txt", b"HELLO WORLD")
-            r.pull()
-            self.assertEqual(fake.reads, 2)   # scaricato perché l'md5 è cambiato
-
-    def test_pull_native_doc_becomes_stub(self):
-        """Doc nativo Google → NON crasha (403); si materializza uno stub
-        proxy .gdrive.json col link, e lo stub NON finisce nella push-list."""
-        import json as _json
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            files = root / "files"; files.mkdir()
-            fake = _FakeDrive()
-            fake.write("bin.txt", b"DATA")
-            fake.add_native("piano.doc", "https://docs.google.com/document/d/XYZ/edit")
-            r = DriveRemote(str(files), str(root / "state.json"),
-                            drive_factory=lambda acct, folder: fake)
-            r.enable({"folder": "F", "account": "acct"})
-            res = r.pull()
-            # binario scaricato + stub scritto = 2 file materializzati
-            self.assertEqual(res["pulled"], 2)
-            self.assertEqual(res["skipped"], [])
-            self.assertTrue((files / "bin.txt").is_file())
-            stub = files / "piano.doc.gdrive.json"
-            self.assertTrue(stub.is_file())
-            payload = _json.loads(stub.read_text(encoding="utf-8"))
-            self.assertEqual(payload["gdrive_url"], "https://docs.google.com/document/d/XYZ/edit")
-            self.assertTrue(payload["mimeType"].startswith("application/vnd.google-apps."))
-            # lo stub è in sync-list ma NON in push-list (non si ri-carica su Drive)
-            self.assertEqual(r.status()["pending"], 0)
-            self.assertIn("piano.doc.gdrive.json", r._load()["sync"])
-            # pull idempotente: seconda volta nessun nuovo file
-            self.assertEqual(r.pull()["pulled"], 0)
-
-    def test_pull_respects_remoteinclude_ignore(self):
-        """Il filtro .remoteinclude/.remoteignore blocca il pull dei path esclusi;
-        il report riporta gli stati per-file."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            files = root / "files"; files.mkdir()
-            (files / ".remoteinclude").write_text("*.csv\n*.md\n", encoding="utf-8")
-            (files / ".remoteignore").write_text("*.tmp\n", encoding="utf-8")
-            fake = _FakeDrive()
-            fake.write("dati.csv", b"a,b")          # incluso
-            fake.write("nota.md", b"# nota")         # incluso
-            fake.write("preventivo.pdf", b"%PDF")    # fuori allowlist
-            fake.write("scratch.tmp", b"tmp")        # ignorato (ma anche fuori allowlist)
-            r = DriveRemote(str(files), str(root / "state.json"),
-                            drive_factory=lambda acct, folder: fake)
-            r.enable({"folder": "F", "account": "acct"})
-            res = r.pull()
-            self.assertEqual(res["pulled"], 2)
-            self.assertTrue((files / "dati.csv").is_file())
-            self.assertTrue((files / "nota.md").is_file())
-            self.assertFalse((files / "preventivo.pdf").exists())
-            self.assertFalse((files / "scratch.tmp").exists())
-            rep = res["report"]
-            self.assertEqual(rep["counts"]["synced"], 2)
-            self.assertIn("preventivo.pdf", rep["skipped_by_include"])
-            # .remoteinclude/.remoteignore sono control-plane: non compaiono nello status
-            self.assertNotIn(".remoteinclude", r.status()["files"])
-
-    def test_push_skips_hard_deny_and_filtered(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            files = root / "files"; files.mkdir()
-            (files / ".remoteignore").write_text("*.pdf\n", encoding="utf-8")
-            (files / "ok.csv").write_text("x", encoding="utf-8")
-            (files / "big.pdf").write_text("PDF", encoding="utf-8")
-            (files / "secret.key").write_text("KEY", encoding="utf-8")
-            fake = _FakeDrive()
-            r = DriveRemote(str(files), str(root / "state.json"),
-                            drive_factory=lambda acct, folder: fake)
-            r.enable({"folder": "F", "account": "acct"})
-            r.add("ok.csv"); r.add("big.pdf"); r.add("secret.key")
-            res = r.push()
-            self.assertEqual(res["pushed"], 1)          # solo ok.csv
-            self.assertIn("ok.csv", fake.files)
-            self.assertNotIn("big.pdf", fake.files)     # filtrato da .remoteignore
-            self.assertNotIn("secret.key", fake.files)  # hard deny
-            rep = res["report"]
-            self.assertIn("big.pdf", rep["skipped_by_ignore"])
-            self.assertIn("secret.key", rep["skipped_by_hard_deny"])
-            self.assertEqual(r.status()["pending"], 0)  # push-list svuotata
+            self.assertEqual(
+                r._load(),
+                {"config": {"folder": "F", "account": "acct"}, "mode": "live"},
+            )
 
 
 if __name__ == "__main__":

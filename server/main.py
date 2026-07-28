@@ -672,8 +672,9 @@ _TOPIC_TOOLS: list[Tool] = [
     ),
     Tool(
         name="topic.migrate_storage",
-        description=("Migra i FILE del topic da uno storage all'altro (local↔Google Drive). "
-                     "Copia NON distruttiva: il vecchio contenuto va nel cestino (recuperabile). "
+        description=("Migra i FILE del topic da locale a Google Drive o viceversa. "
+                     "Su Drive la cartella remota diventa il filesystem live autoritativo; "
+                     "tornando a locale, i file remoti vengono materializzati nel topic. "
                      "Guard SEAL: vietato migrare su uno storage con livello inferiore al tier "
                      "(es. SEAL-3 non va su Drive). target.type=local|drive; per drive folder "
                      "(link/id) opzionale (vuoto = crea cartella)."),
@@ -686,13 +687,12 @@ _TOPIC_TOOLS: list[Tool] = [
                 "required": ["type"]},
         }, "required": ["tier", "name", "target"]},
     ),
-    # ── Remote pluggable: lo storage è SEMPRE locale; un remote opzionale (git o
-    # drive) sincronizza i FILE con verbi uniformi add/commit/push/pull. ──
+    # ── Remote pluggable: git usa il ciclo di sync; Drive è un filesystem live. ──
     Tool(
         name="topic.remote_enable",
-        description=("Attiva un remote di sync per i FILE del topic (storage resta locale). "
-                     "type=git (config.url opzionale) | drive (config.folder link/id opzionale = "
-                     "crea cartella, config.account). Poi usa remote_add/commit/push/pull."),
+        description=("Attiva un remote per i FILE del topic. Git conserva il ciclo "
+                     "add/commit/push/pull. Drive diventa il filesystem autoritativo live: "
+                     "config.folder link/id opzionale (vuoto = crea cartella), config.account."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
@@ -702,42 +702,46 @@ _TOPIC_TOOLS: list[Tool] = [
     ),
     Tool(
         name="topic.remote_disable",
-        description="Disattiva il remote: torna a local pulito PRESERVANDO i file (git→rimuove .git, drive→cancella la sync-list).",
+        description=("Disattiva il remote preservando i file. Per Drive materializza "
+                     "prima la cartella remota nel filesystem locale."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"}}, "required": ["tier", "name"]},
     ),
     Tool(
         name="topic.remote_add",
-        description="Marca un file per il sync (git: git add · drive: aggiunge a sync-list e push-list). path relativo a files/.",
+        description=("Marca un file per il sync Git. Su Drive è un no-op deprecato "
+                     "perché topic.write_file/topic.put caricano immediatamente."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"}, "path": {"type": "string"}}, "required": ["tier", "name", "path"]},
     ),
     Tool(
         name="topic.remote_commit",
-        description="Snapshot delle modifiche (git: commit · drive: no-op). message opzionale.",
+        description="Snapshot delle modifiche Git. Su Drive live è un no-op deprecato.",
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"}, "message": {"type": "string"}}, "required": ["tier", "name"]},
     ),
     Tool(
         name="topic.remote_push",
-        description="Invia le modifiche al remote (git: push · drive: carica la push-list, push-only, non cancella su Drive).",
+        description="Invia le modifiche Git. Su Drive live è un no-op deprecato.",
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"}}, "required": ["tier", "name"]},
     ),
     Tool(
         name="topic.remote_pull",
-        description="Riceve dal remote (git: pull, conflitto→escala · drive: scarica; i nuovi entrano in sync-list, last-writer-wins per-file).",
+        description=("Riceve dal remote Git (conflitto→escala). Su Drive live è un "
+                     "no-op deprecato perché le letture vedono già il remoto."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"}}, "required": ["tier", "name"]},
     ),
     Tool(
         name="topic.remote_status",
-        description="Stato del remote del topic (tipo, abilitato, e per drive: synced/pending).",
+        description=("Stato del remote del topic. Per Drive include mode=live e "
+                     "last_write_wins=true."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"}}, "required": ["tier", "name"]},

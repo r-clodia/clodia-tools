@@ -180,13 +180,8 @@ class TopicService:
     def __init__(self, storage: Storage):
         import threading
         self.s = storage          # control-plane local (meta, summary, minutes, .messages)
-        self._drive_cache: dict = {}   # (account → DriveStorage) cache per-cartella topic
-        # local-first drive: i file di un topic drive vivono in LOCALE (letture
-        # veloci, mai bloccanti); Drive è un MIRROR aggiornato in background dopo
-        # le scritture (debounce) e su richiesta (sync_now). Il push è push-only:
-        # non cancella mai file su Drive. La copia locale è la sorgente di verità.
-        self._mirror_timers: dict = {}
-        self._mirror_lock = threading.Lock()
+        self._drive_cache: dict = {}
+        self._drive_live_lock = threading.RLock()
 
     # ── routing storage dei FILE (control-plane resta su self.s) ─────────────
     def _drive_service(self, account: str | None):
@@ -197,12 +192,18 @@ class TopicService:
         from google.oauth2.credentials import Credentials
         from google.auth.transport.requests import Request as GReq
         from googleapiclient.discovery import build
-        accts = sorted(n[len("gworkspace_"):] for n in vault.store_names()
-                       if n.startswith("gworkspace_"))
+        names = vault.store_names()
+        accts = sorted(
+            {n[len("google_"):] for n in names if n.startswith("google_")}
+            | {n[len("gworkspace_"):] for n in names
+               if n.startswith("gworkspace_")}
+        )
         acct = account or (accts[0] if accts else None)
         if not acct:
             raise TopicError("storage drive: nessun account Google Workspace nel vault")
-        b = vault.get_secret("clodia", f"gworkspace_{acct}")
+        credential = (f"google_{acct}" if f"google_{acct}" in names
+                      else f"gworkspace_{acct}")
+        b = vault.get_secret("clodia", credential)
         creds = Credentials(token=None, refresh_token=b["refresh_token"],
                             client_id=b["client_id"], client_secret=b["client_secret"],
                             token_uri="https://oauth2.googleapis.com/token",
@@ -234,16 +235,8 @@ class TopicService:
             folder = created["id"]
         return {"folder": folder, "account": account}
 
-    def _resolve_backend(self, tier: str, name: str, storage: str | None, cfg: dict):
-        """(storage_obj, base_path) per i FILE del topic. LOCAL-FIRST: sia i topic
-        `local-fs` sia `google-drive` tengono i file in LOCALE (`<dir>/files`) →
-        letture/liste/scritture veloci e mai bloccanti. Per i topic drive, Drive è
-        un mirror aggiornato a parte (seed pull-once + push su write / sync_now)."""
-        return self.s, f"{self._dir(tier, name)}/files"
-
     def _drive_backend_for(self, tier: str, name: str, cfg: dict):
-        """DriveStorage per la cartella-mirror del topic (seed/push). None se il
-        topic non ha una folder Drive configurata."""
+        """DriveStorage live per la cartella autoritativa del topic."""
         folder = (cfg or {}).get("folder")
         if not folder:
             return None
@@ -255,31 +248,16 @@ class TopicService:
             self._drive_cache[key] = ds
         return ds
 
-    # ── local-first drive: seed (pull-once) + mirror (push) ───────────────────
-    def _seed_marker_p(self, tier: str, name: str) -> str:
-        return f"{self._dir(tier, name)}/.drive-seeded"
-
-    def _ensure_drive_seeded(self, tier: str, name: str, meta: dict) -> None:
-        """Pull-once: la PRIMA volta che si accede ai file di un topic drive i cui
-        file vivono ancora SU Drive, li scarica in locale (copia, NON distruttiva su
-        Drive) e scrive un marker idempotente. Poi il topic è local-first."""
-        if meta.get("storage") != "google-drive":
-            return
-        if self.s.exists(self._seed_marker_p(tier, name)):
-            return
-        ds = self._drive_backend_for(tier, name, meta.get("storage_config") or {})
-        if ds is None:
-            return
-        local_base = f"{self._dir(tier, name)}/files"
-        self._drive_pull_tree(ds, "", local_base)
-        self.s.write(self._seed_marker_p(tier, name), b"1")
-        LOG.info("drive-seed: %s/%s seminato in locale da Drive", tier, name)
+    # ── Drive live: migrazione one-shot della vecchia replica locale ─────────
+    def _drive_live_marker_p(self, tier: str, name: str) -> str:
+        return f"{self._dir(tier, name)}/.drive-live-v1"
 
     # I Google Docs nativi (Documenti/Fogli/Presentazioni) NON sono scaricabili
     # come binari: si mostrano come proxy/link e si leggono/editano su Drive.
     _NATIVE_DOC_PREFIX = "application/vnd.google-apps."
 
     def _drive_pull_tree(self, ds, rel: str, local_base: str) -> None:
+        """Materializza Drive in locale quando il remote viene disabilitato."""
         for e in ds.list(rel):
             child = f"{rel}/{e.name}".strip("/")
             if e.kind == "dir":
@@ -298,82 +276,104 @@ class TopicService:
                 except Exception as ex:  # noqa: BLE001 — non scaricabile → salta, non bloccare
                     LOG.warning("drive-seed: salto '%s' (%s)", child, ex)
 
-    def sync_now(self, tier: str, name: str) -> dict:
-        """Push on-demand: mirror di tutti i file locali → Drive. Push-only: NON
-        cancella mai file su Drive. Salta i file già identici (md5)."""
-        try:
-            meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
-        except Exception:  # noqa: BLE001
-            return {"synced": 0, "note": "meta assente"}
-        if meta.get("storage") != "google-drive":
-            return {"synced": 0, "note": "topic non drive"}
-        ds = self._drive_backend_for(tier, name, meta.get("storage_config") or {})
-        if ds is None:
-            return {"synced": 0, "note": "nessun folder drive"}
-        n = self._drive_push_tree(ds, "", f"{self._dir(tier, name)}/files")
-        return {"synced": n}
-
-    def _drive_push_tree(self, ds, rel: str, local_base: str) -> int:
-        import hashlib
-        n = 0
+    def _upload_local_tree(self, ds, rel: str, local_base: str) -> tuple[list[str], list[str]]:
+        """Upload last-write-wins della copia locale su Drive, VERIFICANDO ogni
+        file col checksum md5 restituito da Drive. Ritorna (verified, failed):
+        `verified` = path (relativi a files/) confermati identici su Drive;
+        `failed` = upload falliti o md5 non combaciante. Il chiamante NON deve
+        cancellare il locale se `failed` è non vuoto (data-safety, #45 review)."""
+        verified: list[str] = []
+        failed: list[str] = []
         for e in self.s.list(f"{local_base}/{rel}".strip("/")):
             if e.name.startswith(".") or e.name.endswith(".gdrive.json"):
-                continue  # dotfile o stub proxy di Doc nativo → non si pusha
+                continue
             child = f"{rel}/{e.name}".strip("/")
             if e.kind == "dir":
-                n += self._drive_push_tree(ds, child, local_base)
+                v, f = self._upload_local_tree(ds, child, local_base)
+                verified += v
+                failed += f
                 continue
             data = self.s.read(f"{local_base}/{child}".strip("/")).data
             try:
-                cur = ds.stat(child)
-                if cur and cur.md5 == hashlib.md5(data).hexdigest():
-                    continue  # già identico su Drive → skip
-            except Exception:  # noqa: BLE001
-                pass
-            ds.write(child, data)
-            n += 1
-        return n
+                ds.write(child, data)
+                readback = ds.read(child).data
+            except Exception as ex:  # noqa: BLE001
+                LOG.warning("drive-live: upload/verifica di '%s' fallito: %s", child, ex)
+                failed.append(child)
+                continue
+            # Verifica per confronto del CONTENUTO ri-letto da Drive: definitiva e
+            # backend-agnostica (cattura upload troncati/corrotti; la versione di
+            # write ha formato diverso per backend — md5 su Drive, sha256 in test).
+            if readback == data:
+                verified.append(child)
+            else:
+                LOG.warning("drive-live: contenuto ri-letto ≠ locale per '%s' "
+                            "(%d vs %d byte)", child, len(readback), len(data))
+                failed.append(child)
+        return verified, failed
 
-    def _schedule_mirror(self, tier: str, name: str) -> None:
-        """Debounce: dopo una scrittura/cancellazione locale su un topic drive,
-        programma un push a Drive in background (thread), coalescendo le scritture
-        ravvicinate. Non blocca mai il chiamante. No-op sui topic non-drive."""
-        import threading
-        try:
-            meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
-        except Exception:  # noqa: BLE001
-            return
-        if meta.get("storage") != "google-drive":
-            return
-        key = f"{tier}/{name}"
-        with self._mirror_lock:
-            old = self._mirror_timers.get(key)
-            if old:
-                old.cancel()
-            t = threading.Timer(5.0, self._mirror_fire, args=(tier, name))
-            t.daemon = True
-            self._mirror_timers[key] = t
-            t.start()
+    def _clear_local_files(self, tier: str, name: str) -> None:
+        base = f"{self._dir(tier, name)}/files"
+        self.s.delete(base)
+        self.s.mkdir(base)
 
-    def _mirror_fire(self, tier: str, name: str) -> None:
-        with self._mirror_lock:
-            self._mirror_timers.pop(f"{tier}/{name}", None)
-        try:
-            self.sync_now(tier, name)
-        except Exception:  # noqa: BLE001
-            LOG.warning("drive-mirror: push a Drive fallito per %s/%s",
-                        tier, name, exc_info=True)
+    @staticmethod
+    def _drive_remote_config(meta: dict) -> dict | None:
+        remote = meta.get("remote") or {}
+        if remote.get("type") == "drive":
+            return remote.get("config") or {}
+        return None
+
+    def _ensure_drive_live(self, tier: str, name: str, meta: dict) -> None:
+        """Converte una vecchia replica locale in filesystem Drive autoritativo."""
+        cfg = self._drive_remote_config(meta)
+        if cfg is None or self.s.exists(self._drive_live_marker_p(tier, name)):
+            return
+        with self._drive_live_lock:
+            if self.s.exists(self._drive_live_marker_p(tier, name)):
+                return
+            ds = self._drive_backend_for(tier, name, cfg)
+            if ds is None:
+                raise TopicError("remote drive: nessuna cartella configurata")
+            local_base = f"{self._dir(tier, name)}/files"
+            verified, failed = self._upload_local_tree(ds, "", local_base)
+            if failed:
+                # Data-safety: NON cancellare il locale né segnare live se anche
+                # un solo file non è confermato su Drive. Il topic resta locale,
+                # ritentabile al prossimo accesso.
+                raise TopicError(
+                    f"drive-live abortito per {tier}/{name}: {len(failed)} file non "
+                    f"verificati su Drive (locale intatto): {failed[:5]}")
+            self._clear_local_files(tier, name)
+            self.s.write(self._drive_live_marker_p(tier, name), b"1")
+            LOG.info("drive-live: %s/%s attivato (%d file verificati su Drive)",
+                     tier, name, len(verified))
+
+    def sync_now(self, tier: str, name: str) -> dict:
+        return {
+            "synced": 0,
+            "noop": True,
+            "deprecated": True,
+            "note": "Drive è live: ogni scrittura è già persistita",
+        }
 
     def _files_backend(self, tier: str, name: str):
-        """Storage dei FILE del topic, dal meta (control-plane). Local-first: per i
-        topic drive assicura il seed pull-once da Drive prima di servire i file."""
+        """Storage dei file: Drive live per remote drive, locale negli altri casi."""
         try:
             meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
         except Exception:  # noqa: BLE001 — topic legacy/assente → local
             meta = {}
-        self._ensure_drive_seeded(tier, name, meta)
-        return self._resolve_backend(tier, name, meta.get("storage"),
-                                     meta.get("storage_config") or {})
+        if meta.get("storage") == "google-drive" and not meta.get("remote"):
+            self._migrate_legacy_drive(tier, name)
+            meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
+        cfg = self._drive_remote_config(meta)
+        if cfg is not None:
+            self._ensure_drive_live(tier, name, meta)
+            ds = self._drive_backend_for(tier, name, cfg)
+            if ds is None:
+                raise TopicError("remote drive: nessuna cartella configurata")
+            return ds, ""
+        return self.s, f"{self._dir(tier, name)}/files"
 
     # storage drive: livello SEAL massimo (cap). eu-west-1 → SEAL-2.
     _DRIVE_SEAL_CAP = 2
@@ -407,8 +407,8 @@ class TopicService:
         if not self.s.exists(mp):
             raise TopicError(f"topic non trovato: {tier}/{name}")
         meta = json.loads(self.s.read(mp).data.decode())
-        cur_storage = meta.get("storage") or self.s.capability().name
-        cur_cfg = meta.get("storage_config") or {}
+        cur_storage = ("google-drive" if self._drive_remote_config(meta) is not None
+                       else (meta.get("storage") or self.s.capability().name))
         tgt_type = (target or {}).get("type")
         tgt_storage = "google-drive" if tgt_type == "drive" else "local-fs"
         if tgt_storage == cur_storage:
@@ -422,29 +422,17 @@ class TopicService:
             raise TopicError(
                 f"storage drive ha cap SEAL-{self._DRIVE_SEAL_CAP}: un topic {tier} "
                 f"non può migrare su Drive (anti-declassamento)")
-        # Local-first: i FILE vivono SEMPRE in locale. La migrazione cambia solo se
-        # Drive fa da mirror (→drive) o no (→local); i file locali non si spostano.
         if tgt_type == "drive":
-            # → drive: file già in locale; configura la folder, marca seminato
-            #   (niente pull) e pusha su Drive. Nessuno spostamento distruttivo.
-            new_cfg = self._provision_drive_folder(target, name)
-            meta["storage"] = "google-drive"
-            meta["storage_config"] = new_cfg
-            self.s.write(mp, json.dumps(meta, ensure_ascii=False, indent=2).encode())
-            self._drive_cache.clear()
-            self.s.write(self._seed_marker_p(tier, name), b"1")
-            res = self.sync_now(tier, name)
-            return {"migrated": res.get("synced", 0), "conflicts": [],
+            self.remote_enable(tier, name, "drive", target)
+            return {"migrated": 0, "conflicts": [],
                     "from": cur_storage, "to": "google-drive",
-                    "backup": "(file locali conservati come sorgente di verità)"}
-        # → local: assicura il seed (pull da Drive se non ancora), poi togli il
-        #   mirror. La cartella Drive di origine resta (non distruttivo).
-        self._ensure_drive_seeded(tier, name, meta)
-        meta["storage"] = "local-fs"
-        meta.pop("storage_config", None)
-        self.s.write(mp, json.dumps(meta, ensure_ascii=False, indent=2).encode())
-        self._drive_cache.clear()
-        self.s.delete(self._seed_marker_p(tier, name))
+                    "backup": "(cartella Drive autoritativa)"}
+        if self._drive_remote_config(meta) is not None:
+            self.remote_disable(tier, name)
+        else:
+            meta["storage"] = "local-fs"
+            meta.pop("storage_config", None)
+            self.s.write(mp, json.dumps(meta, ensure_ascii=False, indent=2).encode())
         return {"migrated": 0, "conflicts": [], "from": cur_storage,
                 "to": "local-fs", "backup": "(cartella Drive di origine conservata)"}
 
@@ -499,11 +487,8 @@ class TopicService:
         meta["tier"] = tier
         meta.setdefault("status", "active")
         meta.setdefault("hook_enabled", True)
-        # Storage dei FILE del topic (control-plane = sempre local). Default local;
-        # se richiesto drive (meta.storage_config.type=drive) si lega/crea la cartella.
-        # Modello remote-pluggable (2 lug): lo storage è SEMPRE locale; "drive"
-        # alla creazione = remote drive abilitato dalla nascita (fix 6 lug: prima
-        # marcava google-drive senza wiring → il topic restava di fatto locale).
+        # Il control-plane resta locale. I file sono locali per default; con un
+        # remote Drive vengono serviti direttamente dalla cartella remota.
         sc = meta.get("storage_config") or {}
         want_drive = meta.get("storage") == "google-drive" or sc.get("type") == "drive"
         meta["storage"] = self.s.capability().name
@@ -538,8 +523,8 @@ class TopicService:
             self.s.write(self._summary_p(tier, name),
                          f"{meta.get('title', name)}\n\n## Prossimi passi\n".encode())
         if want_drive:
-            # remote drive dalla nascita: risolve/crea la cartella e abilita il
-            # sync (add/commit/push/pull). Best-effort: un problema Drive non
+            # Remote Drive dalla nascita: risolve/crea la cartella e abilita la
+            # vista live. Best-effort: un problema Drive non
             # deve impedire la creazione del topic (resta local pulito).
             try:
                 meta = self.remote_enable(tier, name, "drive", dict(sc))
@@ -620,7 +605,12 @@ class TopicService:
 
     def _remote_drive_factory(self, account, folder):
         from .drive_fs import DriveStorage
-        return DriveStorage(self._drive_service(account), folder)
+        key = f"remote:{account or ''}:{folder}"
+        ds = self._drive_cache.get(key)
+        if ds is None:
+            ds = DriveStorage(self._drive_service(account), folder)
+            self._drive_cache[key] = ds
+        return ds
 
     def _remote_for(self, tier: str, name: str, meta: dict):
         from .remote import make_remote
@@ -688,6 +678,19 @@ class TopicService:
     def remote_enable(self, tier: str, name: str, rtype: str, config: dict | None = None) -> dict:
         if rtype not in ("git", "drive"):
             raise TopicError(f"remote type non supportato: {rtype}")
+        # Guard SEAL sul VERO punto di attivazione di Drive (non solo in
+        # migrate_storage): dati confidenziali di tier > cap non devono finire su
+        # Google come filesystem live (#45 review, Prima Legge/GDPR). Copre anche
+        # new() (che chiama qui) e la migrazione legacy.
+        if rtype == "drive":
+            try:
+                tier_n = int(_normalize_tier(tier).replace("SEAL-", ""))
+            except (ValueError, AttributeError):
+                tier_n = 0
+            if tier_n > self._DRIVE_SEAL_CAP:
+                raise TopicError(
+                    f"storage drive ha cap SEAL-{self._DRIVE_SEAL_CAP}: un topic "
+                    f"{tier} non può usare Drive come storage live (anti-declassamento)")
         meta, ver = self._read_meta(tier, name)
         config = dict(config or {})
         if rtype == "drive":
@@ -700,15 +703,30 @@ class TopicService:
         self._write_meta(tier, name, meta, base_version=ver)
         rem = self._remote_for(tier, name, meta)
         rem.enable(meta["remote"]["config"])
+        if rtype == "drive":
+            self._ensure_drive_live(tier, name, meta)
         return {"ok": True, "remote": meta["remote"], "status": rem.status()}
 
     def remote_disable(self, tier: str, name: str) -> dict:
         meta, ver = self._read_meta(tier, name)
         rem = self._remote_for(tier, name, meta)
+        cfg = self._drive_remote_config(meta)
+        if cfg is not None:
+            self._ensure_drive_live(tier, name, meta)
+            ds = self._drive_backend_for(tier, name, cfg)
+            if ds is None:
+                raise TopicError("remote drive: nessuna cartella configurata")
+            local_base = f"{self._dir(tier, name)}/files"
+            # Materializza Drive → locale SENZA clear preventivo: se il pull
+            # fallisce a metà non si perde nulla (Drive resta la fonte; in
+            # modalità live il locale è già vuoto). _drive_pull_tree è ripartibile.
+            self._drive_pull_tree(ds, "", local_base)
         if rem is not None:
-            rem.disable()          # local clean, file PRESERVATI
+            rem.disable()
         meta.pop("remote", None)
         self._write_meta(tier, name, meta, base_version=ver)
+        self.s.delete(self._drive_live_marker_p(tier, name))
+        self._drive_cache.clear()
         return {"ok": True}
 
     def remote_add(self, tier: str, name: str, path: str) -> dict:
@@ -731,8 +749,7 @@ class TopicService:
         return self._remote_or_err(tier, name).pull()
 
     def _migrate_legacy_drive(self, tier: str, name: str) -> None:
-        """One-shot: legacy storage=google-drive → remote drive (local+sync).
-        Non distruttivo: i file locali restano, si popola la sola sync-list."""
+        """One-shot: legacy storage=google-drive → remote Drive live."""
         meta, ver = self._read_meta(tier, name)
         if meta.get("storage") != "google-drive" or meta.get("remote"):
             return
@@ -741,21 +758,17 @@ class TopicService:
                           "config": {"folder": sc.get("folder"), "account": sc.get("account")}}
         meta["storage"] = self.s.capability().name
         meta.pop("storage_config", None)
-        self._write_meta(tier, name, meta, base_version=ver)
         rem = self._remote_for(tier, name, meta)
         try:
             rem.enable(meta["remote"]["config"])
-            base = self._abs(tier, name, "files")
-            paths = []
-            for r, _dirs, fnames in os.walk(base):
-                for fn in fnames:
-                    rel = os.path.relpath(os.path.join(r, fn), base)
-                    if not rel.startswith("."):
-                        paths.append(rel)
-            if hasattr(rem, "seed"):
-                rem.seed(paths)
+            self._write_meta(tier, name, meta, base_version=ver)
+            # Upload+verifica+clear SICURO (mai clear senza conferma md5 su Drive):
+            # il vecchio modello mirror poteva essere stale/incompleto, quindi NON
+            # si assume che i file siano già su Drive — si uploadano e verificano.
+            self._ensure_drive_live(tier, name, meta)
         except Exception:  # noqa: BLE001 — la migrazione non deve rompere open()
-            LOG.warning("seed migrazione drive fallito per %s/%s", tier, name)
+            LOG.warning("migrazione drive live fallita per %s/%s (locale intatto)",
+                        tier, name)
 
     def open(self, tier: str, name: str) -> dict:
         """Read-only: meta + summary (+ summary_version per optimistic lock) + minutes."""
@@ -790,12 +803,15 @@ class TopicService:
             if st:
                 mts.append(st.mtime)
         updated_at = _iso(max(mts)) if mts else None
-        # recent_files = fino a 3 file in files/, per mtime desc
+        # recent_files = fino a 3 file dalla sorgente effettiva (Drive live o locale)
         fmt: list[tuple[float, str]] = []
-        for e in self.s.list(f"{d}/files"):
+        files_store, files_base = self._files_backend(tier, name)
+        is_drive_live = files_store is not self.s
+        for e in files_store.list(files_base):
             if e.kind != "file":
                 continue
-            st = self.s.stat(f"{d}/files/{e.name}")
+            st = None if is_drive_live else files_store.stat(
+                f"{files_base}/{e.name}".strip("/"))
             fmt.append((st.mtime if st else 0.0, e.name))
         fmt.sort(reverse=True)
         recent_files = [{"name": n, "path": f"files/{n}", "mtime_iso": _iso(mt)}
@@ -980,13 +996,14 @@ class TopicService:
         rel = (subpath or "").strip("/")
         if ".." in rel.split("/") or "\\" in rel:
             raise TopicError(f"subpath non valido: {subpath}")
-        # local-first: assicura il seed (pull-once) dei file drive prima di elencare.
         try:
             _meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
         except Exception:  # noqa: BLE001
             _meta = {}
-        self._ensure_drive_seeded(tier, name, _meta)
-        _is_drive = _meta.get("storage") == "google-drive"
+        if _meta.get("storage") == "google-drive" and not _meta.get("remote"):
+            self._migrate_legacy_drive(tier, name)
+            _meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
+        _is_drive = self._drive_remote_config(_meta) is not None
         out: list[dict] = []
         is_files, sub = self._files_rel(rel) if rel else (False, "")
         if rel and is_files:
@@ -994,6 +1011,12 @@ class TopicService:
             store, base = self._files_backend(tier, name)
             for e in store.list(f"{base}/{sub}".strip("/")):
                 if e.name.startswith("."):
+                    continue
+                if e.mime and e.mime.startswith(self._NATIVE_DOC_PREFIX):
+                    p = "files/" + (f"{sub}/" if sub else "") + e.name
+                    out.append({"name": e.name, "path": p, "kind": "file",
+                                "remote": True, "url": e.url or "", "mime": e.mime,
+                                "size": e.size, "md5": e.version})
                     continue
                 if e.name.endswith(".gdrive.json"):
                     # stub proxy di un Google Doc nativo → voce REMOTA (link a Drive)
@@ -1012,11 +1035,12 @@ class TopicService:
                 if e.kind == "dir":
                     out.append({"name": e.name, "path": p, "kind": "dir"})
                 else:
-                    st = store.stat(f"{base}/{sub}/{e.name}".strip("/"))
+                    st = None if _is_drive else store.stat(
+                        f"{base}/{sub}/{e.name}".strip("/"))
                     out.append({"name": e.name, "path": p, "kind": "file",
-                                "size": getattr(st, "size", None) if st else None,
+                                "size": (getattr(st, "size", None) if st else e.size),
                                 "mtime_iso": _iso(st.mtime) if st else None,
-                                "md5": getattr(st, "md5", None) if st else None})
+                                "md5": (getattr(st, "md5", None) if st else e.version)})
         else:
             # root o control-plane (summary/minutes) → local
             d = self._dir(tier, name)
@@ -1037,7 +1061,7 @@ class TopicService:
                                 "mtime_iso": _iso(st.mtime) if st else None,
                                 "md5": getattr(st, "md5", None) if st else None})
             # topic drive: espone sempre 'files/' come dir navigabile, anche se il
-            # mirror locale è ancora vuoto (così si può entrare e caricare).
+            # cartella locale è vuota (così si può entrare e caricare).
             if not rel and not seen_files and _is_drive:
                 out.append({"name": "files", "path": "files", "kind": "dir"})
         dirs = sorted((f for f in out if f.get("kind") == "dir"),
@@ -1065,7 +1089,6 @@ class TopicService:
             raise TopicError(f"nome file non valido: {filename}")
         store, base = self._files_backend(tier, name)
         store.write(f"{base}/{rel}".strip("/"), data)
-        self._schedule_mirror(tier, name)  # local-first: mirror a Drive in background
         return {"name": parts[-1], "path": f"files/{rel}"}
 
     def delete_file(self, tier: str, name: str, relpath: str) -> dict:

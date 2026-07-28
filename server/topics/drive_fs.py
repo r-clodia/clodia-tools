@@ -13,6 +13,7 @@ via md5Checksum di Drive (come local-fs usa sha256). supportsAllDrives ovunque
 from __future__ import annotations
 
 import io
+import time
 
 from .storage import (Capability, Entry, NotFound, ReadResult, Stat, Storage,
                       StorageError, VersionConflict)
@@ -27,10 +28,28 @@ def _q(s: str) -> str:
 
 
 class DriveStorage(Storage):
-    def __init__(self, service, root_folder_id: str):
+    def __init__(self, service, root_folder_id: str, cache_ttl: float = 5.0):
         self._svc = service
         self._root = root_folder_id
+        self._cache_ttl = max(0.0, float(cache_ttl))
         self._cache: dict[str, str] = {"": root_folder_id}  # path → id (cartelle/file)
+        self._list_cache: dict[str, tuple[float, list[Entry]]] = {}
+        self._read_cache: dict[str, tuple[float, ReadResult]] = {}
+
+    def _cached(self, cache: dict, key: str):
+        hit = cache.get(key)
+        if hit and hit[0] > time.monotonic():
+            return hit[1]
+        cache.pop(key, None)
+        return None
+
+    def _remember(self, cache: dict, key: str, value) -> None:
+        cache[key] = (time.monotonic() + self._cache_ttl, value)
+
+    def _invalidate(self) -> None:
+        self._cache = {"": self._root}
+        self._list_cache.clear()
+        self._read_cache.clear()
 
     # ── risoluzione path → id ────────────────────────────────────────────────
     def _norm(self, path: str) -> str:
@@ -102,6 +121,10 @@ class DriveStorage(Storage):
         return Capability(name="google-drive", versioning="emulated", atomic_move=True)
 
     def list(self, path: str) -> list[Entry]:
+        rel = self._norm(path)
+        cached = self._cached(self._list_cache, rel)
+        if cached is not None:
+            return list(cached)
         node = self._resolve(path)
         if not node:
             return []
@@ -116,20 +139,41 @@ class DriveStorage(Storage):
             out.append(Entry(name=f["name"], kind=kind, size=int(f.get("size") or 0),
                              mime=mime, url=f.get("webViewLink"),
                              version=f.get("md5Checksum")))  # md5 dai metadati (no download)
+        self._remember(self._list_cache, rel, out)
         return out
 
     def read(self, path: str) -> ReadResult:
+        rel = self._norm(path)
+        cached = self._cached(self._read_cache, rel)
+        if cached is not None:
+            return cached
         node = self._resolve(path)
         if not node or node["mimeType"] == _FOLDER_MIME:
             raise NotFound(f"non trovato: {path}")
         from googleapiclient.http import MediaIoBaseDownload
         buf = io.BytesIO()
-        dl = MediaIoBaseDownload(buf, self._svc.files().get_media(
-            fileId=node["id"], **_ALL))
+        mime = node.get("mimeType", "")
+        if mime == "application/vnd.google-apps.document":
+            request = self._svc.files().export_media(
+                fileId=node["id"], mimeType="text/plain")
+        elif mime == "application/vnd.google-apps.spreadsheet":
+            request = self._svc.files().export_media(
+                fileId=node["id"],
+                mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        elif mime == "application/vnd.google-apps.presentation":
+            request = self._svc.files().export_media(
+                fileId=node["id"], mimeType="application/pdf")
+        elif mime.startswith("application/vnd.google-apps."):
+            raise StorageError(f"tipo Google non esportabile: {mime}")
+        else:
+            request = self._svc.files().get_media(fileId=node["id"], **_ALL)
+        dl = MediaIoBaseDownload(buf, request)
         done = False
         while not done:
             _s, done = dl.next_chunk()
-        return ReadResult(data=buf.getvalue(), version=node.get("md5Checksum", ""))
+        result = ReadResult(data=buf.getvalue(), version=node.get("md5Checksum", ""))
+        self._remember(self._read_cache, rel, result)
+        return result
 
     def write(self, path: str, data: bytes, if_version: str | None = None) -> str:
         from googleapiclient.http import MediaInMemoryUpload
@@ -152,10 +196,14 @@ class DriveStorage(Storage):
                 body={"name": fname, "parents": [parent_id]}, media_body=media,
                 fields="id, md5Checksum", **_ALL).execute()
             self._cache[rel] = f["id"]
-        return f.get("md5Checksum", "")
+        version = f.get("md5Checksum", "")
+        self._invalidate()
+        self._remember(self._read_cache, rel, ReadResult(data=data, version=version))
+        return version
 
     def mkdir(self, path: str) -> None:
         self._ensure_dir(path)
+        self._list_cache.clear()
 
     def move(self, src: str, dst: str) -> None:
         node = self._resolve(src)
@@ -170,16 +218,14 @@ class DriveStorage(Storage):
         self._svc.files().update(
             fileId=node["id"], addParents=new_parent_id, removeParents=old_parents,
             body={"name": new_name}, fields="id", **_ALL).execute()
-        self._cache.clear()  # i path cachati possono essere cambiati
-        self._cache[""] = self._root
+        self._invalidate()
 
     def delete(self, path: str) -> None:
         node = self._resolve(path)
         if not node:
             return
         self._svc.files().update(fileId=node["id"], body={"trashed": True}, **_ALL).execute()
-        self._cache.clear()
-        self._cache[""] = self._root
+        self._invalidate()
 
     def stat(self, path: str) -> Stat | None:
         node = self._resolve(path)
