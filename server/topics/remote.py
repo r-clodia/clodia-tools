@@ -1,25 +1,21 @@
-"""Remote pluggable dei topic — local-first + sync verso un backend remoto.
+"""Remote pluggable dei topic.
 
-Modello (spec topic-remote-storage, 2 lug 2026): lo storage di un topic è SEMPRE
-locale (sorgente di verità); un `Remote` opzionale sincronizza i file verso un
-backend con un'interfaccia UNIFORME a 4 verbi + ciclo di vita:
+Git conserva il ciclo locale add/commit/push/pull. Per Drive la cartella remota
+è invece il filesystem primario: i verbi di sync restano solo per compatibilità
+e sono no-op espliciti.
 
     enable(config) · disable() · add(path) · commit(msg) · push() · pull() · status()
 
 Protocolli:
 - **git**  — i verbi mappano 1:1 su git; traccia l'intero albero (con .gitignore).
-- **drive** — semantica nostra con due liste:
-    sync-list = file soggetti a sync · push-list = sottoinsieme cambiato da pushare
-  add→liste, commit→no-op, push→carica push-list (push-only, mai delete remoto),
-  pull→scarica; i nuovi entrano in sync-list ma NON in push-list.
+- **drive** — vista live, upload immediato e conflitti last-write-wins.
 
-`disable()` torna SEMPRE a un local pulito PRESERVANDO i file (Prima Legge):
-git → rimuove `.git`; drive → cancella lo stato delle liste.
+`disable()` rimuove il tracking; TopicService materializza prima i file Drive
+nel filesystem locale.
 """
 from __future__ import annotations
 
 import abc
-import hashlib
 import json
 import os
 import subprocess
@@ -35,10 +31,6 @@ class RemoteError(RuntimeError):
 
 class RemoteConflict(RemoteError):
     """Conflitto sul pull da risolvere manualmente (git) → escala, non forzare."""
-
-
-def _md5(data: bytes) -> str:
-    return hashlib.md5(data).hexdigest()
 
 
 # Report di sync stile spec `.remoteinclude`/`.remoteignore`: liste per-stato +
@@ -240,9 +232,7 @@ class GitRemote(Remote):
 
 # ─────────────────────────────────────────────────────────────────────────────
 class DriveRemote(Remote):
-    """Remote Drive: local-first + due liste. `state_path` persiste config+liste
-    (nel control-plane del topic, FUORI da files_dir → non sincronizzato).
-    `drive_factory(account)` → un oggetto DriveStorage sulla cartella remota."""
+    """Remote Drive live: Drive è il filesystem primario, senza staging locale."""
 
     def __init__(self, files_dir: str, state_path: str, drive_factory):
         super().__init__(files_dir)
@@ -252,16 +242,13 @@ class DriveRemote(Remote):
     # ── stato (config + liste) ──────────────────────────────────────────────
     def _load(self) -> dict:
         if not self.state_path.is_file():
-            return {"config": {}, "sync": [], "push": [], "hashes": {}}
+            return {"config": {}}
         try:
             d = json.loads(self.state_path.read_text(encoding="utf-8"))
-            d.setdefault("config", {}); d.setdefault("sync", []); d.setdefault("push", [])
-            # md5 dell'ULTIMA versione sincronizzata per-file: è ciò che permette
-            # lo stato 'modified' (locale ≠ ultimo sync) senza interrogare Drive.
-            d.setdefault("hashes", {})
+            d.setdefault("config", {})
             return d
         except (OSError, json.JSONDecodeError):
-            return {"config": {}, "sync": [], "push": [], "hashes": {}}
+            return {"config": {}}
 
     def _save(self, st: dict) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -276,209 +263,71 @@ class DriveRemote(Remote):
 
     # ── ciclo di vita + verbi ───────────────────────────────────────────────
     def enable(self, config: dict) -> dict:
-        st = self._load()
-        st["config"] = {"folder": config.get("folder"), "account": config.get("account")}
-        st.setdefault("sync", []); st.setdefault("push", [])
-        self._save(st)
+        self._save({
+            "config": {
+                "folder": config.get("folder"),
+                "account": config.get("account"),
+            },
+            "mode": "live",
+        })
         return self.status()
 
     def disable(self) -> None:
         if self.state_path.is_file():
-            self.state_path.unlink()   # i file locali restano; sparisce solo lo stato sync
+            self.state_path.unlink()
 
     def add(self, path: str) -> None:
-        st = self._load()
-        if path not in st["sync"]:
-            st["sync"].append(path)
-        if path not in st["push"]:
-            st["push"].append(path)
-        self._save(st)
-
-    def seed(self, paths: list[str]) -> None:
-        """Popola la sync-list SENZA push-list (per la migrazione: i file sono già
-        allineati col remoto, non vanno ri-pushati)."""
-        st = self._load()
-        for p in paths:
-            if p not in st["sync"]:
-                st["sync"].append(p)
-            local = self.files_dir / p
-            if local.is_file():   # baseline: il locale È l'ultimo sync
-                st["hashes"][p] = _md5(local.read_bytes())
-        self._save(st)
+        return None
 
     def unstage(self, path: str = "") -> None:
-        """Toglie dalla push-list — path vuoto = tutto. Se il file non è mai
-        stato sincronizzato (nessuna baseline hash) l'add lo aveva anche
-        tracciato: l'unstage lo riporta a 'solo locale' (fuori dalla sync-list)."""
-        st = self._load()
-        targets = [path] if path else list(st.get("push") or [])
-        hashes = st.get("hashes") or {}
-        for rel in targets:
-            if rel in st["push"]:
-                st["push"].remove(rel)
-            if rel not in hashes and rel in st["sync"]:
-                st["sync"].remove(rel)
-        self._save(st)
+        return None
 
     def commit(self, msg: str = "") -> dict:
-        return {"report": _finalize(_empty_report())}  # no-op per Drive
+        return {
+            "noop": True,
+            "deprecated": True,
+            "note": "Drive è live: ogni scrittura è già persistita",
+        }
 
     def push(self) -> dict:
-        st = self._load()
-        pending = list(st.get("push") or [])
-        if not pending:
-            return {"pushed": 0, "report": _empty_report()}
-        flt = SyncFilter.from_files_dir(self.files_dir)
-        rep = _empty_report()
-        ds = self._ds(st)
-        done = []          # tolti dalla push-list (pushati, rimossi o filtrati)
-        for rel in pending:
-            if rel.endswith(".gdrive.json"):
-                done.append(rel); continue   # stub proxy di un Doc nativo → non si ri-carica su Drive
-            verdict = flt.evaluate(rel)
-            if verdict != sf.INCLUDED:
-                rep[verdict].append(rel)     # filtrato: esce dalla push-list, niente upload
-                done.append(rel)
-                continue
-            local = self.files_dir / rel
-            if not local.is_file():
-                done.append(rel); continue   # rimosso localmente: lo togliamo dalla push-list (push-only, non cancella su Drive)
-            try:
-                data = local.read_bytes()
-                ds.write(rel, data)
-                st["hashes"][rel] = _md5(data)   # il locale appena pushato È l'ultimo sync
-                rep[sf.SYNCED].append(rel)
-                done.append(rel)
-            except Exception as e:  # noqa: BLE001 — un file non blocca gli altri
-                rep[sf.ERROR].append({"path": rel, "error": str(e)[:160]})
-        st["push"] = [f for f in st["push"] if f not in done]
-        self._save(st)
-        return {"pushed": len(rep[sf.SYNCED]), "report": _finalize(rep)}
+        return {
+            "noop": True,
+            "deprecated": True,
+            "pushed": 0,
+            "note": "Drive è live: non esiste una coda di push",
+        }
 
     def pull(self) -> dict:
-        st = self._load()
-        ds = self._ds(st)
-        flt = SyncFilter.from_files_dir(self.files_dir)
-        rep = _empty_report()
-        pulled = 0
-        for rel, entry in _walk_drive(ds, ""):
-            # Filtro `.remoteinclude`/`.remoteignore`: un path escluso non si
-            # pulla (e non entra in sync-list). Valutato sul path logico del file.
-            verdict = flt.evaluate(rel)
-            if verdict != sf.INCLUDED:
-                rep[verdict].append(rel)
-                continue
-            # Doc nativo Google (Documenti/Fogli/Presentazioni): NON è scaricabile
-            # come binario (get_media → HTTP 403). Si materializza uno stub proxy
-            # locale `<name>.gdrive.json` col link, coerente col mirror local-first
-            # (service._drive_pull_tree). Lo stub entra in sync-list, MAI in push.
-            if entry.mime and entry.mime.startswith(_NATIVE_DOC_PREFIX):
-                stub_rel = f"{rel}.gdrive.json"
-                stub = {"gdrive_url": entry.url or "", "mimeType": entry.mime, "name": entry.name}
-                data = json.dumps(stub, ensure_ascii=False).encode()
-                local = self.files_dir / stub_rel
-                if not local.exists() or local.read_bytes() != data:
-                    local.parent.mkdir(parents=True, exist_ok=True)
-                    local.write_bytes(data)
-                    pulled += 1
-                if stub_rel not in st["sync"]:
-                    st["sync"].append(stub_rel)
-                st["hashes"][stub_rel] = _md5(data)
-                rep[sf.SYNCED].append(stub_rel)
-                continue
-            local = self.files_dir / rel
-            # PULL INCREMENTALE: se il file locale esiste ed è già identico al remoto
-            # (md5 dai METADATI Drive, senza scaricare), salta — niente download. Così
-            # un pull ripetuto NON ri-scarica l'intero tree ma solo i file nuovi/cambiati.
-            if local.exists() and entry.version and _md5(local.read_bytes()) == entry.version:
-                if rel not in st["sync"]:
-                    st["sync"].append(rel)
-                st["hashes"][rel] = entry.version
-                rep[sf.SYNCED].append(rel)
-                continue
-            try:
-                remote = ds.read(rel)
-            except Exception as e:  # noqa: BLE001 — non scaricabile → non bloccare il pull
-                rep[sf.ERROR].append({"path": rel, "error": str(e)[:160]})
-                continue
-            if not local.exists():
-                local.parent.mkdir(parents=True, exist_ok=True)
-                local.write_bytes(remote.data)
-                if rel not in st["sync"]:
-                    st["sync"].append(rel)   # nuovo → sync-list, NON push-list
-                st["hashes"][rel] = _md5(remote.data)
-                pulled += 1
-                rep[sf.SYNCED].append(rel)
-            else:
-                if _md5(local.read_bytes()) == _md5(remote.data):
-                    st["hashes"][rel] = _md5(remote.data)
-                    rep[sf.SYNCED].append(rel)
-                    continue  # identico
-                # divergenza: NON sovrascrivere ciecamente. last-writer-wins per
-                # mtime; se il locale è più recente è un conflitto (spec: blocca
-                # il singolo file, non l'intero sync).
-                rstat = ds.stat(rel)
-                r_m = rstat.mtime if rstat else 0
-                l_m = local.stat().st_mtime
-                if r_m > l_m:
-                    local.write_bytes(remote.data)   # remoto più recente → aggiorna locale
-                    st["hashes"][rel] = _md5(remote.data)
-                    pulled += 1
-                    rep[sf.SYNCED].append(rel)
-                else:
-                    rep[sf.CONFLICT].append(rel)     # locale più recente → non distruggo
-        self._save(st)
-        report = _finalize(rep)
-        # Retrocompat: manteniamo le chiavi storiche pulled/conflicts/skipped.
-        return {"pulled": pulled, "conflicts": rep[sf.CONFLICT],
-                "skipped": [e["path"] for e in rep[sf.ERROR]], "report": report}
+        return {
+            "noop": True,
+            "deprecated": True,
+            "pulled": 0,
+            "note": "Drive è live: le letture vedono già il remoto",
+        }
 
     def status(self) -> dict:
         st = self._load()
         cfg = st.get("config") or {}
         enabled = bool(cfg.get("folder"))
-        # Stato PER-FILE (stesso vocabolario di GitRemote.status): synced (in
-        # sync-list, locale == ultimo sync), staged (in push-list), modified
-        # (in sync-list ma locale cambiato), unsynced (solo locale).
         files: dict[str, str] = {}
-        if enabled and self.files_dir.is_dir():
-            sync = set(st.get("sync") or [])
-            push = set(st.get("push") or [])
-            hashes = st.get("hashes") or {}
-            flt = SyncFilter.from_files_dir(self.files_dir)
-            for p in sorted(self.files_dir.rglob("*")):
-                if not p.is_file():
-                    continue
-                rel = str(p.relative_to(self.files_dir))
-                # Hard-deny (segreti, control-plane, cestino) fuori dal quadro:
-                # non sono sincronizzabili, non hanno stato di sync.
-                if flt.evaluate(rel) == sf.SKIP_HARD_DENY:
-                    continue
-                if rel not in sync:
-                    files[rel] = "unsynced"
-                elif rel in push:
-                    files[rel] = "staged"
-                else:
-                    h = hashes.get(rel)
-                    # senza baseline (stato legacy) assumiamo synced: la baseline
-                    # arriva col prossimo push/pull.
-                    files[rel] = "synced" if (h is None or _md5(p.read_bytes()) == h) else "modified"
-        counts = {s: sum(1 for v in files.values() if v == s)
-                  for s in ("synced", "modified", "staged", "unsynced")}
+        if enabled:
+            for rel, _entry in _walk_drive(self._ds(st), ""):
+                files[rel] = "synced"
+        counts = {
+            "synced": len(files),
+            "modified": 0,
+            "staged": 0,
+            "unsynced": 0,
+        }
         return {"type": "drive", "enabled": enabled,
                 "folder": cfg.get("folder"), "account": cfg.get("account"),
-                "synced": len(st.get("sync") or []), "pending": len(st.get("push") or []),
-                "files": files, "counts": counts}
-
-
-# I Google Docs nativi (Documenti/Fogli/Presentazioni) non hanno contenuto
-# binario: get_media dà HTTP 403. Si rappresentano con uno stub proxy locale.
-_NATIVE_DOC_PREFIX = "application/vnd.google-apps."
+                "mode": "live", "synced": len(files), "pending": 0,
+                "files": files, "counts": counts,
+                "last_write_wins": True}
 
 
 def _walk_drive(ds, rel: str):
-    """Genera (path_relativo, Entry) dei FILE nella cartella Drive (ricorsivo).
-    L'Entry porta mime/url, così il pull distingue i Doc nativi dai binari."""
+    """Genera ricorsivamente i file visibili nella cartella Drive."""
     for e in ds.list(rel):
         child = f"{rel}/{e.name}".lstrip("/")
         if e.kind == "dir":
