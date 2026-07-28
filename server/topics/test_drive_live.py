@@ -90,6 +90,55 @@ class DriveLiveTopicTests(unittest.TestCase):
         self.assertNotIn("remote", meta)
         self.assertFalse(self.local.exists("SEAL-1/live/.drive-live-v1"))
 
+    def test_migration_aborts_and_preserves_local_on_upload_failure(self):
+        # #45 review: se anche un solo file non è verificato su Drive, NON si
+        # cancella il locale né si segna live → nessuna perdita, ritentabile.
+        meta = json.loads(self.local.read(self.svc._meta_p("SEAL-1", "live")).data)
+        with mock.patch.object(self.svc, "_upload_local_tree",
+                               return_value=([], ["legacy.txt"])):
+            with self.assertRaises(Exception):
+                self.svc._ensure_drive_live("SEAL-1", "live", meta)
+        self.assertEqual(self.local.read("SEAL-1/live/files/legacy.txt").data, b"LOCAL")
+        self.assertFalse(self.local.exists("SEAL-1/live/.drive-live-v1"))
+
+    def test_content_mismatch_counts_as_failed_and_aborts(self):
+        # upload "riuscito" ma contenuto ri-letto diverso (troncato/corrotto) →
+        # deve essere trattato come failed → abort, locale intatto.
+        meta = json.loads(self.local.read(self.svc._meta_p("SEAL-1", "live")).data)
+        real_read = self.drive.read
+        with mock.patch.object(self.drive, "read",
+                               side_effect=lambda p: types.SimpleNamespace(data=b"TRONCO")):
+            with self.assertRaises(Exception):
+                self.svc._ensure_drive_live("SEAL-1", "live", meta)
+        self.assertEqual(self.local.read("SEAL-1/live/files/legacy.txt").data, b"LOCAL")
+        self.assertFalse(self.local.exists("SEAL-1/live/.drive-live-v1"))
+
+    def test_remote_enable_rejects_confidential_tier_on_drive(self):
+        # guard SEAL sul VERO punto di attivazione (non solo migrate_storage):
+        # topic SEAL-3/4 non possono usare Drive live.
+        for tier in ("SEAL-3", "SEAL-4"):
+            with self.assertRaises(Exception) as ctx:
+                self.svc.remote_enable(tier, "riservato", "drive",
+                                       {"folder": "f", "account": "a"})
+            self.assertIn("cap SEAL", str(ctx.exception))
+
+    def test_disable_keeps_drive_intact_when_pull_fails(self):
+        # remote_disable non pre-cancella il locale e, se il pull fallisce, Drive
+        # (fonte di verità) resta intatto → nessuna perdita.
+        self.svc.list_files("SEAL-1", "live", "files")  # cut-over live
+
+        class Remote:
+            def disable(self):
+                return None
+
+        with mock.patch.object(self.svc, "_remote_for", return_value=Remote()), \
+             mock.patch.object(self.svc, "_drive_pull_tree",
+                               side_effect=RuntimeError("rete giù")):
+            with self.assertRaises(Exception):
+                self.svc.remote_disable("SEAL-1", "live")
+        self.assertEqual(self.drive.read("legacy.txt").data, b"LOCAL")
+        self.assertEqual(self.drive.read("remote.txt").data, b"REMOTE")
+
 
 class DriveStorageCacheTests(unittest.TestCase):
     def test_list_uses_short_lived_cache(self):

@@ -276,20 +276,41 @@ class TopicService:
                 except Exception as ex:  # noqa: BLE001 — non scaricabile → salta, non bloccare
                     LOG.warning("drive-seed: salto '%s' (%s)", child, ex)
 
-    def _upload_local_tree(self, ds, rel: str, local_base: str) -> int:
-        """Upload last-write-wins della vecchia copia locale prima del cut-over."""
-        n = 0
+    def _upload_local_tree(self, ds, rel: str, local_base: str) -> tuple[list[str], list[str]]:
+        """Upload last-write-wins della copia locale su Drive, VERIFICANDO ogni
+        file col checksum md5 restituito da Drive. Ritorna (verified, failed):
+        `verified` = path (relativi a files/) confermati identici su Drive;
+        `failed` = upload falliti o md5 non combaciante. Il chiamante NON deve
+        cancellare il locale se `failed` è non vuoto (data-safety, #45 review)."""
+        verified: list[str] = []
+        failed: list[str] = []
         for e in self.s.list(f"{local_base}/{rel}".strip("/")):
             if e.name.startswith(".") or e.name.endswith(".gdrive.json"):
                 continue
             child = f"{rel}/{e.name}".strip("/")
             if e.kind == "dir":
-                n += self._upload_local_tree(ds, child, local_base)
+                v, f = self._upload_local_tree(ds, child, local_base)
+                verified += v
+                failed += f
                 continue
             data = self.s.read(f"{local_base}/{child}".strip("/")).data
-            ds.write(child, data)
-            n += 1
-        return n
+            try:
+                ds.write(child, data)
+                readback = ds.read(child).data
+            except Exception as ex:  # noqa: BLE001
+                LOG.warning("drive-live: upload/verifica di '%s' fallito: %s", child, ex)
+                failed.append(child)
+                continue
+            # Verifica per confronto del CONTENUTO ri-letto da Drive: definitiva e
+            # backend-agnostica (cattura upload troncati/corrotti; la versione di
+            # write ha formato diverso per backend — md5 su Drive, sha256 in test).
+            if readback == data:
+                verified.append(child)
+            else:
+                LOG.warning("drive-live: contenuto ri-letto ≠ locale per '%s' "
+                            "(%d vs %d byte)", child, len(readback), len(data))
+                failed.append(child)
+        return verified, failed
 
     def _clear_local_files(self, tier: str, name: str) -> None:
         base = f"{self._dir(tier, name)}/files"
@@ -315,11 +336,18 @@ class TopicService:
             if ds is None:
                 raise TopicError("remote drive: nessuna cartella configurata")
             local_base = f"{self._dir(tier, name)}/files"
-            uploaded = self._upload_local_tree(ds, "", local_base)
+            verified, failed = self._upload_local_tree(ds, "", local_base)
+            if failed:
+                # Data-safety: NON cancellare il locale né segnare live se anche
+                # un solo file non è confermato su Drive. Il topic resta locale,
+                # ritentabile al prossimo accesso.
+                raise TopicError(
+                    f"drive-live abortito per {tier}/{name}: {len(failed)} file non "
+                    f"verificati su Drive (locale intatto): {failed[:5]}")
             self._clear_local_files(tier, name)
             self.s.write(self._drive_live_marker_p(tier, name), b"1")
-            LOG.info("drive-live: %s/%s attivato (%d file migrati)",
-                     tier, name, uploaded)
+            LOG.info("drive-live: %s/%s attivato (%d file verificati su Drive)",
+                     tier, name, len(verified))
 
     def sync_now(self, tier: str, name: str) -> dict:
         return {
@@ -650,6 +678,19 @@ class TopicService:
     def remote_enable(self, tier: str, name: str, rtype: str, config: dict | None = None) -> dict:
         if rtype not in ("git", "drive"):
             raise TopicError(f"remote type non supportato: {rtype}")
+        # Guard SEAL sul VERO punto di attivazione di Drive (non solo in
+        # migrate_storage): dati confidenziali di tier > cap non devono finire su
+        # Google come filesystem live (#45 review, Prima Legge/GDPR). Copre anche
+        # new() (che chiama qui) e la migrazione legacy.
+        if rtype == "drive":
+            try:
+                tier_n = int(_normalize_tier(tier).replace("SEAL-", ""))
+            except (ValueError, AttributeError):
+                tier_n = 0
+            if tier_n > self._DRIVE_SEAL_CAP:
+                raise TopicError(
+                    f"storage drive ha cap SEAL-{self._DRIVE_SEAL_CAP}: un topic "
+                    f"{tier} non può usare Drive come storage live (anti-declassamento)")
         meta, ver = self._read_meta(tier, name)
         config = dict(config or {})
         if rtype == "drive":
@@ -676,7 +717,9 @@ class TopicService:
             if ds is None:
                 raise TopicError("remote drive: nessuna cartella configurata")
             local_base = f"{self._dir(tier, name)}/files"
-            self._clear_local_files(tier, name)
+            # Materializza Drive → locale SENZA clear preventivo: se il pull
+            # fallisce a metà non si perde nulla (Drive resta la fonte; in
+            # modalità live il locale è già vuoto). _drive_pull_tree è ripartibile.
             self._drive_pull_tree(ds, "", local_base)
         if rem is not None:
             rem.disable()
@@ -719,10 +762,13 @@ class TopicService:
         try:
             rem.enable(meta["remote"]["config"])
             self._write_meta(tier, name, meta, base_version=ver)
-            self._clear_local_files(tier, name)
-            self.s.write(self._drive_live_marker_p(tier, name), b"1")
+            # Upload+verifica+clear SICURO (mai clear senza conferma md5 su Drive):
+            # il vecchio modello mirror poteva essere stale/incompleto, quindi NON
+            # si assume che i file siano già su Drive — si uploadano e verificano.
+            self._ensure_drive_live(tier, name, meta)
         except Exception:  # noqa: BLE001 — la migrazione non deve rompere open()
-            LOG.warning("migrazione drive live fallita per %s/%s", tier, name)
+            LOG.warning("migrazione drive live fallita per %s/%s (locale intatto)",
+                        tier, name)
 
     def open(self, tier: str, name: str) -> dict:
         """Read-only: meta + summary (+ summary_version per optimistic lock) + minutes."""
