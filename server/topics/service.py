@@ -1,8 +1,8 @@
 """Servizio Topic v2 — i verbi, sopra lo storage astratto.
 
 Backend-agnostico: lavora SOLO tramite l'interfaccia `Storage`. Implementa la
-meccanica (file meta.json + summary.md + minutes append-only, optimistic lock sul
-summary); la disciplina editoriale (cos'è un buon TLDR, quando minutare) sta nella
+meccanica (file meta.json + summary.md + files/AGENTS.md opzionale, optimistic lock sul
+summary); la disciplina editoriale (cos'è un buon TLDR) sta nella
 skill `topic-management`, non qui.
 
 Classificazione a **tier** P0–P3 (sostituisce personal/confidential): è la sola
@@ -12,7 +12,7 @@ classe del topic, e coincide col livello di privacy usato dall'enforcement.
 Layout per topic nello storage:
     <tier>/<name>/meta.json
     <tier>/<name>/summary.md
-    <tier>/<name>/minutes/<AAAAMMGG-hhmmss-token>.md
+    <tier>/<name>/files/AGENTS.md
 """
 from __future__ import annotations
 
@@ -27,7 +27,9 @@ from .storage import NotFound, Storage, StorageError, VersionConflict
 
 LOG = logging.getLogger("clodia-tools.topics")
 
-VALID_STATUS = {"active", "await", "idle", "archived"}
+SCHEMA_VERSION = 2
+TOPIC_STATES = ("active", "on-hold", "done", "archived")
+VALID_STATUS = set(TOPIC_STATES)
 # Scala SEAL (EC Cloud Sovereignty Framework v1.2.1). Sostituisce P0–P3.
 VALID_TIER = ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]
 TIER_NAMES = {
@@ -131,17 +133,30 @@ def _action_points(summary_text: str) -> list[str]:
     return out
 
 
-# Vocabolario unico di status (selezione uguale per tutti). `urgent` = da fare
-# subito. I valori legacy (idle, IT) sono migrati alla lettura.
-TOPIC_STATES = ("await", "active", "archived", "urgent")
-_STATUS_LEGACY = {"idle": "active", "attivo": "active",
-                  "in_attesa": "await", "completato": "active"}
+# Vocabolario unico di status (selezione uguale per tutti). I valori legacy
+# vengono normalizzati alla lettura/scrittura del meta.
+_STATUS_LEGACY = {
+    "idle": "active",
+    "await": "on-hold",
+    "urgent": "active",
+    "attivo": "active",
+    "in_attesa": "on-hold",
+    "completato": "done",
+}
 
 
 def _norm_status(s: str | None) -> str:
     s = (s or "").strip().lower()
     s = _STATUS_LEGACY.get(s, s)
     return s if s in TOPIC_STATES else "active"
+
+
+def _validate_status(s: str | None) -> str:
+    raw = (s or "").strip().lower()
+    st = _STATUS_LEGACY.get(raw, raw)
+    if st not in TOPIC_STATES:
+        raise TopicError(f"status non valido: {s} (validi: {', '.join(TOPIC_STATES)})")
+    return st
 
 
 # Scadenze nei todo (action_points): una data nel testo del punto (es.
@@ -176,9 +191,29 @@ def _next_deadline(action_points: list[str]) -> str | None:
     return (future[0] if future else max(dates)).isoformat()
 
 
+def _norm_deadline(value) -> str | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or not re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        raise TopicError("deadline non valida: attesa data ISO YYYY-MM-DD o null")
+    if _parse_deadline(value) is None:
+        raise TopicError("deadline non valida: attesa data ISO reale YYYY-MM-DD")
+    return value
+
+
+def normalize_meta_v2(meta: dict, tier: str) -> dict:
+    out = dict(meta or {})
+    out.pop("minutes", None)
+    out["schema_version"] = SCHEMA_VERSION
+    out["tier"] = _normalize_tier(out.get("tier") or tier)
+    out["status"] = _validate_status(out.get("status") or "active")
+    out["deadline"] = _norm_deadline(out.get("deadline"))
+    return out
+
+
 class TopicService:
     def __init__(self, storage: Storage):
-        self.s = storage          # control-plane local (meta, summary, minutes, .messages)
+        self.s = storage          # control-plane local (meta, summary, .messages)
         self._drive_cache: dict = {}
 
     # ── routing storage dei FILE (control-plane resta su self.s) ─────────────
@@ -371,7 +406,7 @@ class TopicService:
     @staticmethod
     def _files_rel(relpath: str) -> tuple[bool, str]:
         """(is_files, rel) — True + path sotto files/ se relpath sta in files/,
-        altrimenti False (control-plane: summary/minutes/meta)."""
+        altrimenti False (control-plane: summary/meta)."""
         r = (relpath or "").lstrip("/")
         if r == "files":
             return True, ""
@@ -448,7 +483,7 @@ class TopicService:
         explicit = meta.get("participants") or []
         meta["participants"] = list(dict.fromkeys(
             [meta["owner"], *explicit, *_defaults]))
-        meta.setdefault("deadline", None)
+        meta = normalize_meta_v2(meta, tier)
         meta["created_at"] = _now().isoformat(timespec="seconds")
         self.s.write(mp, json.dumps(meta, ensure_ascii=False, indent=2).encode())
         if not self.s.exists(self._summary_p(tier, name)):
@@ -715,7 +750,7 @@ class TopicService:
                         tier, name)
 
     def open(self, tier: str, name: str) -> dict:
-        """Read-only: meta + summary (+ summary_version per optimistic lock) + minutes."""
+        """Read-only: meta + summary (+ summary_version per optimistic lock)."""
         # Migrazione one-shot legacy storage=google-drive → remote drive.
         try:
             self._migrate_legacy_drive(tier, name)
@@ -725,9 +760,7 @@ class TopicService:
             meta_r = self.s.read(self._meta_p(tier, name))
         except NotFound:
             raise TopicError(f"topic non trovato: {tier}/{name}")
-        meta = json.loads(meta_r.data.decode())
-        meta.setdefault("tier", tier)
-        meta["tier"] = _normalize_tier(meta.get("tier"))
+        meta = normalize_meta_v2(json.loads(meta_r.data.decode()), tier)
         meta.setdefault("storage", self.s.capability().name)
         try:
             sumr = self.s.read(self._summary_p(tier, name))
@@ -735,15 +768,11 @@ class TopicService:
         except NotFound:
             summary, summary_version = "", None
         d = self._dir(tier, name)
-        minutes = [e.name for e in self.s.list(f"{d}/minutes") if e.kind == "file"]
-        # updated_at = mtime più recente tra meta, summary e minute
+        # updated_at = mtime più recente tra meta, summary e files/AGENTS.md
         mts: list[float] = []
-        for p in (self._meta_p(tier, name), self._summary_p(tier, name)):
+        agents_path = f"{d}/files/AGENTS.md"
+        for p in (self._meta_p(tier, name), self._summary_p(tier, name), agents_path):
             st = self.s.stat(p)
-            if st:
-                mts.append(st.mtime)
-        for mn in minutes:
-            st = self.s.stat(f"{d}/minutes/{mn}")
             if st:
                 mts.append(st.mtime)
         updated_at = _iso(max(mts)) if mts else None
@@ -760,10 +789,14 @@ class TopicService:
         fmt.sort(reverse=True)
         recent_files = [{"name": n, "path": f"files/{n}", "mtime_iso": _iso(mt)}
                         for mt, n in fmt[:3]]
+        try:
+            agents_md = self.s.read(agents_path).data.decode("utf-8", "replace")
+        except NotFound:
+            agents_md = None
         return {
-            "tier": tier, "tier_name": TIER_NAMES.get(tier, tier), "name": name,
+            "tier": meta["tier"], "tier_name": TIER_NAMES.get(meta["tier"], meta["tier"]), "name": name,
             "meta": meta, "summary": summary, "summary_version": summary_version,
-            "tldr": _tldr(summary), "minutes": sorted(minutes),
+            "tldr": _tldr(summary), "minutes": [], "agents_md": agents_md,
             "updated_at": updated_at, "recent_files": recent_files,
             "recap_history": self.recap_history(tier, name),
         }
@@ -851,14 +884,8 @@ class TopicService:
         return []
 
     def add_minute(self, tier: str, name: str, text: str) -> dict:
-        """Aggiunge una minuta come FILE NUOVO (append-only → niente contesa)."""
-        if not self.s.exists(self._meta_p(tier, name)):
-            raise TopicError(f"topic non trovato: {tier}/{name}")
-        ts = _now().strftime("%Y%m%d-%H%M%S")
-        token = base64.urlsafe_b64encode(os.urandom(3)).decode().rstrip("=")
-        fname = f"{ts}-{token}.md"
-        self.s.write(f"{self._dir(tier, name)}/minutes/{fname}", (text or "").encode())
-        return {"minute": fname}
+        """Compat legacy: minutes è rimosso dallo schema topic v2."""
+        raise TopicError("minutes rimosso dallo schema topic v2: usa summary.md o files/AGENTS.md")
 
     # ── canale: partecipanti / messaggi / file ──────────────────────────────
     def _read_meta(self, tier: str, name: str) -> tuple[dict, str | None]:
@@ -866,9 +893,10 @@ class TopicService:
             r = self.s.read(self._meta_p(tier, name))
         except NotFound:
             raise TopicError(f"topic non trovato: {tier}/{name}")
-        return json.loads(r.data.decode()), r.version
+        return normalize_meta_v2(json.loads(r.data.decode()), tier), r.version
 
     def _write_meta(self, tier: str, name: str, meta: dict, base_version: str | None) -> None:
+        meta = normalize_meta_v2(meta, tier)
         self.s.write(self._meta_p(tier, name),
                      json.dumps(meta, ensure_ascii=False, indent=2).encode(),
                      if_version=base_version)
@@ -933,7 +961,7 @@ class TopicService:
 
     def list_files(self, tier: str, name: str, subpath: str = "") -> list[dict]:
         """Elenca <subpath> a partire dalla ROOT del topic (non da files/): così
-        il navigator mostra la struttura reale — summary.md, meta.yaml, minutes/,
+        il navigator mostra la struttura reale — summary.md, meta.json, files/,
         files/ — e si naviga nelle sottocartelle. subpath relativo alla root del
         topic (anti-traversal). I file/cartelle interni (dotfile, es. .messages)
         sono nascosti. path nelle voci = relativo alla root del topic."""
@@ -986,7 +1014,7 @@ class TopicService:
                                 "mtime_iso": _iso(st.mtime) if st else None,
                                 "md5": (getattr(st, "md5", None) if st else e.version)})
         else:
-            # root o control-plane (summary/minutes) → local
+            # root o control-plane (summary/meta) → local
             d = self._dir(tier, name)
             base = f"{d}/{rel}" if rel else d
             seen_files = False
@@ -1039,7 +1067,7 @@ class TopicService:
         """SOFT-DELETE: NON cancella mai davvero. Sposta un file o una cartella
         (dentro files/) nel cestino del topic `.trash/<timestamp>/<path>`, creato
         se non esiste → sempre recuperabile. La struttura del topic (meta, summary,
-        minutes/, .messages) è protetta: si agisce solo sotto files/, simmetrico a
+        .messages e control-plane sono protetti: si agisce solo sotto files/, simmetrico a
         put_file. Anti-traversal per segmento."""
         if not self.s.exists(self._meta_p(tier, name)):
             raise TopicError(f"topic non trovato: {tier}/{name}")
@@ -1050,7 +1078,7 @@ class TopicService:
         if parts[0] != "files" or len(parts) < 2:
             raise TopicError(
                 "puoi rimuovere solo file/cartelle dentro 'files/' del topic "
-                "(meta, summary, minutes sono protetti)")
+                "(meta, summary e messaggi sono protetti)")
         sub = "/".join(parts[1:])   # path sotto files/
         store, base = self._files_backend(tier, name)
         target = f"{base}/{sub}".strip("/")
@@ -1069,21 +1097,15 @@ class TopicService:
 
     def archive(self, tier: str, name: str) -> dict:
         """Imposta status=archived nel meta (NON sposta su storage inferiore)."""
-        mp = self._meta_p(tier, name)
-        try:
-            r = self.s.read(mp)
-        except NotFound:
-            raise TopicError(f"topic non trovato: {tier}/{name}")
-        meta = json.loads(r.data.decode())
+        meta, ver = self._read_meta(tier, name)
         meta["status"] = "archived"
-        self.s.write(mp, json.dumps(meta, ensure_ascii=False, indent=2).encode(),
-                     if_version=r.version)
+        self._write_meta(tier, name, meta, base_version=ver)
         return {"status": "archived"}
 
     def list(self, tier: str | None = None, include_archived: bool = False) -> list[dict]:
         """Elenco topic con riga sintetica. In P1 legge i meta dallo storage."""
         out: list[dict] = []
-        tiers = [tier] if tier else list(VALID_TIER)
+        tiers = [_normalize_tier(tier)] if tier else list(VALID_TIER)
         for tr in tiers:
             for e in self.s.list(tr):
                 if e.kind != "dir":
@@ -1119,16 +1141,22 @@ class TopicService:
     def set_status(self, tier: str, name: str, status: str) -> dict:
         """Imposta lo status del topic (vocabolario TOPIC_STATES). Ritorna lo
         status normalizzato applicato."""
-        st = _norm_status(status)
-        if st not in TOPIC_STATES:
-            raise TopicError(f"status non valido: {status} (validi: {', '.join(TOPIC_STATES)})")
+        st = _validate_status(status)
         meta, ver = self._read_meta(tier, name)
         meta["status"] = st
         self._write_meta(tier, name, meta, base_version=ver)
         return {"status": st}
 
+    def set_deadline(self, tier: str, name: str, deadline) -> dict:
+        """Imposta la deadline del topic in formato ISO YYYY-MM-DD, oppure null."""
+        dl = _norm_deadline(deadline)
+        meta, ver = self._read_meta(tier, name)
+        meta["deadline"] = dl
+        self._write_meta(tier, name, meta, base_version=ver)
+        return {"deadline": dl}
+
     def search(self, query: str, mode: str = "lexical") -> list[dict]:
-        """P1: ricerca lessicale (substring) su meta/summary/minute. 'semantic' = P2."""
+        """P1: ricerca lessicale (substring) su meta/summary/AGENTS.md. 'semantic' = P2."""
         q = (query or "").strip().lower()
         if not q:
             return []
@@ -1142,13 +1170,8 @@ class TopicService:
                 try:
                     info = self.open(tr, e.name)
                     parts = [json.dumps(info["meta"], ensure_ascii=False), info["summary"]]
-                    for mn in info["minutes"]:
-                        try:
-                            parts.append(self.s.read(
-                                f"{self._dir(tr, e.name)}/minutes/{mn}"
-                            ).data.decode("utf-8", "replace"))
-                        except StorageError:
-                            pass
+                    if info.get("agents_md"):
+                        parts.append(info["agents_md"])
                     if q in "\n".join(parts).lower():
                         hits.append({"tier": tr, "name": e.name,
                                      "title": info["meta"].get("title"), "tldr": info["tldr"]})

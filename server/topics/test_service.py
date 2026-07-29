@@ -26,13 +26,14 @@ def main() -> int:
 
     # new su tier esplicito + storage nel meta
     m = svc.new("P2", "cliente-x", {"title": "Cliente X", "type": "contratto"})
-    check("new: tier P2", m["tier"] == "P2")
+    check("new: tier legacy P2 → SEAL-2", m["tier"] == "SEAL-2")
     check("new: storage backend nel meta", m.get("storage") == "local-fs")
     check("new: niente più classification", "classification" not in m)
+    check("new: schema v2", m["schema_version"] == 2 and m["deadline"] is None and m["status"] == "active")
 
-    # default tier P0 quando non specificato
+    # default tier SEAL-0 quando non specificato
     m0 = svc.new(None, "idea-libera")
-    check("new: default tier P0", m0["tier"] == "P0")
+    check("new: default tier SEAL-0", m0["tier"] == "SEAL-0")
     check("new: hook automatico", m0["hook_enabled"] is True)
 
     # new idempotente
@@ -64,10 +65,16 @@ def main() -> int:
     except VersionConflict:
         check("conflitto su summary stale", True)
 
-    # minutes append-only
-    svc.add_minute("P2", "cliente-x", "deciso storage astratto")
-    svc.add_minute("P2", "cliente-x", "deciso tiering unico")
-    check("due minute", len(svc.open("P2", "cliente-x")["minutes"]) == 2)
+    # minutes rimosso in schema v2
+    try:
+        svc.add_minute("P2", "cliente-x", "deciso storage astratto")
+        check("minutes rimosso", False)
+    except TopicError:
+        check("minutes rimosso", True)
+
+    # AGENTS.md opzionale leggibile/searchable
+    svc.put_file("P2", "cliente-x", "AGENTS.md", b"Regole della casa: priorita contratti.\n")
+    check("AGENTS.md letto da open", "priorita contratti" in (svc.open("P2", "cliente-x")["agents_md"] or ""))
 
     # recap history: ogni CAMBIO di TLDR appende un'entry (newest-first), no duplicati
     svc.new("P2", "recap-x", {"title": "Recap X"})
@@ -88,18 +95,33 @@ def main() -> int:
     names = {x["name"] for x in lst}
     check("list contiene i topic dei vari tier", {"cliente-x", "idea-libera"} <= names)
     cx = next(x for x in lst if x["name"] == "cliente-x")
-    check("list: tier + action_points", cx["tier"] == "P2" and cx["action_points"] == ["firma"])
+    check("list: tier + action_points", cx["tier"] == "SEAL-2" and cx["action_points"] == ["firma"])
 
     # filtro per tier
     check("list per tier", {x["name"] for x in svc.list("P0")} == {"idea-libera"})
+
+    # status chiuso
+    check("set_status on-hold", svc.set_status("P2", "cliente-x", "on-hold")["status"] == "on-hold")
+    try:
+        svc.set_status("P2", "cliente-x", "urgentissimo")
+        check("status invalido rifiutato", False)
+    except TopicError:
+        check("status invalido rifiutato", True)
+    check("set_deadline ISO", svc.set_deadline("P2", "cliente-x", "2026-08-15")["deadline"] == "2026-08-15")
+    check("set_deadline null", svc.set_deadline("P2", "cliente-x", None)["deadline"] is None)
+    try:
+        svc.set_deadline("P2", "cliente-x", "15/08/2026")
+        check("deadline invalida rifiutata", False)
+    except TopicError:
+        check("deadline invalida rifiutata", True)
 
     # archive
     svc.archive("P2", "cliente-x")
     check("archived nascosto", "cliente-x" not in {x["name"] for x in svc.list()})
     check("archived con flag", "cliente-x" in {x["name"] for x in svc.list(include_archived=True)})
 
-    # search lessicale (nelle minute)
-    check("search trova nella minuta", "cliente-x" in {h["name"] for h in svc.search("storage astratto")})
+    # search lessicale (AGENTS.md)
+    check("search trova in AGENTS.md", "cliente-x" in {h["name"] for h in svc.search("priorita contratti")})
 
     # tier non valido
     try:
