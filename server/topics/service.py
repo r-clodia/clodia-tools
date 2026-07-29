@@ -201,13 +201,34 @@ def _norm_deadline(value) -> str | None:
     return value
 
 
+def _coerce_deadline(value, ctx: str = "") -> str | None:
+    """Versione TOLLERANTE di _norm_deadline per il read-path/migrazione: un
+    valore legacy non conforme (testo libero, formato errato) diventa None con un
+    warning, MAI un'eccezione. Rifiutare l'input errato è compito dei soli
+    endpoint di scrittura (_norm_deadline), non della lettura di un topic."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", value) \
+            and _parse_deadline(value) is not None:
+        return value
+    LOG.warning("meta v2%s: deadline legacy non conforme %r → null",
+                f" ({ctx})" if ctx else "", value)
+    return None
+
+
 def normalize_meta_v2(meta: dict, tier: str) -> dict:
+    """Normalizza un meta al formato v2 in modo TOLLERANTE: usato sul read-path
+    (open/list/_read_meta) e in migrazione → non deve MAI sollevare per valori
+    legacy non conformi, altrimenti un topic diventa non-apribile e sparisce
+    dalla lista (list() ingoia TopicError). status sconosciuto → 'active',
+    deadline non valida → null. La validazione stretta con errore resta solo
+    negli endpoint di scrittura set_status/set_deadline."""
     out = dict(meta or {})
     out.pop("minutes", None)
     out["schema_version"] = SCHEMA_VERSION
     out["tier"] = _normalize_tier(out.get("tier") or tier)
-    out["status"] = _validate_status(out.get("status") or "active")
-    out["deadline"] = _norm_deadline(out.get("deadline"))
+    out["status"] = _norm_status(out.get("status") or "active")
+    out["deadline"] = _coerce_deadline(out.get("deadline"), ctx=out.get("name", ""))
     return out
 
 

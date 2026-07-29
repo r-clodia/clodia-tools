@@ -115,6 +115,25 @@ def main() -> int:
     except TopicError:
         check("deadline invalida rifiutata", True)
 
+    # read-path TOLLERANTE (review #49): un topic con meta legacy non conforme
+    # (status fuori vocabolario + deadline testo libero) NON deve rompere
+    # open()/list() né sparire dalla lista — deve essere coerciato.
+    import json as _json
+    svc.new("P1", "legacy-x", {"title": "Legacy"})
+    mp = svc._meta_p("P1", "legacy-x")
+    raw = _json.loads(svc.s.read(mp).data.decode())
+    raw["status"] = "urgent"                 # legacy vocab
+    raw["deadline"] = "fine agosto 2026"     # testo libero
+    svc.s.write(mp, _json.dumps(raw).encode())
+    try:
+        opened = svc.open("P1", "legacy-x")
+        check("legacy: open non solleva", True)
+        check("legacy: status coerciato", opened["meta"]["status"] in ("active", "on-hold"))
+        check("legacy: deadline coerciata a null", opened["meta"]["deadline"] is None)
+    except Exception:  # noqa: BLE001
+        check("legacy: open non solleva", False)
+    check("legacy: visibile in list", "legacy-x" in {x["name"] for x in svc.list()})
+
     # archive
     svc.archive("P2", "cliente-x")
     check("archived nascosto", "cliente-x" not in {x["name"] for x in svc.list()})
