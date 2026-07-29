@@ -12,7 +12,11 @@ from .local_fs import LocalFsStorage
 from .service import TopicService
 
 
-class DriveLiveTopicTests(unittest.TestCase):
+class DriveBackedTopicTests(unittest.TestCase):
+    """Modello corretto (#45): collegare un topic a una cartella Drive rende
+    Drive la source of truth. Nessun upload dei file locali, nessuna
+    'migrazione', nessun marker: i verbi file proxano direttamente al remoto."""
+
     def setUp(self) -> None:
         self.local = LocalFsStorage(tempfile.mkdtemp())
         self.drive = LocalFsStorage(tempfile.mkdtemp())
@@ -22,7 +26,10 @@ class DriveLiveTopicTests(unittest.TestCase):
             return_value=[],
         ):
             self.svc.new("SEAL-1", "live", {"owner": "davide"})
-        self.svc.put_file("SEAL-1", "live", "legacy.txt", b"LOCAL")
+        # Drive è la FONTE: pre-popolato col contenuto autoritativo.
+        self.drive.write("remote.txt", b"REMOTE")
+        # Collega il remote drive scrivendo il meta direttamente (qui il backend
+        # Drive è mockato, quindi non passiamo dal provisioning della cartella).
         meta_path = self.svc._meta_p("SEAL-1", "live")
         current = self.local.read(meta_path)
         meta = json.loads(current.data)
@@ -35,7 +42,6 @@ class DriveLiveTopicTests(unittest.TestCase):
             json.dumps(meta).encode(),
             if_version=current.version,
         )
-        self.drive.write("remote.txt", b"REMOTE")
         self.backend = mock.patch.object(
             self.svc, "_drive_backend_for", return_value=self.drive)
         self.backend.start()
@@ -43,19 +49,9 @@ class DriveLiveTopicTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.backend.stop()
 
-    def test_files_are_live_and_local_replica_is_removed(self):
+    def test_reads_and_writes_go_straight_to_drive(self):
         files = self.svc.list_files("SEAL-1", "live", "files")
-
-        self.assertEqual(
-            [item["name"] for item in files],
-            ["legacy.txt", "remote.txt"],
-        )
-        self.assertEqual(self.drive.read("legacy.txt").data, b"LOCAL")
-        self.assertEqual(
-            self.local.list("SEAL-1/live/files"),
-            [],
-        )
-        self.assertTrue(self.local.exists("SEAL-1/live/.drive-live-v1"))
+        self.assertEqual([item["name"] for item in files], ["remote.txt"])
 
         self.svc.put_file("SEAL-1", "live", "now.txt", b"NOW")
         self.assertEqual(self.drive.read("now.txt").data, b"NOW")
@@ -65,11 +61,18 @@ class DriveLiveTopicTests(unittest.TestCase):
             b"REMOTE",
         )
 
-    def test_delete_uses_drive_trash_backend(self):
-        self.svc.list_files("SEAL-1", "live", "files")
-        result = self.svc.delete_file(
-            "SEAL-1", "live", "files/remote.txt")
+    def test_local_files_are_hidden_never_uploaded(self):
+        # Un file solo-locale, con topic drive-backed, "sparisce dalla vista":
+        # non viene mostrato né caricato su Drive, ma resta intatto in locale.
+        self.local.write("SEAL-1/live/files/solo-locale.txt", b"LOCAL")
+        names = [i["name"] for i in self.svc.list_files("SEAL-1", "live", "files")]
+        self.assertNotIn("solo-locale.txt", names)       # nascosto dalla vista
+        self.assertFalse(self.drive.exists("solo-locale.txt"))  # mai caricato
+        self.assertEqual(
+            self.local.read("SEAL-1/live/files/solo-locale.txt").data, b"LOCAL")
 
+    def test_delete_uses_drive_trash_backend(self):
+        result = self.svc.delete_file("SEAL-1", "live", "files/remote.txt")
         self.assertEqual(result["trash_path"], "Drive/Cestino")
         self.assertFalse(self.drive.exists("remote.txt"))
 
@@ -78,55 +81,16 @@ class DriveLiveTopicTests(unittest.TestCase):
             def disable(self):
                 return None
 
-        self.svc.list_files("SEAL-1", "live", "files")
         with mock.patch.object(self.svc, "_remote_for", return_value=Remote()):
             self.svc.remote_disable("SEAL-1", "live")
 
         self.assertEqual(
-            self.local.read("SEAL-1/live/files/remote.txt").data,
-            b"REMOTE",
-        )
+            self.local.read("SEAL-1/live/files/remote.txt").data, b"REMOTE")
         meta = json.loads(self.local.read("SEAL-1/live/meta.json").data)
         self.assertNotIn("remote", meta)
-        self.assertFalse(self.local.exists("SEAL-1/live/.drive-live-v1"))
-
-    def test_migration_aborts_and_preserves_local_on_upload_failure(self):
-        # #45 review: se anche un solo file non è verificato su Drive, NON si
-        # cancella il locale né si segna live → nessuna perdita, ritentabile.
-        meta = json.loads(self.local.read(self.svc._meta_p("SEAL-1", "live")).data)
-        with mock.patch.object(self.svc, "_upload_local_tree",
-                               return_value=([], ["legacy.txt"])):
-            with self.assertRaises(Exception):
-                self.svc._ensure_drive_live("SEAL-1", "live", meta)
-        self.assertEqual(self.local.read("SEAL-1/live/files/legacy.txt").data, b"LOCAL")
-        self.assertFalse(self.local.exists("SEAL-1/live/.drive-live-v1"))
-
-    def test_content_mismatch_counts_as_failed_and_aborts(self):
-        # upload "riuscito" ma contenuto ri-letto diverso (troncato/corrotto) →
-        # deve essere trattato come failed → abort, locale intatto.
-        meta = json.loads(self.local.read(self.svc._meta_p("SEAL-1", "live")).data)
-        real_read = self.drive.read
-        with mock.patch.object(self.drive, "read",
-                               side_effect=lambda p: types.SimpleNamespace(data=b"TRONCO")):
-            with self.assertRaises(Exception):
-                self.svc._ensure_drive_live("SEAL-1", "live", meta)
-        self.assertEqual(self.local.read("SEAL-1/live/files/legacy.txt").data, b"LOCAL")
-        self.assertFalse(self.local.exists("SEAL-1/live/.drive-live-v1"))
-
-    def test_remote_enable_rejects_confidential_tier_on_drive(self):
-        # guard SEAL sul VERO punto di attivazione (non solo migrate_storage):
-        # topic SEAL-3/4 non possono usare Drive live.
-        for tier in ("SEAL-3", "SEAL-4"):
-            with self.assertRaises(Exception) as ctx:
-                self.svc.remote_enable(tier, "riservato", "drive",
-                                       {"folder": "f", "account": "a"})
-            self.assertIn("cap SEAL", str(ctx.exception))
 
     def test_disable_keeps_drive_intact_when_pull_fails(self):
-        # remote_disable non pre-cancella il locale e, se il pull fallisce, Drive
-        # (fonte di verità) resta intatto → nessuna perdita.
-        self.svc.list_files("SEAL-1", "live", "files")  # cut-over live
-
+        # Se il pull fallisce, Drive (fonte) resta intatto → nessuna perdita.
         class Remote:
             def disable(self):
                 return None
@@ -136,8 +100,37 @@ class DriveLiveTopicTests(unittest.TestCase):
                                side_effect=RuntimeError("rete giù")):
             with self.assertRaises(Exception):
                 self.svc.remote_disable("SEAL-1", "live")
-        self.assertEqual(self.drive.read("legacy.txt").data, b"LOCAL")
         self.assertEqual(self.drive.read("remote.txt").data, b"REMOTE")
+
+
+class RemoteEnableGuardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.local = LocalFsStorage(tempfile.mkdtemp())
+        self.svc = TopicService(self.local)
+        with mock.patch(
+            "server.instance_profile.topic_default_participants",
+            return_value=[],
+        ):
+            self.svc.new("SEAL-1", "withlocal", {"owner": "davide"})
+        self.svc.put_file("SEAL-1", "withlocal", "doc.txt", b"X")
+
+    def test_refuses_to_link_drive_when_local_files_present(self):
+        # Guardia anti-nascondimento: Drive diventa la fonte e i locali NON sono
+        # caricati → collegarlo con file solo-locali li renderebbe invisibili.
+        with self.assertRaises(Exception) as ctx:
+            self.svc.remote_enable("SEAL-1", "withlocal", "drive",
+                                   {"folder": "f", "account": "a"})
+        self.assertIn("nasconderebbe", str(ctx.exception))
+        self.assertEqual(
+            self.local.read("SEAL-1/withlocal/files/doc.txt").data, b"X")
+
+    def test_rejects_confidential_tier_on_drive(self):
+        # Guard SEAL (anti-declassamento): topic SEAL-3/4 non possono usare Drive.
+        for tier in ("SEAL-3", "SEAL-4"):
+            with self.assertRaises(Exception) as ctx:
+                self.svc.remote_enable(tier, "riservato", "drive",
+                                       {"folder": "f", "account": "a"})
+            self.assertIn("cap SEAL", str(ctx.exception))
 
 
 class DriveStorageCacheTests(unittest.TestCase):
