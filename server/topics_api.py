@@ -26,7 +26,7 @@ from starlette.routing import Route
 
 from .pki_verify import verify_session_token
 from .topics.local_fs import LocalFsStorage
-from .topics.service import TopicError, TopicService
+from .topics.service import SCHEMA_VERSION, TopicError, TopicService, normalize_meta_v2
 
 LOG = logging.getLogger("clodia-tools.topics")
 
@@ -144,6 +144,24 @@ async def set_status(request: Request):
         res = _service().set_status(request.path_params["tier"],
                                     request.path_params["name"],
                                     (body or {}).get("status", ""))
+        _invalidate_list_cache()
+        return JSONResponse(res)
+    except TopicError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+async def set_deadline(request: Request):
+    _, err = _authorize(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    try:
+        res = _service().set_deadline(request.path_params["tier"],
+                                      request.path_params["name"],
+                                      (body or {}).get("deadline"))
         _invalidate_list_cache()
         return JSONResponse(res)
     except TopicError as e:
@@ -322,8 +340,13 @@ async def files(request: Request):
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
+def _snapshot_meta_bytes(raw: bytes, tier: str) -> bytes:
+    meta = normalize_meta_v2(json.loads(raw.decode("utf-8")), tier)
+    return json.dumps(meta, ensure_ascii=False, indent=2).encode()
+
+
 async def export_topics(request: Request):
-    """Esporta i topic (meta, summary, minutes/, files/, conversazioni .messages)
+    """Esporta i topic schema v2 (meta, summary, files/, conversazioni .messages)
     in un tar.gz. `?topics=tier/name,tier/name` per selezionarne alcuni; assente
     → tutti. Nessun segreto: i topic non contengono credenziali."""
     _, err = _authorize(request)
@@ -336,7 +359,7 @@ async def export_topics(request: Request):
     topics = [t for t in svc.list(None, include_archived=True)
               if selected is None or f"{t['tier']}/{t['name']}" in selected]
     included = {f"{t['tier']}/{t['name']}" for t in topics}
-    manifest = {"kind": "clodia-topics-snapshot", "version": 1,
+    manifest = {"kind": "clodia-topics-snapshot", "version": SCHEMA_VERSION,
                 "count": len(topics), "topics": sorted(included)}
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -351,7 +374,16 @@ async def export_topics(request: Request):
                 rel = p.relative_to(root)
                 parts = rel.parts
                 if len(parts) >= 2 and f"{parts[0]}/{parts[1]}" in included:
-                    tar.add(p, arcname="topics-store/" + str(rel))
+                    arcname = "topics-store/" + str(rel)
+                    if len(parts) == 3 and parts[2] == "meta.json":
+                        data = _snapshot_meta_bytes(p.read_bytes(), parts[0])
+                        ti = tarfile.TarInfo(arcname)
+                        ti.size = len(data)
+                        tar.addfile(ti, io.BytesIO(data))
+                    elif len(parts) >= 3 and parts[2] == "minutes":
+                        continue
+                    else:
+                        tar.add(p, arcname=arcname)
     buf.seek(0)
     return Response(buf.read(), media_type="application/gzip",
                     headers={"Content-Disposition": 'attachment; filename="clodia-topics-snapshot.tgz"'})
@@ -376,6 +408,19 @@ async def import_topics(request: Request):
     added, skipped = set(), set()
     try:
         with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as tar:
+            try:
+                mf = tar.extractfile("manifest.json")
+                manifest = json.loads((mf.read() if mf else b"{}").decode("utf-8"))
+            except Exception:
+                manifest = {}
+            version = int(manifest.get("version") or 1)
+            if version != SCHEMA_VERSION:
+                return JSONResponse({
+                    "error": "unsupported_snapshot_version",
+                    "detail": f"snapshot v{version} non importabile: esegui prima la migrazione a v{SCHEMA_VERSION}",
+                    "expected_version": SCHEMA_VERSION,
+                    "found_version": version,
+                }, status_code=400)
             for m in tar.getmembers():
                 if not m.isfile() or m.name == "manifest.json":
                     continue
@@ -396,7 +441,12 @@ async def import_topics(request: Request):
                     continue
                 dest = root / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(src.read())
+                data = src.read()
+                if len(parts) == 3 and parts[2] == "meta.json":
+                    data = _snapshot_meta_bytes(data, parts[0])
+                if len(parts) >= 3 and parts[2] == "minutes":
+                    continue
+                dest.write_bytes(data)
     except (tarfile.TarError, OSError) as e:
         return JSONResponse({"error": f"bundle non valido: {e}"}, status_code=400)
     return JSONResponse({"imported": sorted(added), "skipped": sorted(skipped),
@@ -414,6 +464,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/messages", post_message, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/archive", archive_topic, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/status", set_status, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/deadline", set_deadline, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/participants", participants, methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/remote", remote, methods=["POST"]),
