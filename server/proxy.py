@@ -135,6 +135,20 @@ async def list_proxied_tools() -> list[Tool]:
     return tools
 
 
+def _response_text(content: list) -> str:
+    """Flatten textual MCP content, including embedded text resources."""
+    parts: list[str] = []
+    for item in content:
+        if getattr(item, "type", None) == "text":
+            parts.append(item.text)
+            continue
+        if getattr(item, "type", None) == "resource":
+            text = getattr(getattr(item, "resource", None), "text", None)
+            if text is not None:
+                parts.append(text)
+    return "\n".join(parts) if parts else "(nessun contenuto testuale)"
+
+
 async def call_proxied(name: str, arguments: dict) -> str:
     """Instrada la call al backend giusto e ritorna il testo concatenato."""
     backend_name, tool_name = name.split(NS_SEP, 1)
@@ -143,5 +157,4 @@ async def call_proxied(name: str, arguments: dict) -> str:
         raise ValueError(f"backend MCP sconosciuto: {backend_name!r}")
     async with _session(b) as s:
         res = await s.call_tool(tool_name, arguments)
-        parts = [c.text for c in res.content if getattr(c, "type", None) == "text"]
-        return "\n".join(parts) if parts else "(nessun contenuto testuale)"
+        return _response_text(res.content)
