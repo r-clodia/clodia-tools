@@ -8,6 +8,22 @@ processo (e container, e repo) **separato dal runtime degli agenti**. Un agente
 non possiede credenziali né CLI: l'unico modo di agire sul mondo è chiedere al
 gateway, che **autentica (PKI ckt1) → applica la whitelist per-agente → esegue o nega**.
 
+> ### 📍 Non è il repo di ingresso
+>
+> Questo repository è un **componente** di Clodia Platform, non un prodotto
+> installabile per conto proprio. Il repo di ingresso — installazione, quickstart,
+> architettura d'insieme, licenza e **avvertenze di rischio** — è:
+>
+> ### 👉 **[r-clodia/clodia-platform](https://github.com/r-clodia/clodia-platform)**
+>
+> Non partire da qui per deployare: `clodia-platform` clona i repo componenti,
+> builda le immagini e orchestra lo stack. Prima di installare, leggi il
+> disclaimer as-is e i **difetti noti** nel tracker della platform —
+> [issue `security` aperte](https://github.com/r-clodia/clodia-platform/issues?q=is%3Aissue+is%3Aopen+label%3Asecurity)
+> e [`SECURITY.md`](https://github.com/r-clodia/clodia-platform/blob/main/SECURITY.md).
+> Il software è distribuito **COSÌ COM'È, senza garanzie**: lo esegui a tuo
+> rischio e pericolo.
+
 ## Architettura
 
 ```
