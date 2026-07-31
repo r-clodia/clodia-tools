@@ -39,8 +39,12 @@ _DEFAULT_GATED_EXACT = frozenset({
     "agents.grant_scoped", "agents.revoke_scoped",
     # mcp: add/remove nuova superficie di codice; mcp.list NON gated
     "mcp.add", "mcp.remove",
-    # packs: install/remove esegue codice terzi; packs.list/show NON gated
+    # packs: install/remove esegue codice terzi; packs.list/show NON gated.
+    # install_pip/install_npm eseguono il codice del pacchetto (setup.py /
+    # postinstall) nel gateway → stesso rischio di import_url, quindi gated.
+    # check_command è read-only (verifica presenza binario) → NON gated.
     "packs.import_url", "packs.remove",
+    "packs.install_pip", "packs.install_npm",
     # providers: pausa/ripresa (egress dati); providers.list NON gated
     "providers.pause", "providers.resume",
     # workflows: lifecycle distruttivo (il verbo reale del delete è delete_run)
