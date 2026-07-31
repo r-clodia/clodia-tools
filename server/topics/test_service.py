@@ -139,6 +139,36 @@ def main() -> int:
     check("archived nascosto", "cliente-x" not in {x["name"] for x in svc.list()})
     check("archived con flag", "cliente-x" in {x["name"] for x in svc.list(include_archived=True)})
 
+    # Un topic archiviato resta visibile come metadata, ma nessuna operazione di
+    # contenuto è ammessa (nemmeno quelle normalmente eseguite dall'owner).
+    archived_ops = {
+        "open": lambda: svc.open("P2", "cliente-x"),
+        "read_file": lambda: svc.read_file("P2", "cliente-x", "files/AGENTS.md"),
+        "list_files": lambda: svc.list_files("P2", "cliente-x"),
+        "save_summary": lambda: svc.save_summary("P2", "cliente-x", "vietato", None),
+        "post_message": lambda: svc.post_message("P2", "cliente-x", "owner", "vietato"),
+        "put_file": lambda: svc.put_file("P2", "cliente-x", "vietato.txt", b"no"),
+        "delete_file": lambda: svc.delete_file("P2", "cliente-x", "files/AGENTS.md"),
+        "add_participant": lambda: svc.add_participant("P2", "cliente-x", "agent-x"),
+        "remove_participant": lambda: svc.remove_participant("P2", "cliente-x", "owner"),
+    }
+    for op_name, op in archived_ops.items():
+        try:
+            op()
+            check(f"archived: {op_name} negato", False)
+        except TopicError as exc:
+            check(f"archived: {op_name} negato con errore esplicito",
+                  "archiviat" in str(exc).lower())
+
+    # set_status è la sola via di sblocco e non lascia stato residuo in cache.
+    check("archived: riattivazione ammessa",
+          svc.set_status("P2", "cliente-x", "active")["status"] == "active")
+    check("reactivated: lettura immediata",
+          b"priorita contratti" in svc.read_file("P2", "cliente-x", "files/AGENTS.md"))
+    check("reactivated: scrittura immediata",
+          svc.put_file("P2", "cliente-x", "riattivato.txt", b"ok")["path"]
+          == "files/riattivato.txt")
+
     # search lessicale (AGENTS.md)
     check("search trova in AGENTS.md", "cliente-x" in {h["name"] for h in svc.search("priorita contratti")})
 
