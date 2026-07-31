@@ -1584,6 +1584,39 @@ def _native_tool_namespaces() -> list[str]:
     return ns
 
 
+def runtime_configuration_warnings() -> list[str]:
+    """Coerenza fra whitelist, namespace montati e credenziali consumabili."""
+    from .whitelist import CONFIG
+
+    mounted = set(_native_tool_namespaces())
+    mounted.update(
+        str(backend.get("name") or "")
+        for backend in (CONFIG.get("mcp_backends") or [])
+    )
+    warnings = []
+    for agent, spec in (CONFIG.get("agents") or {}).items():
+        for tool in spec.get("allowed_tools") or []:
+            if tool == "*" or NS_SEP_DOT not in tool:
+                continue
+            namespace = tool.split(NS_SEP_DOT, 1)[0]
+            if namespace not in mounted:
+                warnings.append(
+                    f"agent '{agent}': namespace '{namespace}' in whitelist "
+                    "ma non esposto da tool nativi o backend MCP"
+                )
+    for row in email.credential_diagnostics():
+        if row["operational"]:
+            continue
+        detail = (
+            f"campi mancanti: {', '.join(row['missing'])}"
+            if row["missing"] else f"errore: {row['error']}"
+        )
+        warnings.append(
+            f"credenziale email '{row['credential']}' non materializzabile ({detail})"
+        )
+    return warnings
+
+
 def _dispatch_agents(name: str, a: dict, caller: str | None,
                      gate_approval: dict | None = None):
     from .tools import agents_admin as adm
@@ -1800,19 +1833,29 @@ def _connector_allows(name: str, agent: str | None) -> bool:
 
 def _email_account(arguments: dict) -> str:
     """Account per una chiamata email.*: quello richiesto esplicitamente,
-    altrimenti l'UNICO account su cui il chiamante ha un grant vault
-    (gmail_*/mailbox_*). Se assente o ambiguo (più account) resta 'demo' → il
-    tool solleva un errore chiaro con la lista disponibile, così l'agent sa che
-    deve specificare `account`. Evita il default muto a 'demo' quando l'agent ha
-    esattamente una casella delegata."""
+    altrimenti l'UNICO account operativo con grant vault. Con zero o più account
+    solleva un errore azionabile: nessun fallback verso mailbox inesistenti."""
+    agent = agent_name()
+    accounts = email.available_accounts(agent)
     acct = (arguments.get("account") or "").strip()
     if acct:
-        return acct
-    grants = _vault_grants(agent_name())
-    accts = sorted({c[len("google_"):] for c in grants if c.startswith("google_")}
-                   | {c[len("gmail_"):] for c in grants if c.startswith("gmail_")}
-                   | {c[len("mailbox_"):] for c in grants if c.startswith("mailbox_")})
-    return accts[0] if len(accts) == 1 else "demo"
+        if acct in accounts:
+            return acct
+        raise ValueError(
+            f"email: account '{acct}' non disponibile per '{agent}'. "
+            f"Passa il parametro 'account' con uno di questi valori: {accounts}"
+        )
+    if len(accounts) == 1:
+        return accounts[0]
+    if not accounts:
+        raise ValueError(
+            f"email: nessun account operativo con grant per '{agent}'. "
+            "Configura una mailbox e assegna il relativo grant nel vault."
+        )
+    raise ValueError(
+        "email: il parametro 'account' è obbligatorio quando sono disponibili "
+        f"più mailbox. Valori accettati: {accounts}"
+    )
 
 
 # Namespace UNIVERSALI: disponibili a OGNI agente senza grant per-agente.

@@ -23,8 +23,13 @@ from ..whitelist import agent_name, tool_allowed
 
 _EMAIL_PY = sys.executable
 _EMAIL_SCRIPT = str(Path(__file__).resolve().parents[2] / "vendor" / "email_client.py")
-# Account legacy serviti da secrets/email_config.json (fallback senza vault).
-_LEGACY_ACCOUNTS = {"demo", "studio"}
+
+_VAULT_PREFIXES = ("google_", "gmail_", "mailbox_")
+_REQUIRED_FIELDS = {
+    "google": ("client_id", "client_secret", "refresh_token", "email"),
+    "gmail": ("client_id", "client_secret", "refresh_token", "email"),
+    "mailbox": ("email", "imap_server", "imap_port", "smtp_server", "smtp_port"),
+}
 
 
 def _gmail_cred(account: str) -> str:
@@ -39,18 +44,77 @@ def _mailbox_cred(account: str) -> str:
     return f"mailbox_{account}"
 
 
-def known_accounts() -> set:
+def _legacy_config_file() -> Path:
+    secrets_dir = os.environ.get("CLODIA_SECRETS_DIR")
+    if not secrets_dir:
+        workspace = os.environ.get("CLODIA_WORKSPACE_ROOT")
+        secrets_dir = (
+            f"{workspace}/secrets" if workspace
+            else str(Path(_EMAIL_SCRIPT).resolve().parent.parent.parent.parent / "secrets")
+        )
+    return Path(secrets_dir) / "email_config.json"
+
+
+def _legacy_accounts() -> set[str]:
+    try:
+        data = json.loads(_legacy_config_file().read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return set()
+    if "accounts" in data:
+        return {str(name) for name in (data.get("accounts") or {})}
+    return {"demo"} if data else set()
+
+
+def credential_diagnostics() -> list[dict]:
+    """Stato materializzabile delle credenziali email, senza valori segreti."""
+    rows = []
+    for credential in vault.store_names():
+        prefix = next((p for p in _VAULT_PREFIXES if credential.startswith(p)), None)
+        if prefix is None:
+            continue
+        kind = prefix[:-1]
+        account = credential[len(prefix):]
+        missing: list[str] = []
+        error = None
+        try:
+            bundle = vault.read_internal(credential)
+            missing = [field for field in _REQUIRED_FIELDS[kind] if not bundle.get(field)]
+            if kind == "mailbox" and not (
+                bundle.get("password") or bundle.get("app_password")
+            ):
+                missing.append("password|app_password")
+        except Exception as exc:  # noqa: BLE001 - diagnostica, mai valori
+            error = type(exc).__name__
+        rows.append({
+            "credential": credential,
+            "account": account,
+            "kind": kind,
+            "operational": not missing and error is None,
+            "missing": missing,
+            "error": error,
+        })
+    return rows
+
+
+def known_accounts() -> set[str]:
     """Account email disponibili: Gmail OAuth (gmail_*), caselle generiche
     (mailbox_*) e i legacy da email_config.json."""
-    accts = set(_LEGACY_ACCOUNTS)
-    for n in vault.store_names():
-        if n.startswith("google_"):          # credenziale unificata (ha scope Gmail)
-            accts.add(n[len("google_"):])
-        elif n.startswith("gmail_"):
-            accts.add(n[len("gmail_"):])
-        elif n.startswith("mailbox_"):
-            accts.add(n[len("mailbox_"):])
-    return accts
+    return _legacy_accounts() | {
+        row["account"] for row in credential_diagnostics() if row["operational"]
+    }
+
+
+def available_accounts(agent: str) -> list[str]:
+    """Account operativi che l'agente può davvero materializzare dal vault."""
+    granted = set(vault.grants_for(agent))
+    accounts = {
+        row["account"]
+        for row in credential_diagnostics()
+        if row["operational"] and row["credential"] in granted
+    }
+    # Il legacy è autorizzato dalla whitelist e non ha grant per-account.
+    accounts.update(_legacy_accounts())
+    return sorted(accounts)
 
 
 @contextlib.contextmanager
@@ -136,7 +200,11 @@ def _attachment_args(attachments: Optional[Sequence[str]]) -> list[str]:
 def folders(account: str = "demo") -> dict:
     """Elenca le cartelle IMAP dell'account."""
     tool_allowed("email.folders")
-    return {"account": account, "folders": _run_json(account, ["folders"])}
+    return {
+        "account": account,
+        "available_accounts": available_accounts(agent_name()),
+        "folders": _run_json(account, ["folders"]),
+    }
 
 
 def list_messages(account: str = "demo", folder: str = "INBOX", limit: int = 10) -> dict:
