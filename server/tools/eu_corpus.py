@@ -71,6 +71,37 @@ def collections() -> dict:
         raise RuntimeError(f"eu-rag-search irraggiungibile ({_BASE}): {getattr(e, 'reason', e)}")
 
 
+def create_collection(collection: str, tier: str = "SEAL-1",
+                      description: str | None = None) -> dict:
+    """Crea una collection RAG.
+
+    L'endpoint primario è POST /collections; per compatibilità con deployment
+    precedenti prova anche /collections/create se il servizio risponde 404.
+    """
+    fields = {"collection": collection, "tier": tier, "description": description or ""}
+    data = urllib.parse.urlencode(fields).encode()
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization": f"Bearer {_ingest_token()}",
+    }
+    errors = []
+    for path in ("/collections", "/collections/create"):
+        req = urllib.request.Request(f"{_BASE}{path}", data=data, method="POST",
+                                     headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+                _tier_cache.update(at=0.0, map={})
+                return json.load(resp)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "ignore")[:200]
+            errors.append(f"{path} HTTP {e.code}: {body}")
+            if e.code != 404:
+                raise RuntimeError(f"eu-rag create_collection HTTP {e.code}: {body}")
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"eu-rag create_collection irraggiungibile ({_BASE}): {e.reason}")
+    raise RuntimeError("eu-rag create_collection non supportato: " + " | ".join(errors))
+
+
 _tier_cache: dict = {"at": 0.0, "map": {}}
 
 
