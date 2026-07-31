@@ -10,6 +10,7 @@ from mcp.types import TextContent, Tool
 from . import __version__
 from . import instance_profile
 from . import proxy
+from . import transfer_channel
 from .tools import email, fs, logs, runtime
 from .tools import web_post
 from .tools import eu_corpus
@@ -620,7 +621,8 @@ _TOPIC_TOOLS: list[Tool] = [
         description=("Scarica una COPIA di un file del topic nel TUO scratch (path "
                      "locale), per trattarlo con le skill standard (xlsx/pdf/docx/…). "
                      "USA QUESTO per i BINARI invece di topic.read_file (che passa "
-                     "base64 nel contesto e si tronca sui file grandi). `dest` = path "
+                     "base64 nel contesto e si tronca sui file grandi). Il trasporto "
+                     "usa envelope cifrati effimeri sul volume shared. `dest` = path "
                      "assoluto sotto il tuo scratch. Flusso: topic.fetch → skill "
                      "standard sul file locale → topic.put."),
         inputSchema={"type": "object", "properties": {
@@ -634,7 +636,7 @@ _TOPIC_TOOLS: list[Tool] = [
         name="topic.put",
         description=("Carica nel topic (files/) un file preparato nel TUO scratch. USA "
                      "QUESTO per i BINARI invece di topic.write_file: il gateway legge i "
-                     "byte dal path locale, niente base64 nel modello. `src` = path "
+                     "byte tramite un envelope cifrato effimero, niente base64 nel modello. `src` = path "
                      "assoluto nel tuo scratch; `filename` può includere sottocartelle."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
@@ -2599,22 +2601,21 @@ def _dispatch_topic(name: str, a: dict):
             data = (a["content"] or "").encode("utf-8")
         return svc.put_file(a["tier"], a["name"], fn, data)
     if verb == "fetch":
-        # Consegna una COPIA del file del topic nello SCRATCH dell'agent (path
-        # locale), come un `git clone` ma di un singolo file e mediato dal gateway:
-        # i byte NON transitano dal modello (niente base64 nel contesto → niente
-        # troncamento sui file grandi). ACL: read_file rispetta la classe del topic.
+        # I byte attraversano il solo volume /shared come envelope cifrato per
+        # lo spawn destinatario; agent-server decifra e materializza `dest`.
         data = svc.read_file(a["tier"], a["name"], a["path"])
-        dest = _safe_scratch_path(a["dest"])
-        _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-        with open(dest, "wb") as f:
-            f.write(data)
-        return {"local_path": dest, "size": len(data)}
+        chat_id = current_chat()
+        if not chat_id:
+            raise ValueError("topic.fetch richiede una sessione agent con chat_id")
+        return transfer_channel.fetch_to_agent(
+            data, chat_id=chat_id, dest=a["dest"], sender=agent_name())
     if verb == "put":
-        # Mette nel topic store un file preparato nello scratch dell'agent (come un
-        # `push`): il gateway legge i byte dal path locale e li scrive nello store.
-        src = _safe_scratch_path(a["src"])
-        with open(src, "rb") as f:
-            data = f.read()
+        # agent-server legge lo scratch della sola sessione, cifra per il gateway
+        # e deposita un envelope effimero su /shared; qui viene decifrato e consumato.
+        chat_id = current_chat()
+        if not chat_id:
+            raise ValueError("topic.put richiede una sessione agent con chat_id")
+        data = transfer_channel.put_from_agent(chat_id=chat_id, src=a["src"])
         return svc.put_file(a["tier"], a["name"], a["filename"], data)
     if verb == "delete_file":
         return svc.delete_file(a["tier"], a["name"], a["path"])
