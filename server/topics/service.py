@@ -23,6 +23,7 @@ import os
 import re
 from datetime import datetime, timezone
 
+from . import mentions
 from .storage import NotFound, Storage, StorageError, VersionConflict
 
 LOG = logging.getLogger("clodia-tools.topics")
@@ -970,7 +971,8 @@ class TopicService:
     def post_message(self, tier: str, name: str, author: str, text: str,
                      kind: str = "human", attachments: list[str] | None = None) -> dict:
         """Posta un messaggio nel canale (append-only file in `.messages/` →
-        niente contesa). `kind` = human|ai|system. `attachments` = nomi file in files/."""
+        niente contesa). `kind` = human|ai|system. `attachments` = nomi file in files/.
+        `mentions` = destinatari strutturati estratti al write-time (issue#83, D1)."""
         meta, _ = self._read_meta(tier, name)
         self._assert_content_available(meta)
         now = _now()
@@ -979,6 +981,7 @@ class TopicService:
             "id": f"{now.strftime('%Y%m%d-%H%M%S')}-{token}",
             "author": author, "kind": kind, "text": text or "",
             "attachments": attachments or [], "ts": now.isoformat(timespec="seconds"),
+            "mentions": mentions.extract_mentions(text or ""),
         }
         self.s.write(f"{self._dir(tier, name)}/.messages/{msg['id']}.json",
                      json.dumps(msg, ensure_ascii=False).encode())
