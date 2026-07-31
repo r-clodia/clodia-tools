@@ -109,6 +109,12 @@ async def _lifespan(_app):
                          conf.get("name") or "workspace")
         except Exception as e:  # noqa: BLE001 — mai bloccare il boot
             LOG.warning("auto-create workspace (topics:single) fallito: %s", e)
+        try:
+            from . import main as gateway_main
+            for warning in gateway_main.runtime_configuration_warnings():
+                LOG.warning("configurazione non operativa: %s", warning)
+        except Exception as e:  # noqa: BLE001 - diagnostica best-effort
+            LOG.warning("controllo coerenza configurazione fallito: %s", e)
         yield
 
 

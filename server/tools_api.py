@@ -35,6 +35,7 @@ from . import instance_profile
 from . import proxy
 from . import vault
 from . import whitelist
+from .tools import email as email_tool
 
 # Nomi backend: lowercase slug, niente collisione coi prefissi nativi.
 _NATIVE_PREFIXES = {"trello", "fs", "email", "agent", "topic", "runtime"}
@@ -125,19 +126,39 @@ def _connector_guard(cid: str):
 async def list_tools(request: Request):
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    names = vault.store_names()
     # Integrazione Google UNIFICATA: un solo consenso (Gmail + Drive + Docs +
     # Calendar) → una sola credenziale google_<account> = un solo refresh token,
     # niente cross-invalidation dei due consensi separati (gmail_/gworkspace_).
-    google_accounts = sorted(n[len("google_"):] for n in names if n.startswith("google_"))
+    email_diagnostics = email_tool.credential_diagnostics()
+    google_rows = [row for row in email_diagnostics if row["kind"] == "google"]
+    google_accounts = sorted(row["account"] for row in google_rows if row["operational"])
     connectors = [{
         "id": "google",
         "label": "Google",
         "provider": "google",
         "scopes": "Gmail · Drive · Docs · Calendar",
         "connected": bool(google_accounts),
+        "operational": bool(google_rows) and all(row["operational"] for row in google_rows),
         "accounts": google_accounts,
+        "issues": [
+            {"account": row["account"], "missing": row["missing"], "error": row["error"]}
+            for row in google_rows if not row["operational"]
+        ],
     }]
+    mailbox_rows = [row for row in email_diagnostics if row["kind"] == "mailbox"]
+    mailbox_accounts = sorted(row["account"] for row in mailbox_rows if row["operational"])
+    connectors.append({
+        "id": "mailboxes",
+        "label": "Email mailboxes",
+        "provider": "email",
+        "connected": bool(mailbox_accounts),
+        "operational": bool(mailbox_rows) and all(row["operational"] for row in mailbox_rows),
+        "accounts": mailbox_accounts,
+        "issues": [
+            {"account": row["account"], "missing": row["missing"], "error": row["error"]}
+            for row in mailbox_rows if not row["operational"]
+        ],
+    })
     # Integrazione Image generation (OpenAI): attiva se la key è nel vault.
     connectors.append({
         "id": "openai-images",
@@ -646,8 +667,18 @@ async def email_mailboxes(request: Request):
     """GET → lista delle caselle generiche (mailbox_*) nel vault (solo nomi)."""
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    boxes = [n[len("mailbox_"):] for n in vault.store_names() if n.startswith("mailbox_")]
-    return JSONResponse({"mailboxes": sorted(boxes)})
+    rows = [
+        row for row in email_tool.credential_diagnostics()
+        if row["kind"] == "mailbox"
+    ]
+    return JSONResponse({
+        "mailboxes": sorted(row["account"] for row in rows if row["operational"]),
+        "statuses": [
+            {"account": row["account"], "operational": row["operational"],
+             "missing": row["missing"], "error": row["error"]}
+            for row in rows
+        ],
+    })
 
 
 async def email_mailbox_add(request: Request):
