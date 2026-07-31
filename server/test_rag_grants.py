@@ -49,6 +49,25 @@ class RagGrantEnforcementTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 main._rag_authorize("eu-normativa", write=False)
 
+    def test_sysadmin_provisioner_can_write_within_clearance(self) -> None:
+        with patch.object(main, "agent_name", return_value="sysadmin"), \
+                patch.object(main, "_is_super", return_value=False), \
+                patch.object(main, "current_clearance", return_value="SEAL-1"), \
+                patch.object(main.instance_profile, "rag_check_collection"), \
+                patch.object(main.eu_corpus, "collection_tier", return_value="SEAL-1"), \
+                patch.object(main.runtime, "rag_grants",
+                             side_effect=AssertionError("grant lookup should be bypassed")):
+            main._rag_authorize("pack-kb", write=True)
+
+    def test_sysadmin_provisioner_still_respects_clearance(self) -> None:
+        with patch.object(main, "agent_name", return_value="sysadmin"), \
+                patch.object(main, "_is_super", return_value=False), \
+                patch.object(main, "current_clearance", return_value="SEAL-1"), \
+                patch.object(main.instance_profile, "rag_check_collection"), \
+                patch.object(main.eu_corpus, "collection_tier", return_value="SEAL-2"):
+            with self.assertRaises(PermissionError):
+                main._rag_authorize("confidential-kb", write=True)
+
     def test_collections_are_filtered_with_live_core_grants(self) -> None:
         with patch.object(main, "agent_name", return_value="esperto-bandi"), \
                 patch.object(main, "_is_super", return_value=False), \
@@ -67,6 +86,24 @@ class RagGrantEnforcementTests(unittest.TestCase):
         self.assertEqual(
             [row["collection"] for row in result["collections"]],
             ["eu-normativa"],
+        )
+
+    def test_collections_for_provisioner_are_filtered_by_clearance(self) -> None:
+        with patch.object(main, "agent_name", return_value="sysadmin"), \
+                patch.object(main, "_is_super", return_value=False), \
+                patch.object(main, "current_clearance", return_value="SEAL-1"), \
+                patch.object(main.instance_profile, "rag_enabled", return_value=True), \
+                patch.object(main.instance_profile, "rag_mode", return_value="multi"), \
+                patch.object(main.eu_corpus, "collections", return_value={
+                    "collections": [
+                        {"collection": "public-kb", "tier": "SEAL-1"},
+                        {"collection": "client-kb", "tier": "SEAL-2"},
+                    ],
+                }):
+            result = main._dispatch_rag("rag.collections", {})
+        self.assertEqual(
+            [row["collection"] for row in result["collections"]],
+            ["public-kb"],
         )
 
 

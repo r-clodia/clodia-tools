@@ -410,6 +410,18 @@ _RAG_TOOLS: list[Tool] = [
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
+        name="rag.create_collection",
+        description=("Crea/provisiona una collection della knowledge base. Riservato "
+                     "al provisioning dei pack: usa solo nomi e tier dichiarati nei "
+                     "manifest curated. Dopo la creazione usa rag.ingest per le "
+                     "risorse iniziali."),
+        inputSchema={"type": "object", "properties": {
+            "collection": {"type": "string"},
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "description": {"type": "string"},
+        }, "required": ["collection"]},
+    ),
+    Tool(
         name="rag.search",
         description=("Retrieval semantico su una collection della knowledge base. "
                      "Query IT/EN. Ritorna passaggi con citazione (documento, "
@@ -946,6 +958,28 @@ _PACKS_TOOLS: list[Tool] = [
                       "montati, RAG provisionato e verificato)."),
          inputSchema={"type": "object", "properties": {
              "name": {"type": "string"}}, "required": ["name"]}),
+    Tool(name="packs.install_pip",
+         description=("Installa package pip dichiarati da un pack nel venv persistente "
+                      "$CLODIA_DATA/runtime/venv. Non è shell libera: accetta solo spec "
+                      "package/versione validate. Usa solo valori provenienti da "
+                      "`requires.pip` del manifest curated."),
+         inputSchema={"type": "object", "properties": {
+             "packages": {"type": "array", "items": {"type": "string"}}},
+             "required": ["packages"]}),
+    Tool(name="packs.install_npm",
+         description=("Installa package npm dichiarati da un pack nel prefix persistente "
+                      "$CLODIA_DATA/runtime/npm. Non è shell libera: accetta solo spec "
+                      "package/versione validate. Usa solo valori provenienti da "
+                      "`requires.npm` del manifest curated."),
+         inputSchema={"type": "object", "properties": {
+             "packages": {"type": "array", "items": {"type": "string"}}},
+             "required": ["packages"]}),
+    Tool(name="packs.check_command",
+         description=("Verifica che un binario richiesto dal pack sia disponibile nel "
+                      "PATH runtime (venv/bin + npm/bin + PATH di sistema). Usalo per "
+                      "`requires.bin` e `requires.system`."),
+         inputSchema={"type": "object", "properties": {
+             "command": {"type": "string"}}, "required": ["command"]}),
 ]
 
 # workflows.* — controllo delle run dei workflow (start/stop/terminate). Sysadmin.
@@ -1710,6 +1744,7 @@ def _dispatch_jobs(name: str, a: dict, caller: str | None):
 
 def _dispatch_packs(name: str, a: dict):
     from .tools import platform_ops as ops
+    from .tools import pack_runtime
     sub = name.split(NS_SEP_DOT, 1)[1]
     if sub == "list":
         return ops.packs_list()
@@ -1721,6 +1756,12 @@ def _dispatch_packs(name: str, a: dict):
         return ops.packs_remove(a["name"])
     if sub == "setup_done":
         return ops.packs_setup_done(a["name"])
+    if sub == "install_pip":
+        return pack_runtime.install_pip(a["packages"])
+    if sub == "install_npm":
+        return pack_runtime.install_npm(a["packages"])
+    if sub == "check_command":
+        return pack_runtime.check_command(a["command"])
     raise ValueError(f"unknown packs tool: {name}")
 
 
@@ -2395,6 +2436,13 @@ def _rag_readable(grants: dict[str, set[str]]) -> set[str]:
     return set(grants.get("rag_read") or []) | set(grants.get("rag_write") or [])
 
 
+def _rag_provisioners() -> set[str]:
+    return {
+        x.strip() for x in _os.environ.get("CLODIA_RAG_PROVISIONERS", "sysadmin").split(",")
+        if x.strip()
+    }
+
+
 def _rag_authorize(collection: str, write: bool) -> None:
     """Reference monitor per-collection: grant read/write (arg-aware, dal
     AgentSpec autorevole nel core) + tiering (clearance ≥ tier della collection).
@@ -2403,6 +2451,13 @@ def _rag_authorize(collection: str, write: bool) -> None:
     instance_profile.rag_check_collection(collection)
     ag = agent_name()
     if _is_super(ag):
+        return
+    if write and ag in _rag_provisioners():
+        tier = eu_corpus.collection_tier(collection)
+        if _rank(current_clearance()) < _rank(tier):
+            raise PermissionError(
+                f"agent '{ag}': clearance insufficiente per la collection '{collection}' "
+                f"(tier {tier})")
         return
     grants = _rag_grants(ag)
     if write:
@@ -2433,10 +2488,29 @@ def _dispatch_rag(name: str, a: dict):
             res = {"collections": [c for c in res.get("collections", [])
                                    if c.get("collection") == only]}
         if not _is_super(agent_name()):
-            allowed = _rag_readable(_rag_grants(agent_name()))
-            res = {"collections": [c for c in res.get("collections", [])
-                                   if c.get("collection") in allowed]}
+            if agent_name() in _rag_provisioners():
+                res = {"collections": [
+                    c for c in res.get("collections", [])
+                    if _rank(current_clearance()) >= _rank(c.get("tier", "SEAL-0"))
+                ]}
+            else:
+                allowed = _rag_readable(_rag_grants(agent_name()))
+                res = {"collections": [c for c in res.get("collections", [])
+                                       if c.get("collection") in allowed]}
         return res
+    if verb == "create_collection":
+        collection = a["collection"]
+        _rag_authorize(collection, write=True)
+        tier = a.get("tier", "SEAL-1")
+        if _rank(current_clearance()) < _rank(tier):
+            raise PermissionError(
+                f"agent '{agent_name()}': clearance insufficiente per creare "
+                f"collection tier {tier}")
+        return eu_corpus.create_collection(
+            collection,
+            tier=tier,
+            description=a.get("description"),
+        )
     collection = a["collection"]
     if verb == "search":
         _rag_authorize(collection, write=False)
