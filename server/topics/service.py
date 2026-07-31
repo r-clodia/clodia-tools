@@ -770,8 +770,21 @@ class TopicService:
             LOG.warning("migrazione drive→remote fallita per %s/%s (locale intatto)",
                         tier, name)
 
+    @staticmethod
+    def _assert_content_available(meta: dict) -> None:
+        if _norm_status(meta.get("status")) == "archived":
+            raise TopicError(
+                "topic archiviato: riattivalo prima di leggere o modificare il contenuto"
+            )
+
     def open(self, tier: str, name: str) -> dict:
+        return self._open(tier, name, allow_archived=False)
+
+    def _open(self, tier: str, name: str, *, allow_archived: bool) -> dict:
         """Read-only: meta + summary (+ summary_version per optimistic lock)."""
+        initial_meta, _ = self._read_meta(tier, name)
+        if not allow_archived:
+            self._assert_content_available(initial_meta)
         # Migrazione one-shot legacy storage=google-drive → remote drive.
         try:
             self._migrate_legacy_drive(tier, name)
@@ -825,6 +838,8 @@ class TopicService:
     def read_file(self, tier: str, name: str, relpath: str) -> bytes:
         """Legge un file dentro il topic (es. files/foo.md). Anti-traversal.
         I path sotto files/ vanno sullo storage del topic (local o drive)."""
+        meta, _ = self._read_meta(tier, name)
+        self._assert_content_available(meta)
         rel = (relpath or "").lstrip("/")
         if not rel or ".." in rel.split("/"):
             raise TopicError(f"path non valido: {relpath}")
@@ -838,8 +853,8 @@ class TopicService:
                      base_version: str | None) -> dict:
         """Scrive il summary in optimistic lock. base_version = la versione letta
         con open(); se è cambiata → VersionConflict (il chiamante escala)."""
-        if not self.s.exists(self._meta_p(tier, name)):
-            raise TopicError(f"topic non trovato: {tier}/{name}")
+        meta, _ = self._read_meta(tier, name)
+        self._assert_content_available(meta)
         # Se non c'è ancora storia ma esiste un summary, registra il recap PRECEDENTE
         # (una tantum) col mtime del summary → la timeline mostra la transizione.
         try:
@@ -932,6 +947,7 @@ class TopicService:
 
     def add_participant(self, tier: str, name: str, agent: str) -> dict:
         meta, v = self._read_meta(tier, name)
+        self._assert_content_available(meta)
         parts = meta.setdefault("participants", [])
         added = agent not in parts
         if added:
@@ -944,6 +960,7 @@ class TopicService:
 
     def remove_participant(self, tier: str, name: str, agent: str) -> dict:
         meta, v = self._read_meta(tier, name)
+        self._assert_content_available(meta)
         parts = meta.setdefault("participants", [])
         if agent in parts:
             parts.remove(agent)
@@ -954,8 +971,8 @@ class TopicService:
                      kind: str = "human", attachments: list[str] | None = None) -> dict:
         """Posta un messaggio nel canale (append-only file in `.messages/` →
         niente contesa). `kind` = human|ai|system. `attachments` = nomi file in files/."""
-        if not self.s.exists(self._meta_p(tier, name)):
-            raise TopicError(f"topic non trovato: {tier}/{name}")
+        meta, _ = self._read_meta(tier, name)
+        self._assert_content_available(meta)
         now = _now()
         token = base64.urlsafe_b64encode(os.urandom(4)).decode().rstrip("=")
         msg = {
@@ -986,6 +1003,8 @@ class TopicService:
         files/ — e si naviga nelle sottocartelle. subpath relativo alla root del
         topic (anti-traversal). I file/cartelle interni (dotfile, es. .messages)
         sono nascosti. path nelle voci = relativo alla root del topic."""
+        meta, _ = self._read_meta(tier, name)
+        self._assert_content_available(meta)
         rel = (subpath or "").strip("/")
         if ".." in rel.split("/") or "\\" in rel:
             raise TopicError(f"subpath non valido: {subpath}")
@@ -1067,8 +1086,8 @@ class TopicService:
         """Carica/sovrascrive un file in files/ (upload umano o output agente).
         `filename` può includere sottocartelle (es. 'archivio/foto/1.jpg') per
         organizzare i file; le dir padre vengono create. Anti-traversal per segmento."""
-        if not self.s.exists(self._meta_p(tier, name)):
-            raise TopicError(f"topic non trovato: {tier}/{name}")
+        meta, _ = self._read_meta(tier, name)
+        self._assert_content_available(meta)
         rel = (filename or "").strip().strip("/")
         # Normalizza il prefisso 'files/' ridondante: gli agenti spesso passano il
         # path completo che vedono (es. 'files/x.pdf') invece del nome relativo a
@@ -1090,8 +1109,8 @@ class TopicService:
         se non esiste → sempre recuperabile. La struttura del topic (meta, summary,
         .messages e control-plane sono protetti: si agisce solo sotto files/, simmetrico a
         put_file. Anti-traversal per segmento."""
-        if not self.s.exists(self._meta_p(tier, name)):
-            raise TopicError(f"topic non trovato: {tier}/{name}")
+        meta, _ = self._read_meta(tier, name)
+        self._assert_content_available(meta)
         rel = (relpath or "").strip().strip("/")
         parts = rel.split("/")
         if not rel or "\\" in rel or any(p in ("", ".", "..") for p in parts):
@@ -1132,7 +1151,7 @@ class TopicService:
                 if e.kind != "dir":
                     continue
                 try:
-                    info = self.open(tr, e.name)
+                    info = self._open(tr, e.name, allow_archived=True)
                 except TopicError:
                     continue
                 m = info["meta"]
