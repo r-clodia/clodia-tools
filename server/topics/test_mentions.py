@@ -41,6 +41,28 @@ class ExtractMentionsTests(unittest.TestCase):
         self.assertEqual(extract_mentions("nessuna menzione qui"), [])
 
 
+class OrdinalMentionsTests(unittest.TestCase):
+    """Mention con ordinale @agente#N — istanze multi-spawn (issue#94)."""
+
+    def test_ordinal_mention(self) -> None:
+        self.assertEqual(extract_mentions("fai tu @fullstack-dev#2"), ["fullstack-dev#2"])
+
+    def test_generic_and_ordinal_are_distinct(self) -> None:
+        self.assertEqual(extract_mentions("@fullstack-dev e @fullstack-dev#2"),
+                         ["fullstack-dev", "fullstack-dev#2"])
+
+    def test_ordinal_zero_or_hash_alone_not_matched(self) -> None:
+        # #0 non è un ordinale valido: la mention resta quella generica.
+        self.assertEqual(extract_mentions("@dev#0"), ["dev"])
+        self.assertEqual(extract_mentions("@dev# ciao"), ["dev"])
+
+    def test_escaped_ordinal_not_mention(self) -> None:
+        self.assertEqual(extract_mentions("il letterale $$dev#2 non conta"), [])
+
+    def test_ordinal_in_code_block_not_mention(self) -> None:
+        self.assertEqual(extract_mentions("`@dev#2` placeholder"), [])
+
+
 class PostMessageMentionsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.svc = TopicService(LocalFsStorage(tempfile.mkdtemp()))

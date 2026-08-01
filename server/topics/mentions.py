@@ -17,18 +17,21 @@ from __future__ import annotations
 
 import re
 
-# Stessa forma dei principal/agent name della piattaforma.
+# Stessa forma dei principal/agent name della piattaforma. L'ordinale
+# opzionale `#N` indirizza una ISTANZA di un seed multi-spawn (issue#94):
+# `@fullstack-dev#2` → mention strutturata "fullstack-dev#2".
 _NAME = r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
+_ORDINAL = r"(?:#[1-9][0-9]{0,2})?"
 
 # Sigillo valido solo dopo inizio stringa, whitespace o punteggiatura di
 # apertura (non dopo lettere, cifre, `/`, `.`, `$` ecc.).
-_MENTION_RE = re.compile(rf"(?:(?<=^)|(?<=[\s\(\[\{{<,;:'\"]))[@$]({_NAME})")
+_MENTION_RE = re.compile(rf"(?:(?<=^)|(?<=[\s\(\[\{{<,;:'\"]))[@$]({_NAME}{_ORDINAL})")
 
 _FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 _QUOTED_LINE_RE = re.compile(r"^[ \t]{0,3}>.*$", re.MULTILINE)
 # `$$nome` (escape letterale) va consumato PRIMA del match delle mention.
-_ESCAPED_RE = re.compile(rf"\$\${_NAME}")
+_ESCAPED_RE = re.compile(rf"\$\${_NAME}{_ORDINAL}")
 
 
 def extract_mentions(text: str) -> list[str]:
