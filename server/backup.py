@@ -1,5 +1,10 @@
 """Backup gestito della piattaforma (ISO 27001 A.8.13) via restic.
 
+Perimetro = datadir + (se separata) la directory dello stato decisionale del
+gateway (`CLODIA_TOOLS_STATE_DIR`, clodia-platform#80): da quando whitelist,
+consensi e deleghe vivono fuori dalla datadir condivisa, restic deve salvarli
+esplicitamente, altrimenti l'isolamento li farebbe uscire dal backup.
+
 La datadir (`/datadir`, montata dal gateway) è lo stato completo dell'istanza:
 vault (creds+topic), DB, PKI, agents, secrets. restic la salva su uno storage
 off-site **cifrato lato-client** (AES-256, passphrase nel vault) → il provider
@@ -16,7 +21,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import vault
+from . import state_paths, vault
 
 DATADIR = os.environ.get("CLODIA_DATA", "/datadir")
 CRED = "backup_config"  # credenziale infra nel vault (no grant per-agente)
@@ -194,6 +199,15 @@ def _snapshot_dbs(cfg: dict) -> None:
                            capture_output=True, text=True, timeout=300)
 
 
+def backup_targets() -> list[str]:
+    """Path salvati da restic: la datadir e, se isolata, la directory dello stato
+    decisionale del gateway (whitelist/gate/deleghe, clodia-platform#80)."""
+    targets = [DATADIR]
+    if state_paths.is_isolated():
+        targets.append(str(state_paths.state_dir()))
+    return targets
+
+
 def run_backup() -> dict:
     """Backup completo: snapshot DB → restic backup datadir → forget retention → check."""
     cfg = _cfg()
@@ -204,7 +218,8 @@ def run_backup() -> dict:
         excludes = []
         for e in _EXCLUDES:
             excludes += ["--exclude", e]
-        b = _run(["backup", DATADIR, "--tag", "platform", *excludes], cfg, timeout=3600)
+        b = _run(["backup", *backup_targets(), "--tag", "platform", *excludes],
+                 cfg, timeout=3600)
         result = {"backup_rc": b.returncode, "backup_err": b.stderr[-400:] if b.returncode else ""}
         if b.returncode != 0:
             raise RuntimeError(f"restic backup fallito: {b.stderr[:400]}")

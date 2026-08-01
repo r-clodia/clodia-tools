@@ -17,15 +17,20 @@ vs il suo cert emesso dalla CA), poi controlla che lo scope copra l'azione gated
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import time
 
 from . import pki_verify as _pv
+from . import state_paths
 
 # Store delle deleghe PERMANENTI (async·A): token raw, ri-verificati al lookup
-# (così scadenza/revoca/tamper vengono colti). Gateway datadir.
-_STORE = pathlib.Path(os.environ.get("CLODIA_DATA") or "/datadir") / "delegations" / "active.jsonl"
+# (così scadenza/revoca/tamper vengono colti). Stato DECISIONALE del gateway →
+# volume del solo gateway, non la datadir condivisa (clodia-platform#80).
+_STORE_NAME = "delegations/active.jsonl"
+
+
+def _store() -> pathlib.Path:
+    return state_paths.state_path(_STORE_NAME)
 
 
 def verify(token: str) -> dict | None:
@@ -60,8 +65,8 @@ def register(token: str) -> dict | None:
     v = verify(token)
     if not v:
         return None
-    _STORE.parent.mkdir(parents=True, exist_ok=True)
-    with _STORE.open("a", encoding="utf-8") as f:
+    _store().parent.mkdir(parents=True, exist_ok=True)
+    with _store().open("a", encoding="utf-8") as f:
         f.write(json.dumps({"token": token, "principal": v["principal"],
                             "scope": v["scope"]}, ensure_ascii=False) + "\n")
     return v
@@ -71,7 +76,7 @@ def find_covering(agent: str, verb: str) -> dict | None:
     """Prima delega permanente VALIDA (firma+scadenza ok) il cui scope copre
     (agent, verb). None se nessuna. Chiamato dal gate: se presente → unlock."""
     try:
-        lines = _STORE.read_text("utf-8").splitlines()
+        lines = _store().read_text("utf-8").splitlines()
     except FileNotFoundError:
         return None
     for ln in lines:
@@ -89,7 +94,7 @@ def list_active() -> list[dict]:
     """Deleghe permanenti VALIDE (firma+scadenza ok) → [{principal, scope, exp}]."""
     out: list[dict] = []
     try:
-        lines = _STORE.read_text("utf-8").splitlines()
+        lines = _store().read_text("utf-8").splitlines()
     except FileNotFoundError:
         return out
     for ln in lines:
@@ -107,7 +112,7 @@ def revoke(principal: str, verb: str) -> bool:
     """Rimuove le deleghe di `principal` che coprono `verb` (revoca lato store).
     Ritorna True se ne ha tolta almeno una."""
     try:
-        lines = _STORE.read_text("utf-8").splitlines()
+        lines = _store().read_text("utf-8").splitlines()
     except FileNotFoundError:
         return False
     kept, removed = [], False
@@ -122,7 +127,7 @@ def revoke(principal: str, verb: str) -> bool:
             continue
         kept.append(ln)
     if removed:
-        _STORE.write_text("\n".join(kept) + ("\n" if kept else ""), "utf-8")
+        _store().write_text("\n".join(kept) + ("\n" if kept else ""), "utf-8")
     return removed
 
 
