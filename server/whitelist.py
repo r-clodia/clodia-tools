@@ -4,15 +4,22 @@ from pathlib import Path
 import os
 import yaml
 
+from . import state_paths
+
 TOOL_ROOT = Path(__file__).resolve().parent.parent
 # Default BAKED nell'immagine (repo): è il SEED dei base-agent.
 _DEFAULT_CONFIG_PATH = TOOL_ROOT / "config.yaml"
-# Config RUNTIME sul volume dati: persiste ai rebuild dell'immagine, così le
-# registrazioni a runtime (connettori, backend MCP via Add-MCP, responder
-# confinati dei canali) non vengono azzerate a ogni deploy del gateway. In locale
-# (nessun CLODIA_DATA) coincide col default baked → nessun cambiamento.
-_DATA = os.environ.get("CLODIA_DATA")
-CONFIG_PATH = (Path(_DATA) / "clodia-tools-config.yaml") if _DATA else _DEFAULT_CONFIG_PATH
+# Config RUNTIME sul volume dello STATO DECISIONALE del gateway: persiste ai
+# rebuild dell'immagine, così le registrazioni a runtime (connettori, backend
+# MCP via Add-MCP, responder confinati dei canali) non vengono azzerate a ogni
+# deploy del gateway. La whitelist è la decisione di autorizzazione del
+# reference monitor: vive su un volume che l'agent-server NON monta
+# (`CLODIA_TOOLS_STATE_DIR`, issue clodia-platform#80); senza quella env resta
+# in CLODIA_DATA come prima. In locale (nessuna delle due) coincide col default
+# baked → nessun cambiamento.
+CONFIG_FILENAME = "clodia-tools-config.yaml"
+CONFIG_PATH = (state_paths.state_path(CONFIG_FILENAME)
+               if state_paths.configured() else _DEFAULT_CONFIG_PATH)
 
 
 def _read_yaml(p: Path) -> dict:

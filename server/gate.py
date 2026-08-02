@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import pki_verify
+from . import pki_verify, state_paths
 
 LOG = logging.getLogger("clodia-tools.gate")
 
@@ -84,16 +84,14 @@ def gated_verbs_spec() -> dict:
 # Un consenso è per (agent, instance, verb): l'umano approva l'uso di QUEL verbo
 # da parte di QUELL'istanza, con ccap1 + jti + revoca e scope sul verbo
 # (cap = "gate:<verb>").
-def _data() -> Path:
-    return Path(os.environ.get("CLODIA_DATA", "/datadir"))
-
-
+# I consensi (e le revoche) sono stato DECISIONALE: vivono sul volume del solo
+# gateway, non sulla datadir condivisa con l'agent-server (clodia-platform#80).
 def _store_path() -> Path:
-    return _data() / "clodia-tools-gate.json"
+    return state_paths.state_path("clodia-tools-gate.json")
 
 
 def _revoked_path() -> Path:
-    return _data() / "clodia-tools-gate-revoked.json"
+    return state_paths.state_path("clodia-tools-gate-revoked.json")
 
 
 def _load(p: Path) -> dict:
@@ -195,7 +193,7 @@ _REQ_TTL = 30 * 60
 
 
 def _req_path() -> Path:
-    return _data() / "clodia-tools-gate-requests.json"
+    return state_paths.state_path("clodia-tools-gate-requests.json")
 
 
 def request(agent: str, instance: str, verb: str, *, context: Optional[str] = None,
