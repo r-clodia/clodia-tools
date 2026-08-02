@@ -811,16 +811,31 @@ class TopicService:
             if st:
                 mts.append(st.mtime)
         updated_at = _iso(max(mts)) if mts else None
-        # recent_files = fino a 3 file dalla sorgente effettiva (Drive live o locale)
+        # recent_files = up to 3 files from the effective source (live Drive or
+        # local). BEST-EFFORT on purpose: this is a decoration for the card, and
+        # it must never be able to make `open` fail. A topic whose remote is
+        # unreachable — expired OAuth token, Drive down, network gone — still has
+        # meta and summary in the local control plane, so it stays readable.
+        # Letting the exception through made a single revoked Google token take
+        # down `topic.open` for that topic AND the whole topic list with it.
+        # `files_unavailable` tells the caller the difference between "no files"
+        # and "files could not be listed", so the UI can say so instead of
+        # silently showing an empty topic.
         fmt: list[tuple[float, str]] = []
-        files_store, files_base = self._files_backend(tier, name)
-        is_drive_live = files_store is not self.s
-        for e in files_store.list(files_base):
-            if e.kind != "file":
-                continue
-            st = None if is_drive_live else files_store.stat(
-                f"{files_base}/{e.name}".strip("/"))
-            fmt.append((st.mtime if st else 0.0, e.name))
+        files_unavailable = False
+        try:
+            files_store, files_base = self._files_backend(tier, name)
+            is_drive_live = files_store is not self.s
+            for e in files_store.list(files_base):
+                if e.kind != "file":
+                    continue
+                st = None if is_drive_live else files_store.stat(
+                    f"{files_base}/{e.name}".strip("/"))
+                fmt.append((st.mtime if st else 0.0, e.name))
+        except Exception as exc:  # noqa: BLE001 - never fatal for open()
+            files_unavailable = True
+            LOG.warning("topic %s/%s: file backend unreachable (%s) - opening "
+                        "with meta and summary only", tier, name, str(exc)[:160])
         fmt.sort(reverse=True)
         recent_files = [{"name": n, "path": f"files/{n}", "mtime_iso": _iso(mt)}
                         for mt, n in fmt[:3]]
@@ -833,6 +848,9 @@ class TopicService:
             "meta": meta, "summary": summary, "summary_version": summary_version,
             "tldr": _tldr(summary), "minutes": [], "agents_md": agents_md,
             "updated_at": updated_at, "recent_files": recent_files,
+            # True when the file backend could not be listed: the caller must not
+            # read an empty `recent_files` as "this topic has no files".
+            "files_unavailable": files_unavailable,
             "recap_history": self.recap_history(tier, name),
         }
 
