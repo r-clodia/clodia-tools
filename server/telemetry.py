@@ -62,9 +62,11 @@ def record(verb: str, agent: str, outcome: str, *, channel: Optional[str] = None
            detail: str = "") -> None:
     """Registra UNA invocazione. Non solleva mai.
 
-    `outcome` = `ok` | `denied` | `error`. `detail` è una CLASSE di motivo (es.
-    `whitelist`, `egress`, `unattended`, `denied_tools`), non un messaggio: i
-    messaggi contengono nomi di file e indirizzi.
+    `outcome` = `ok` | `denied` | `error` | `would_gate` | `would_deny`. Gli
+    ultimi due vengono dalla modalità di osservazione: il controllo ha deciso di
+    fermare e non ha fermato. `detail` è una CLASSE di motivo (es. `whitelist`,
+    `egress`, `unattended`, `denied_tools`), non un messaggio: i messaggi
+    contengono nomi di file e indirizzi.
     """
     if not enabled():
         return
@@ -117,12 +119,24 @@ def stats(limit: int = 5000) -> dict:
     by_agent: Counter = Counter()
     by_outcome: Counter = Counter()
     denied_by_why: Counter = Counter()
+    # Ciò che la modalità di osservazione serve a rispondere: quali controlli
+    # sarebbero scattati, quante volte e su quale verbo. Separati per agente,
+    # perché la risposta «servono» o «sono rumore» può essere diversa per clodia
+    # e per un postino.
+    would_by_why: Counter = Counter()
+    would_by_verb: Counter = Counter()
+    would_by_agent: Counter = Counter()
     for r in rows:
         by_verb[r.get("verb", "?")] += 1
         by_agent[r.get("agent", "?")] += 1
-        by_outcome[r.get("outcome", "?")] += 1
-        if r.get("outcome") == "denied":
+        oc = r.get("outcome", "?")
+        by_outcome[oc] += 1
+        if oc == "denied":
             denied_by_why[r.get("why", "?")] += 1
+        if oc in ("would_gate", "would_deny"):
+            would_by_why[r.get("why") or oc] += 1
+            would_by_verb[r.get("verb", "?")] += 1
+            would_by_agent[r.get("agent", "?")] += 1
     return {"rows": len(rows),
             "first_at": rows[0].get("at") if rows else None,
             "last_at": rows[-1].get("at") if rows else None,
@@ -130,6 +144,10 @@ def stats(limit: int = 5000) -> dict:
             "by_agent": dict(by_agent),
             "by_outcome": dict(by_outcome),
             "denied_by_reason": dict(denied_by_why),
+            "would_have_fired": {"total": sum(would_by_why.values()),
+                                 "by_reason": dict(would_by_why),
+                                 "by_verb": dict(would_by_verb.most_common(20)),
+                                 "by_agent": dict(would_by_agent)},
             "gated": sum(1 for r in rows if r.get("gated")),
             "unattended": sum(1 for r in rows if r.get("unattended")),
             "in_tainted_channel": sum(1 for r in rows if r.get("tainted"))}

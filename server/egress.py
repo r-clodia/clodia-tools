@@ -292,6 +292,13 @@ def check(agent: str, agent_cfg: dict, verb: str, arguments: dict,
     """
     declared = mode()
     m = declared
+    # La modalità di osservazione globale implica `report` qui: il rifiuto va
+    # registrato come «sarebbe scattato», non come rifiuto. Senza questo il
+    # verdetto direbbe `deny` e il chiamante lo tradurrebbe in un `would_deny` —
+    # coerente nel risultato, ma con due punti che decidono la stessa cosa.
+    from . import observe as _obs
+    if _obs.skipping() and m in ("gate", "on"):
+        m = "report"
     if m == "off":
         return {"checked": False, "action": "allow", "verb": verb, "mode": m}
     if unattended and m == "gate":
