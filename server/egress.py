@@ -278,7 +278,8 @@ def gate_reason(agent: str, verb: str, dtype: str, dests: list[str]) -> str:
             f"i prossimi invii verso quella destinazione non chiederanno più.")
 
 
-def check(agent: str, agent_cfg: dict, verb: str, arguments: dict) -> dict:
+def check(agent: str, agent_cfg: dict, verb: str, arguments: dict,
+          unattended: bool = False) -> dict:
     """Verdetto + AZIONE da compiere, secondo il modo. Non solleva mai.
 
     L'azione è una stringa perché il chiamante deve poter fare `await` sul gate:
@@ -289,11 +290,22 @@ def check(agent: str, agent_cfg: dict, verb: str, arguments: dict) -> dict:
         deny    rifiuta (PermissionError, lo solleva il chiamante)
         gate    chiedi all'umano; se approva → `remember` e procedi
     """
-    m = mode()
+    declared = mode()
+    m = declared
     if m == "off":
         return {"checked": False, "action": "allow", "verb": verb, "mode": m}
+    if unattended and m == "gate":
+        # Nessun umano davanti al turno: un gate resterebbe appeso fino al
+        # timeout. `on` è il modo giusto dove nessuno può rispondere — era già
+        # scritto nella docstring del modulo, qui viene applicato.
+        m = "on"
     v = decide(agent_cfg, verb, arguments)
-    v["mode"] = m
+    # Il modo DICHIARATO resta leggibile accanto a quello applicato: nel log,
+    # «configurato on» e «gate degradato perché non presidiato» sono due
+    # situazioni diverse e vanno distinte da chi legge.
+    v["mode"] = declared
+    v["applied_mode"] = m
+    v["unattended"] = bool(unattended)
     if not v.get("checked"):
         v["action"] = "allow"
         return v
