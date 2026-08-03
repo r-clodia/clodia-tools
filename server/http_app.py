@@ -148,11 +148,15 @@ def build_app() -> Starlette:
     from .gate_api import routes as gate_routes
     # Job logici: esecuzione verbi allowlisted senza turno LLM né gate.
     from .logic_api import routes as logic_routes
+    # Confinamento in uscita: vista read-only per il punteggio trifecta, che si
+    # calcola nell'agent-server ma non può leggere il volume del gateway (#80).
+    from .egress_api import routes as egress_routes
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
                 *imagegen_routes, *topics_routes, *connectors_routes, *profile_routes,
                 *telegram_routes, *agents_routes, *vault_routes,
-                *tool_routes, *mint_routes, *gate_routes, *logic_routes],
+                *tool_routes, *mint_routes, *gate_routes, *logic_routes,
+                *egress_routes],
         lifespan=_lifespan)
 
 
