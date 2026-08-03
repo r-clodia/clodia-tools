@@ -233,6 +233,27 @@ def normalize_meta_v2(meta: dict, tier: str) -> dict:
     return out
 
 
+def _remote_unreachable(exc: Exception, tier: str, name: str) -> "TopicError":
+    """Traduce il fallimento di un backend remoto in un errore AZIONABILE.
+
+    Senza questo il chiamante riceve l'eccezione grezza della libreria del
+    provider (`RefreshError: invalid_grant…`), che diventa un 500 opaco e, in UI,
+    un fallimento silenzioso: l'utente vede una cartella vuota e non sa che il
+    collegamento è scaduto. Il prefisso `remote-unavailable:` è il marcatore su
+    cui i chiamanti (agent-server, webui) distinguono "non ci sono file" da
+    "non è stato possibile leggerli".
+    """
+    txt = str(exc)
+    if "invalid_grant" in txt or "expired or revoked" in txt:
+        why = ("il collegamento Google di questo topic è scaduto o è stato "
+               "revocato: riautorizza l'integrazione Google per riprendere "
+               "l'accesso ai file")
+    else:
+        why = f"storage remoto non raggiungibile ({txt[:120]})"
+    LOG.warning("topic %s/%s: %s", tier, name, why)
+    return TopicError(f"remote-unavailable: {why}")
+
+
 class TopicService:
     def __init__(self, storage: Storage):
         self.s = storage          # control-plane local (meta, summary, .messages)
@@ -864,7 +885,10 @@ class TopicService:
             raise TopicError(f"path non valido: {relpath}")
         is_files, sub = self._files_rel(rel)
         if is_files:
-            store, base = self._files_backend(tier, name)
+            try:
+                store, base = self._files_backend(tier, name)
+            except Exception as exc:  # noqa: BLE001 - remote backend down
+                raise _remote_unreachable(exc, tier, name) from exc
             return store.read(f"{base}/{sub}".strip("/")).data
         return self.s.read(f"{self._dir(tier, name)}/{rel}").data
 
@@ -1041,8 +1065,14 @@ class TopicService:
         is_files, sub = self._files_rel(rel) if rel else (False, "")
         if rel and is_files:
             # dentro files/ → storage del topic (local o drive)
-            store, base = self._files_backend(tier, name)
-            for e in store.list(f"{base}/{sub}".strip("/")):
+            try:
+                store, base = self._files_backend(tier, name)
+                entries = list(store.list(f"{base}/{sub}".strip("/")))
+            except TopicError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — backend remoto giù
+                raise _remote_unreachable(exc, tier, name) from exc
+            for e in entries:
                 if e.name.startswith("."):
                     continue
                 if e.mime and e.mime.startswith(self._NATIVE_DOC_PREFIX):
