@@ -361,6 +361,42 @@ def gate_key(dtype: str, dest: str) -> str:
     return f"egress:{dtype}:{dest}"
 
 
+#: Avvertenze per CLASSE di destinazione. Nessuna chiamata di rete e nessun
+#: lookup: sapere se un repo è pubblico richiederebbe l'API GitHub, che può
+#: sbagliare, essere stale, e soprattutto sposterebbe la decisione dal giudizio
+#: dell'owner a un'interrogazione. Se lo aggiunge lui è chiaro — il compito del
+#: dialog è dirgli **cosa** sta concedendo, non decidere al suo posto.
+_DANGER = {
+    "github": ("un repository su github.com. Se è pubblico, tutto ciò che viene "
+               "spinto lì è visibile a chiunque e resta nella storia del repo "
+               "anche se cancellato dopo."),
+    "http": ("un sistema di terzi raggiunto via HTTP. Non sai come tratta ciò "
+             "che riceve, né per quanto lo conserva."),
+    "mailto": ("un indirizzo email. Una volta inviato, il messaggio non è più "
+               "richiamabile e la copia resta sul server del destinatario."),
+    "tg": ("una chat su Telegram, cioè su un'infrastruttura non tua."),
+    "gsheets": ("un foglio Google. Se è condiviso, lo vede chi ha il link."),
+}
+
+
+def danger_note(uri: str) -> str:
+    """Avvertenza sulla classe di destinazione, o stringa vuota.
+
+    Serve nel dialog di approvazione: approvare una destinazione la rende
+    silenziosa da lì in avanti, quindi è il momento in cui l'informazione deve
+    essere completa. Non blocca niente.
+    """
+    u = (uri or "").strip().lower()
+    if not u or u == "*":
+        return ("QUALUNQUE destinazione di questo tipo, senza ulteriori domande." if u == "*"
+                else "")
+    scheme = u.partition(":")[0]
+    if scheme in ("http", "https"):
+        host = urlsplit(u).hostname or ""
+        return _DANGER["github"] if host.endswith("github.com") else _DANGER["http"]
+    return _DANGER.get(scheme, "")
+
+
 def gate_reason(agent: str, verb: str, dtype: str, dests: list[str]) -> str:
     """Testo del dialog. Dice ANCHE che approvando la destinazione resta.
 
@@ -371,10 +407,14 @@ def gate_reason(agent: str, verb: str, dtype: str, dests: list[str]) -> str:
     invio.
     """
     where = ", ".join(dests)
+    notes = [n for n in {danger_note(d) for d in dests} if n]
+    warn = ("\n⚠️ " + " ".join(sorted(notes))) if notes else ""
     return (f"@{agent} vuole usare {verb} verso {where}, che non è fra le "
-            f"destinazioni consentite. Approvando, l'invio procede E "
-            f"{where} viene aggiunto alla whitelist '{dtype}' di {agent}: "
-            f"i prossimi invii verso quella destinazione non chiederanno più.")
+            f"destinazioni consentite. Approvando, l'invio procede E {where} "
+            f"viene aggiunto alle destinazioni ammesse — per TUTTI gli agenti, "
+            f"non solo per {agent}: è la destinazione che stai giudicando, non "
+            f"chi spedisce. I prossimi invii verso di lì non chiederanno più."
+            f"{warn}")
 
 
 def check(agent: str, agent_cfg: dict, verb: str, arguments: dict,
