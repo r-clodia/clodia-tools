@@ -27,8 +27,8 @@ class _Values:
     def __init__(self, outer):
         self.o = outer
 
-    def get(self, spreadsheetId, range):  # noqa: N803 - Google API arg names
-        self.o.calls.append(("values.get", spreadsheetId, range))
+    def get(self, spreadsheetId, range, valueRenderOption):  # noqa: N803
+        self.o.calls.append(("values.get", spreadsheetId, range, valueRenderOption))
         return _Exec({"range": range, "values": self.o.values})
 
     def append(self, spreadsheetId, range, valueInputOption,  # noqa: N803
@@ -117,11 +117,23 @@ class GSheetsTest(unittest.TestCase):
     def test_read_defaults_to_the_first_tab(self):
         r = gsheets.read("SID")
         self.assertEqual(r["rows"], 2)
-        self.assertIn(("values.get", "SID", "preventivo"), self.svc.calls)
+        self.assertIn(("values.get", "SID", "preventivo", "FORMATTED_VALUE"), self.svc.calls)
 
     def test_read_honours_an_explicit_range(self):
         gsheets.read("SID", range="personale!A1:C5")
-        self.assertIn(("values.get", "SID", "personale!A1:C5"), self.svc.calls)
+        self.assertIn(("values.get", "SID", "personale!A1:C5", "FORMATTED_VALUE"),
+                      self.svc.calls)
+
+    def test_read_can_return_formula_text_instead_of_the_computed_value(self):
+        """A default read is lossy where a formula lives, and silently so.
+
+        Found in the live end-to-end check: `=SUM(B1:C1)` came back as `0`. An
+        agent reading a budget to reproduce it would write back constants,
+        destroying what this module exists to preserve.
+        """
+        r = gsheets.read("SID", tab="preventivo", formulas=True)
+        self.assertIn(("values.get", "SID", "preventivo", "FORMULA"), self.svc.calls)
+        self.assertTrue(r["formulas"])
 
     def test_append_rows_inserts_rows_and_keeps_formulas(self):
         r = gsheets.append_rows("SID", "personale", [["x", "=SUM(A1:A2)"]])

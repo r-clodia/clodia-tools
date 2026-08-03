@@ -1238,10 +1238,14 @@ _GSHEETS_TOOLS: list[Tool] = [
              "required": ["spreadsheet_id"]}),
     Tool(name="gsheets.read",
          description=("Legge i valori di un range A1 (es. 'Foglio1!A1:D20') oppure di "
-                      "un'intera tab. Senza range né tab legge la PRIMA tab."),
+                      "un'intera tab. Senza range né tab legge la PRIMA tab. "
+                      "formulas=true restituisce il TESTO delle formule invece del "
+                      "valore calcolato: usalo se devi riprodurre il foglio, "
+                      "altrimenti una formula ti torna come numero."),
          inputSchema={"type": "object", "properties": {
              "spreadsheet_id": {"type": "string"}, "range": {"type": "string"},
-             "tab": {"type": "string"}, "account": {"type": "string"}},
+             "tab": {"type": "string"}, "formulas": {"type": "boolean"},
+             "account": {"type": "string"}},
              "required": ["spreadsheet_id"]}),
     Tool(name="gsheets.add_tab",
          description=("Aggiunge una tab a un Google Sheet ESISTENTE lasciando intatte "
@@ -1556,7 +1560,7 @@ def _dispatch_gsheets(name: str, a: dict):
         return gsh.list_tabs(a["spreadsheet_id"], account=a.get("account"))
     if verb == "read":
         return gsh.read(a["spreadsheet_id"], range=a.get("range"), tab=a.get("tab"),
-                        account=a.get("account"))
+                        formulas=bool(a.get("formulas")), account=a.get("account"))
     if verb == "add_tab":
         return gsh.add_tab(a["spreadsheet_id"], a["title"], index=a.get("index"),
                            account=a.get("account"))
