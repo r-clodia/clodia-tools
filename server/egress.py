@@ -39,15 +39,21 @@ Three properties from §7 that this module implements literally:
 Modes, via `CLODIA_EGRESS_ENFORCE`:
 
     off      no check at all (escape hatch)
-    report   decide and LOG, allow anyway — default. Harvests the real
-             destination set from real traffic, which is exactly how the four
-             gaps in the network whitelist were found: by reading the log after
-             traffic, not by guessing the list up front.
-    on       enforce: a denied destination raises PermissionError
+    report   decide and LOG, allow anyway. Useful to harvest destinations
+             without involving the human at all.
+    gate     a destination outside the whitelist asks the HUMAN — default.
+             Approving both lets the call through and REMEMBERS the destination,
+             so the whitelist fills up through use instead of being written up
+             front. This is the decision of 3 Aug 2026: start empty, populate by
+             using it, and never let an agent reach an unvetted address silently.
+    on       hard deny, no question asked. The right mode where nobody can
+             answer — an unattended job that hits a gate stalls until the
+             request times out, and #116 is the lesson about unattended paths
+             attempting gated actions.
 
-This module decides and explains. It does not know about gates: a denied
-destination is a candidate for the "new destination" gate (§10 step 6), which
-comes after this and needs this to exist.
+The gate is the whole point of the `gate` mode: sending to an unknown address is
+neither refused nor allowed, it is ASKED. `check()` returns the action and the
+caller performs it, so the async gate machinery stays out of this module.
 """
 from __future__ import annotations
 
@@ -63,8 +69,10 @@ UNKNOWN = "?"
 
 
 def mode() -> str:
-    m = (os.environ.get("CLODIA_EGRESS_ENFORCE") or "report").strip().lower()
-    return m if m in ("off", "report", "on") else "report"
+    m = (os.environ.get("CLODIA_EGRESS_ENFORCE") or "gate").strip().lower()
+    # An unknown value falls back to `gate`, never to `off`: a typo in the env
+    # var must not silently disable the whitelist.
+    return m if m in ("off", "report", "gate", "on") else "gate"
 
 
 # ── destination extractors ───────────────────────────────────────────────────
@@ -80,6 +88,20 @@ def _emails(a: dict) -> list[str]:
         out += [x.strip().lower() for x in str(raw).replace(";", ",").split(",")
                 if x.strip()]
     return out
+
+
+def address_of(header: str) -> str:
+    """Estrae l'indirizzo da un header From: `Nome <a@b.it>` → `a@b.it`.
+
+    Serve a `email.reply`, il cui destinatario non sta negli argomenti: viene dal
+    messaggio a cui si risponde. Funzione pura e separata dalla chiamata IMAP,
+    così il parsing è testabile senza rete.
+    """
+    h = (header or "").strip()
+    if "<" in h and ">" in h:
+        h = h[h.index("<") + 1:h.index(">")]
+    h = h.strip().strip('"').strip("'").lower()
+    return h if "@" in h else ""
 
 
 def _chat(a: dict) -> list[str]:
@@ -230,40 +252,121 @@ def decide(agent_cfg: dict, verb: str, arguments: dict) -> dict:
             "destinations": dests, "rules": rules}
 
 
-def enforce(agent: str, agent_cfg: dict, verb: str, arguments: dict) -> dict:
-    """Apply `decide` according to the mode. Raises PermissionError only in `on`.
+def gate_key(dtype: str, dest: str) -> str:
+    """Chiave del gate per una destinazione nuova.
 
-    In `report` the call proceeds and the verdict is logged in a form meant to be
-    harvested: the log IS the way the real destination set is discovered, so it
-    carries agent, type and destinations, never the payload.
+    Per DESTINAZIONE, non per verbo: approvare «scrivi a mario@x.it» è una
+    decisione diversa da «puoi mandare mail», ed è quella che l'umano è in grado
+    di prendere guardando il dialog.
+    """
+    return f"egress:{dtype}:{dest}"
+
+
+def gate_reason(agent: str, verb: str, dtype: str, dests: list[str]) -> str:
+    """Testo del dialog. Dice ANCHE che approvando la destinazione resta.
+
+    §7 proprietà 2: aggiungere una destinazione è più privilegiato della singola
+    invocazione, perché la rende silenziosa per sempre. Se l'approvazione
+    popola la whitelist — ed è la decisione presa — l'umano deve saperlo dal
+    dialog, altrimenti concede un permesso permanente credendo di autorizzare un
+    invio.
+    """
+    where = ", ".join(dests)
+    return (f"@{agent} vuole usare {verb} verso {where}, che non è fra le "
+            f"destinazioni consentite. Approvando, l'invio procede E "
+            f"{where} viene aggiunto alla whitelist '{dtype}' di {agent}: "
+            f"i prossimi invii verso quella destinazione non chiederanno più.")
+
+
+def check(agent: str, agent_cfg: dict, verb: str, arguments: dict) -> dict:
+    """Verdetto + AZIONE da compiere, secondo il modo. Non solleva mai.
+
+    L'azione è una stringa perché il chiamante deve poter fare `await` sul gate:
+    tenere la macchina del consenso fuori da questo modulo lo lascia testabile
+    senza event loop.
+
+        allow   procedi
+        deny    rifiuta (PermissionError, lo solleva il chiamante)
+        gate    chiedi all'umano; se approva → `remember` e procedi
     """
     m = mode()
     if m == "off":
-        return {"checked": False, "allowed": True, "verb": verb, "mode": m}
+        return {"checked": False, "action": "allow", "verb": verb, "mode": m}
     v = decide(agent_cfg, verb, arguments)
     v["mode"] = m
     if not v.get("checked"):
+        v["action"] = "allow"
         return v
     if v["allowed"]:
         LOG.info("egress ok · %s · %s → %s", agent, verb,
                  ", ".join(v.get("destinations") or []))
+        v["action"] = "allow"
         return v
+    dests = [d for d in (v.get("refused") or v.get("destinations") or []) if d]
     if m == "report":
-        # Deliberately WARNING, not error: it is the line an operator greps to
-        # build the whitelist, and it must stand out without looking like a
-        # failure — nothing was blocked.
+        # WARNING di proposito, non error: è la riga che si grepperebbe per
+        # costruire la whitelist, e non deve sembrare un fallimento — non è
+        # stato bloccato niente.
         LOG.warning("egress WOULD-DENY · %s · %s → %s · %s (mode=report, "
-                    "chiamata consentita)", agent, verb,
-                    ", ".join(v.get("destinations") or []), v.get("reason"))
-        v["allowed"] = True
+                    "chiamata consentita)", agent, verb, ", ".join(dests),
+                    v.get("reason"))
+        v["action"] = "allow"
         v["would_deny"] = True
         return v
+    if m == "gate":
+        # Una destinazione non vagliata non si rifiuta e non si consente: si
+        # CHIEDE. È la decisione del 3 ago 2026 — whitelist vuota all'inizio,
+        # popolata dall'uso.
+        if UNKNOWN in dests:
+            # Niente da approvare e niente da ricordare: il dialog dovrebbe dire
+            # «verso una destinazione che non sappiamo qual è». Si nega, e resta
+            # la via esplicita del `*` sul tipo.
+            LOG.warning("egress DENY · %s · %s · destinazione non leggibile "
+                        "dalla chiamata (nessun gate possibile)", agent, verb)
+            v["action"] = "deny"
+            return v
+        v["action"] = "gate"
+        v["gate_key"] = gate_key(v["type"], dests[0])
+        v["gate_reason"] = gate_reason(agent, verb, v["type"], dests)
+        v["remember"] = dests
+        LOG.info("egress GATE · %s · %s → %s (%s)", agent, verb,
+                 ", ".join(dests), v.get("reason"))
+        return v
     LOG.warning("egress DENY · %s · %s → %s · %s", agent, verb,
-                ", ".join(v.get("destinations") or []), v.get("reason"))
-    raise PermissionError(
+                ", ".join(dests), v.get("reason"))
+    v["action"] = "deny"
+    return v
+
+
+def denied_error(agent: str, v: dict) -> PermissionError:
+    return PermissionError(
         f"uscita non consentita per l'agent '{agent}': {v.get('reason')}. "
         f"Le destinazioni ammesse si dichiarano in egress_allow.{v.get('type')} "
         f"nella config del gateway (modifica gated, come i grant).")
+
+
+def remember(agent: str, dtype: str, dests: list[str]) -> list[str]:
+    """Aggiunge le destinazioni approvate alla whitelist di `agent` e persiste.
+
+    Scrive nella config del GATEWAY, sul suo volume: l'agent-server non la monta,
+    quindi un agente non può aggiungersi destinazioni da sé (clodia-platform#80).
+    Idempotente. Ritorna le regole risultanti per quel tipo.
+    """
+    from . import whitelist as _wl
+    added = [d for d in dests if d and d != UNKNOWN]
+    if not added:
+        return []
+    agents = _wl.CONFIG.setdefault("agents", {})
+    spec = agents.setdefault(agent, {})
+    allow = spec.setdefault("egress_allow", {})
+    rules = allow.setdefault(dtype, [])
+    for d in added:
+        if d not in rules:
+            rules.append(d)
+    _wl.save_config()
+    LOG.warning("egress whitelist · %s · %s += %s (approvato da un umano)",
+                agent, dtype, ", ".join(added))
+    return list(rules)
 
 
 def summary(agent_cfg: dict) -> dict:

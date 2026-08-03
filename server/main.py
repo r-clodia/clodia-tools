@@ -2054,6 +2054,27 @@ def _gate_notify_principal(agent: str, gate_key: str, principal: str | None) -> 
     return False
 
 
+def _reply_recipient(arguments: dict) -> str:
+    """Destinatario reale di un `email.reply`, letto dal messaggio originale.
+
+    Stringa vuota se non risolvibile → `egress.check` la tratta come
+    destinazione ignota e nega. È la direzione d'errore giusta: «l'attaccante
+    scrive, l'agente risponde con i dati» è il percorso dell'injection, e non
+    sapere a chi si sta rispondendo non è una buona ragione per procedere.
+    """
+    try:
+        msg = email.read_message(
+            str(arguments.get("email_id") or ""),
+            account=_email_account(arguments),
+            folder=arguments.get("folder") or "INBOX")
+    except Exception as e:  # noqa: BLE001 — non risolvibile ≠ consentito
+        LOG.warning("egress: destinatario di email.reply non risolvibile (%s)", e)
+        return ""
+    from . import egress as _eg
+    src = msg.get("from") or (msg.get("message") or {}).get("from") or ""
+    return _eg.address_of(str(src))
+
+
 async def _require_gate_consent(
     agent: str, gate_key: str, *, consume: bool, reason: str = "",
     allow_delegation: bool = True,
@@ -2206,10 +2227,37 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 _acfg = agent_config(_ag) if _ag else {}
             except KeyError:
                 # Agent non in config (clone, connettore): nessuna regola
-                # dichiarata → la decisione la prende egress.decide (deny in
-                # `on`, log in `report`). Non si inventa un default permissivo.
+                # dichiarata → decide `egress.check`. Non si inventa un default
+                # permissivo.
                 _acfg = {}
-            _egress.enforce(_ag or "", _acfg, name, arguments)
+            # `email.reply` non ha il destinatario negli argomenti: viene dal
+            # messaggio a cui risponde, cioè da contenuto non fidato. Senza
+            # risolverlo il verdetto sarebbe «destinazione ignota → nego», che
+            # romperebbe il caso d'uso legittimo (un messaggero risponde alla
+            # posta in arrivo: è il suo lavoro). Si risolve qui, al call-site,
+            # con una lettura in più che avviene SOLO per questo verbo.
+            _eargs = arguments
+            if name == "email.reply" and not (arguments.get("to") or ""):
+                _eargs = {**arguments, "to": _reply_recipient(arguments)}
+            _ev = _egress.check(_ag or "", _acfg, name, _eargs)
+            if _ev.get("action") == "deny":
+                raise _egress.denied_error(_ag or "", _ev)
+            if _ev.get("action") == "gate":
+                # Destinazione non vagliata → si CHIEDE, non si rifiuta. La
+                # whitelist nasce vuota e si popola con l'uso (decisione del
+                # 3 ago 2026): approvando, l'invio procede e la destinazione
+                # resta ammessa. Il gate è sulla DESTINAZIONE, non sul verbo:
+                # «scrivi a mario@x.it» è la domanda che l'umano sa valutare,
+                # «puoi mandare mail» no.
+                await _require_gate_consent(
+                    _ag, _ev["gate_key"], consume=True,
+                    reason=_ev.get("gate_reason", ""),
+                    # Nessuna delega prefirmata su una destinazione nuova: è
+                    # l'atto che la rende silenziosa per sempre (§7 proprietà 2),
+                    # e una delega la renderebbe silenziosa senza che nessuno la
+                    # veda mai.
+                    allow_delegation=False)
+                _egress.remember(_ag or "", _ev["type"], _ev.get("remember") or [])
         if name == "fs.list_dir":
             result = fs.list_dir(arguments["path"])
         elif name == "web.post":
