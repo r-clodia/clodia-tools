@@ -1224,6 +1224,53 @@ _GDOCS_TOOLS: list[Tool] = [
              "required": ["document_id", "find", "replace"]}),
 ]
 
+# gsheets.* — Google Sheets on the same Workspace credential. The Sheets API
+# accepts the `auth/drive` scope the connector already requests, so this needed
+# no new consent (clodia-platform#118). Every verb is INCREMENTAL: before this,
+# acting on a spreadsheet meant gdrive.download + gdrive.upload, which replaces
+# the file and destroys the tabs the agent did not author.
+_GSHEETS_TOOLS: list[Tool] = [
+    Tool(name="gsheets.list_tabs",
+         description=("Tab di un Google Sheet: titolo, id, posizione e dimensioni. "
+                      "Da chiamare prima di leggere o scrivere, per sapere i nomi."),
+         inputSchema={"type": "object", "properties": {
+             "spreadsheet_id": {"type": "string"}, "account": {"type": "string"}},
+             "required": ["spreadsheet_id"]}),
+    Tool(name="gsheets.read",
+         description=("Legge i valori di un range A1 (es. 'Foglio1!A1:D20') oppure di "
+                      "un'intera tab. Senza range né tab legge la PRIMA tab."),
+         inputSchema={"type": "object", "properties": {
+             "spreadsheet_id": {"type": "string"}, "range": {"type": "string"},
+             "tab": {"type": "string"}, "account": {"type": "string"}},
+             "required": ["spreadsheet_id"]}),
+    Tool(name="gsheets.add_tab",
+         description=("Aggiunge una tab a un Google Sheet ESISTENTE lasciando intatte "
+                      "le altre (mutazione, non riscrittura del file). Errore "
+                      "azionabile se il titolo è già in uso."),
+         inputSchema={"type": "object", "properties": {
+             "spreadsheet_id": {"type": "string"}, "title": {"type": "string"},
+             "index": {"type": "integer"}, "account": {"type": "string"}},
+             "required": ["spreadsheet_id", "title"]}),
+    Tool(name="gsheets.append_rows",
+         description=("Aggiunge righe DOPO l'ultima riga popolata di una tab: non "
+                      "sovrascrive nulla. È la scrittura da preferire. I valori "
+                      "entrano come se digitati (le formule restano formule)."),
+         inputSchema={"type": "object", "properties": {
+             "spreadsheet_id": {"type": "string"}, "tab": {"type": "string"},
+             "rows": {"type": "array", "items": {"type": "array"}},
+             "account": {"type": "string"}},
+             "required": ["spreadsheet_id", "tab", "rows"]}),
+    Tool(name="gsheets.write_range",
+         description=("Scrive in un range A1 esplicito SOVRASCRIVENDO le celle "
+                      "esistenti. Nessun default e nessuna scorciatoia su tab intera: "
+                      "per aggiungere dati usa append_rows."),
+         inputSchema={"type": "object", "properties": {
+             "spreadsheet_id": {"type": "string"}, "range": {"type": "string"},
+             "values": {"type": "array", "items": {"type": "array"}},
+             "account": {"type": "string"}},
+             "required": ["spreadsheet_id", "range", "values"]}),
+]
+
 # telegram.* — invio + inbound con lease per-chat. Un agente scrive solo a chat
 # che hanno già scritto e di cui detiene il lease; chat diverse → lease
 # indipendenti. Il bot token vive nel vault, mai nel modello.
@@ -1502,6 +1549,26 @@ def _dispatch_gdocs(name: str, a: dict):
     raise ValueError(f"unknown gdocs verb: {name}")
 
 
+def _dispatch_gsheets(name: str, a: dict):
+    from .tools import gsheets as gsh
+    verb = name.split(NS_SEP_DOT, 1)[1]
+    if verb == "list_tabs":
+        return gsh.list_tabs(a["spreadsheet_id"], account=a.get("account"))
+    if verb == "read":
+        return gsh.read(a["spreadsheet_id"], range=a.get("range"), tab=a.get("tab"),
+                        account=a.get("account"))
+    if verb == "add_tab":
+        return gsh.add_tab(a["spreadsheet_id"], a["title"], index=a.get("index"),
+                           account=a.get("account"))
+    if verb == "append_rows":
+        return gsh.append_rows(a["spreadsheet_id"], a["tab"], a["rows"],
+                               account=a.get("account"))
+    if verb == "write_range":
+        return gsh.write_range(a["spreadsheet_id"], a["range"], a["values"],
+                               account=a.get("account"))
+    raise ValueError(f"unknown gsheets verb: {name}")
+
+
 def _dispatch_telegram(name: str, a: dict):
     from .tools import telegram as tg
     verb = name.split(NS_SEP_DOT, 1)[1]
@@ -1612,7 +1679,7 @@ def _native_tool_namespaces() -> list[str]:
     """Namespace dei tool nativi del gateway (per agents.list_tools)."""
     tools = (_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
              + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS
-             + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _AGENT_TOOLS
+             + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS + _AGENT_TOOLS
              + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
@@ -1856,6 +1923,7 @@ def _connector_allows(name: str, agent: str | None) -> bool:
     - gdrive.*     se l'agent ha un grant google_/gworkspace_;
     - gcalendar.*  idem (stessa credenziale Google Workspace);
     - gdocs.*      idem.
+    - gsheets.*    idem (l'API Sheets accetta lo scope `drive`).
     Così la delega non dipende da config.yaml (effimero al rebuild)."""
     grants = _vault_grants(agent)
     # La credenziale Google UNIFICATA (google_<account>) abilita SIA email.* SIA
@@ -1869,7 +1937,7 @@ def _connector_allows(name: str, agent: str | None) -> bool:
     if name.startswith("telegram.") and "telegram_bot_token" in grants:
         return True
     _gws_grant = any(c.startswith("google_") or c.startswith("gworkspace_") for c in grants)
-    if name.startswith(("gdrive.", "gcalendar.", "gdocs.")) and _gws_grant:
+    if name.startswith(("gdrive.", "gcalendar.", "gdocs.", "gsheets.")) and _gws_grant:
         return True
     return False
 
@@ -1929,7 +1997,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", [])) | set(current_scoped_tools())
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _AGENT_TOOLS
+    native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS + _AGENT_TOOLS
                   + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     # Feature `rag` (profilo istanza): off → i verbi rag.*/eu_corpus.* non
     # esistono proprio (né in lista né al dispatch).
@@ -2211,6 +2279,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_gcalendar(name, arguments)
         elif name.startswith("gdocs."):
             result = _dispatch_gdocs(name, arguments)
+        elif name.startswith("gsheets."):
+            result = _dispatch_gsheets(name, arguments)
         elif name.startswith("runtime."):
             # proxy httpx SINCRONO all'agent-server → offload su thread (no blocco loop)
             result = await asyncio.to_thread(_dispatch_runtime, name, arguments, _ag)
