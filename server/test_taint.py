@@ -139,3 +139,34 @@ class StateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompositionEpochTests(unittest.TestCase):
+    """La composizione entra nella chiave del gate di contesto.
+
+    È IL meccanismo con cui «il cambio di composizione invalida gli unlock
+    attivi» (#77): con la composizione dentro la chiave, aggiungere un
+    partecipante produce una chiave diversa e l'unlock precedente non combacia
+    più. Nessuna revoca da spazzare — che è l'unico modo per cui non può essere
+    dimenticata.
+    """
+
+    def test_the_key_changes_when_a_participant_is_added(self):
+        a = taint.context_gate_key("chan:SEAL-1:x:clodia", ["clodia", "davide"])
+        b = taint.context_gate_key("chan:SEAL-1:x:clodia",
+                                   ["clodia", "davide", "messaggero"])
+        self.assertNotEqual(a, b)
+
+    def test_the_key_does_not_depend_on_the_order(self):
+        """Altrimenti si invaliderebbe a ogni riordino del meta, e i gate
+        arriverebbero senza che nulla sia cambiato."""
+        a = taint.context_gate_key("chan:SEAL-1:x:clodia", ["clodia", "davide"])
+        b = taint.context_gate_key("chan:SEAL-1:x:clodia", ["davide", "clodia"])
+        self.assertEqual(a, b)
+
+    def test_the_key_names_the_channel_and_is_not_per_spawn(self):
+        k = taint.context_gate_key("chan:SEAL-1:x:clodia#4", ["clodia"])
+        self.assertTrue(k.startswith("egress-context:SEAL-1/x:"))
+
+    def test_no_channel_means_no_key(self):
+        self.assertIsNone(taint.context_gate_key("", ["clodia"]))
