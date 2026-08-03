@@ -292,3 +292,49 @@ class ReplyRecipientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DangerNoteTests(unittest.TestCase):
+    """L'avvertenza nel dialog di approvazione (#128, revisione del 4 ago 2026).
+
+    Sostituisce il controllo «un repo pubblico non è mai aggiungibile», che era un
+    cavillo: richiedeva l'API GitHub, poteva sbagliare o essere stale, e spostava
+    la decisione dal giudizio dell'owner a un lookup. Se lo aggiunge lui è chiaro;
+    il compito del dialog è dire COSA sta concedendo.
+    """
+
+    def test_github_warns_about_public_visibility(self):
+        n = egress.danger_note("https://github.com/r-clodia/clodia-web")
+        self.assertIn("pubblico", n)
+        self.assertIn("storia del repo", n)
+
+    def test_another_host_warns_about_a_third_party_system(self):
+        self.assertIn("terzi", egress.danger_note("https://api.tizio.it/"))
+
+    def test_each_scheme_has_its_own_note(self):
+        for uri, needle in (("mailto:x@y.it", "non è più richiamabile"),
+                            ("tg:123", "non tua"),
+                            ("gsheets:1abc", "chi ha il link")):
+            with self.subTest(uri=uri):
+                self.assertIn(needle, egress.danger_note(uri))
+
+    def test_the_owners_own_drive_folder_gets_no_warning(self):
+        """Una cartella del Drive dell'owner non è un sistema di terzi: avvertire
+        anche lì insegnerebbe a ignorare l'avvertenza."""
+        self.assertEqual(egress.danger_note("gdrive:folder/1AbC"), "")
+
+    def test_a_star_says_it_opens_everything(self):
+        self.assertIn("QUALUNQUE", egress.danger_note("*"))
+
+    def test_the_dialog_carries_the_warning_and_says_it_is_for_everyone(self):
+        r = egress.gate_reason("clodia", "github.push_files", "github",
+                               ["https://github.com/r-clodia/clodia-web"])
+        self.assertIn("⚠️", r)
+        self.assertIn("pubblico", r)
+        # approvare vale per tutti: è la destinazione che si giudica (#128)
+        self.assertIn("TUTTI gli agenti", r)
+
+    def test_no_warning_means_no_empty_alert_line(self):
+        r = egress.gate_reason("clodia", "gdrive.upload", "drive",
+                               ["gdrive:folder/1AbC"])
+        self.assertNotIn("⚠️", r)
