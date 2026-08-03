@@ -21,12 +21,15 @@ def _call(req):
     return asyncio.run(egress_api.profile(req))
 
 
-_CFG = {"agents": {
-    "messaggero": {"egress_allow": {"email": ["a@b.it", "@tomato.blue"],
-                                    "telegram": []}},
-    "clodia": {"egress_allow": {"http": ["*"]}},
-    "segretario": {},
-}}
+_CFG = {"egress_allow": ["mailto:a@b.it", "mailto:*@tomato.blue"],
+        "source_allow": ["https://eur-lex.europa.eu/legal-content/"],
+        "agents": {}}
+
+
+def _with(cfg):
+    from . import whitelist as wl
+    from unittest.mock import patch as _p
+    return _p.object(wl, "CONFIG", cfg)
 
 
 class AuthTests(unittest.TestCase):
@@ -36,42 +39,49 @@ class AuthTests(unittest.TestCase):
             self.assertEqual(_call(_Req("wrong")).status_code, 401)
 
     def test_with_no_secret_configured_it_fails_closed(self):
-        """An unset secret must not mean 'no authentication required'."""
+        """Un secret non impostato non deve significare «nessuna autenticazione»."""
         with patch.dict("os.environ", {}, clear=True):
             self.assertEqual(_call(_Req("anything")).status_code, 401)
 
 
-class PayloadTests(unittest.TestCase):
+class ShapeTests(unittest.TestCase):
     def _body(self):
         import json
         with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t",
-                                       "CLODIA_EGRESS_ENFORCE": "gate"}), \
-             patch("server.whitelist.CONFIG", _CFG):
+                                       "CLODIA_EGRESS_ENFORCE": "gate"}), _with(_CFG):
             r = _call(_Req("s3cr3t"))
         self.assertEqual(r.status_code, 200)
         return json.loads(r.body)
 
     def test_the_destinations_are_never_returned(self):
-        """An address book is private data, and the score does not need it to
-        tell arbitrary egress from circumscribed egress. Returning it would put
-        the owner's contacts into the context of whatever renders the score."""
+        """Una rubrica è dato privato, e al punteggio non serve per distinguere
+        uscita circoscritta da arbitraria. Restituirla metterebbe i contatti
+        dell'owner nel contesto di qualunque cosa renderizzi il numero."""
         raw = str(self._body())
-        for leaked in ("a@b.it", "@tomato.blue"):
+        for leaked in ("a@b.it", "tomato.blue", "eur-lex"):
             self.assertNotIn(leaked, raw)
 
-    def test_it_reports_the_shape_per_agent_and_type(self):
+    def test_it_reports_the_shape_of_both_lists(self):
         b = self._body()
         self.assertEqual(b["mode"], "gate")
-        self.assertEqual(b["agents"]["messaggero"]["email"],
-                         {"scope": "listed", "count": 2})
-        # declared empty = muted, distinct from "never declared"
-        self.assertEqual(b["agents"]["messaggero"]["telegram"]["scope"], "muted")
-        self.assertEqual(b["agents"]["segretario"], {})
+        self.assertEqual(b["egress"], {"scope": "listed", "count": 2,
+                                       "schemes": ["mailto"]})
+        self.assertEqual(b["source"]["scope"], "listed")
 
-    def test_a_star_rule_is_wide_not_circumscribed(self):
-        """`["*"]` is declared but constrains nothing. Reporting it as
-        circumscribed is the one direction of error this measure cannot afford."""
-        self.assertEqual(self._body()["agents"]["clodia"]["http"]["scope"], "wide")
+    def test_a_star_is_wide_not_circumscribed(self):
+        import json
+        cfg = {"egress_allow": ["*", "mailto:a@b.it"], "agents": {}}
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), _with(cfg):
+            b = json.loads(_call(_Req("s3cr3t")).body)
+        self.assertEqual(b["egress"]["scope"], "wide")
+
+    def test_an_empty_list_is_none_not_muted(self):
+        import json
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), \
+                _with({"agents": {}}):
+            b = json.loads(_call(_Req("s3cr3t")).body)
+        self.assertEqual(b["egress"]["scope"], "none")
+        self.assertEqual(b["source"]["scope"], "none")
 
 
 if __name__ == "__main__":

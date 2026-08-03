@@ -84,9 +84,9 @@ def _emails(a: dict) -> list[str]:
     out = []
     for field in ("to", "cc", "bcc"):
         raw = a.get(field) or ""
-        # A single field may carry several addresses.
-        out += [x.strip().lower() for x in str(raw).replace(";", ",").split(",")
-                if x.strip()]
+        # Un solo campo può portare più indirizzi.
+        out += [f"mailto:{x.strip().lower()}"
+                for x in str(raw).replace(";", ",").split(",") if x.strip()]
     return out
 
 
@@ -106,39 +106,46 @@ def address_of(header: str) -> str:
 
 def _chat(a: dict) -> list[str]:
     c = str(a.get("chat_id") or "").strip()
-    return [c] if c else []
+    return [f"tg:{c}"] if c else []
 
 
-def _host(a: dict) -> list[str]:
+def _http(a: dict) -> list[str]:
+    """URL di destinazione ridotto a schema://host/ — su TLS il path non è
+    comunque visibile a un proxy, e una whitelist che promette granularità che
+    non ha è peggio di una che dichiara la propria."""
     url = str(a.get("url") or "").strip()
     if not url:
         return []
-    h = (urlsplit(url).hostname or "").lower()
-    return [h] if h else []
+    u = urlsplit(url)
+    h = (u.hostname or "").lower()
+    return [f"{u.scheme or 'https'}://{h}/"] if h else []
 
 
 def _repo(a: dict) -> list[str]:
     owner, repo = str(a.get("owner") or "").strip(), str(a.get("repo") or "").strip()
-    return [f"{owner}/{repo}".lower()] if owner and repo else []
+    return [f"https://github.com/{owner}/{repo}".lower()] if owner and repo else []
 
 
 def _drive_target(a: dict) -> list[str]:
-    """Where the content lands, or who it is shared with.
+    """Dove finisce il contenuto, o con CHI viene condiviso.
 
-    `gdrive.share` is egress to a PERSON, not to a folder: the destination is
-    the address, which is why the two are not folded together.
+    `gdrive.share` è uscita verso una PERSONA, non verso una cartella: la
+    destinazione è l'indirizzo, ed è per questo che i due non si fondono. Con la
+    notazione URI la differenza si vede — `mailto:` contro `gdrive:folder/`.
     """
     out = []
     for field in ("email", "folder_id", "parent_id"):
         v = str(a.get(field) or "").strip()
-        if v:
-            out.append(v.lower())
+        if not v:
+            continue
+        out.append(f"mailto:{v.lower()}" if field == "email"
+                   else f"gdrive:folder/{v}")
     return out
 
 
 def _spreadsheet(a: dict) -> list[str]:
     v = str(a.get("spreadsheet_id") or "").strip()
-    return [v] if v else []
+    return [f"gsheets:{v}"] if v else []
 
 
 #: verb → (destination type, extractor). A verb absent from this table is not
@@ -153,7 +160,7 @@ _SPECS: dict[str, tuple[str, Callable[[dict], list[str]]]] = {
     "email.reply": ("email", _emails),
     "telegram.send": ("telegram", _chat),
     "telegram.send_file": ("telegram", _chat),
-    "web.post": ("http", _host),
+    "web.post": ("http", _http),
     "gdrive.upload": ("drive", _drive_target),
     "gdrive.share": ("drive", _drive_target),
     "gdrive.mkdir": ("drive", _drive_target),
@@ -185,30 +192,133 @@ def spec_for(verb: str) -> Optional[tuple[str, Callable[[dict], list[str]]]]:
 # ── rule matching ────────────────────────────────────────────────────────────
 
 def _matches(dest: str, rule: str) -> bool:
-    """A destination against one rule.
+    """Una destinazione (URI) contro una regola (URI).
 
-    Three forms, and no regexes: a rule an operator cannot read is a rule nobody
-    audits.
-      *              any destination of this type (explicit opt-out)
-      @domain        email suffix — "@tomato.blue" covers every address there
-      exact          case-insensitive equality
+    Tre forme, e nessuna regex: una regola che l'operatore non legge è una regola
+    che nessuno verifica.
+
+        *                              qualunque destinazione (opt-out esplicito)
+        mailto:*@tomato.blue           wildcard nella parte locale di uno schema
+        https://github.com/r-clodia/   prefisso, per gli schemi gerarchici
+        mailto:tizio@x.it              esatto
+
+    Il PREFISSO vale solo per gli schemi in cui la gerarchia esiste (`http`,
+    `https`, `gdrive`): `mailto:a@b.it` non è prefisso di `mailto:a@b.it.evil`
+    perché un indirizzo non è un percorso, ed è esattamente il caso in cui un
+    prefisso ingenuo aprirebbe un dominio ostile.
     """
     r = (rule or "").strip().lower()
     d = (dest or "").strip().lower()
-    if not r:
+    if not r or not d:
         return False
     if r == "*":
         return True
-    if r.startswith("@"):
-        return d.endswith(r)
-    return d == r
+    if r == d:
+        return True
+    if "*" in r:
+        # wildcard solo dentro lo stesso schema, e solo come suffisso
+        r_s, _, r_rest = r.partition(":")
+        d_s, _, d_rest = d.partition(":")
+        if r_s != d_s:
+            return False
+        return r_rest.startswith("*") and d_rest.endswith(r_rest[1:])
+    if r.split(":", 1)[0] in _HIERARCHICAL and d.startswith(r):
+        return True
+    return False
+
+
+#: Schemi in cui il prefisso ha senso (c'è un percorso). Per gli altri il match
+#: è esatto o wildcard: aprire per prefisso un indirizzo email o una chat id
+#: aprirebbe destinazioni che nessuno ha approvato.
+_HIERARCHICAL = ("http", "https", "gdrive")
+
+#: Schemi ammessi in USCITA e in INGRESSO. Le due liste sono separate perché
+#: l'errore ha direzioni diverse: sbagliare una destinazione è rumoroso (un invio
+#: bloccato), sbagliare una fonte è SILENZIOSO — un taint che non si accende, e
+#: tutti i gate a valle che non scattano. Un `mailfrom:` nella lista di uscita è
+#: un errore di configurazione e va rifiutato, non ignorato.
+EGRESS_SCHEMES = ("mailto", "tg", "http", "https", "gdrive", "gsheets")
+SOURCE_SCHEMES = ("mailfrom", "http", "https")
+
+
+def allowed_uris(cfg: dict | None = None) -> list[str]:
+    """Whitelist GLOBALE delle destinazioni.
+
+    Globale e non per-agente (clodia-platform#128): l'approvazione giudica la
+    DESTINAZIONE, non chi spedisce — è ciò che il dialog chiede. E per-agente la
+    lista non converge mai: con quattordici agenti lo stesso indirizzo viene
+    chiesto quattordici volte, mentre la rarità del gate è ciò che lo rende
+    leggibile invece che riflesso.
+
+    Migra al volo le vecchie voci per-agente, così un'istanza aggiornata non
+    perde le destinazioni che un umano aveva già approvato.
+    """
+    from . import whitelist as _wl
+    c = cfg if cfg is not None else _wl.CONFIG
+    out: list[str] = [str(x).strip() for x in (c.get("egress_allow") or []) if str(x).strip()]
+    for name, spec in (c.get("agents") or {}).items():
+        legacy = (spec or {}).get("egress_allow")
+        if not isinstance(legacy, dict):
+            continue
+        for dtype, rules in legacy.items():
+            for r in rules or []:
+                u = _legacy_to_uri(dtype, str(r))
+                if u and u not in out:
+                    out.append(u)
+                    LOG.info("egress: migrata voce legacy %s/%s → %s (era di '%s')",
+                             dtype, r, u, name)
+    bad = [u for u in out if u != "*" and u.partition(":")[0] not in EGRESS_SCHEMES]
+    for u in bad:
+        LOG.warning("egress: voce con schema non ammesso in uscita, IGNORATA: %s", u)
+    return [u for u in out if u not in bad]
+
+
+def source_uris(cfg: dict | None = None) -> list[str]:
+    """Whitelist GLOBALE delle fonti fidate (leggere da qui non contamina).
+
+    Lista separata da quella di uscita, di proposito: vedi `SOURCE_SCHEMES`.
+    Vuota per default — e va tenuta piccola e statica, perché è configurazione
+    dell'istanza e non qualcosa da approvare in un dialog: la prima injection che
+    chiedesse «aggiungi questo dominio alle fonti fidate» spegnerebbe il taint per
+    sempre.
+    """
+    from . import whitelist as _wl
+    c = cfg if cfg is not None else _wl.CONFIG
+    out = [str(x).strip() for x in (c.get("source_allow") or []) if str(x).strip()]
+    bad = [u for u in out if u.partition(":")[0] not in SOURCE_SCHEMES]
+    for u in bad:
+        LOG.warning("source: voce con schema non ammesso in ingresso, IGNORATA: %s", u)
+    return [u for u in out if u not in bad]
+
+
+def _legacy_to_uri(dtype: str, rule: str) -> str:
+    """Converte una vecchia voce (tipo + valore nudo) in URI."""
+    r = rule.strip()
+    if not r:
+        return ""
+    if r == "*":
+        return ""            # un `*` per-tipo non si promuove a `*` globale
+    if dtype == "email":
+        return f"mailto:{'*' + r if r.startswith('@') else r}".lower()
+    if dtype == "telegram":
+        return f"tg:{r}"
+    if dtype == "github":
+        return f"https://github.com/{r}".lower()
+    if dtype == "http":
+        return f"https://{r}/".lower()
+    if dtype == "drive":
+        return f"mailto:{r}" if "@" in r else f"gdrive:folder/{r}"
+    if dtype == "gsheets":
+        return f"gsheets:{r}"
+    return ""
 
 
 def decide(agent_cfg: dict, verb: str, arguments: dict) -> dict:
-    """Decide whether `verb` may reach the destinations in `arguments`.
+    """Decide se `verb` può raggiungere le destinazioni in `arguments`.
 
-    Returns a verdict dict; never raises. The caller enforces (or logs) it, so
-    that the mode lives in one place and this function stays testable.
+    `agent_cfg` resta nella firma per compatibilità con i chiamanti, ma la
+    whitelist è GLOBALE (#128): la destinazione è approvata o non lo è, e non
+    dipende da chi spedisce.
     """
     spec = spec_for(verb)
     if not spec:
@@ -216,38 +326,27 @@ def decide(agent_cfg: dict, verb: str, arguments: dict) -> dict:
     dtype, extract = spec
     try:
         dests = [d for d in extract(arguments or {}) if d]
-    except Exception as e:  # noqa: BLE001 - a malformed call is not a decision
+    except Exception as e:  # noqa: BLE001 — una chiamata malformata non è una decisione
         LOG.warning("egress: destinatari non estraibili da %s (%s)", verb, e)
         dests = []
-    allow = (agent_cfg or {}).get("egress_allow") or {}
-    rules = allow.get(dtype)
+    rules = allowed_uris()
 
     if not dests:
-        # Property 3: no readable destination → deny, unless the type is
-        # explicitly opened with "*".
-        wide = bool(rules) and any(_matches("anything", r) for r in rules)
+        # Destinazione non leggibile dalla chiamata → nego, a meno che la lista
+        # non sia stata aperta con `*` esplicito.
+        wide = "*" in rules
         return {"checked": True, "allowed": wide, "verb": verb, "type": dtype,
                 "destinations": [UNKNOWN], "rules": rules,
                 "reason": ("destinazione non leggibile dalla chiamata"
-                           if not wide else "tipo aperto con '*'")}
-
-    if rules is None:
-        # Property 6: the type is not modelled for this agent at all.
-        return {"checked": True, "allowed": False, "verb": verb, "type": dtype,
-                "destinations": dests, "rules": None,
-                "reason": f"nessuna regola di uscita dichiarata per '{dtype}'"}
-    if not rules:
-        # Property 1: declared but empty = deny. Distinct from the case above so
-        # the operator can tell "never configured" from "deliberately muted".
-        return {"checked": True, "allowed": False, "verb": verb, "type": dtype,
-                "destinations": dests, "rules": [],
-                "reason": f"uscita '{dtype}' dichiarata vuota (muta)"}
+                           if not wide else "uscita aperta con '*'")}
 
     refused = [d for d in dests if not any(_matches(d, r) for r in rules)]
     if refused:
         return {"checked": True, "allowed": False, "verb": verb, "type": dtype,
                 "destinations": dests, "refused": refused, "rules": rules,
-                "reason": f"destinazione non in whitelist: {', '.join(refused)}"}
+                "reason": (f"destinazione non in whitelist: {', '.join(refused)}"
+                           if rules else
+                           f"nessuna destinazione dichiarata: {', '.join(refused)}")}
     return {"checked": True, "allowed": True, "verb": verb, "type": dtype,
             "destinations": dests, "rules": rules}
 
@@ -365,32 +464,33 @@ def denied_error(agent: str, v: dict) -> PermissionError:
 
 
 def remember(agent: str, dtype: str, dests: list[str]) -> list[str]:
-    """Aggiunge le destinazioni approvate alla whitelist di `agent` e persiste.
+    """Aggiunge le destinazioni approvate alla whitelist GLOBALE e persiste.
 
-    Scrive nella config del GATEWAY, sul suo volume: l'agent-server non la monta,
-    quindi un agente non può aggiungersi destinazioni da sé (clodia-platform#80).
-    Idempotente. Ritorna le regole risultanti per quel tipo.
+    Scrive nella config del gateway, sul suo volume: l'agent-server non la monta,
+    quindi un agente non può aggiungersi destinazioni da sé
+    (clodia-platform#80). `agent` resta solo per il log — chi ha chiesto è
+    un'informazione di audit, non un criterio: la destinazione vale per tutti.
+
+    Idempotente. Ritorna la lista risultante.
     """
     from . import whitelist as _wl
     added = [d for d in dests if d and d != UNKNOWN]
     if not added:
         return []
-    agents = _wl.CONFIG.setdefault("agents", {})
-    spec = agents.setdefault(agent, {})
-    allow = spec.setdefault("egress_allow", {})
-    rules = allow.setdefault(dtype, [])
+    cur = list(_wl.CONFIG.get("egress_allow") or [])
     for d in added:
-        if d not in rules:
-            rules.append(d)
+        if d not in cur:
+            cur.append(d)
+    _wl.CONFIG["egress_allow"] = cur
     _wl.save_config()
-    LOG.warning("egress whitelist · %s · %s += %s (approvato da un umano)",
-                agent, dtype, ", ".join(added))
-    return list(rules)
+    LOG.warning("egress whitelist · += %s (approvato da un umano, richiesto da %s)",
+                ", ".join(added), agent or "?")
+    return cur
 
 
-def summary(agent_cfg: dict) -> dict:
-    """For introspection/UI: what this agent may reach, by type."""
-    allow = (agent_cfg or {}).get("egress_allow") or {}
-    types = sorted({t for t, _ in _SPECS.values()} | {"github"})
-    return {"mode": mode(),
-            "types": {t: allow.get(t) for t in types}}
+def summary(agent_cfg: dict | None = None) -> dict:
+    """Per introspezione/UI: modo, destinazioni ammesse, fonti fidate."""
+    return {"mode": mode(), "egress_allow": allowed_uris(),
+            "source_allow": source_uris(),
+            "egress_schemes": list(EGRESS_SCHEMES),
+            "source_schemes": list(SOURCE_SCHEMES)}

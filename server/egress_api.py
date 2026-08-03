@@ -37,34 +37,35 @@ def _authorized(request: Request) -> bool:
     return bool(got) and hmac.compare_digest(got, expected)
 
 
-def _scope(rules) -> str:
-    """How constrained the egress of one type is.
+def _shape(uris: list) -> dict:
+    """Forma di una lista, senza gli indirizzi: quante voci e di quali schemi.
 
-    `wide` covers the explicit `*` opt-out: a rule set of `["*"]` is declared but
-    constrains nothing, and reporting it as circumscribed would be the one
-    direction of error this measure cannot afford.
+    `wide` copre l'opt-out esplicito `*`: una lista che lo contiene è dichiarata
+    ma non vincola niente, e riportarla come circoscritta sarebbe la sola
+    direzione d'errore che questa misura non può permettersi.
     """
-    if rules is None:
-        return "none"          # no rules declared → the type denies (§7 prop. 6)
-    if not rules:
-        return "muted"         # declared empty → denies (§7 prop. 1)
-    if any(str(r).strip() == "*" for r in rules):
-        return "wide"
-    return "listed"
+    if not uris:
+        return {"scope": "none", "count": 0, "schemes": []}
+    if "*" in uris:
+        return {"scope": "wide", "count": len(uris), "schemes": ["*"]}
+    return {"scope": "listed", "count": len(uris),
+            "schemes": sorted({str(u).partition(":")[0] for u in uris})}
 
 
 async def profile(request: Request):
-    """GET /internal/egress → mode + per-agent shape of the whitelist."""
+    """GET /internal/egress → modo + FORMA delle liste, mai le destinazioni.
+
+    Il consumatore è il punteggio trifecta, che per distinguere uscita
+    circoscritta da arbitraria non ha bisogno degli indirizzi e non deve averli:
+    una rubrica è dato privato, e finirebbe nel contesto di qualunque cosa
+    renderizzi il numero.
+    """
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     from . import egress
-    from .whitelist import CONFIG
-    agents = {}
-    for name, spec in (CONFIG.get("agents") or {}).items():
-        allow = (spec or {}).get("egress_allow") or {}
-        agents[name] = {t: {"scope": _scope(r), "count": len(r or [])}
-                        for t, r in allow.items()}
-    return JSONResponse({"mode": egress.mode(), "agents": agents})
+    return JSONResponse({"mode": egress.mode(),
+                         "egress": _shape(egress.allowed_uris()),
+                         "source": _shape(egress.source_uris())})
 
 
 async def observations(request: Request):
@@ -105,26 +106,16 @@ async def observations(request: Request):
 
 
 async def whitelist_view(request: Request):
-    """GET /internal/egress/whitelist → le destinazioni, per agente e per tipo.
+    """GET /internal/egress/whitelist → le due liste globali, in notazione URI.
 
-    Diverso da `/internal/egress`, che ritorna solo la FORMA: là il consumatore è
-    il punteggio, che non ha bisogno degli indirizzi e non deve averli. Qui il
-    consumatore è l'owner nelle impostazioni, che ha tutto il diritto di vedere
-    la propria rubrica — è la sua. Stessa auth server-to-server: la webui passa
-    dall'agent-server, non parla al gateway.
+    Diverso da `/internal/egress`, che ritorna solo la forma: là il consumatore è
+    il punteggio; qui è l'owner nelle impostazioni, che ha tutto il diritto di
+    vedere la propria rubrica — è la sua.
     """
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     from . import egress
-    from .whitelist import CONFIG
-    agents = {}
-    for name, spec in (CONFIG.get("agents") or {}).items():
-        allow = (spec or {}).get("egress_allow") or {}
-        if allow:
-            agents[name] = {t: list(r or []) for t, r in allow.items()}
-    return JSONResponse({"mode": egress.mode(), "agents": agents,
-                         "types": sorted({t for t, _ in egress._SPECS.values()}
-                                         | {"github"})})
+    return JSONResponse(egress.summary())
 
 
 routes = [Route("/internal/egress", profile, methods=["GET"]),
