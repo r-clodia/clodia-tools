@@ -19,6 +19,18 @@ agents:
     - fs.list_dir
     - topic.*
     - runtime.*
+    # §8 di clodia-platform#104 — verbi che NON sono operazioni da turno di
+    # chat. Sottrazione, non enumerazione: dove c'è un wildcard resta, perché
+    # enumerarlo renderebbe stale il punteggio trifecta al primo pack nuovo
+    # (#119). Il DENY vince sull'allow, super-agent inclusi: è l'unico ordine
+    # in cui la lista toglie qualcosa.
+    denied_tools:
+    - settings.backup_run
+    - mcp.add
+    - mcp.remove
+    - packs.install_pip
+    - packs.install_npm
+    - packs.import_url
   ophelia:
     allowed_paths:
     - .
@@ -34,6 +46,13 @@ agents:
     - fs.list_dir
     - topic.*
     - runtime.*
+    denied_tools:
+    - settings.backup_run
+    - mcp.add
+    - mcp.remove
+    - packs.install_pip
+    - packs.install_npm
+    - packs.import_url
   # Wainston (agent di sistema, normal): helpdesk widget + amministrazione delle
   # capability degli ALTRI agent editabili. Non super → la whitelist è esplicita.
   wainston:
@@ -88,6 +107,24 @@ agents:
     - fs.list_dir
     - topic.*
     - runtime.*
+    # §8: letture libere, SCRITTURE gated. Sono gli stessi verbi che per altri
+    # agent restano liberi, quindi la granularità non può essere globale.
+    gated_tools:
+    - email.send
+    - email.reply
+    - gdrive.upload
+    - gdrive.share
+    - gdrive.mkdir
+    - gdrive.move
+    - gdocs.create
+    - gdocs.append_text
+    - gdocs.replace_text
+    - gsheets.add_tab
+    - gsheets.append_rows
+    - gsheets.write_range
+    - gcalendar.create_event
+    - gcalendar.update_event
+    - gcalendar.delete_event
   # NB: i responder confinati dei canali (eco-<topic>) sono CLONI per-topic
   # registrati a RUNTIME dal backend (channel_responder → /internal/agents/whitelist),
   # non qui: sono istanza-specifici. Il backend li ri-registra a ogni tick, così
