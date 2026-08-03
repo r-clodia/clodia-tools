@@ -282,6 +282,57 @@ def agent_config(name: str | None = None) -> dict:
     return CONFIG["agents"][name or agent_name()]
 
 
+def _listed(verb: str, patterns: set) -> bool:
+    """Match ESATTO o per namespace (`ns.*`). Deliberatamente NON riusa
+    `_tool_allowed` di main.py: quello ha una scorciatoia per i namespace
+    universali che ritorna True indipendentemente dall'insieme passato. Usarlo
+    per un DENY negherebbe verbi che nessuno ha elencato — la direzione d'errore
+    peggiore per una lista che serve a togliere.
+    """
+    v = (verb or "").strip()
+    if not v or not patterns:
+        return False
+    if v in patterns:
+        return True
+    if "." in v and f"{v.split('.', 1)[0]}.*" in patterns:
+        return True
+    return False
+
+
+def agent_denies(verb: str, name: str | None = None) -> bool:
+    """True se `verb` è nella `denied_tools` dell'agente.
+
+    Serve a ritagliare eccezioni da un `*` (clodia-platform#104 §8): il wildcard
+    resta — l'enumerazione renderebbe il punteggio stale, misurato in #119 — ma
+    alcuni verbi non sono operazioni da turno di chat (`settings.backup_run`,
+    `mcp.add`, `packs.install_*`) e vanno tolti per sottrazione invece che
+    ricostruendo l'insieme per addizione.
+
+    Il DENY vince sempre sull'allow, inclusi i super-agent: è l'unico ordine che
+    rende la lista utile — se un `*` potesse sovrascriverla non toglierebbe nulla.
+    """
+    try:
+        cfg = agent_config(name)
+    except KeyError:
+        return False
+    return _listed(verb, set(cfg.get("denied_tools") or []))
+
+
+def agent_gates(verb: str, name: str | None = None) -> bool:
+    """True se `verb` è gated PER QUESTO agente (`gated_tools` nella sua config).
+
+    La lista globale in gate.py dice «questo verbo è pericoloso per chiunque». La
+    §8 chiede qualcosa di diverso: «le SCRITTURE di impiegato-tomato sono gated»,
+    «le scritture github di fullstack-dev sono gated». Sono gli stessi verbi che
+    per altri agenti restano liberi, quindi la granularità non può essere globale.
+    """
+    try:
+        cfg = agent_config(name)
+    except KeyError:
+        return False
+    return _listed(verb, set(cfg.get("gated_tools") or []))
+
+
 def resolve_safe_path(rel_or_abs: str) -> Path:
     """Resolve a path and verify it's inside one of the agent's allowed_paths."""
     cfg = agent_config()

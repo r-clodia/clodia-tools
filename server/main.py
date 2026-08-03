@@ -11,13 +11,15 @@ from . import __version__
 from . import instance_profile
 from . import proxy
 from . import taint as _taint
+from . import telemetry as _tlm
 from . import transfer_channel
 from .tools import email, fs, logs, runtime
 from .tools import web_post
 from .tools import eu_corpus
-from .whitelist import (agent_config, agent_name, current_chat, current_clearance,
-                        current_human_role, current_principal, current_scoped_tools,
-                        is_on_behalf, is_unattended)
+from .whitelist import (agent_config, agent_denies, agent_gates, agent_name,
+                        current_chat, current_clearance, current_human_role,
+                        current_principal, current_scoped_tools, is_on_behalf,
+                        is_unattended)
 
 import os as _os
 from .topics.service import TopicService, TopicError
@@ -70,6 +72,17 @@ _EMAIL_TOOLS: list[Tool] = [
                     "items": {"type": "string"},
                     "description": "optional local file paths to attach",
                 },
+                "topic_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": ("allegati PER RIFERIMENTO: path di file del topic "
+                                    "(es. 'files/contratto.pdf'). Il gateway li legge e "
+                                    "li allega senza che il contenuto entri nel tuo "
+                                    "contesto — non serve scaricarli prima, e non "
+                                    "consumano token."),
+                },
+                "tier": {"type": "string", "description": "tier del topic per topic_files"},
+                "name": {"type": "string", "description": "nome del topic per topic_files"},
             },
             "required": ["to", "subject", "body"],
         },
@@ -2175,6 +2188,47 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
 _UNATTENDED_TOPIC_ALLOW = frozenset({"topic.invoke_hook"})
 
 
+def agent_name_safe() -> str:
+    """`agent_name()` solleva se l'identità non è impostata, e nel ramo di
+    rifiuto quello è proprio uno dei casi possibili: un errore nel registro
+    nasconderebbe il rifiuto che stiamo registrando."""
+    try:
+        return agent_name() or "?"
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
+def _topic_attachments(a: dict, agent: str) -> tuple[list, str | None]:
+    """Materializza `topic_files` in una dir temporanea e ne ritorna i path.
+
+    Il compartimento vale come per ogni altro accesso: si passa da
+    `_require_topic_member`, quindi un agente non allega file di topic di cui non
+    è partecipante. La dir temporanea viene cancellata dal chiamante nel `finally`
+    — i byte non restano né nello spawn né nel gateway.
+    """
+    rels = [r for r in (a.get("topic_files") or []) if str(r).strip()]
+    if not rels:
+        return [], None
+    tier, tname = a.get("tier"), a.get("name")
+    if not (tier and tname):
+        raise ValueError("topic_files richiede tier + name del topic")
+    svc = _topics()
+    _require_topic_member(svc, tier, tname)
+    import os as _os
+    import tempfile as _tf
+    d = _tf.mkdtemp(prefix="attach-")
+    out = []
+    for rel in rels:
+        data = svc.read_file(tier, tname, str(rel))
+        dest = _os.path.join(d, _os.path.basename(str(rel)))
+        with open(dest, "wb") as f:
+            f.write(data)
+        out.append(dest)
+    LOG.info("email: %d allegati per riferimento da %s/%s (agent %s)",
+             len(out), tier, tname, agent)
+    return out, d
+
+
 def _unattended_denial(verb: str) -> str | None:
     """Blocco per le sessioni di job (clodia-platform#104, decisione 2 ago 2026).
 
@@ -2279,6 +2333,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 and not _connector_allows(name, _ag):
             raise PermissionError(
                 f"tool '{name}' non in whitelist per agent '{_ag}'")
+        # DENY PER-AGENTE (#104 §8). Prima di tutto il resto: è una sottrazione
+        # da `*`, e se un allow potesse sovrascriverla non toglierebbe nulla.
+        # Vale anche per i super-agent, che è il punto — la lista esiste proprio
+        # per ritagliare eccezioni al wildcard di clodia.
+        if not is_on_behalf() and agent_denies(name, _ag):
+            raise PermissionError(
+                f"tool '{name}' escluso per l'agent '{_ag}' (denied_tools): non è "
+                f"un'operazione da turno di chat. Va eseguita da un job o da un "
+                f"amministratore.")
         # BLOCCO DELLE SESSIONI NON PRESIDIATE (#104). Prima dei gate, di
         # proposito: negare non richiede il consenso di nessuno, e chiedere un
         # consenso che nessuno può dare è esattamente il difetto di #116.
@@ -2295,7 +2358,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         gate_approval = None
         if not is_on_behalf():
             from . import gate as _gate
-            if _gate.is_gated(name):
+            # Gated GLOBALE (pericoloso per chiunque) oppure PER-AGENTE (§8: le
+            # scritture di impiegato-tomato, quelle github di fullstack-dev —
+            # stessi verbi che per altri restano liberi, quindi la granularità
+            # non può essere globale).
+            if _gate.is_gated(name) or agent_gates(name, _ag):
                 reason = web_post.gate_summary(arguments) if name == "web.post" else ""
                 gate_approval = await _require_gate_consent(
                     _ag, name, consume=True, reason=reason,
@@ -2376,14 +2443,26 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name == "logs.tail":
             result = logs.tail(arguments.get("lines", 100), arguments.get("level", ""))
         elif name == "email.send":
-            result = email.send(
-                arguments["to"],
-                arguments["subject"],
-                arguments["body"],
-                account=_email_account(arguments),
-                cc=arguments.get("cc"),
-                attachments=arguments.get("attachments"),
-            )
+            # ALLEGATI PER RIFERIMENTO (#104 §8, requisito derivato della riga
+            # `messaggero`). Il gateway legge i file dal topic e li allega: il
+            # contenuto NON entra nel contesto dell'agente, esattamente come per
+            # i segreti. È ciò che permette di togliere a un postino i verbi di
+            # lettura dei file del topic senza togliergli il mestiere — e non
+            # brucia token su un PDF.
+            _extra, _tmpdir = _topic_attachments(arguments, _ag or "")
+            try:
+                result = email.send(
+                    arguments["to"],
+                    arguments["subject"],
+                    arguments["body"],
+                    account=_email_account(arguments),
+                    cc=arguments.get("cc"),
+                    attachments=(arguments.get("attachments") or []) + _extra,
+                )
+            finally:
+                if _tmpdir:
+                    import shutil as _sh
+                    _sh.rmtree(_tmpdir, ignore_errors=True)
         elif name == "email.folders":
             result = email.folders(account=_email_account(arguments))
         elif name == "email.list":
@@ -2520,6 +2599,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # contenuto di terzi più ovvia, e marcare solo il ritorno nativo
             # avrebbe lasciato scoperto proprio il vettore del caso Invariant Labs.
             _taint.note_verb(name, _ag or "")
+            _tlm.record(name, _ag or "", "ok", channel=current_chat(),
+                        unattended=is_unattended())
             return [TextContent(type="text", text=text)]
         else:
             raise ValueError(f"unknown tool: {name}")
@@ -2529,8 +2610,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # colonna `untrusted_input` del catalogo da «questo agente è esposto» a
         # «questo verbo produce taint», ed è questo il punto in cui accade.
         _taint.note_verb(name, _ag or "")
+        _tlm.record(name, _ag or "", "ok", channel=current_chat(),
+                    unattended=is_unattended())
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
     except PermissionError as e:
+        # Il motivo è una CLASSE, non il messaggio: i messaggi contengono nomi di
+        # file e indirizzi, e questo registro non deve diventare una rubrica.
+        _why = ("egress" if "uscita non consentita" in str(e)
+                else "unattended" if "job schedulato" in str(e)
+                else "denied_tools" if "denied_tools" in str(e)
+                else "whitelist" if "non in whitelist" in str(e)
+                else "clearance" if "clearance" in str(e).lower()
+                else "other")
+        _tlm.record(name, agent_name_safe(), "denied", channel=current_chat(),
+                    unattended=is_unattended(), detail=_why)
         return [TextContent(type="text", text=f"DENIED: {e}")]
     except VersionConflict as e:
         return [TextContent(type="text", text=(
