@@ -17,7 +17,7 @@ from .tools import web_post
 from .tools import eu_corpus
 from .whitelist import (agent_config, agent_name, current_chat, current_clearance,
                         current_human_role, current_principal, current_scoped_tools,
-                        is_on_behalf)
+                        is_on_behalf, is_unattended)
 
 import os as _os
 from .topics.service import TopicService, TopicError
@@ -2170,6 +2170,35 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
             else f"topic-access:{meta.get('tier', tier)}/{tname}")
 
 
+#: L'UNICO verbo `topic.*` ammesso a una sessione non presidiata: spedire
+#: informazione verso un topic. Non legge, non elenca, non scarica.
+_UNATTENDED_TOPIC_ALLOW = frozenset({"topic.invoke_hook"})
+
+
+def _unattended_denial(verb: str) -> str | None:
+    """Blocco per le sessioni di job (clodia-platform#104, decisione 2 ago 2026).
+
+    «Per i job asincroni blocco totale, nessun accesso ai dati dei topic, unica
+    possibilità invocare hook dei topic per spedire informazioni.»
+
+    Il motivo per cui un job non si difende con i gate come una chat: **non c'è
+    nessuno che possa rispondere**. Un gate in una sessione non presidiata non è
+    una protezione, è uno stallo fino al timeout — è la lezione di #116, dove la
+    riconciliazione al boot tentava verbi gated senza canale e produceva decine di
+    popup fuori contesto. Qui si nega prima, invece di chiedere a nessuno.
+
+    Vale sul CLAIM FIRMATO nel token, non su un parametro: l'agente non può
+    dichiararsi presidiato.
+    """
+    if not is_unattended():
+        return None
+    if verb.startswith("topic.") and verb not in _UNATTENDED_TOPIC_ALLOW:
+        return (f"'{verb}' non è disponibile in un job schedulato: una sessione non "
+                f"presidiata non accede ai dati dei topic. Per spedire informazioni "
+                f"a un topic usa topic.invoke_hook.")
+    return None
+
+
 def _channel_participants(channel: str | None) -> list:
     """Partecipanti del canale corrente, per la firma di composizione."""
     ch = (channel or "").strip()
@@ -2250,6 +2279,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 and not _connector_allows(name, _ag):
             raise PermissionError(
                 f"tool '{name}' non in whitelist per agent '{_ag}'")
+        # BLOCCO DELLE SESSIONI NON PRESIDIATE (#104). Prima dei gate, di
+        # proposito: negare non richiede il consenso di nessuno, e chiedere un
+        # consenso che nessuno può dare è esattamente il difetto di #116.
+        _un = _unattended_denial(name)
+        if _un:
+            raise PermissionError(_un)
         # M-gate: conferma umana su azioni sotto supervisione — UN SOLO meccanismo.
         # (a) VERBI gated (packs/mcp/agents/…): consenso one-shot per-verbo.
         # (b) CROSS-TOPIC: un agente che tocca un topic di cui NON è participant
@@ -2298,7 +2333,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             _eargs = arguments
             if name == "email.reply" and not (arguments.get("to") or ""):
                 _eargs = {**arguments, "to": _reply_recipient(arguments)}
-            _ev = _egress.check(_ag or "", _acfg, name, _eargs)
+            # In una sessione non presidiata il modo `gate` non ha senso: la
+            # richiesta resterebbe appesa fino al timeout. Si nega.
+            _ev = _egress.check(_ag or "", _acfg, name, _eargs,
+                                unattended=is_unattended())
             if _ev.get("action") == "deny":
                 raise _egress.denied_error(_ag or "", _ev)
             if _ev.get("action") == "gate":

@@ -201,6 +201,23 @@ def current_chat() -> str | None:
     return _CURRENT_CHAT.get()
 
 
+#: Sessione NON PRESIDIATA: aperta da un job schedulato, nessun umano davanti al
+#: turno. Viene dal claim firmato nel token, quindi l'agente non può negarla.
+_CURRENT_UNATTENDED: ContextVar[bool] = ContextVar("clodia_unattended", default=False)
+
+
+def set_current_unattended(v: bool) -> object:
+    return _CURRENT_UNATTENDED.set(bool(v))
+
+
+def reset_current_unattended(token: object) -> None:
+    _CURRENT_UNATTENDED.reset(token)  # type: ignore[arg-type]
+
+
+def is_unattended() -> bool:
+    return _CURRENT_UNATTENDED.get()
+
+
 def set_current_scoped_tools(tools: list[str] | None) -> object:
     return _CURRENT_SCOPED_TOOLS.set(tuple(dict.fromkeys(tools or [])))
 
