@@ -2098,6 +2098,13 @@ async def _require_gate_consent(
     su diniego o timeout. `consume`=True → one-shot (verbi); False → time-boxed
     (cross-topic: l'intera operazione sul topic vale finché dura il consenso)."""
     from . import gate as _gate
+    from . import observe as _obs
+    if _obs.skipping():
+        # Osservazione: si registra il gate che sarebbe scattato e si procede.
+        # Prima della delega, così anche i gate coperti da delega restano contati
+        # — servono a capire quali controlli servono, non a documentare gli unlock.
+        _obs.note("gate", gate_key, agent, detail=reason[:120])
+        return None
     inst = "-"
     # DELEGA PERMANENTE (async·A): se esiste una delega firmata dall'utente il cui
     # scope copre questa azione (verb == gate_key), è già autorizzata → unlock senza
@@ -2338,16 +2345,24 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # Vale anche per i super-agent, che è il punto — la lista esiste proprio
         # per ritagliare eccezioni al wildcard di clodia.
         if not is_on_behalf() and agent_denies(name, _ag):
-            raise PermissionError(
-                f"tool '{name}' escluso per l'agent '{_ag}' (denied_tools): non è "
-                f"un'operazione da turno di chat. Va eseguita da un job o da un "
-                f"amministratore.")
+            from . import observe as _obs
+            if _obs.skipping():
+                _obs.note("deny", name, _ag or "", detail="denied_tools")
+            else:
+                raise PermissionError(
+                    f"tool '{name}' escluso per l'agent '{_ag}' (denied_tools): non è "
+                    f"un'operazione da turno di chat. Va eseguita da un job o da un "
+                    f"amministratore.")
         # BLOCCO DELLE SESSIONI NON PRESIDIATE (#104). Prima dei gate, di
         # proposito: negare non richiede il consenso di nessuno, e chiedere un
         # consenso che nessuno può dare è esattamente il difetto di #116.
         _un = _unattended_denial(name)
         if _un:
-            raise PermissionError(_un)
+            from . import observe as _obs
+            if _obs.skipping():
+                _obs.note("deny", name, _ag or "", detail="unattended")
+            else:
+                raise PermissionError(_un)
         # M-gate: conferma umana su azioni sotto supervisione — UN SOLO meccanismo.
         # (a) VERBI gated (packs/mcp/agents/…): consenso one-shot per-verbo.
         # (b) CROSS-TOPIC: un agente che tocca un topic di cui NON è participant
@@ -2402,10 +2417,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 _eargs = {**arguments, "to": _reply_recipient(arguments)}
             # In una sessione non presidiata il modo `gate` non ha senso: la
             # richiesta resterebbe appesa fino al timeout. Si nega.
+            from . import observe as _obs2
             _ev = _egress.check(_ag or "", _acfg, name, _eargs,
                                 unattended=is_unattended())
             if _ev.get("action") == "deny":
-                raise _egress.denied_error(_ag or "", _ev)
+                from . import observe as _obs
+                if _obs.skipping():
+                    _obs.note("deny", name, _ag or "",
+                              detail=f"egress:{_ev.get('type') or '?'}")
+                else:
+                    raise _egress.denied_error(_ag or "", _ev)
             if _ev.get("action") == "gate":
                 # Destinazione non vagliata → si CHIEDE, non si rifiuta. La
                 # whitelist nasce vuota e si popola con l'uso (decisione del
@@ -2421,7 +2442,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     # e una delega la renderebbe silenziosa senza che nessuno la
                     # veda mai.
                     allow_delegation=False)
-                _egress.remember(_ag or "", _ev["type"], _ev.get("remember") or [])
+                # In osservazione NON si ricorda: nessuno ha approvato, e una
+                # whitelist che si popola da sé mentre i gate sono spenti sarebbe
+                # una whitelist scritta dagli agenti. Al ritorno all'enforcement
+                # ci si troverebbe tutto già consentito — cioè il contrario dello
+                # scopo di questa modalità.
+                if not _obs2.skipping():
+                    _egress.remember(_ag or "", _ev["type"], _ev.get("remember") or [])
             # GATE DI CONTESTO (#104 §6): destinazione già ammessa, ma il canale
             # è contaminato. È il rischio che la whitelist non copre — l'uscita
             # verso una destinazione legittima di dati raccolti sotto injection.
