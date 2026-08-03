@@ -66,9 +66,14 @@ class UnattendedEgressTests(unittest.TestCase):
     def test_a_whitelisted_destination_still_works_in_a_job(self):
         """Il blocco non rende i job inutili: una destinazione già approvata da
         un umano passa, ed è il modo previsto per farli funzionare."""
-        with patch.dict("os.environ", {"CLODIA_EGRESS_ENFORCE": "gate"}):
-            v = egress.check("clodia", {"egress_allow": {"email": ["@tomato.blue"]}},
-                             "email.send", {"to": "chi@tomato.blue"}, unattended=True)
+        # whitelist GLOBALE in notazione URI (#128): la destinazione è approvata
+        # o non lo è, e non dipende da chi spedisce.
+        from . import whitelist as wl
+        cfg = {"agents": {}, "egress_allow": ["mailto:*@tomato.blue"]}
+        with patch.dict("os.environ", {"CLODIA_EGRESS_ENFORCE": "gate"}), \
+                patch.object(wl, "CONFIG", cfg):
+            v = egress.check("clodia", {}, "email.send",
+                             {"to": "chi@tomato.blue"}, unattended=True)
         self.assertEqual(v["action"], "allow")
 
     def test_report_mode_is_unaffected(self):
