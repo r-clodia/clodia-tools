@@ -11,10 +11,10 @@ No new consent was needed: the Workspace connector already requests
 `https://www.googleapis.com/auth/drive`, which the Sheets API accepts. The
 agent must hold the Workspace grant, as for gdrive/gdocs/gcalendar.
 
-Verbs: list_tabs, read (values of a tab or A1 range), add_tab, append_rows,
-write_range. `append_rows` is the safe write and covers most tasks;
-`write_range` is the only verb that can overwrite existing cells, so it demands
-an explicit range and never defaults to one.
+Verbs: list_tabs, read (values of a tab or A1 range, `formulas=True` for the
+formula text), add_tab, append_rows, write_range. `append_rows` is the safe
+write and covers most tasks; `write_range` is the only verb that can overwrite
+existing cells, so it demands an explicit range and never defaults to one.
 """
 from __future__ import annotations
 
@@ -55,12 +55,19 @@ def list_tabs(spreadsheet_id: str, account: Optional[str] = None) -> dict:
 
 
 def read(spreadsheet_id: str, range: Optional[str] = None,  # noqa: A002 - MCP arg name
-         tab: Optional[str] = None, account: Optional[str] = None) -> dict:
+         tab: Optional[str] = None, formulas: bool = False,
+         account: Optional[str] = None) -> dict:
     """Values of an A1 `range`, or of a whole `tab`.
 
     With neither, reads the FIRST tab rather than guessing a name — an explicit
     read of something that exists beats an error on a spreadsheet whose tab
     names the agent has not looked up yet.
+
+    `formulas=True` returns the formula TEXT (`=SUM(B1:C1)`) instead of the
+    computed value. Without it a read is lossy in a way that matters here: an
+    agent reading a budget in order to reproduce it elsewhere would get `0`
+    where a formula lives, and write back a constant — destroying exactly what
+    this module exists to preserve.
     """
     svc, acct = _svc(account)
     rng = range or tab
@@ -71,10 +78,12 @@ def read(spreadsheet_id: str, range: Optional[str] = None,  # noqa: A002 - MCP a
                     "range": None, "values": [], "rows": 0}
         rng = tabs[0]["title"]
     res = svc.spreadsheets().values().get(
-        spreadsheetId=spreadsheet_id, range=rng).execute()
+        spreadsheetId=spreadsheet_id, range=rng,
+        valueRenderOption="FORMULA" if formulas else "FORMATTED_VALUE").execute()
     values = res.get("values", [])
     return {"account": acct, "spreadsheet_id": spreadsheet_id,
-            "range": res.get("range", rng), "values": values, "rows": len(values)}
+            "range": res.get("range", rng), "values": values, "rows": len(values),
+            "formulas": bool(formulas)}
 
 
 def add_tab(spreadsheet_id: str, title: str, index: Optional[int] = None,
