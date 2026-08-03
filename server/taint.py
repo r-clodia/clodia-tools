@@ -187,6 +187,30 @@ def clear(channel: Optional[str], by: str = "") -> dict:
     return {"channel": ch, "tainted": False, "cleared_by": by}
 
 
+def composition_epoch(participants) -> str:
+    """Firma breve della composizione del canale.
+
+    Entra nella chiave del gate di contesto, e questo È il meccanismo con cui
+    «il cambio di composizione invalida gli unlock attivi» (#77): con la
+    composizione dentro la chiave, aggiungere un partecipante produce una chiave
+    diversa e l'unlock precedente semplicemente non combacia più. Non serve
+    nessuna revoca da spazzare, che è l'unico modo per cui non può essere
+    dimenticata — altrimenti si sbloccherebbe a 2 lati e si aggiungerebbe dopo
+    un agente con verbi di uscita.
+    """
+    import hashlib
+    names = sorted({str(x).strip() for x in (participants or []) if str(x).strip()})
+    return hashlib.sha256("|".join(names).encode()).hexdigest()[:8]
+
+
+def context_gate_key(channel: Optional[str], participants) -> Optional[str]:
+    """Chiave del gate di CONTESTO per un canale contaminato."""
+    ch = channel_of(channel)
+    if not ch:
+        return None
+    return f"egress-context:{ch}:{composition_epoch(participants)}"
+
+
 def note_verb(verb: str, agent: str = "", chat: Optional[str] = None) -> None:
     """Da chiamare DOPO l'esecuzione di un verbo: se produce contenuto di terzi,
     contamina il canale corrente. Non solleva mai — una misura che rompe il turno

@@ -2170,6 +2170,64 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
             else f"topic-access:{meta.get('tier', tier)}/{tname}")
 
 
+def _channel_participants(channel: str | None) -> list:
+    """Partecipanti del canale corrente, per la firma di composizione."""
+    ch = (channel or "").strip()
+    if not ch or "/" not in ch:
+        return []
+    tier, tname = ch.split("/", 1)
+    try:
+        return list(_topics().open(tier, tname).get("meta", {}).get("participants") or [])
+    except Exception:  # noqa: BLE001 — canale non leggibile → composizione vuota
+        return []
+
+
+def _context_gate_needed(verb: str, agent: str, egress_verdict: dict) -> tuple[str | None, str]:
+    """Gate di CONTESTO (#104 §6, #77 «danger score di contesto + gate di uscita»).
+
+    Presidia la TRANSIZIONE, non il verbo: l'agente vive a due lati e i verbi che
+    accendono il terzo restano dichiarati e inerti, ma la loro invocazione **in un
+    contesto contaminato** passa da un umano.
+
+    Condizione 1 di #77 — serve ANCHE la contaminazione. Col solo punteggio di
+    capacità scatterebbe quasi sempre (150 canali su 156 sono a 3/3) e un gate
+    approvato per riflesso è peggio di nessun gate.
+
+    Sul primo lato (dati privati) non si interroga il punteggio, che vive in
+    clodia-logic: un canale di topic **è** dato privato — i suoi file, il summary,
+    la conversazione. Chiamare l'agent-server nel percorso caldo per riscoprirlo
+    aggiungerebbe una dipendenza di rete a ogni verbo di uscita.
+
+    Condizione 2 di #77 — la deduplicazione si valuta sul gate **effettivamente
+    presidiato**: si omette solo se l'azione si fermerà davvero davanti a un umano
+    in questo turno. Se il gate del verbo è coperto da una delega prefirmata, o se
+    la destinazione è già in whitelist, nessuno guarda → questo gate DEVE scattare.
+    """
+    from . import egress as _eg
+    if not _eg.spec_for(verb):
+        return None, ""                      # non è un verbo di uscita
+    if egress_verdict.get("action") == "gate":
+        # La destinazione è nuova: l'umano vede già questa chiamata. Un secondo
+        # dialog sullo stesso invio è consent fatigue, non controllo in più.
+        return None, ""
+    from . import taint as _t
+    from .whitelist import current_chat
+    chat = current_chat()
+    st = _t.status(chat)
+    if not st.get("tainted"):
+        return None, ""
+    ch = st["channel"]
+    key = _t.context_gate_key(chat, _channel_participants(ch))
+    srcs = ", ".join(f"{x.get('kind')}:{x.get('detail')}"
+                     for x in (st.get("sources") or [])[-3:]) or "sorgente non registrata"
+    reason = (f"@{agent} sta per usare {verb} da un canale CONTAMINATO ({ch}): "
+              f"è entrato contenuto non fidato ({srcs}). Un'istruzione nascosta in "
+              f"quel contenuto potrebbe essere ciò che sta chiedendo questa uscita. "
+              f"Approvando, il canale viene declassificato: le uscite successive non "
+              f"chiederanno più, finché non entra contenuto nuovo.")
+    return key, reason
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     try:
@@ -2259,6 +2317,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     # veda mai.
                     allow_delegation=False)
                 _egress.remember(_ag or "", _ev["type"], _ev.get("remember") or [])
+            # GATE DI CONTESTO (#104 §6): destinazione già ammessa, ma il canale
+            # è contaminato. È il rischio che la whitelist non copre — l'uscita
+            # verso una destinazione legittima di dati raccolti sotto injection.
+            _ctx_key, _ctx_reason = _context_gate_needed(name, _ag or "", _ev)
+            if _ctx_key:
+                await _require_gate_consent(
+                    _ag, _ctx_key, consume=False, reason=_ctx_reason,
+                    # Nessuna delega: la condizione 2 di #77 esiste proprio per
+                    # il caso in cui una delega copre il gate del verbo e
+                    # nessuno guarda. Ammetterla qui riaprirebbe quel buco.
+                    allow_delegation=False)
+                # L'approvazione È l'«ultimo unlock» della definizione: il flag si
+                # azzera, e si ri-arma da sé se entra contenuto nuovo.
+                _taint.clear(current_chat(), by=current_principal() or "human")
         if name == "fs.list_dir":
             result = fs.list_dir(arguments["path"])
         elif name == "web.post":
