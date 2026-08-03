@@ -10,6 +10,7 @@ from mcp.types import TextContent, Tool
 from . import __version__
 from . import instance_profile
 from . import proxy
+from . import taint as _taint
 from . import transfer_channel
 from .tools import email, fs, logs, runtime
 from .tools import web_post
@@ -2405,9 +2406,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif proxy.is_proxied(name):
             # C1: instrada al backend MCP montato (già passato il check whitelist).
             text = await proxy.call_proxied(name, arguments)
+            # I verbi GitHub e gli MCP esterni passano DA QUI: sono la sorgente di
+            # contenuto di terzi più ovvia, e marcare solo il ritorno nativo
+            # avrebbe lasciato scoperto proprio il vettore del caso Invariant Labs.
+            _taint.note_verb(name, _ag or "")
             return [TextContent(type="text", text=text)]
         else:
             raise ValueError(f"unknown tool: {name}")
+        # CONTAMINAZIONE (#104 §4, passo 7). Dopo l'esecuzione e solo in caso di
+        # successo: il taint nasce quando il contenuto di terzi è EFFETTIVAMENTE
+        # entrato nel contesto, non quando è stato chiesto. La §4 riformula la
+        # colonna `untrusted_input` del catalogo da «questo agente è esposto» a
+        # «questo verbo produce taint», ed è questo il punto in cui accade.
+        _taint.note_verb(name, _ag or "")
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
     except PermissionError as e:
         return [TextContent(type="text", text=f"DENIED: {e}")]
@@ -2858,7 +2869,10 @@ def _dispatch_topic(name: str, a: dict):
                                   f"filename='{fn}', src=<path nel tuo scratch>).")}
         else:
             data = (a["content"] or "").encode("utf-8")
-        return svc.put_file(a["tier"], a["name"], fn, data)
+        # Output dell'agente: provenienza `agent`, non `untrusted`. Non è
+        # contenuto di terzi per sé — se il canale è già contaminato la
+        # contaminazione è del canale, e non serve ri-etichettarla sul file.
+        return svc.put_file(a["tier"], a["name"], fn, data, "agent", agent_name())
     if verb == "fetch":
         # I byte attraversano il solo volume /shared come envelope cifrato per
         # lo spawn destinatario; agent-server decifra e materializza `dest`.
@@ -2875,7 +2889,8 @@ def _dispatch_topic(name: str, a: dict):
         if not chat_id:
             raise ValueError("topic.put richiede una sessione agent con chat_id")
         data = transfer_channel.put_from_agent(chat_id=chat_id, src=a["src"])
-        return svc.put_file(a["tier"], a["name"], a["filename"], data)
+        return svc.put_file(a["tier"], a["name"], a["filename"], data,
+                            "agent", agent_name())
     if verb == "delete_file":
         return svc.delete_file(a["tier"], a["name"], a["path"])
     if verb == "migrate_storage":

@@ -1063,6 +1063,7 @@ class TopicService:
         _is_drive = self._drive_remote_config(_meta) is not None
         out: list[dict] = []
         is_files, sub = self._files_rel(rel) if rel else (False, "")
+        prov_map = self.provenance_map(tier, name) if (rel and is_files) else {}
         if rel and is_files:
             # dentro files/ → storage del topic (local o drive)
             try:
@@ -1110,10 +1111,16 @@ class TopicService:
                 p = "files/" + (f"{sub}/" if sub else "") + e.name
                 st = None if _is_drive else store.stat(
                     f"{base}/{sub}/{e.name}".strip("/"))
+                rel_in_files = (f"{sub}/" if sub else "") + e.name
                 out.append({"name": e.name, "path": p, "kind": "file",
                             "size": (getattr(st, "size", None) if st else e.size),
                             "mtime_iso": _iso(st.mtime) if st else None,
-                            "md5": (getattr(st, "md5", None) if st else e.version)})
+                            "md5": (getattr(st, "md5", None) if st else e.version),
+                            # Etichetta assente = file caricato prima della §3:
+                            # `unknown`, non `trusted`. Un default rassicurante
+                            # su dati storici è la direzione d'errore sbagliata.
+                            "provenance": (prov_map.get(rel_in_files) or {}).get(
+                                "provenance", "unknown")})
         else:
             # root o control-plane (summary/meta) → local
             d = self._dir(tier, name)
@@ -1143,10 +1150,50 @@ class TopicService:
                        key=lambda f: f.get("mtime_iso") or "", reverse=True)
         return dirs + files
 
-    def put_file(self, tier: str, name: str, filename: str, data: bytes) -> dict:
+    #: Sidecar della provenienza: relpath sotto files/ → {provenance, at, by}.
+    #: Dotfile, quindi nascosto dal navigator. Un file per topic invece di un
+    #: sidecar per file: l'etichetta SEGUE il file senza dover riscrivere path
+    #: (#104 §3, «quarantena fisica solo se serve»), e `files/` resta uno solo.
+    _PROV_FILE = ".provenance.json"
+
+    def _prov_path(self, tier: str, name: str) -> str:
+        return f"{self._dir(tier, name)}/{self._PROV_FILE}"
+
+    def provenance_map(self, tier: str, name: str) -> dict:
+        try:
+            return json.loads(self.s.read(self._prov_path(tier, name)).data.decode()) or {}
+        except Exception:  # noqa: BLE001 — assente o illeggibile = nessuna etichetta
+            return {}
+
+    def set_provenance(self, tier: str, name: str, relpath: str,
+                       provenance: str, by: str = "") -> dict:
+        """Etichetta la provenienza di un file sotto files/.
+
+        È una CLASSIFICAZIONE, non un'autorizzazione (#104 §3): dice da dove
+        viene il file, non se si può leggere. La lettura resta libera e
+        CONTAMINA il canale — bloccarla renderebbe impossibile il caso d'uso
+        principale («riassumi questo PDF del cliente») e produrrebbe due gate al
+        posto di uno.
+        """
+        m = self.provenance_map(tier, name)
+        m[relpath] = {"provenance": provenance, "at": _now().isoformat(timespec="seconds"),
+                      "by": by}
+        self.s.write(self._prov_path(tier, name),
+                     json.dumps(m, ensure_ascii=False, indent=1).encode())
+        return m[relpath]
+
+    def put_file(self, tier: str, name: str, filename: str, data: bytes,
+                 provenance: str = "untrusted", by: str = "") -> dict:
         """Carica/sovrascrive un file in files/ (upload umano o output agente).
         `filename` può includere sottocartelle (es. 'archivio/foto/1.jpg') per
-        organizzare i file; le dir padre vengono create. Anti-traversal per segmento."""
+        organizzare i file; le dir padre vengono create. Anti-traversal per segmento.
+
+        `provenance` = `trusted` | `untrusted` | `agent`. **Default `untrusted`**
+        (#104 §3): il costo di sbagliare per difetto deve restare basso — una
+        approvazione in più a valle — non alto, cioè un file illeggibile. I file
+        introdotti da un verbo (allegati mail, download Drive) sono untrusted
+        d'ufficio: non c'è nessuno da interrogare.
+        """
         meta, _ = self._read_meta(tier, name)
         self._assert_content_available(meta)
         rel = (filename or "").strip().strip("/")
@@ -1162,7 +1209,11 @@ class TopicService:
             raise TopicError(f"nome file non valido: {filename}")
         store, base = self._files_backend(tier, name)
         store.write(f"{base}/{rel}".strip("/"), data)
-        return {"name": parts[-1], "path": f"files/{rel}"}
+        prov = (provenance or "untrusted").strip().lower()
+        if prov not in ("trusted", "untrusted", "agent"):
+            prov = "untrusted"
+        self.set_provenance(tier, name, rel, prov, by=by)
+        return {"name": parts[-1], "path": f"files/{rel}", "provenance": prov}
 
     def delete_file(self, tier: str, name: str, relpath: str) -> dict:
         """SOFT-DELETE: NON cancella mai davvero. Sposta un file o una cartella

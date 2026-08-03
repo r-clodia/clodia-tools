@@ -312,7 +312,7 @@ async def participants(request: Request):
 
 
 async def files(request: Request):
-    _, err = _authorize(request)
+    who, err = _authorize(request)
     if err:
         return err
     tier = request.path_params["tier"]; name = request.path_params["name"]
@@ -334,10 +334,23 @@ async def files(request: Request):
         data = _b64.b64decode(body.get("content_b64") or "")
     except Exception:
         return JSONResponse({"error": "bad_content"}, status_code=400)
+    # Provenienza dichiarata dall'utente all'upload (#104 §3). È l'unico momento
+    # in cui l'informazione esiste, e l'unico interlocutore che può risponderla è
+    # lui. Default `untrusted`: se il client non la manda, non si assume il bene.
+    prov = (body.get("provenance") or "untrusted").strip().lower()
     try:
-        return JSONResponse(await asyncio.to_thread(svc.put_file, tier, name, fn, data))
+        res = await asyncio.to_thread(svc.put_file, tier, name, fn, data, prov,
+                                      who or "")
     except TopicError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+    if prov != "trusted":
+        # Il file untrusted CONTAMINA il canale. La lettura resta libera: è una
+        # classificazione, non un blocco, e un file illeggibile spingerebbe
+        # l'utente a dichiarare «trusted» per andare avanti — che è il modo di
+        # rendere l'etichetta inutile.
+        from . import taint  # noqa: PLC0415
+        taint.mark(f"{tier}/{name}", "file", fn, who or "")
+    return JSONResponse(res)
 
 
 def _snapshot_meta_bytes(raw: bytes, tier: str) -> bytes:

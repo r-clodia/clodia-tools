@@ -1,0 +1,141 @@
+"""Tests for per-channel taint (clodia-platform#104 §4, step 7).
+
+The flag is what makes the context gate usable at all: #77's condition 1 says the
+gate fires only if the channel is ALSO tainted, because 150 of 156 channels are at
+3/3 capability and a gate on capability alone would fire almost always — and a
+gate approved by reflex is worse than no gate.
+
+So the tests that matter here are about the flag being ARMED and CLEARED at the
+right moments, and about the channel being the unit rather than the spawn.
+"""
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from . import taint
+
+
+class ChannelKeyTests(unittest.TestCase):
+    def test_a_session_key_normalises_to_the_channel(self):
+        """The taint belongs to the CHANNEL, not the spawn: if one spawn of clodia
+        reads a hostile page, the contamination concerns the room. With
+        multi-spawn this is concrete — four spawns share the channel."""
+        for chat, want in (
+            ("chan:SEAL-2:contract:clodia", "SEAL-2/contract"),
+            ("chan:SEAL-2:contract:clodia#3", "SEAL-2/contract"),
+            ("chan:SEAL-1:hedge-iot-new:fullstack-dev#2", "SEAL-1/hedge-iot-new"),
+        ):
+            with self.subTest(chat=chat):
+                self.assertEqual(taint.channel_of(chat), want)
+
+    def test_a_direct_chat_gets_its_own_flag_rather_than_none(self):
+        """A DM is not different from a channel (decision of 2 Aug 2026), so it
+        must have a flag instead of having none."""
+        self.assertEqual(taint.channel_of("dm:davide:clodia"), "dm:davide:clodia")
+
+    def test_no_chat_means_no_channel(self):
+        for empty in ("", None, "   "):
+            self.assertIsNone(taint.channel_of(empty))
+
+
+class TaintingVerbTests(unittest.TestCase):
+    def test_verbs_that_return_third_party_content_taint(self):
+        for verb in ("web.fetch", "email.read", "github.get_file_contents",
+                     "github.list_issues", "topic.read_file", "gdrive.download",
+                     "normattiva.search", "trello.cards"):
+            with self.subTest(verb=verb):
+                self.assertTrue(taint.taints(verb))
+
+    def test_send_only_and_control_verbs_do_not_taint(self):
+        """A verb that only pushes data out brings nothing INTO the context, and
+        acquiring a lease is access control, not reading."""
+        for verb in ("email.send", "telegram.send", "web.post",
+                     "telegram.lease_acquire", "topic.save_summary",
+                     "gsheets.write_range", "github.create_pull_request"):
+            with self.subTest(verb=verb):
+                self.assertFalse(taint.taints(verb))
+
+
+class StateTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        p = patch.object(taint, "_path",
+                         side_effect=lambda: Path(self.tmp.name) / "taint.json")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_an_unknown_channel_is_clean_not_unknown(self):
+        """Nothing has entered yet, so there is nothing to be cautious about."""
+        st = taint.status("chan:SEAL-1:nuovo:clodia")
+        self.assertFalse(st["tainted"])
+        self.assertEqual(st["sources"], [])
+
+    def test_marking_arms_the_flag_and_records_where_it_came_from(self):
+        """«The channel is tainted» is not actionable; «an untrusted PDF came in»
+        is. A boolean cannot carry that, and without it the human declassifies
+        blind (#104 §4)."""
+        taint.mark("chan:SEAL-1:x:clodia", "file", "contratto.pdf", "davide")
+        st = taint.status("chan:SEAL-1:x:clodia")
+        self.assertTrue(st["tainted"])
+        self.assertEqual(st["sources"][-1]["detail"], "contratto.pdf")
+        self.assertEqual(st["sources"][-1]["kind"], "file")
+
+    def test_the_same_source_twice_does_not_pile_up(self):
+        for _ in range(3):
+            taint.mark("chan:SEAL-1:x:clodia", "verb", "web.fetch", "clodia")
+        self.assertEqual(len(taint.status("chan:SEAL-1:x:clodia")["sources"]), 1)
+
+    def test_only_the_last_sources_are_kept(self):
+        for i in range(10):
+            taint.mark("chan:SEAL-1:x:clodia", "verb", f"web.fetch/{i}")
+        self.assertEqual(len(taint.status("chan:SEAL-1:x:clodia")["sources"]),
+                         taint._MAX_SOURCES)
+
+    def test_clear_disarms_the_flag_but_keeps_the_history(self):
+        """After an unlock one must still be able to say what had come in, or the
+        audit loses the reason that unlock was asked for."""
+        taint.mark("chan:SEAL-1:x:clodia", "verb", "web.fetch")
+        taint.clear("chan:SEAL-1:x:clodia", by="davide")
+        st = taint.status("chan:SEAL-1:x:clodia")
+        self.assertFalse(st["tainted"])
+        self.assertEqual(st["sources"], [])
+        raw = taint._load()["SEAL-1/x"]
+        self.assertEqual(raw["cleared_by"], "davide")
+        self.assertEqual(len(raw["archived_sources"]), 1)
+
+    def test_taint_re_arms_after_a_clear(self):
+        """This is the definition from #77 — «entered AFTER the last unlock» — and
+        the reason the open question «close the window or ask again?» needed no
+        decision: the flag re-arms and the next outbound action gates again,
+        without interrupting the turn."""
+        taint.mark("chan:SEAL-1:x:clodia", "verb", "web.fetch")
+        taint.clear("chan:SEAL-1:x:clodia", by="davide")
+        taint.mark("chan:SEAL-1:x:clodia", "verb", "email.read")
+        self.assertTrue(taint.status("chan:SEAL-1:x:clodia")["tainted"])
+
+    def test_taint_does_not_cross_channels(self):
+        """Sessions are already per-channel, so it does not spill by itself. The
+        case of an agent that REPORTS the content across is still open (#104 §4)."""
+        taint.mark("chan:SEAL-1:a:clodia", "verb", "web.fetch")
+        self.assertFalse(taint.status("chan:SEAL-1:b:clodia")["tainted"])
+
+    def test_note_verb_marks_only_for_tainting_verbs(self):
+        with patch("server.whitelist.current_chat", return_value="chan:SEAL-1:x:clodia"):
+            taint.note_verb("email.send", "messaggero")
+            self.assertFalse(taint.status("chan:SEAL-1:x:clodia")["tainted"])
+            taint.note_verb("web.fetch", "clodia")
+            self.assertTrue(taint.status("chan:SEAL-1:x:clodia")["tainted"])
+
+    def test_note_verb_never_raises(self):
+        """A measurement that breaks the turn it is measuring is worse than a
+        missing measurement."""
+        with patch.object(taint, "mark", side_effect=RuntimeError("boom")):
+            taint.note_verb("web.fetch", "clodia")   # must not raise
+
+
+if __name__ == "__main__":
+    unittest.main()
