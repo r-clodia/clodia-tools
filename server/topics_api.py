@@ -96,6 +96,15 @@ async def open_topic(request: Request):
     name = request.path_params["name"]
     try:
         data = await asyncio.to_thread(_service().open, tier, name)
+        # Primo bit del vettore di contesto (#104 §4): «è entrato contenuto non
+        # fidato». Vive nel gateway, e senza esporlo qui la UI mostra un punteggio
+        # a due bit su tre — cioè lo stato *statico* del canale, che è quello che
+        # non cambia mai. Il bit dinamico è l'unico che l'owner può azzerare, e
+        # quindi l'unico su cui gli serve un'indicazione in tempo reale.
+        from . import taint as _t
+        st = _t.status(f"{tier}/{name}")
+        data["taint"] = {"tainted": st["tainted"], "since": st.get("since"),
+                         "sources": st.get("sources") or []}
         return JSONResponse(data)
     except TopicError:
         return JSONResponse({"error": "not_found"}, status_code=404)

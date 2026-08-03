@@ -67,4 +67,66 @@ async def profile(request: Request):
     return JSONResponse({"mode": egress.mode(), "agents": agents})
 
 
-routes = [Route("/internal/egress", profile, methods=["GET"])]
+async def observations(request: Request):
+    """GET /internal/observations?since=<epoch> → gate che SAREBBERO scattati.
+
+    Alimenta il feedback effimero nel footer della webui: in modalità di
+    osservazione l'owner lavora come prima, e questo è l'unico modo in cui vede
+    che un controllo *avrebbe* chiesto qualcosa. Senza, l'osservazione è muta e
+    l'unico modo di leggerla sarebbe aprire il registro a mano.
+
+    Solo metadati, come il registro da cui legge.
+    """
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        since = int(request.query_params.get("since") or 0)
+    except ValueError:
+        since = 0
+    limit = 50
+    from . import observe, telemetry
+    rows = []
+    try:
+        p = telemetry._path()
+        if p.is_file():
+            import json as _j
+            for line in p.read_text(encoding="utf-8").splitlines()[-2000:]:
+                try:
+                    r = _j.loads(line)
+                except ValueError:
+                    continue
+                if r.get("outcome") in ("would_gate", "would_deny") \
+                        and int(r.get("at") or 0) > since:
+                    rows.append(r)
+    except OSError as e:
+        return JSONResponse({"error": str(e)[:120], "observations": []})
+    return JSONResponse({"observing": observe.skipping(),
+                         "observations": rows[-limit:]})
+
+
+async def whitelist_view(request: Request):
+    """GET /internal/egress/whitelist → le destinazioni, per agente e per tipo.
+
+    Diverso da `/internal/egress`, che ritorna solo la FORMA: là il consumatore è
+    il punteggio, che non ha bisogno degli indirizzi e non deve averli. Qui il
+    consumatore è l'owner nelle impostazioni, che ha tutto il diritto di vedere
+    la propria rubrica — è la sua. Stessa auth server-to-server: la webui passa
+    dall'agent-server, non parla al gateway.
+    """
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import egress
+    from .whitelist import CONFIG
+    agents = {}
+    for name, spec in (CONFIG.get("agents") or {}).items():
+        allow = (spec or {}).get("egress_allow") or {}
+        if allow:
+            agents[name] = {t: list(r or []) for t, r in allow.items()}
+    return JSONResponse({"mode": egress.mode(), "agents": agents,
+                         "types": sorted({t for t, _ in egress._SPECS.values()}
+                                         | {"github"})})
+
+
+routes = [Route("/internal/egress", profile, methods=["GET"]),
+          Route("/internal/egress/whitelist", whitelist_view, methods=["GET"]),
+          Route("/internal/observations", observations, methods=["GET"])]
