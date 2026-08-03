@@ -43,6 +43,35 @@ class ExtractorTests(unittest.TestCase):
         self.assertFalse(v["checked"])
 
 
+class ReplyRecipientTests(unittest.TestCase):
+    """`email.reply` — il destinatario viene dal messaggio, non dalla chiamata."""
+
+    def test_address_is_extracted_from_a_from_header(self):
+        for header, want in (
+            ("Mario Rossi <mario@x.it>", "mario@x.it"),
+            ("  <A@B.IT> ", "a@b.it"),
+            ("plain@z.it", "plain@z.it"),
+            ('"Chi Sa" <chi@sa.it>', "chi@sa.it"),
+        ):
+            with self.subTest(header=header):
+                self.assertEqual(egress.address_of(header), want)
+
+    def test_a_header_without_an_address_yields_nothing(self):
+        """Vuoto → destinazione ignota → nega. Non sapere a chi si risponde non
+        è una buona ragione per procedere."""
+        for header in ("", "Mario Rossi", "<>", None):
+            self.assertEqual(egress.address_of(header), "")
+
+    def test_a_resolved_recipient_is_checked_like_any_other(self):
+        """Risolto il destinatario, `email.reply` non è più un caso speciale."""
+        cfg = _cfg(email=["@tomato.blue"])
+        v = egress.decide(cfg, "email.reply", {"email_id": "1", "to": "chi@tomato.blue"})
+        self.assertTrue(v["allowed"])
+        v = egress.decide(cfg, "email.reply", {"email_id": "1", "to": "chi@altrove.it"})
+        self.assertFalse(v["allowed"])
+        self.assertEqual(v["refused"], ["chi@altrove.it"])
+
+
 class DenyDefaultTests(unittest.TestCase):
     """The three deny-by-default rules. Each one is the whole point."""
 
@@ -101,38 +130,107 @@ class MatchingTests(unittest.TestCase):
 
 
 class ModeTests(unittest.TestCase):
-    def _enforce(self, mode, cfg, verb, args):
+    def _check(self, mode, cfg, verb, args):
         with patch.dict("os.environ", {"CLODIA_EGRESS_ENFORCE": mode}):
-            return egress.enforce("messaggero", cfg, verb, args)
+            return egress.check("messaggero", cfg, verb, args)
+
+    def test_gate_is_the_default_and_asks_instead_of_refusing(self):
+        """The decision of 3 Aug 2026: start with an empty whitelist and populate
+        it through use. An unvetted address is neither refused nor allowed
+        silently — it is ASKED."""
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(egress.mode(), "gate")
+        v = self._check("gate", {}, "email.send", {"to": "terzo@esterno.it"})
+        self.assertEqual(v["action"], "gate")
+        self.assertEqual(v["gate_key"], "egress:email:terzo@esterno.it")
+        self.assertEqual(v["remember"], ["terzo@esterno.it"])
+
+    def test_the_gate_dialog_says_the_destination_will_be_remembered(self):
+        """§7 property 2: adding a destination is more privileged than the single
+        send, because it makes it silent forever. If approval populates the
+        whitelist, the human must learn it FROM the dialog — otherwise they grant
+        a permanent permission believing they authorised one message."""
+        v = self._check("gate", {}, "email.send", {"to": "terzo@esterno.it"})
+        r = v["gate_reason"]
+        self.assertIn("terzo@esterno.it", r)
+        self.assertIn("whitelist", r)
+        self.assertIn("non chiederanno più", r)
+
+    def test_gate_refuses_when_the_destination_cannot_be_read(self):
+        """There is nothing to show in a dialog and nothing to remember: an
+        `email.reply` whose recipient comes from the incoming message cannot be
+        approved by address. The explicit `*` on the type stays the way out."""
+        v = self._check("gate", {}, "email.reply", {"email_id": "42"})
+        self.assertEqual(v["action"], "deny")
+
+    def test_a_whitelisted_destination_does_not_gate(self):
+        v = self._check("gate", _cfg(email=["@tomato.blue"]), "email.send",
+                        {"to": "chi@tomato.blue"})
+        self.assertEqual(v["action"], "allow")
 
     def test_report_allows_and_marks_would_deny(self):
-        """The default mode. It must NOT block: switching a live instance
-        straight to `on` would mute every agent at once, and the real
-        destination set is learned from real traffic."""
-        v = self._enforce("report", {}, "email.send", {"to": "x@y.it"})
-        self.assertTrue(v["allowed"])
+        v = self._check("report", {}, "email.send", {"to": "x@y.it"})
+        self.assertEqual(v["action"], "allow")
         self.assertTrue(v["would_deny"])
 
-    def test_on_raises_for_a_denied_destination(self):
-        with self.assertRaises(PermissionError) as cm:
-            self._enforce("on", _cfg(email=["@tomato.blue"]), "email.send",
-                          {"to": "fuori@altrove.it"})
-        # the message must say WHERE to fix it, not just that it failed
-        self.assertIn("egress_allow.email", str(cm.exception))
-
-    def test_on_allows_a_whitelisted_destination(self):
-        v = self._enforce("on", _cfg(email=["@tomato.blue"]), "email.send",
-                          {"to": "chi@tomato.blue"})
-        self.assertTrue(v["allowed"])
+    def test_on_denies_without_asking(self):
+        """The right mode where nobody can answer: an unattended job that hits a
+        gate stalls until the request times out (#116)."""
+        v = self._check("on", _cfg(email=["@tomato.blue"]), "email.send",
+                        {"to": "fuori@altrove.it"})
+        self.assertEqual(v["action"], "deny")
+        # the error must say WHERE to fix it, not just that it failed
+        self.assertIn("egress_allow.email", str(egress.denied_error("x", v)))
 
     def test_off_skips_the_check_entirely(self):
-        v = self._enforce("off", {}, "email.send", {"to": "x@y.it"})
+        v = self._check("off", {}, "email.send", {"to": "x@y.it"})
         self.assertFalse(v["checked"])
+        self.assertEqual(v["action"], "allow")
 
-    def test_an_unknown_mode_falls_back_to_report_not_to_off(self):
+    def test_an_unknown_mode_falls_back_to_gate_not_to_off(self):
         """A typo in the env var must not silently disable the whitelist."""
         with patch.dict("os.environ", {"CLODIA_EGRESS_ENFORCE": "enforce"}):
-            self.assertEqual(egress.mode(), "report")
+            self.assertEqual(egress.mode(), "gate")
+
+
+class RememberTests(unittest.TestCase):
+    """Approval populates the whitelist — in the GATEWAY's config."""
+
+    def setUp(self):
+        # `remember` fa `from . import whitelist`, che risolve l'ATTRIBUTO del
+        # package e non `sys.modules`: un fake iniettato in sys.modules verrebbe
+        # ignorato, i test userebbero il modulo vero e — scoperto sbagliando —
+        # `save_config()` scriverebbe sul config.yaml del repo. Si patchano
+        # quindi CONFIG e save_config sul modulo reale.
+        from . import whitelist as wl
+        self.cfg = {"agents": {"messaggero": {"allowed_tools": ["email.*"]}}}
+        self.saves = 0
+        for pt in (patch.object(wl, "CONFIG", self.cfg),
+                   patch.object(wl, "save_config", self._saved)):
+            pt.start()
+            self.addCleanup(pt.stop)
+
+    def _saved(self):
+        self.saves += 1
+
+    def test_an_approved_destination_is_added_and_persisted(self):
+        rules = egress.remember("messaggero", "email", ["terzo@esterno.it"])
+        self.assertEqual(rules, ["terzo@esterno.it"])
+        self.assertEqual(
+            self.cfg["agents"]["messaggero"]["egress_allow"]["email"],
+            ["terzo@esterno.it"])
+        self.assertEqual(self.saves, 1)
+
+    def test_remembering_twice_does_not_duplicate(self):
+        egress.remember("messaggero", "email", ["a@b.it"])
+        rules = egress.remember("messaggero", "email", ["a@b.it"])
+        self.assertEqual(rules, ["a@b.it"])
+
+    def test_the_unknown_sentinel_is_never_remembered(self):
+        """Writing "?" into a whitelist would open every unreadable destination
+        for good — the opposite of what the deny was for."""
+        self.assertEqual(egress.remember("messaggero", "email", [egress.UNKNOWN]), [])
+        self.assertNotIn("egress_allow", self.cfg["agents"]["messaggero"])
 
 
 if __name__ == "__main__":
