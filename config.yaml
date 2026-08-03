@@ -19,6 +19,16 @@ agents:
     - fs.list_dir
     - topic.*
     - runtime.*
+    # Il terzo bit del vettore di contesto (scrittura verso l'esterno) era acceso
+    # per DEFAULT in tutta la colonia: `topic.*` contiene quattro verbi che
+    # spingono i file del canale FUORI dall'istanza, e nessuno l'aveva deciso.
+    # Non si rimuovono, si gatano: è la differenza fra togliere un mestiere e
+    # chiedere conferma.
+    gated_tools:
+    - topic.remote_add
+    - topic.remote_enable
+    - topic.remote_commit
+    - topic.remote_push
     # §8 di clodia-platform#104 — verbi che NON sono operazioni da turno di
     # chat. Sottrazione, non enumerazione: dove c'è un wildcard resta, perché
     # enumerarlo renderebbe stale il punteggio trifecta al primo pack nuovo
@@ -46,6 +56,16 @@ agents:
     - fs.list_dir
     - topic.*
     - runtime.*
+    # Il terzo bit del vettore di contesto (scrittura verso l'esterno) era acceso
+    # per DEFAULT in tutta la colonia: `topic.*` contiene quattro verbi che
+    # spingono i file del canale FUORI dall'istanza, e nessuno l'aveva deciso.
+    # Non si rimuovono, si gatano: è la differenza fra togliere un mestiere e
+    # chiedere conferma.
+    gated_tools:
+    - topic.remote_add
+    - topic.remote_enable
+    - topic.remote_commit
+    - topic.remote_push
     denied_tools:
     - settings.backup_run
     - mcp.add
@@ -125,6 +145,10 @@ agents:
     - gcalendar.create_event
     - gcalendar.update_event
     - gcalendar.delete_event
+    - topic.remote_add
+    - topic.remote_enable
+    - topic.remote_commit
+    - topic.remote_push
   # NB: i responder confinati dei canali (eco-<topic>) sono CLONI per-topic
   # registrati a RUNTIME dal backend (channel_responder → /internal/agents/whitelist),
   # non qui: sono istanza-specifici. Il backend li ri-registra a ogni tick, così
