@@ -1075,6 +1075,18 @@ class TopicService:
             for e in entries:
                 if e.name.startswith("."):
                     continue
+                # KIND BEFORE MIME, and the order is the whole point. A Drive
+                # folder has mime `application/vnd.google-apps.folder`, which
+                # matches _NATIVE_DOC_PREFIX: classified by mime first, every
+                # subfolder came out as a remote FILE with a webViewLink, so the
+                # UI rendered a link to the Drive web app and in-app navigation
+                # stopped at the first level (#117). `url` is kept on the entry
+                # so opening Drive stays available as an explicit choice.
+                if e.kind == "dir":
+                    out.append({"name": e.name,
+                                "path": "files/" + (f"{sub}/" if sub else "") + e.name,
+                                "kind": "dir", "url": e.url or ""})
+                    continue
                 if e.mime and e.mime.startswith(self._NATIVE_DOC_PREFIX):
                     p = "files/" + (f"{sub}/" if sub else "") + e.name
                     out.append({"name": e.name, "path": p, "kind": "file",
@@ -1094,16 +1106,14 @@ class TopicService:
                                 "url": info.get("gdrive_url") or "",
                                 "mime": info.get("mimeType")})
                     continue
+                # dirs are handled above, so this is a plain file
                 p = "files/" + (f"{sub}/" if sub else "") + e.name
-                if e.kind == "dir":
-                    out.append({"name": e.name, "path": p, "kind": "dir"})
-                else:
-                    st = None if _is_drive else store.stat(
-                        f"{base}/{sub}/{e.name}".strip("/"))
-                    out.append({"name": e.name, "path": p, "kind": "file",
-                                "size": (getattr(st, "size", None) if st else e.size),
-                                "mtime_iso": _iso(st.mtime) if st else None,
-                                "md5": (getattr(st, "md5", None) if st else e.version)})
+                st = None if _is_drive else store.stat(
+                    f"{base}/{sub}/{e.name}".strip("/"))
+                out.append({"name": e.name, "path": p, "kind": "file",
+                            "size": (getattr(st, "size", None) if st else e.size),
+                            "mtime_iso": _iso(st.mtime) if st else None,
+                            "md5": (getattr(st, "md5", None) if st else e.version)})
         else:
             # root o control-plane (summary/meta) → local
             d = self._dir(tier, name)
