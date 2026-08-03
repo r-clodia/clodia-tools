@@ -2190,6 +2190,26 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             _ck = _cross_topic_gate_key(name, arguments, _ag)
             if _ck:
                 await _require_gate_consent(_ag, _ck, consume=False)
+        # WHITELIST DI DESTINAZIONE (clodia-platform#104 §7, passo 5). Uscita da
+        # capacità binaria a capacità circoscritta: «può inviare mail» diventa
+        # «può inviare mail a queste destinazioni». Dopo il gate, non prima: se
+        # il verbo è gated l'umano ha già visto la richiesta, e il verdetto sulla
+        # destinazione è l'ultima cosa che deve poter fermare la chiamata.
+        # Default `report`: decide e logga senza bloccare, perché la lista vera
+        # delle destinazioni si impara dal traffico reale — è così che sono state
+        # trovate le quattro lacune della whitelist di rete.
+        # NON si applica alle richieste on-behalf: l'utente autenticato dall'UI
+        # è trusted (§2), e una sua mail non è un'uscita dell'agente — è la sua.
+        if not is_on_behalf():
+            from . import egress as _egress
+            try:
+                _acfg = agent_config(_ag) if _ag else {}
+            except KeyError:
+                # Agent non in config (clone, connettore): nessuna regola
+                # dichiarata → la decisione la prende egress.decide (deny in
+                # `on`, log in `report`). Non si inventa un default permissivo.
+                _acfg = {}
+            _egress.enforce(_ag or "", _acfg, name, arguments)
         if name == "fs.list_dir":
             result = fs.list_dir(arguments["path"])
         elif name == "web.post":
