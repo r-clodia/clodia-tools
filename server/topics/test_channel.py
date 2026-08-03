@@ -80,6 +80,46 @@ class ChannelTests(unittest.TestCase):
         with self.assertRaises(TopicError):
             self.svc.put_file("P1", "ch", "../evil", b"x")
 
+    def test_provenance_defaults_to_untrusted_and_shows_in_the_listing(self) -> None:
+        """#104 §3: default `untrusted`, and the label follows the file.
+
+        The cost of erring this way must stay low — one extra approval
+        downstream — not high, i.e. an unreadable file. So it is a
+        CLASSIFICATION, not an authorisation: reading stays free and taints the
+        channel instead.
+        """
+        r = self.svc.put_file("P1", "ch", "contratto.pdf", b"%PDF")
+        self.assertEqual(r["provenance"], "untrusted")
+        entry = [f for f in self.svc.list_files("P1", "ch", "files")
+                 if f["name"] == "contratto.pdf"][0]
+        self.assertEqual(entry["provenance"], "untrusted")
+
+    def test_a_declared_trusted_file_keeps_its_label(self) -> None:
+        self.svc.put_file("P1", "ch", "mio.md", b"x", "trusted", by="davide")
+        entry = [f for f in self.svc.list_files("P1", "ch", "files")
+                 if f["name"] == "mio.md"][0]
+        self.assertEqual(entry["provenance"], "trusted")
+
+    def test_an_invalid_provenance_falls_back_to_untrusted(self) -> None:
+        r = self.svc.put_file("P1", "ch", "x.md", b"x", "fidatissimo")
+        self.assertEqual(r["provenance"], "untrusted")
+
+    def test_a_file_with_no_label_reads_as_unknown_not_trusted(self) -> None:
+        """Files uploaded before §3 existed. A reassuring default on historical
+        data is the wrong direction of error."""
+        self.svc.put_file("P1", "ch", "vecchio.md", b"x")
+        # simula l'assenza del sidecar (file pre-esistente)
+        self.svc.s.write(self.svc._prov_path("P1", "ch"), b"{}")
+        entry = [f for f in self.svc.list_files("P1", "ch", "files")
+                 if f["name"] == "vecchio.md"][0]
+        self.assertEqual(entry["provenance"], "unknown")
+
+    def test_the_provenance_sidecar_is_hidden_from_the_navigator(self) -> None:
+        """È un dotfile: comparirebbe fra i file del topic e non è un documento."""
+        self.svc.put_file("P1", "ch", "a.md", b"x")
+        names = [f["name"] for f in self.svc.list_files("P1", "ch")]
+        self.assertNotIn(self.svc._PROV_FILE, names)
+
 
 if __name__ == "__main__":
     unittest.main()
