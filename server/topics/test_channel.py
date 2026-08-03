@@ -46,9 +46,34 @@ class ChannelTests(unittest.TestCase):
 
     def test_files_upload_and_list(self) -> None:
         self.svc.put_file("P1", "ch", "report.md", b"# R\n")
-        files = self.svc.list_files("P1", "ch")
-        self.assertEqual([f["name"] for f in files], ["report.md"])
+        # list_files starts from the topic ROOT, not from files/ — the navigator
+        # shows the real structure and one navigates into it. The test predates
+        # that change and used to assert the old files/-relative listing.
+        root = self.svc.list_files("P1", "ch")
+        self.assertEqual([f["name"] for f in root], ["files", "meta.json", "summary.md"])
+        inside = self.svc.list_files("P1", "ch", "files")
+        self.assertEqual([f["name"] for f in inside], ["report.md"])
         self.assertEqual(self.svc.read_file("P1", "ch", "files/report.md"), b"# R\n")
+
+    def test_subfolders_are_navigable_not_links(self) -> None:
+        """#117: a subfolder must be a navigable dir, whatever the backend.
+
+        On a Drive remote a folder's mime is `application/vnd.google-apps.folder`,
+        which matches the native-Google-document prefix. Classified by mime
+        before kind, every subfolder was emitted as a remote FILE carrying a
+        webViewLink, so the UI opened the Drive web app instead of navigating.
+        """
+        self.svc.put_field = None  # noqa: B010 - guard against accidental reuse
+        self.svc.put_file("P1", "ch", "archivio/2026/nota.md", b"x")
+        entries = self.svc.list_files("P1", "ch", "files")
+        arch = [f for f in entries if f["name"] == "archivio"]
+        self.assertEqual(len(arch), 1)
+        self.assertEqual(arch[0]["kind"], "dir")
+        self.assertEqual(arch[0]["path"], "files/archivio")
+        # and it is navigable one level deeper
+        deeper = self.svc.list_files("P1", "ch", "files/archivio")
+        self.assertEqual([f["name"] for f in deeper], ["2026"])
+        self.assertEqual(deeper[0]["kind"], "dir")
 
     def test_put_file_rejects_traversal(self) -> None:
         from .service import TopicError
