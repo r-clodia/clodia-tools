@@ -58,9 +58,24 @@ def _headers() -> dict[str, str]:
 
 
 def _post(path: str, body: dict) -> dict:
+    """Chiamata al control-plane dei transfer, propagando il MOTIVO dell'errore.
+
+    `raise_for_status()` scartava il corpo, quindi l'agente vedeva
+    `400 Bad Request` e nient'altro: tre agenti hanno concluso, uno dopo l'altro,
+    che il servizio era guasto — mentre il motivo (un path fuori dallo scratch)
+    era stato calcolato a monte e buttato via. Un errore che non arriva a chi può
+    correggerlo non è un errore: è un mistero.
+    """
     with httpx.Client(timeout=httpx.Timeout(connect=4, read=60, write=60, pool=4)) as client:
         response = client.post(f"{AGENT_SERVER_URL}{path}", headers=_headers(), json=body)
-        response.raise_for_status()
+        if response.status_code >= 400:
+            detail = ""
+            try:
+                payload = response.json()
+                detail = str(payload.get("detail") or payload.get("error") or "").strip()
+            except ValueError:
+                detail = (response.text or "").strip()[:400]
+            raise ValueError(detail or f"trasferimento rifiutato (HTTP {response.status_code})")
         return response.json()
 
 
@@ -81,6 +96,15 @@ def cleanup_expired() -> None:
 
 
 def fetch_to_agent(data: bytes, *, chat_id: str, dest: str, sender: str) -> dict:
+    """Consegna `data` nello scratch della sessione. `dest` può essere un NOME.
+
+    Il path dello scratch è un dettaglio d'infrastruttura che l'agente non ha
+    modo di conoscere in modo affidabile — la sua cwd è la radice dello spawn,
+    non lo scratch — quindi pretendere un path assoluto significava pretendere
+    che indovinasse. Chi sa dov'è lo scratch è l'agent-server: gli si passa il
+    nome e lo risolve lui.
+    """
+
     if len(data) > MAX_BYTES:
         raise ValueError(f"file oltre il limite di {MAX_BYTES} byte")
     cleanup_expired()
