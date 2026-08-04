@@ -13,8 +13,9 @@ from . import egress_api
 
 
 class _Req:
-    def __init__(self, secret=None):
+    def __init__(self, secret=None, uri=None):
         self.headers = {"x-orchestrator-secret": secret} if secret else {}
+        self.query_params = {"uri": uri} if uri else {}
 
 
 def _call(req):
@@ -82,6 +83,43 @@ class ShapeTests(unittest.TestCase):
             b = json.loads(_call(_Req("s3cr3t")).body)
         self.assertEqual(b["egress"]["scope"], "none")
         self.assertEqual(b["source"]["scope"], "none")
+
+
+class MembershipQueryTests(unittest.TestCase):
+    """`?uri=` risponde sì/no senza restituire la lista.
+
+    Il punteggio trifecta deve sapere se il remote di un canale punta a una
+    destinazione vagliata. Chiedendolo non impara nulla che non sappia già —
+    l'URI viene dal meta del topic; ricevendo la lista imparerebbe tutto.
+    """
+
+    def _q(self, uri, cfg):
+        import json
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), _with(cfg):
+            return json.loads(_call(_Req("s3cr3t", uri=uri)).body)
+
+    def test_a_whitelisted_uri_answers_true(self):
+        b = self._q("gdrive:folder/1AbC", {"egress_allow": ["gdrive:folder/1AbC"],
+                                           "agents": {}})
+        self.assertTrue(b["allowed"])
+        self.assertEqual(b["query"], "gdrive:folder/1AbC")
+
+    def test_an_unlisted_uri_answers_false(self):
+        b = self._q("gdrive:folder/ALTRA", {"egress_allow": ["gdrive:folder/1AbC"],
+                                            "agents": {}})
+        self.assertFalse(b["allowed"])
+
+    def test_the_answer_does_not_carry_the_list(self):
+        b = self._q("gdrive:folder/X", {"egress_allow": ["gdrive:folder/SEGRETA"],
+                                        "agents": {}})
+        self.assertNotIn("SEGRETA", str(b))
+
+    def test_without_the_query_nothing_is_answered(self):
+        import json
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), \
+                _with({"agents": {}}):
+            b = json.loads(_call(_Req("s3cr3t")).body)
+        self.assertNotIn("allowed", b)
 
 
 if __name__ == "__main__":
