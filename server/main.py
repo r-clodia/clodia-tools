@@ -663,15 +663,18 @@ _TOPIC_TOOLS: list[Tool] = [
                      "locale), per trattarlo con le skill standard (xlsx/pdf/docx/…). "
                      "USA QUESTO per i BINARI invece di topic.read_file (che passa "
                      "base64 nel contesto e si tronca sui file grandi). Il trasporto "
-                     "usa envelope cifrati effimeri sul volume shared. `dest` = path "
-                     "assoluto sotto il tuo scratch. Flusso: topic.fetch → skill "
-                     "standard sul file locale → topic.put."),
+                     "usa envelope cifrati effimeri sul volume shared. `dest` è "
+                     "OPZIONALE: senza, il file prende il proprio nome nel tuo "
+                     "scratch, e il path locale te lo ritorno io in `local_path` — "
+                     "non provare a comporlo da `pwd`, che è la radice dello spawn "
+                     "e NON lo scratch. Flusso: topic.fetch → skill "
+                     "standard su `local_path` → topic.put."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
             "path": {"type": "string", "description": "path nel topic, es. files/expenses/x.xlsx"},
-            "dest": {"type": "string", "description": "path assoluto di destinazione nel tuo scratch"},
-        }, "required": ["tier", "name", "path", "dest"]},
+            "dest": {"type": "string", "description": "opzionale: nome del file nel tuo scratch (default: lo stesso nome che ha nel topic)"},
+        }, "required": ["tier", "name", "path"]},
     ),
     Tool(
         name="topic.put",
@@ -3390,8 +3393,12 @@ def _dispatch_topic(name: str, a: dict):
         chat_id = current_chat()
         if not chat_id:
             raise ValueError("topic.fetch richiede una sessione agent con chat_id")
+        # `dest` opzionale: senza, il file prende il proprio nome dentro lo
+        # scratch. Pretenderlo obbligatorio e assoluto costringeva l'agente a
+        # indovinare un path d'infrastruttura che non conosce.
+        _dest = str(a.get("dest") or "").strip() or _os.path.basename(a["path"])
         return transfer_channel.fetch_to_agent(
-            data, chat_id=chat_id, dest=a["dest"], sender=agent_name())
+            data, chat_id=chat_id, dest=_dest, sender=agent_name())
     if verb == "put":
         # agent-server legge lo scratch della sola sessione, cifra per il gateway
         # e deposita un envelope effimero su /shared; qui viene decifrato e consumato.
