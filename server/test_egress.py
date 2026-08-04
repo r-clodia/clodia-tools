@@ -338,3 +338,73 @@ class DangerNoteTests(unittest.TestCase):
         r = egress.gate_reason("clodia", "gdrive.upload", "drive",
                                ["gdrive:folder/1AbC"])
         self.assertNotIn("⚠️", r)
+
+
+class CanonicalUriTests(unittest.TestCase):
+    """Le forme che un umano scrive naturalmente devono combaciare.
+
+    Trovato rispondendo alla domanda «se metto la URL della cartella Drive in
+    whitelist il segnale si spegne?»: NO, non si spegneva. Il punteggio interroga
+    `gdrive:folder/<id>`, e ciò che si copia dal browser è
+    `https://drive.google.com/drive/folders/<id>`. Una notazione che non accetta la
+    forma che l'utente ha sotto le dita è un trabocchetto, non un aiuto: si
+    incolla, non combacia, e nessuno capisce perché.
+    """
+
+    FOLDER = "1QBzBmKKdnOTWTPkGz9NErAb3_IuvtYkO"
+
+    def test_a_browser_drive_url_matches_the_canonical_folder_uri(self):
+        dest = f"gdrive:folder/{self.FOLDER}"
+        for rule in (f"gdrive:folder/{self.FOLDER}",
+                     f"https://drive.google.com/drive/folders/{self.FOLDER}",
+                     f"https://drive.google.com/drive/u/0/folders/{self.FOLDER}"):
+            with self.subTest(rule=rule):
+                self.assertTrue(egress._matches(dest, rule))
+
+    def test_a_spreadsheet_url_becomes_the_gsheets_uri(self):
+        self.assertEqual(
+            egress.canonical("https://docs.google.com/spreadsheets/d/1tIf/edit#gid=0"),
+            "gsheets:1tIf")
+
+    def test_a_bare_id_does_not_match(self):
+        """Un id nudo non dice di che cosa è l'id: potrebbe essere una cartella, un
+        foglio o un documento, e indovinare aprirebbe la cosa sbagliata."""
+        self.assertFalse(egress._matches(f"gdrive:folder/{self.FOLDER}", self.FOLDER))
+
+    def test_the_host_is_lowercased_but_not_the_path(self):
+        self.assertEqual(egress.canonical("HTTPS://API.Tizio.IT/Path/Case"),
+                         "https://api.tizio.it/Path/Case")
+
+    def test_canonical_is_idempotent(self):
+        for u in (f"gdrive:folder/{self.FOLDER}", "mailto:a@b.it", "tg:1",
+                  "https://github.com/a/b"):
+            with self.subTest(u=u):
+                self.assertEqual(egress.canonical(egress.canonical(u)),
+                                 egress.canonical(u))
+
+
+class DegenerateRuleTests(unittest.TestCase):
+    """Una regola che non vincola nulla dentro il proprio schema va scartata.
+
+    `gdrive:folder/` consentirebbe QUALUNQUE cartella. Chi vuole quello scrive
+    `*`, che si vede leggendo la lista; una barra finale dimenticata no.
+    """
+
+    def test_they_are_dropped_from_the_list_loudly(self):
+        cfg = _cfg("gdrive:folder/", "mailto:", "tg:", "https://", "mailto:ok@x.it")
+        with _with(cfg), self.assertLogs("clodia-tools.egress", level="WARNING") as cm:
+            rules = egress.allowed_uris()
+        self.assertEqual(rules, ["mailto:ok@x.it"])
+        self.assertIn("aprirebbe l'intero tipo", "".join(cm.output))
+
+    def test_they_do_not_match_even_if_passed_directly(self):
+        """La difesa non deve dipendere da quale porta si è usata per entrare."""
+        self.assertFalse(egress._matches("gdrive:folder/1AbC", "gdrive:folder/"))
+        self.assertFalse(egress._matches("mailto:a@b.it", "mailto:"))
+
+    def test_a_host_only_http_rule_is_legitimate(self):
+        """`https://host/` significa «qualunque path su quell'host», che è una
+        regola sensata — su TLS il path non è comunque distinguibile."""
+        self.assertTrue(egress._matches("https://api.tizio.it/", "https://api.tizio.it/"))
+        with _with(_cfg("https://api.tizio.it/")):
+            self.assertEqual(egress.allowed_uris(), ["https://api.tizio.it/"])
