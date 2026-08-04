@@ -288,7 +288,22 @@ _HIERARCHICAL = ("http", "https", "gdrive")
 #: tutti i gate a valle che non scattano. Un `mailfrom:` nella lista di uscita è
 #: un errore di configurazione e va rifiutato, non ignorato.
 EGRESS_SCHEMES = ("mailto", "tg", "http", "https", "gdrive", "gsheets")
-SOURCE_SCHEMES = ("mailfrom", "http", "https")
+#: `gdrive` fra le fonti: una cartella Drive vagliata è una fonte fidata, ed è il
+#: caso che rende operativa questa lista — un topic collegato a una cartella di cui
+#: l'owner risponde non deve contaminare a ogni lettura.
+SOURCE_SCHEMES = ("mailfrom", "http", "https", "gdrive", "gsheets")
+
+
+def is_vetted_source(uri: str) -> bool:
+    """True se `uri` è fra le fonti fidate dichiarate.
+
+    Lista vuota per default → tutto contamina, che è la direzione giusta: una
+    fonte non dichiarata non è una fonte fidata, e sbagliare qui è SILENZIOSO
+    (un taint che non si accende non lo si vede).
+    """
+    if not uri:
+        return False
+    return any(_matches(uri, r) for r in source_uris())
 
 
 def allowed_uris(cfg: dict | None = None) -> list[str]:

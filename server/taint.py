@@ -211,13 +211,30 @@ def context_gate_key(channel: Optional[str], participants) -> Optional[str]:
     return f"egress-context:{ch}:{composition_epoch(participants)}"
 
 
-def note_verb(verb: str, agent: str = "", chat: Optional[str] = None) -> None:
-    """Da chiamare DOPO l'esecuzione di un verbo: se produce contenuto di terzi,
-    contamina il canale corrente. Non solleva mai — una misura che rompe il turno
-    che sta misurando è peggio della misura mancante.
+def note_verb(verb: str, agent: str = "", chat: Optional[str] = None,
+              vetted: Optional[bool] = None) -> None:
+    """Da chiamare DOPO l'esecuzione di un verbo: se ha portato dentro contenuto
+    di terzi, contamina il canale corrente.
+
+    `vetted=True` = la SORGENTE di questa lettura è dichiarata fidata → non
+    contamina. Serve perché il verbo da solo non basta a decidere: `topic.read_file`
+    su un PDF che l'owner ha caricato marcandolo `trusted` non è la stessa cosa
+    dello stesso verbo su una cartella Drive di cui nessuno risponde. Prima
+    contaminava sempre, e un flag che si accende su tutto smette di discriminare —
+    che è esattamente la condizione posta in #77 per non produrre consent fatigue.
+
+    `None` = sorgente non determinabile → contamina. Direzione prudente: una
+    lettura di cui non sappiamo la provenienza non è una lettura fidata.
+
+    Non solleva mai: una misura che rompe il turno che sta misurando è peggio della
+    misura mancante.
     """
     try:
         if not taints(verb):
+            return
+        if vetted is True:
+            LOG.info("taint · %s da fonte dichiarata fidata: nessuna contaminazione",
+                     verb)
             return
         from .whitelist import current_chat
         mark(chat if chat is not None else current_chat(), "verb", verb, agent)
