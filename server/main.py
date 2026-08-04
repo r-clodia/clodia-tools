@@ -142,21 +142,32 @@ _EMAIL_TOOLS: list[Tool] = [
     ),
     Tool(
         name="email.save_attachment",
-        description=("Scarica un allegato e lo SCRIVE su file nel tuo scratch (`dest` "
-                     "assoluto): i byte NON passano dal contesto del modello — usa QUESTO "
-                     "per PDF, immagini e binari. Flusso tipico: email.save_attachment → "
-                     "topic.put per depositarlo nei file di un topic. "
-                     "Usa email.read per scoprire i nomi degli allegati."),
+        description=("Scarica un allegato senza che i byte passino dal contesto del "
+                     "modello — usa QUESTO per PDF, immagini e binari. Due "
+                     "destinazioni, ne serve una: `tier`+`name` per archiviarlo "
+                     "DIRETTAMENTE nei file di un topic (il gateway lo scrive, "
+                     "provenienza `untrusted` e il canale risulta contaminato: non "
+                     "serve topic.put), oppure `dest` per un path nel tuo scratch se "
+                     "devi lavorarlo. Usa email.read per scoprire i nomi degli "
+                     "allegati."),
         inputSchema={
             "type": "object",
             "properties": {
                 "email_id": {"type": "string", "description": "IMAP message id"},
                 "filename": {"type": "string", "description": "nome esatto dell'allegato (da email.read)"},
-                "dest": {"type": "string", "description": "path assoluto di destinazione nel tuo scratch"},
+                "dest": {"type": "string", "description": ("path assoluto nel tuo "
+                          "scratch. Alternativa a tier+name: se devi solo archiviare "
+                          "l'allegato, usa tier+name e i byte non passano da te")},
+                "tier": {"type": "string", "description": "tier del topic in cui archiviare"},
+                "name": {"type": "string", "description": "nome del topic in cui archiviare"},
                 "account": {"type": "string"},
                 "folder": {"type": "string", "description": "IMAP folder, default INBOX"},
             },
-            "required": ["email_id", "filename", "dest"],
+            # `dest` non è più obbligatorio: serve UNA delle due destinazioni, e il
+            # dispatch lo verifica con un errore che dice quali sono. Uno schema che
+            # imponesse entrambe costringerebbe a passare un path finto per
+            # archiviare in un topic.
+            "required": ["email_id", "filename"],
         },
     ),
     Tool(
@@ -2668,18 +2679,48 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             )
         elif name == "email.save_attachment":
             # I byte dell'allegato NON passano dal modello: decodifica server-side
-            # e scrittura nello scratch validato (come topic.fetch).
-            dest = _safe_scratch_path(arguments["dest"])
+            # e scrittura o nello scratch validato, o DIRETTAMENTE nei file del
+            # topic. La seconda è la RICEZIONE per riferimento, simmetrica
+            # all'invio (`email.send(topic_files=…)`): esisteva il modo di
+            # spedire un file senza vederlo, non quello di archiviarne uno.
+            #
+            # Serve perché il flusso documentato era `save_attachment` →
+            # `topic.put`, e a un postino `topic.put` è negato (§8 di #104): un
+            # allegato in arrivo non era archiviabile da chi la posta la riceve.
+            _tier, _tname = arguments.get("tier"), arguments.get("name")
+            _dest_arg = (arguments.get("dest") or "").strip()
+            if not (_dest_arg or (_tier and _tname)):
+                raise ValueError(
+                    "serve `dest` (path nel tuo scratch) oppure `tier`+`name` del "
+                    "topic in cui archiviare l'allegato")
             raw, meta = email.get_attachment_bytes(
                 arguments["email_id"],
                 arguments["filename"],
                 account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
             )
-            _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-            with open(dest, "wb") as f:
-                f.write(raw)
-            result = {"local_path": dest, "size": len(raw), **meta}
+            if _tier and _tname:
+                svc = _topics()
+                _require_topic_member(svc, _tier, _tname)
+                fn = arguments["filename"]
+                # Provenienza `untrusted` d'ufficio: un file introdotto da un verbo
+                # non ha nessuno da interrogare (#104 §3), e la posta in arrivo è
+                # la definizione di sorgente non controllata.
+                r = svc.put_file(_tier, _tname, fn, raw, "untrusted", by=_ag or "")
+                # E CONTAMINA il canale: è contenuto di terzi che entra adesso.
+                # Senza questo l'archiviazione sarebbe un modo di far entrare un
+                # PDF ostile senza lasciare traccia nel flag.
+                _taint.mark(f"{_tier}/{_tname}", "file", fn, _ag or "")
+                LOG.info("email: allegato '%s' archiviato in %s/%s (untrusted)",
+                         fn, _tier, _tname)
+                result = {"topic_path": r["path"], "provenance": r["provenance"],
+                          "size": len(raw), "tainted": True, **meta}
+            else:
+                dest = _safe_scratch_path(_dest_arg)
+                _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+                with open(dest, "wb") as f:
+                    f.write(raw)
+                result = {"local_path": dest, "size": len(raw), **meta}
         elif name == "email.search":
             result = email.search(
                 arguments["query"],
