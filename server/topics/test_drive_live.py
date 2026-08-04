@@ -115,12 +115,23 @@ class RemoteEnableGuardTests(unittest.TestCase):
         self.svc.put_file("SEAL-1", "withlocal", "doc.txt", b"X")
 
     def test_refuses_to_link_drive_when_local_files_present(self):
-        # Guardia anti-nascondimento: Drive diventa la fonte e i locali NON sono
-        # caricati → collegarlo con file solo-locali li renderebbe invisibili.
+        """Guardia anti-nascondimento: Drive diventa la fonte e i locali NON sono
+        caricati → collegarlo con file solo-locali li renderebbe invisibili.
+
+        Si asserisce sui FATTI che il messaggio deve portare, non sulla parola con
+        cui li dice: il marcatore che lo rende confermabile invece di un errore, e
+        che i file **ricompaiono** scollegando il remote. Quest'ultimo perché la
+        prima stesura diceva «persi», e un avviso che esagera su file che tornano
+        insegna a non fidarsi degli avvisi — che è il danno peggiore.
+        """
         with self.assertRaises(Exception) as ctx:
             self.svc.remote_enable("SEAL-1", "withlocal", "drive",
                                    {"folder": "f", "account": "a"})
-        self.assertIn("nasconderebbe", str(ctx.exception))
+        msg = str(ctx.exception)
+        self.assertTrue(msg.startswith("confirmable:"), msg)
+        self.assertIn("non saranno più visibili", msg)
+        self.assertIn("ricompaiono", msg)
+        self.assertNotIn("persi", msg)
         self.assertEqual(
             self.local.read("SEAL-1/withlocal/files/doc.txt").data, b"X")
 
