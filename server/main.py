@@ -1289,6 +1289,44 @@ _GSHEETS_TOOLS: list[Tool] = [
              "required": ["spreadsheet_id", "range", "values"]}),
 ]
 
+# egress.*/ingress.* — amministrazione delle due whitelist (clodia-platform#128).
+# `allow` è GATED: allarga un permesso, e il dialog dice cosa costa. `revoke` e
+# `list` no — togliere autorità e leggerla non richiedono un consenso, e chiederlo
+# insegnerebbe che anche restringere è un'operazione da negoziare.
+_EGRESS_ADMIN_TOOLS: list[Tool] = [
+    Tool(name="egress.allow",
+         description=("Aggiunge una DESTINAZIONE ammessa in uscita, per tutti gli "
+                      "agenti. Notazione URI: mailto:x@y.it · mailto:*@dominio · "
+                      "tg:<chat> · https://host/ · https://github.com/owner/repo · "
+                      "gdrive://<folder-id> (o l'URL del browser) · gsheets:<id>. "
+                      "Richiede approvazione umana."),
+         inputSchema={"type": "object", "properties": {"uri": {"type": "string"}},
+                      "required": ["uri"]}),
+    Tool(name="egress.revoke",
+         description="Rimuove una destinazione ammessa. Non richiede approvazione.",
+         inputSchema={"type": "object", "properties": {"uri": {"type": "string"}},
+                      "required": ["uri"]}),
+    Tool(name="egress.list",
+         description="Destinazioni ammesse in uscita e modo del confinamento.",
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="ingress.allow",
+         description=("Aggiunge una FONTE FIDATA: leggere da lì non contaminerà "
+                      "più il canale. Notazione URI: mailfrom:x@y.it · "
+                      "https://host/prefisso/ · gdrive://<folder-id> · "
+                      "gsheets:<id>. Richiede approvazione umana, e il dialog "
+                      "avverte che da quel momento le istruzioni nascoste in quella "
+                      "fonte non produrranno più nessun segnale."),
+         inputSchema={"type": "object", "properties": {"uri": {"type": "string"}},
+                      "required": ["uri"]}),
+    Tool(name="ingress.revoke",
+         description="Rimuove una fonte fidata. Non richiede approvazione.",
+         inputSchema={"type": "object", "properties": {"uri": {"type": "string"}},
+                      "required": ["uri"]}),
+    Tool(name="ingress.list",
+         description="Fonti fidate dichiarate.",
+         inputSchema={"type": "object", "properties": {}}),
+]
+
 # telegram.* — invio + inbound con lease per-chat. Un agente scrive solo a chat
 # che hanno già scritto e di cui detiene il lease; chat diverse → lease
 # indipendenti. Il bot token vive nel vault, mai nel modello.
@@ -1567,6 +1605,18 @@ def _dispatch_gdocs(name: str, a: dict):
     raise ValueError(f"unknown gdocs verb: {name}")
 
 
+def _dispatch_egress_admin(name: str, a: dict):
+    from . import egress as eg
+    ns, verb = name.split(NS_SEP_DOT, 1)
+    if verb == "allow":
+        return eg.allow(ns, a["uri"])
+    if verb == "revoke":
+        return eg.revoke(ns, a["uri"])
+    if verb == "list":
+        return eg.listing(ns)
+    raise ValueError(f"unknown {ns} verb: {name}")
+
+
 def _dispatch_gsheets(name: str, a: dict):
     from .tools import gsheets as gsh
     verb = name.split(NS_SEP_DOT, 1)[1]
@@ -1697,7 +1747,8 @@ def _native_tool_namespaces() -> list[str]:
     """Namespace dei tool nativi del gateway (per agents.list_tools)."""
     tools = (_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
              + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS
-             + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS + _AGENT_TOOLS
+             + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
+             + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS
              + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
@@ -2015,7 +2066,7 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", [])) | set(current_scoped_tools())
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS + _AGENT_TOOLS
+    native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS
                   + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     # Feature `rag` (profilo istanza): off → i verbi rag.*/eu_corpus.* non
     # esistono proprio (né in lista né al dispatch).
@@ -2469,7 +2520,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # stessi verbi che per altri restano liberi, quindi la granularità
             # non può essere globale).
             if _gate.is_gated(name) or agent_gates(name, _ag):
-                reason = web_post.gate_summary(arguments) if name == "web.post" else ""
+                if name == "web.post":
+                    reason = web_post.gate_summary(arguments)
+                elif name in ("egress.allow", "ingress.allow"):
+                    # Il verbo che ALLARGA un permesso è quello in cui il dialog
+                    # deve dire cosa costa, non solo cosa concede.
+                    from . import egress as _eg
+                    _u = _eg.canonical(str(arguments.get("uri") or ""))
+                    _dir = name.split(".", 1)[0]
+                    _what = ("fonte fidata" if _dir == "ingress"
+                             else "destinazione ammessa")
+                    reason = (f"@{_ag} chiede di aggiungere {_u} come {_what}, "
+                              f"per TUTTI gli agenti. {_eg.admin_note(_dir, _u)}")
+                else:
+                    reason = ""
                 gate_approval = await _require_gate_consent(
                     _ag, name, consume=True, reason=reason,
                     allow_delegation=name not in {
@@ -2661,6 +2725,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_gdocs(name, arguments)
         elif name.startswith("gsheets."):
             result = _dispatch_gsheets(name, arguments)
+        elif name.startswith(("egress.", "ingress.")):
+            result = _dispatch_egress_admin(name, arguments)
         elif name.startswith("runtime."):
             # proxy httpx SINCRONO all'agent-server → offload su thread (no blocco loop)
             result = await asyncio.to_thread(_dispatch_runtime, name, arguments, _ag)

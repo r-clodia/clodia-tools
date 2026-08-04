@@ -617,6 +617,103 @@ def remember(agent: str, dtype: str, dests: list[str]) -> list[str]:
     return cur
 
 
+# ── verbi di amministrazione delle liste (gated) ─────────────────────────────
+
+_DIRECTIONS = {
+    "egress": ("egress_allow", EGRESS_SCHEMES, "destinazione ammessa"),
+    "ingress": ("source_allow", SOURCE_SCHEMES, "fonte fidata"),
+}
+
+
+def admin_note(direction: str, uri: str) -> str:
+    """Cosa COSTA aggiungere questa voce. Va nel dialog del gate.
+
+    Per l'uscita è l'avvertenza sulla classe di destinazione. Per l'ingresso è
+    un'altra cosa e più grave: aggiungere una fonte fidata **spegne il taint** per
+    tutto ciò che arriverà da lì, per sempre. Sbagliare una destinazione è
+    rumoroso — un invio bloccato, lo vedi. Sbagliare una fonte è silenzioso: un
+    taint che non si accende non produce nessun segnale, e tutti i gate a valle
+    smettono di scattare senza che nulla lo dica.
+
+    È l'unico punto del modello in cui un'injection che chiedesse «aggiungi questa
+    fonte» otterrebbe un guadagno durevole. Il dialog non può impedirlo; può
+    dirlo.
+    """
+    if direction == "ingress":
+        return ("Da qui in avanti leggere da questa fonte NON contaminerà più il "
+                "canale, e la prima uscita successiva non chiederà conferma. Se "
+                "quella fonte contiene istruzioni nascoste, non lo saprai. "
+                "Approva solo fonti di cui rispondi tu.")
+    return danger_note(uri)
+
+
+def allow(direction: str, uri: str) -> dict:
+    """Aggiunge `uri` alla lista della direzione indicata. Idempotente.
+
+    Rifiuta gli schemi della direzione sbagliata e le voci degeneri: `mailfrom:`
+    in uscita è un errore di configurazione, `gdrive:folder/` aprirebbe l'intero
+    Drive. Rifiutare qui e non solo al caricamento significa che l'errore si vede
+    subito, invece di sparire in un warning che nessuno legge.
+    """
+    key, schemes, label = _direction(direction)
+    u = canonical(uri)
+    if not u:
+        raise ValueError("uri richiesto")
+    if u == "*":
+        raise ValueError(
+            "'*' aprirebbe qualunque destinazione: non si concede con un verbo. "
+            "Se è davvero quello che serve, va scritto nella config del gateway, "
+            "dove si vede rileggendola.")
+    scheme = u.partition(":")[0]
+    if scheme not in schemes:
+        raise ValueError(
+            f"schema '{scheme}' non ammesso come {label}: ammessi {', '.join(schemes)}")
+    if _is_degenerate(u):
+        raise ValueError(
+            f"'{u}' non vincola nulla dentro il suo schema: aprirebbe l'intero "
+            f"tipo. Indica la risorsa completa.")
+    from . import whitelist as _wl
+    cur = list(_wl.CONFIG.get(key) or [])
+    added = u not in cur
+    if added:
+        cur.append(u)
+        _wl.CONFIG[key] = cur
+        _wl.save_config()
+    LOG.warning("%s · %s %s (approvato da un umano)", key,
+                "+=" if added else "già presente:", u)
+    return {"direction": direction, "uri": u, "added": added, "total": len(cur)}
+
+
+def revoke(direction: str, uri: str) -> dict:
+    """Rimuove `uri`. NON gated: togliere autorità non richiede un consenso —
+    chiederlo insegnerebbe che anche restringere è un'operazione da negoziare."""
+    key, _, _ = _direction(direction)
+    u = canonical(uri)
+    from . import whitelist as _wl
+    cur = list(_wl.CONFIG.get(key) or [])
+    if u not in cur:
+        return {"direction": direction, "uri": u, "removed": False, "total": len(cur)}
+    cur = [x for x in cur if x != u]
+    _wl.CONFIG[key] = cur
+    _wl.save_config()
+    LOG.warning("%s · -= %s", key, u)
+    return {"direction": direction, "uri": u, "removed": True, "total": len(cur)}
+
+
+def listing(direction: str) -> dict:
+    key, schemes, label = _direction(direction)
+    uris = allowed_uris() if direction == "egress" else source_uris()
+    return {"direction": direction, "label": label, "mode": mode(),
+            "schemes": list(schemes), "uris": uris}
+
+
+def _direction(direction: str):
+    d = (direction or "").strip().lower()
+    if d not in _DIRECTIONS:
+        raise ValueError(f"direzione '{direction}' sconosciuta: egress | ingress")
+    return _DIRECTIONS[d]
+
+
 def summary(agent_cfg: dict | None = None) -> dict:
     """Per introspezione/UI: modo, destinazioni ammesse, fonti fidate."""
     return {"mode": mode(), "egress_allow": allowed_uris(),
