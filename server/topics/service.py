@@ -685,7 +685,14 @@ class TopicService:
                 pass
         return rem.status() if rem else {"enabled": False}
 
-    def remote_enable(self, tier: str, name: str, rtype: str, config: dict | None = None) -> dict:
+    #: Marcatore nel messaggio d'errore: dice alla UI che questo rifiuto è
+    #: CONFERMABILE, non definitivo. Senza un marcatore il frontend dovrebbe
+    #: riconoscere il caso dal testo italiano, che è il modo di rompere la
+    #: conferma alla prima riformulazione della frase.
+    CONFIRMABLE_HIDES_LOCAL = "confirmable:hides-local"
+
+    def remote_enable(self, tier: str, name: str, rtype: str, config: dict | None = None,
+                      confirm_hides_local: bool = False) -> dict:
         if rtype not in ("git", "drive"):
             raise TopicError(f"remote type non supportato: {rtype}")
         # Guard SEAL sul VERO punto di attivazione di Drive (non solo in
@@ -711,12 +718,19 @@ class TopicService:
                             and not e.name.endswith(".gdrive.json")]
             except Exception:  # noqa: BLE001 — files/ assente → topic vuoto, ok
                 existing = []
-            if existing:
+            if existing and not confirm_hides_local:
+                # NON un rifiuto definitivo: una conferma. I file locali non
+                # vengono cancellati — restano su disco e `remote_disable` li
+                # ripristina — ma spariscono dal topic finché Drive è la fonte.
+                # Dirlo con precisione: un avviso che dice «persi» quando i file
+                # tornano insegna a non fidarsi degli avvisi.
                 raise TopicError(
-                    f"collegare Drive a {tier}/{name} nasconderebbe {len(existing)} "
-                    f"file locali: Drive diventa la fonte e i locali NON vengono "
-                    f"caricati. Popola prima la cartella Drive, oppure lascia il "
-                    f"topic su local-fs.")
+                    f"{self.CONFIRMABLE_HIDES_LOCAL}: collegando Drive, i "
+                    f"{len(existing)} file già presenti in {tier}/{name} non "
+                    f"saranno più visibili nel topic: Drive diventa la fonte e i "
+                    f"locali NON vengono caricati. Restano su disco e ricompaiono "
+                    f"se scolleghi il remote, ma se ti servono su Drive vanno "
+                    f"copiati prima. Fai una copia se hai dubbi.")
         meta, ver = self._read_meta(tier, name)
         config = dict(config or {})
         if rtype == "drive":
