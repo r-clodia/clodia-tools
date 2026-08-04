@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import logging
 import os
 import re
@@ -257,7 +258,19 @@ def _remote_unreachable(exc: Exception, tier: str, name: str) -> "TopicError":
 class TopicService:
     def __init__(self, storage: Storage):
         self.s = storage          # control-plane local (meta, summary, .messages)
-        self._drive_cache: dict = {}
+        # Cache dei backend Drive PER THREAD, non condivisa. Il service di
+        # google-api-python-client NON è thread-safe: l'oggetto http sottostante
+        # tiene lo stato della connessione TLS, e due chiamate concorrenti lo
+        # corrompono. Sintomo osservato in produzione il 4 ago 2026, con tre topic
+        # Drive e il polling della vista file: `[SSL] record layer failure`
+        # seguito da `free(): invalid next size (normal)` — corruzione dello heap
+        # glibc, il processo aborta con exit 0 e nessun traceback, docker lo
+        # riavvia, e l'utente vede 503 intermittenti.
+        #
+        # Non un lock: serializzerebbe ogni accesso a Drive fra tutti i topic, e
+        # il gateway serve i topic in thread proprio per non bloccare l'event loop.
+        # Un service per thread costa una costruzione in più e nulla di condiviso.
+        self._drive_local = threading.local()
 
     # ── routing storage dei FILE (control-plane resta su self.s) ─────────────
     def _drive_service(self, account: str | None):
@@ -318,11 +331,30 @@ class TopicService:
             return None
         from .drive_fs import DriveStorage
         key = f"{tier}/{name}:{folder}"
-        ds = self._drive_cache.get(key)
+        cache = self._drive_thread_cache()
+        ds = cache.get(key)
         if ds is None:
             ds = DriveStorage(self._drive_service((cfg or {}).get("account")), folder)
-            self._drive_cache[key] = ds
+            cache[key] = ds
         return ds
+
+    def _drive_thread_cache(self) -> dict:
+        """Cache dei backend Drive del thread corrente (vedi `__init__`)."""
+        cache = getattr(self._drive_local, "cache", None)
+        if cache is None:
+            cache = {}
+            self._drive_local.cache = cache
+        return cache
+
+    def _drive_cache_clear(self) -> None:
+        """Svuota la cache del thread corrente.
+
+        Solo del corrente: i backend degli altri thread sono oggetti loro e
+        toccarli da qui sarebbe la stessa condivisione che questo cambio elimina.
+        Un backend stantio in un altro thread costa una chiamata a vuoto e viene
+        ricostruito; toccarlo costerebbe un crash.
+        """
+        self._drive_thread_cache().clear()
 
     # Drive remote = source of truth: quando un topic è collegato a una cartella
     # Drive NON si fa alcun upload dei file locali (niente "migrazione"): Drive è
@@ -616,10 +648,11 @@ class TopicService:
     def _remote_drive_factory(self, account, folder):
         from .drive_fs import DriveStorage
         key = f"remote:{account or ''}:{folder}"
-        ds = self._drive_cache.get(key)
+        cache = self._drive_thread_cache()
+        ds = cache.get(key)
         if ds is None:
             ds = DriveStorage(self._drive_service(account), folder)
-            self._drive_cache[key] = ds
+            cache[key] = ds
         return ds
 
     def _remote_for(self, tier: str, name: str, meta: dict):
@@ -764,7 +797,7 @@ class TopicService:
             rem.disable()
         meta.pop("remote", None)
         self._write_meta(tier, name, meta, base_version=ver)
-        self._drive_cache.clear()
+        self._drive_cache_clear()
         return {"ok": True}
 
     def remote_add(self, tier: str, name: str, path: str) -> dict:
