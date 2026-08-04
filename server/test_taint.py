@@ -170,3 +170,47 @@ class CompositionEpochTests(unittest.TestCase):
 
     def test_no_channel_means_no_key(self):
         self.assertIsNone(taint.context_gate_key("", ["clodia"]))
+
+
+class VettedSourceTests(unittest.TestCase):
+    """Il taint segue la PROVENIENZA, non il solo nome del verbo (#128).
+
+    Prima `topic.read_file` contaminava sempre: anche su un PDF che l'owner aveva
+    caricato marcandolo `trusted`. Un flag che si accende su tutto smette di
+    discriminare, che è esattamente la condizione posta in #77 per non produrre
+    consent fatigue — e rende il gate di contesto onnipresente, cioè inutile.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        p = patch.object(taint, "_path",
+                         side_effect=lambda: Path(self.tmp.name) / "t.json")
+        p.start()
+        self.addCleanup(p.stop)
+        self.CH = "chan:SEAL-1:x:clodia"
+
+    def _tainted(self, vetted):
+        taint._save({})
+        with patch("server.whitelist.current_chat", return_value=self.CH):
+            taint.note_verb("topic.read_file", "clodia", vetted=vetted)
+        return taint.status(self.CH)["tainted"]
+
+    def test_a_vetted_source_does_not_taint(self):
+        self.assertFalse(self._tainted(True))
+
+    def test_an_unvetted_source_taints(self):
+        self.assertTrue(self._tainted(False))
+
+    def test_an_undeterminable_source_taints(self):
+        """Direzione prudente: una lettura di cui non sappiamo la provenienza non
+        è una lettura fidata, e sbagliare qui è silenzioso."""
+        self.assertTrue(self._tainted(None))
+
+    def test_a_non_tainting_verb_is_unaffected_by_the_verdict(self):
+        """`vetted=False` non deve trasformare un invio in una contaminazione: la
+        tabella dei verbi resta il primo filtro."""
+        taint._save({})
+        with patch("server.whitelist.current_chat", return_value=self.CH):
+            taint.note_verb("email.send", "messaggero", vetted=False)
+        self.assertFalse(taint.status(self.CH)["tainted"])

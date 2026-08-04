@@ -2195,6 +2195,63 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
 _UNATTENDED_TOPIC_ALLOW = frozenset({"topic.invoke_hook"})
 
 
+#: Verbi che leggono FILE di un topic: per loro la provenienza è determinabile e
+#: decide se la lettura contamina. Gli altri verbi che contaminano (posta, web,
+#: MCP esterni) restano governati dalla sola tabella in `taint.py`.
+_TOPIC_READ_VERBS = frozenset({
+    "topic.read_file", "topic.read_document", "topic.files", "topic.fetch",
+})
+
+
+def _source_vetted(verb: str, a: dict) -> bool | None:
+    """La sorgente di questa lettura è dichiarata fidata?
+
+    `True` non contamina, `False`/`None` sì. `None` è «non determinabile», e si
+    tratta come non fidata: una lettura di cui non sappiamo la provenienza non è
+    una lettura fidata, e sbagliare in questa direzione è **silenzioso** — un
+    taint che non si accende non lo si vede.
+
+    Due sorgenti, due criteri:
+
+    - **file di un topic**: se il topic è collegato a una cartella Drive, la fonte
+      è la cartella e vale `source_allow`; altrimenti vale l'ETICHETTA del file —
+      `trusted` (dichiarato dall'owner all'upload) e `agent` (output nostro) non
+      contaminano, `untrusted` e `unknown` sì;
+    - **web**: l'URL contro `source_allow`, per prefisso.
+    """
+    from . import egress as _eg
+    try:
+        if verb.startswith("web."):
+            url = str((a or {}).get("url") or "").strip()
+            return _eg.is_vetted_source(url) if url else None
+        if verb not in _TOPIC_READ_VERBS:
+            return None
+        tier, name = (a or {}).get("tier"), (a or {}).get("name")
+        if not (tier and name):
+            return None
+        svc = _topics()
+        meta = svc.open(tier, name).get("meta", {})
+        rem = (meta.get("remote") or {})
+        if str(rem.get("type") or "") == "drive":
+            folder = str((rem.get("config") or {}).get("folder") or "").strip()
+            # Cartella Drive: la fonte è la cartella, non il singolo file. Le
+            # etichette di provenienza non esistono su Drive — chi ci scrive lo fa
+            # da fuori — quindi l'unica domanda sensata è se di quella cartella
+            # l'owner risponda.
+            return _eg.is_vetted_source(f"gdrive:folder/{folder}") if folder else None
+        path = str((a or {}).get("path") or "").strip()
+        if not path:
+            return None                     # `topic.files`: elenco, nessun file
+        rel = path[len("files/"):] if path.startswith("files/") else path
+        prov = (svc.provenance_map(tier, name).get(rel) or {}).get("provenance")
+        if prov in ("trusted", "agent"):
+            return True
+        return False                        # untrusted, o etichetta assente
+    except Exception as e:  # noqa: BLE001 — non determinabile ≠ fidata
+        LOG.warning("taint: provenienza di %s non determinabile (%s)", verb, e)
+        return None
+
+
 def agent_name_safe() -> str:
     """`agent_name()` solleva se l'identità non è impostata, e nel ramo di
     rifiuto quello è proprio uno dei casi possibili: un errore nel registro
@@ -2625,7 +2682,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # I verbi GitHub e gli MCP esterni passano DA QUI: sono la sorgente di
             # contenuto di terzi più ovvia, e marcare solo il ritorno nativo
             # avrebbe lasciato scoperto proprio il vettore del caso Invariant Labs.
-            _taint.note_verb(name, _ag or "")
+            _taint.note_verb(name, _ag or "",
+                              vetted=_source_vetted(name, arguments))
             _tlm.record(name, _ag or "", "ok", channel=current_chat(),
                         unattended=is_unattended())
             return [TextContent(type="text", text=text)]
@@ -2636,7 +2694,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # entrato nel contesto, non quando è stato chiesto. La §4 riformula la
         # colonna `untrusted_input` del catalogo da «questo agente è esposto» a
         # «questo verbo produce taint», ed è questo il punto in cui accade.
-        _taint.note_verb(name, _ag or "")
+        _taint.note_verb(name, _ag or "", vetted=_source_vetted(name, arguments))
         _tlm.record(name, _ag or "", "ok", channel=current_chat(),
                     unattended=is_unattended())
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
