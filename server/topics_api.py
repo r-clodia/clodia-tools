@@ -279,7 +279,9 @@ async def remote(request: Request):
         if action == "status":
             return JSONResponse(svc.remote_status(tier, name))
         if action == "enable":
-            return JSONResponse(svc.remote_enable(tier, name, body.get("type"), body.get("config")))
+            return JSONResponse(svc.remote_enable(
+                tier, name, body.get("type"), body.get("config"),
+                confirm_hides_local=bool(body.get("confirm_hides_local"))))
         if action == "disable":
             return JSONResponse(svc.remote_disable(tier, name))
         if action == "add":
