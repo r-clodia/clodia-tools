@@ -2195,15 +2195,29 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
 _UNATTENDED_TOPIC_ALLOW = frozenset({"topic.invoke_hook"})
 
 
-#: Verbi che leggono FILE di un topic: per loro la provenienza è determinabile e
-#: decide se la lettura contamina. Gli altri verbi che contaminano (posta, web,
-#: MCP esterni) restano governati dalla sola tabella in `taint.py`.
+#: Verbi che leggono FILE di un topic: la fonte è il topic (la sua cartella Drive,
+#: o l'etichetta del file locale).
 _TOPIC_READ_VERBS = frozenset({
     "topic.read_file", "topic.read_document", "topic.files", "topic.fetch",
+    # `remote_pull` scarica il contenuto del remote: è una lettura da quella
+    # fonte come le altre, e trattarla diversamente contaminerebbe anche il pull
+    # da una cartella vagliata.
+    "topic.remote_pull",
 })
 
+#: Verbi che leggono una risorsa Drive/Workspace PER ID: la fonte è quella
+#: risorsa, e l'argomento che la identifica è diverso per ognuno. Senza questa
+#: mappa un `gsheets.read` su un foglio dichiarato fidato contaminerebbe comunque
+#: — la regola «verbo + fonte» applicata a metà.
+_RESOURCE_READ_VERBS = {
+    "gsheets.read": ("spreadsheet_id", "gsheets:{}"),
+    "gsheets.list_tabs": ("spreadsheet_id", "gsheets:{}"),
+    "gdocs.read": ("document_id", "gdrive:doc/{}"),
+    "gdrive.download": ("file_id", "gdrive:file/{}"),
+}
 
-def _source_vetted(verb: str, a: dict) -> bool | None:
+
+def _source_vetted(verb: str, a: dict, result: object = None) -> bool | None:
     """La sorgente di questa lettura è dichiarata fidata?
 
     `True` non contamina, `False`/`None` sì. `None` è «non determinabile», e si
@@ -2217,13 +2231,33 @@ def _source_vetted(verb: str, a: dict) -> bool | None:
       è la cartella e vale `source_allow`; altrimenti vale l'ETICHETTA del file —
       `trusted` (dichiarato dall'owner all'upload) e `agent` (output nostro) non
       contaminano, `untrusted` e `unknown` sì;
-    - **web**: l'URL contro `source_allow`, per prefisso.
+    - **web**: l'URL contro `source_allow`, per prefisso;
+    - **una mail letta**: il mittente, preso dal RISULTATO della chiamata — è già
+      lì, e una seconda fetch per rileggerlo sarebbe una richiesta in più per
+      un'informazione che abbiamo in mano.
+
+    Regola generale: si valuta solo una chiamata con UNA fonte identificabile.
+    `email.list`, `telegram.inbox`, `trello.cards`, `gcalendar.list_events`
+    mescolano più mittenti/autori in una risposta: non c'è una fonte da vagliare,
+    e dichiararne una sarebbe peggio che ammettere di non poterlo fare.
     """
     from . import egress as _eg
     try:
         if verb.startswith("web."):
             url = str((a or {}).get("url") or "").strip()
             return _eg.is_vetted_source(url) if url else None
+        if verb == "email.read":
+            src = ""
+            if isinstance(result, dict):
+                src = str(result.get("from")
+                          or (result.get("message") or {}).get("from") or "")
+            addr = _eg.address_of(src)
+            return _eg.is_vetted_source(f"mailfrom:{addr}") if addr else None
+        spec = _RESOURCE_READ_VERBS.get(verb)
+        if spec:
+            field, tmpl = spec
+            rid = str((a or {}).get(field) or "").strip()
+            return _eg.is_vetted_source(tmpl.format(rid)) if rid else None
         if verb not in _TOPIC_READ_VERBS:
             return None
         tier, name = (a or {}).get("tier"), (a or {}).get("name")
@@ -2694,7 +2728,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # entrato nel contesto, non quando è stato chiesto. La §4 riformula la
         # colonna `untrusted_input` del catalogo da «questo agente è esposto» a
         # «questo verbo produce taint», ed è questo il punto in cui accade.
-        _taint.note_verb(name, _ag or "", vetted=_source_vetted(name, arguments))
+        _taint.note_verb(name, _ag or "",
+                          vetted=_source_vetted(name, arguments, result))
         _tlm.record(name, _ag or "", "ok", channel=current_chat(),
                     unattended=is_unattended())
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]

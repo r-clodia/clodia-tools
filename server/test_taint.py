@@ -214,3 +214,35 @@ class VettedSourceTests(unittest.TestCase):
         with patch("server.whitelist.current_chat", return_value=self.CH):
             taint.note_verb("email.send", "messaggero", vetted=False)
         self.assertFalse(taint.status(self.CH)["tainted"])
+
+
+class SourceResolutionTests(unittest.TestCase):
+    """La regola è «verbo + fonte», e va applicata a OGNI verbo che ha una fonte.
+
+    Formulata da @ddbit il 4 ago 2026: «quello che conta non è né il verbo né la
+    fonte, ma l'evento in cui l'agente legge da una fonte non fidata. Prima della
+    lettura non c'è taint.» Applicandola ho trovato che era implementata a metà:
+    sei verbi con una fonte identificabile contaminavano comunque sempre.
+    """
+
+    def test_every_tainting_verb_with_one_source_resolves_it(self):
+        from . import main
+        resolved = set(main._TOPIC_READ_VERBS) | set(main._RESOURCE_READ_VERBS) \
+            | {"email.read"}
+        # Chi resta mescola più fonti in una risposta: non c'è UNA fonte da
+        # vagliare, e dichiararne una sarebbe peggio che ammettere di non poterlo
+        # fare. Se un giorno uno di questi diventa a fonte singola, va spostato.
+        mixed = {"email.list", "email.search", "email.get_attachment",
+                 "telegram.inbox", "telegram.receive", "telegram.pull",
+                 "trello.cards", "trello.comments", "trello.show_card",
+                 "gcalendar.list_events"}
+        unaccounted = {v for v in taint._TAINTING_EXACT
+                       if v not in resolved and v not in mixed}
+        self.assertEqual(unaccounted, set(),
+                         f"verbi che contaminano senza fonte né motivo: {unaccounted}")
+
+    def test_a_read_from_a_vetted_folder_does_not_taint_on_pull_either(self):
+        """`remote_pull` è una lettura da quella fonte come le altre: trattarla a
+        parte contaminerebbe anche il pull da una cartella vagliata."""
+        from . import main
+        self.assertIn("topic.remote_pull", main._TOPIC_READ_VERBS)
