@@ -196,7 +196,14 @@ def spec_for(verb: str) -> Optional[tuple[str, Callable[[dict], list[str]]]]:
 #: URL di cartella Drive è ciò che si copia dalla barra del browser: se la
 #: whitelist non lo accettasse, la notazione URI sarebbe un trabocchetto invece
 #: di un aiuto — si incolla, non combacia, e nessuno capisce perché.
+#: `gdrive://<id>` e `gdrive:folder/<id>` sono **la stessa risorsa in due
+#: codifiche**, come l'URL del browser: accettarne una sola trasformerebbe una
+#: questione di stile in un errore di configurazione silenzioso.
 _CANON = (
+    # forma con authority: gdrive://<id> e gdrive://folder/<id>
+    (re.compile(r"^gdrive://(?:folder/)?([\w-]+)/?$"),
+     lambda m: f"gdrive:folder/{m.group(1)}"),
+    (re.compile(r"^gsheets://([\w-]+)/?$"), lambda m: f"gsheets:{m.group(1)}"),
     (re.compile(r"^https?://drive\.google\.com/drive/(?:u/\d+/)?folders/([\w-]+)"),
      lambda m: f"gdrive:folder/{m.group(1)}"),
     (re.compile(r"^https?://docs\.google\.com/spreadsheets/d/([\w-]+)"),

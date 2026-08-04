@@ -361,6 +361,24 @@ class CanonicalUriTests(unittest.TestCase):
             with self.subTest(rule=rule):
                 self.assertTrue(egress._matches(dest, rule))
 
+    def test_the_authority_form_is_the_same_resource(self):
+        """`gdrive://<id>` e `gdrive:folder/<id>` sono la stessa risorsa in due
+        codifiche, come l'URL del browser. Accettarne una sola trasformerebbe una
+        questione di stile in un errore di configurazione silenzioso."""
+        dest = f"gdrive:folder/{self.FOLDER}"
+        for rule in (f"gdrive://{self.FOLDER}", f"gdrive://folder/{self.FOLDER}",
+                     f"gdrive://{self.FOLDER}/"):
+            with self.subTest(rule=rule):
+                self.assertTrue(egress._matches(dest, rule))
+        self.assertTrue(egress._matches("gsheets:1tIf", "gsheets://1tIf"))
+
+    def test_the_authority_form_without_an_id_is_still_degenerate(self):
+        """Accettare la codifica non deve aprire una scorciatoia per la regola che
+        apre tutto."""
+        for rule in ("gdrive://", "gdrive://folder/"):
+            with self.subTest(rule=rule):
+                self.assertFalse(egress._matches(f"gdrive:folder/{self.FOLDER}", rule))
+
     def test_a_spreadsheet_url_becomes_the_gsheets_uri(self):
         self.assertEqual(
             egress.canonical("https://docs.google.com/spreadsheets/d/1tIf/edit#gid=0"),
