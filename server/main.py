@@ -2362,6 +2362,35 @@ def agent_name_safe() -> str:
         return "?"
 
 
+#: Quando si toglie un verbo, l'errore deve dire COSA USARE al posto suo.
+#: Senza, l'agente conclude che manca un grant o che il server è rotto — è
+#: successo con `topic.put` a un postino, che ha provato tre strade e poi ha
+#: chiesto aiuto in chat. Un rifiuto senza alternativa è un vicolo cieco, e il
+#: modello ci sbatte dentro con l'insistenza di chi non ha altre mosse.
+_DENY_HINT = {
+    "topic.put": ("Per archiviare un allegato di posta usa "
+                  "email.save_attachment(email_id, filename) — senza tier/name "
+                  "va nel topic del canale, e i byte non passano da te. Per un "
+                  "file che hai prodotto, chiedilo a un agente che ha topic.put."),
+    "topic.write_file": ("Per archiviare un allegato di posta usa "
+                         "email.save_attachment(email_id, filename)."),
+    "topic.read_file": ("Non ti serve leggerlo per spedirlo: "
+                        "email.send(topic_files=['files/x.pdf']) e "
+                        "telegram.send_file(path='files/x.pdf') li allegano "
+                        "senza che il contenuto passi da te."),
+    "topic.read_document": ("Per spedire un documento usa "
+                            "email.send(topic_files=[...]) senza leggerlo."),
+    "topic.fetch": ("Per spedire un file del topic non serve portarselo nello "
+                    "scratch: email.send(topic_files=[...])."),
+    "topic.files": ("Non hai l'elenco dei file di proposito. Il path di ciò che "
+                    "devi spedire arriva nella conversazione."),
+    "mcp.add": "Si installa dalla pagina Packs, non da un turno di chat.",
+    "packs.install_pip": "Si installa dalla pagina Packs.",
+    "packs.install_npm": "Si installa dalla pagina Packs.",
+    "settings.backup_run": "Il backup si esegue da un job, non da un turno di chat.",
+}
+
+
 def _current_topic() -> tuple[str | None, str | None]:
     """(tier, name) del canale in cui l'agente sta operando, dal claim `chat`.
 
@@ -2538,10 +2567,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if _obs.skipping():
                 _obs.note("deny", name, _ag or "", detail="denied_tools")
             else:
+                _hint = _DENY_HINT.get(name)
                 raise PermissionError(
-                    f"tool '{name}' escluso per l'agent '{_ag}' (denied_tools): non è "
-                    f"un'operazione da turno di chat. Va eseguita da un job o da un "
-                    f"amministratore.")
+                    f"tool '{name}' non disponibile per l'agent '{_ag}'. "
+                    + (_hint or "È stato escluso deliberatamente dalle sue "
+                                "capacità: se ti serve, chiedi a Davide."))
         # BLOCCO DELLE SESSIONI NON PRESIDIATE (#104). Prima dei gate, di
         # proposito: negare non richiede il consenso di nessuno, e chiedere un
         # consenso che nessuno può dare è esattamente il difetto di #116.
@@ -2948,7 +2978,11 @@ def _safe_scratch_path(p: str) -> str:
     rp = _os.path.realpath(p or "")
     root = _os.path.realpath(_SPAWNS_ROOT)
     if not (rp == root or rp.startswith(root + "/")):
-        raise ValueError(f"path non consentito (deve stare sotto {_SPAWNS_ROOT}): {p}")
+        raise ValueError(
+            f"path non consentito (deve stare sotto {SPAWNS_ROOT}): {p}. "
+            f"Se stai archiviando un allegato di posta non serve un file locale: "
+            f"email.save_attachment(email_id, filename) lo scrive nel topic del "
+            f"canale, e i byte non passano da te.")
     return rp
 
 
