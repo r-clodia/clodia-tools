@@ -2979,7 +2979,7 @@ def _safe_scratch_path(p: str) -> str:
     root = _os.path.realpath(_SPAWNS_ROOT)
     if not (rp == root or rp.startswith(root + "/")):
         raise ValueError(
-            f"path non consentito (deve stare sotto {SPAWNS_ROOT}): {p}. "
+            f"path non consentito (deve stare sotto {_SPAWNS_ROOT}): {p}. "
             f"Se stai archiviando un allegato di posta non serve un file locale: "
             f"email.save_attachment(email_id, filename) lo scrive nel topic del "
             f"canale, e i byte non passano da te.")
