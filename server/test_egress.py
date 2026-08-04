@@ -426,3 +426,76 @@ class DegenerateRuleTests(unittest.TestCase):
         self.assertTrue(egress._matches("https://api.tizio.it/", "https://api.tizio.it/"))
         with _with(_cfg("https://api.tizio.it/")):
             self.assertEqual(egress.allowed_uris(), ["https://api.tizio.it/"])
+
+
+class AdminVerbTests(unittest.TestCase):
+    """`egress.allow` / `ingress.allow` — i verbi che allargano le liste (#128).
+
+    Gated di proposito: `allow` rende silenziosa una destinazione o una fonte da lì
+    in avanti, quindi è più privilegiato di qualunque singola invocazione che
+    consentirebbe. `revoke` e `list` no: togliere autorità e leggerla non
+    richiedono un consenso, e chiederlo insegnerebbe che anche restringere è
+    un'operazione da negoziare.
+    """
+
+    def setUp(self):
+        from . import whitelist as wl
+        self.cfg = {"agents": {}, "egress_allow": [], "source_allow": []}
+        for pt in (patch.object(wl, "CONFIG", self.cfg),
+                   patch.object(wl, "save_config", lambda: None)):
+            pt.start()
+            self.addCleanup(pt.stop)
+
+    def test_allow_normalises_and_is_idempotent(self):
+        r1 = egress.allow("egress", "https://drive.google.com/drive/folders/1AbC")
+        self.assertEqual(r1["uri"], "gdrive:folder/1AbC")
+        self.assertTrue(r1["added"])
+        self.assertFalse(egress.allow("egress", "gdrive://1AbC")["added"])
+        self.assertEqual(self.cfg["egress_allow"], ["gdrive:folder/1AbC"])
+
+    def test_the_wrong_direction_is_refused(self):
+        """Uno schema nella lista sbagliata è un errore di configurazione, e
+        rifiutarlo qui lo mostra subito invece di farlo sparire in un warning."""
+        with self.assertRaises(ValueError) as cm:
+            egress.allow("egress", "mailfrom:x@y.it")
+        self.assertIn("non ammesso", str(cm.exception))
+        with self.assertRaises(ValueError):
+            egress.allow("ingress", "tg:123")
+
+    def test_a_degenerate_uri_is_refused(self):
+        with self.assertRaises(ValueError):
+            egress.allow("egress", "gdrive:folder/")
+
+    def test_a_star_cannot_be_granted_by_a_verb(self):
+        """Aprire tutto si scrive nella config, dove si vede rileggendola — non lo
+        si ottiene approvando un popup."""
+        with self.assertRaises(ValueError) as cm:
+            egress.allow("egress", "*")
+        self.assertIn("config del gateway", str(cm.exception))
+
+    def test_revoke_removes_and_reports_when_absent(self):
+        egress.allow("ingress", "mailfrom:a@b.it")
+        self.assertTrue(egress.revoke("ingress", "mailfrom:a@b.it")["removed"])
+        self.assertFalse(egress.revoke("ingress", "mailfrom:a@b.it")["removed"])
+
+    def test_revoke_accepts_the_other_encoding_too(self):
+        """Chi ha aggiunto con l'URL del browser deve poter rimuovere con l'URL."""
+        egress.allow("egress", "gdrive://1AbC")
+        self.assertTrue(egress.revoke(
+            "egress", "https://drive.google.com/drive/folders/1AbC")["removed"])
+
+    def test_an_unknown_direction_is_refused(self):
+        with self.assertRaises(ValueError):
+            egress.allow("sideways", "mailto:a@b.it")
+
+    def test_the_ingress_note_says_what_it_costs_not_what_it_grants(self):
+        """È l'unico punto del modello in cui un'injection che chiedesse «aggiungi
+        questa fonte» avrebbe un guadagno durevole: il dialog non può impedirlo,
+        può dirlo."""
+        n = egress.admin_note("ingress", "https://blog.qualunque.it/")
+        self.assertIn("NON contaminerà", n)
+        self.assertIn("non lo saprai", n)
+
+    def test_the_egress_note_describes_the_class_of_destination(self):
+        self.assertIn("pubblico", egress.admin_note(
+            "egress", "https://github.com/a/b"))

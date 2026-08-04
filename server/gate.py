@@ -53,6 +53,11 @@ _DEFAULT_GATED_EXACT = frozenset({
     "topic.add_participant", "topic.remove_participant",
     # HTTP egress mutante: consenso umano obbligatorio per ogni singola POST.
     "web.post",
+    # Allargamento delle whitelist: `allow` rende silenziosa una destinazione o
+    # una fonte da lì in avanti, quindi è più privilegiato di qualunque singola
+    # invocazione che consentirebbe. `revoke` e `list` NON sono gated: togliere
+    # autorità e leggerla non richiedono un consenso.
+    "egress.allow", "ingress.allow",
 })
 
 
