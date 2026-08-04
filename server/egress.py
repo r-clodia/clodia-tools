@@ -282,7 +282,10 @@ def _matches(dest: str, rule: str) -> bool:
 #: Schemi in cui il prefisso ha senso (c'è un percorso). Per gli altri il match
 #: è esatto o wildcard: aprire per prefisso un indirizzo email o una chat id
 #: aprirebbe destinazioni che nessuno ha approvato.
-_HIERARCHICAL = ("http", "https", "gdrive")
+#: `mcp` è gerarchico sul namespace: `mcp:normattiva.` copre
+#: `normattiva.search` e `normattiva.get` senza elencarli, e senza
+#: coprire `normattiva-mirror.`.
+_HIERARCHICAL = ("http", "https", "gdrive", "mcp")
 
 #: Schemi ammessi in USCITA e in INGRESSO. Le due liste sono separate perché
 #: l'errore ha direzioni diverse: sbagliare una destinazione è rumoroso (un invio
@@ -293,7 +296,15 @@ EGRESS_SCHEMES = ("mailto", "tg", "http", "https", "gdrive", "gsheets")
 #: `gdrive` fra le fonti: una cartella Drive vagliata è una fonte fidata, ed è il
 #: caso che rende operativa questa lista — un topic collegato a una cartella di cui
 #: l'owner risponde non deve contaminare a ogni lettura.
-SOURCE_SCHEMES = ("mailfrom", "http", "https", "gdrive", "gsheets")
+#: `mcp:<namespace>.` — un server MCP la cui RISPOSTA è scritta da un'unica
+#: istituzione, non da un terzo qualsiasi: `mcp:normattiva.` restituisce il
+#: testo di legge, e chi interroga sceglie QUALE norma, non cosa c'è scritto.
+#: Il criterio è questo, e non è «viene da un pack»: un pack vaglia il
+#: SERVER, non i byte che il server ripete — `web.fetch` sta in un pack e
+#: ripete il web aperto. L'appartenenza a un contenitore non è una proprietà
+#: del contenuto, e attribuirla spegnerebbe il taint sulla fonte più larga
+#: che esista, nella direzione d'errore che non si vede.
+SOURCE_SCHEMES = ("mailfrom", "http", "https", "gdrive", "gsheets", "mcp")
 
 
 def is_vetted_source(uri: str) -> bool:
@@ -358,6 +369,10 @@ def _is_degenerate(uri: str) -> bool:
     if scheme in ("http", "https"):
         # `https://` senza host non vincola; `https://host/` sì.
         return not (urlsplit(uri).hostname or "")
+    if scheme == "mcp":
+        # `mcp:` nudo dichiarerebbe fidato ogni server montato, presente e futuro:
+        # è la regola che una lista opt-in non deve poter esprimere per sbaglio.
+        return rest in ("", ".")
     # `gdrive:folder/`, `mailto:`, `tg:` → niente dopo il separatore
     return rest in ("", "/") or rest.rstrip("/").endswith(":") or rest in ("folder/", "doc/")
 
@@ -647,23 +662,22 @@ def admin_note(direction: str, uri: str) -> str:
     return danger_note(uri)
 
 
-def allow(direction: str, uri: str) -> dict:
-    """Aggiunge `uri` alla lista della direzione indicata. Idempotente.
+def check_grantable(direction: str, uri: str) -> str:
+    """Solleva `ValueError` se `uri` non è concedibile in quella direzione.
 
-    Rifiuta gli schemi della direzione sbagliata e le voci degeneri: `mailfrom:`
-    in uscita è un errore di configurazione, `gdrive:folder/` aprirebbe l'intero
-    Drive. Rifiutare qui e non solo al caricamento significa che l'errore si vede
-    subito, invece di sparire in un warning che nessuno legge.
+    Estratta da `allow()` perché serve **senza concedere**: l'installazione di un
+    pack deve poter mostrare all'owner cosa sarebbe concesso, e una convalida che
+    per sapere la risposta deve prima scrivere non è una convalida.
     """
-    key, schemes, label = _direction(direction)
+    _key, schemes, label = _direction(direction)
     u = canonical(uri)
     if not u:
         raise ValueError("uri richiesto")
     if u == "*":
         raise ValueError(
-            "'*' aprirebbe qualunque destinazione: non si concede con un verbo. "
-            "Se è davvero quello che serve, va scritto nella config del gateway, "
-            "dove si vede rileggendola.")
+            "'*' aprirebbe qualunque destinazione: non si concede con un verbo, "
+            "né dal manifest di un pack. Se serve davvero, va scritto nella "
+            "config del gateway, dove si vede rileggendola.")
     scheme = u.partition(":")[0]
     if scheme not in schemes:
         raise ValueError(
@@ -672,6 +686,19 @@ def allow(direction: str, uri: str) -> dict:
         raise ValueError(
             f"'{u}' non vincola nulla dentro il suo schema: aprirebbe l'intero "
             f"tipo. Indica la risorsa completa.")
+    return u
+
+
+def allow(direction: str, uri: str) -> dict:
+    """Aggiunge `uri` alla lista della direzione indicata. Idempotente.
+
+    Rifiuta gli schemi della direzione sbagliata e le voci degeneri: `mailfrom:`
+    in uscita è un errore di configurazione, `gdrive:folder/` aprirebbe l'intero
+    Drive. Rifiutare qui e non solo al caricamento significa che l'errore si vede
+    subito, invece di sparire in un warning che nessuno legge.
+    """
+    key, _schemes, _label = _direction(direction)
+    u = check_grantable(direction, uri)
     from . import whitelist as _wl
     cur = list(_wl.CONFIG.get(key) or [])
     added = u not in cur

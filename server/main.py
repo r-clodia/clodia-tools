@@ -2309,6 +2309,13 @@ def _source_vetted(verb: str, a: dict, result: object = None) -> bool | None:
     """
     from . import egress as _eg
     try:
+        # Un backend MCP montato: la fonte è il SERVER, uno per namespace, e si
+        # vaglia come qualunque altra — `mcp:normattiva.` in `source_allow`.
+        # Il discriminante è `is_proxied`, non il nome: senza, un
+        # `mcp:email.` in lista spegnerebbe il taint sulla posta in arrivo,
+        # che ha una fonte diversa a ogni messaggio e va valutata sul risultato.
+        if proxy.is_proxied(verb):
+            return _eg.is_vetted_source(f"mcp:{verb}")
         if verb.startswith("web."):
             url = str((a or {}).get("url") or "").strip()
             return _eg.is_vetted_source(url) if url else None
