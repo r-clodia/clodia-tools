@@ -81,8 +81,10 @@ _EMAIL_TOOLS: list[Tool] = [
                                     "contesto — non serve scaricarli prima, e non "
                                     "consumano token."),
                 },
-                "tier": {"type": "string", "description": "tier del topic per topic_files"},
-                "name": {"type": "string", "description": "nome del topic per topic_files"},
+                "tier": {"type": "string", "description": ("tier del topic per topic_files. "
+                          "OPZIONALE: senza, si usa il topic del canale in cui stai "
+                          "lavorando")},
+                "name": {"type": "string", "description": "nome del topic (opzionale, vedi tier)"},
             },
             "required": ["to", "subject", "body"],
         },
@@ -158,8 +160,10 @@ _EMAIL_TOOLS: list[Tool] = [
                 "dest": {"type": "string", "description": ("path assoluto nel tuo "
                           "scratch. Alternativa a tier+name: se devi solo archiviare "
                           "l'allegato, usa tier+name e i byte non passano da te")},
-                "tier": {"type": "string", "description": "tier del topic in cui archiviare"},
-                "name": {"type": "string", "description": "nome del topic in cui archiviare"},
+                "tier": {"type": "string", "description": ("tier del topic in cui archiviare. "
+                          "OPZIONALE: senza `dest` e senza tier/name l'allegato va nel "
+                          "topic del canale in cui stai lavorando")},
+                "name": {"type": "string", "description": "nome del topic (opzionale, vedi tier)"},
                 "account": {"type": "string"},
                 "folder": {"type": "string", "description": "IMAP folder, default INBOX"},
             },
@@ -2358,6 +2362,36 @@ def agent_name_safe() -> str:
         return "?"
 
 
+def _current_topic() -> tuple[str | None, str | None]:
+    """(tier, name) del canale in cui l'agente sta operando, dal claim `chat`.
+
+    Il gateway lo SA — la chiave di sessione è `chan:<tier>:<nome>:<seed>#<n>` e
+    arriva firmata nel token. Chiederlo all'agente significava chiedergli di
+    indovinare dove si trova: `topic.open` richiede a sua volta tier+name, e i
+    verbi di elenco a un postino sono negati dal §8, quindi l'unica mossa che gli
+    restava era domandarlo all'utente. Ed è quello che ha fatto.
+    """
+    from . import taint as _t
+    ch = _t.channel_of(current_chat())
+    if not ch or "/" not in ch:
+        return None, None
+    tier, name = ch.split("/", 1)
+    return tier, name
+
+
+def _topic_of(a: dict) -> tuple[str | None, str | None]:
+    """Topic indicato negli argomenti, altrimenti quello del canale corrente.
+
+    L'argomento esplicito resta e vince: serve per operare su un ALTRO topic — e
+    in quel caso scatta il gate cross-topic, che è esattamente la differenza fra
+    «archivia qui» e «archivia là».
+    """
+    tier, name = a.get("tier"), a.get("name")
+    if tier and name:
+        return tier, name
+    return _current_topic()
+
+
 def _topic_attachments(a: dict, agent: str) -> tuple[list, str | None]:
     """Materializza `topic_files` in una dir temporanea e ne ritorna i path.
 
@@ -2369,9 +2403,11 @@ def _topic_attachments(a: dict, agent: str) -> tuple[list, str | None]:
     rels = [r for r in (a.get("topic_files") or []) if str(r).strip()]
     if not rels:
         return [], None
-    tier, tname = a.get("tier"), a.get("name")
+    tier, tname = _topic_of(a)
     if not (tier and tname):
-        raise ValueError("topic_files richiede tier + name del topic")
+        raise ValueError(
+            "topic_files: non sono riuscito a ricavare il topic dal canale in cui "
+            "stai lavorando — passa tier + name")
     svc = _topics()
     _require_topic_member(svc, tier, tname)
     import os as _os
@@ -2687,12 +2723,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # Serve perché il flusso documentato era `save_attachment` →
             # `topic.put`, e a un postino `topic.put` è negato (§8 di #104): un
             # allegato in arrivo non era archiviabile da chi la posta la riceve.
-            _tier, _tname = arguments.get("tier"), arguments.get("name")
             _dest_arg = (arguments.get("dest") or "").strip()
+            # Senza `dest` si archivia nel topic: quello indicato, o QUELLO IN CUI
+            # SI STA LAVORANDO. Il default è ciò che rende il verbo usabile da un
+            # agente che non ha modo di scoprire dove si trova.
+            _tier, _tname = (None, None) if _dest_arg else _topic_of(arguments)
             if not (_dest_arg or (_tier and _tname)):
                 raise ValueError(
-                    "serve `dest` (path nel tuo scratch) oppure `tier`+`name` del "
-                    "topic in cui archiviare l'allegato")
+                    "non sono riuscito a ricavare il topic dal canale: passa "
+                    "`tier`+`name`, oppure `dest` per scrivere nel tuo scratch")
             raw, meta = email.get_attachment_bytes(
                 arguments["email_id"],
                 arguments["filename"],

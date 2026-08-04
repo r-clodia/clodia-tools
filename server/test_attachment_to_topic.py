@@ -79,3 +79,49 @@ class SaveAttachmentToTopicTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CurrentTopicDefaultTests(unittest.TestCase):
+    """Il topic si ricava dal CANALE, non si chiede all'agente.
+
+    Sintomo reale: messaggero ha chiesto in chat «quale topic devo usare? (tier +
+    nome)» tre volte nello stesso messaggio. Non era confusione del modello — era
+    l'unica mossa che gli restava: `topic.open` richiede a sua volta tier+name, e i
+    verbi di elenco a un postino sono negati dal §8, quindi non aveva modo di
+    scoprire dove si trovava. Il gateway invece lo sa, dal claim firmato nel token.
+    """
+
+    def test_the_channel_key_yields_tier_and_name(self):
+        from . import main
+        # `main` importa `current_chat` a livello di modulo, quindi il patch va sul
+        # SUO namespace: patchare `server.whitelist.current_chat` non lo
+        # raggiungerebbe. (In `taint` funziona perché l'import è dentro la funzione.)
+        with patch("server.main.current_chat",
+                   return_value="chan:SEAL-1:bilancio-tomato-2026:messaggero#2"):
+            self.assertEqual(main._current_topic(),
+                             ("SEAL-1", "bilancio-tomato-2026"))
+
+    def test_an_explicit_topic_still_wins(self):
+        """L'argomento esplicito serve per operare su un ALTRO topic — e in quel
+        caso scatta il gate cross-topic, che è la differenza fra «archivia qui» e
+        «archivia là»."""
+        from . import main
+        with patch("server.main.current_chat",
+                   return_value="chan:SEAL-1:qui:messaggero"):
+            self.assertEqual(main._topic_of({"tier": "SEAL-2", "name": "la"}),
+                             ("SEAL-2", "la"))
+
+    def test_a_partial_argument_falls_back_to_the_channel(self):
+        """`tier` senza `name` non identifica niente: meglio il canale corrente
+        che un errore su un argomento incompleto."""
+        from . import main
+        with patch("server.main.current_chat",
+                   return_value="chan:SEAL-1:qui:messaggero"):
+            self.assertEqual(main._topic_of({"tier": "SEAL-2"}), ("SEAL-1", "qui"))
+
+    def test_outside_a_channel_there_is_no_default(self):
+        """In una sessione senza canale (job, DM non normalizzata) non si inventa
+        un topic: l'errore dice cosa passare."""
+        from . import main
+        with patch("server.main.current_chat", return_value=None):
+            self.assertEqual(main._topic_of({}), (None, None))
