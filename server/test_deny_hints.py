@@ -53,3 +53,21 @@ class DenyHintTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScratchPathErrorTests(unittest.TestCase):
+    """Il ramo d'errore va percorso da un test, o non è codice eseguito.
+
+    Riscrivendo questo messaggio ho sbagliato il nome della variabile e il ramo
+    sollevava `NameError` invece del testo: il rifiuto diventava un errore
+    interno, cioè esattamente il segnale che aveva mandato messaggero a cercare
+    un guasto del server. Nessun test attraversava il percorso di fallimento.
+    """
+
+    def test_a_path_outside_the_scratch_is_refused_with_the_alternative(self):
+        with self.assertRaises(ValueError) as cm:
+            main._safe_scratch_path("/tmp/f24.pdf")
+        msg = str(cm.exception)
+        self.assertIn("/tmp/f24.pdf", msg)
+        self.assertIn(main._SPAWNS_ROOT, msg)
+        self.assertIn("email.save_attachment", msg)
