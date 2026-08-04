@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
@@ -191,6 +192,43 @@ def spec_for(verb: str) -> Optional[tuple[str, Callable[[dict], list[str]]]]:
 
 # ── rule matching ────────────────────────────────────────────────────────────
 
+#: Forme che un umano scrive naturalmente, ricondotte alla forma canonica. Un
+#: URL di cartella Drive è ciò che si copia dalla barra del browser: se la
+#: whitelist non lo accettasse, la notazione URI sarebbe un trabocchetto invece
+#: di un aiuto — si incolla, non combacia, e nessuno capisce perché.
+_CANON = (
+    (re.compile(r"^https?://drive\.google\.com/drive/(?:u/\d+/)?folders/([\w-]+)"),
+     lambda m: f"gdrive:folder/{m.group(1)}"),
+    (re.compile(r"^https?://docs\.google\.com/spreadsheets/d/([\w-]+)"),
+     lambda m: f"gsheets:{m.group(1)}"),
+    (re.compile(r"^https?://docs\.google\.com/document/d/([\w-]+)"),
+     lambda m: f"gdrive:doc/{m.group(1)}"),
+)
+
+
+def canonical(uri: str) -> str:
+    """Forma canonica di un URI di destinazione.
+
+    Riconduce gli URL che si copiano dal browser allo schema che il PDP confronta.
+    Idempotente: applicarla a una forma già canonica non la cambia.
+    """
+    u = (uri or "").strip()
+    if not u:
+        return ""
+    for rx, to in _CANON:
+        m = rx.match(u)
+        if m:
+            return to(m)
+    if u.lower().startswith(("http://", "https://")):
+        # host in minuscolo, il resto no: un path può essere case-sensitive.
+        sp = urlsplit(u)
+        host = (sp.hostname or "").lower()
+        port = f":{sp.port}" if sp.port else ""
+        return f"{sp.scheme.lower()}://{host}{port}{sp.path or '/'}"
+    scheme, sep, rest = u.partition(":")
+    return f"{scheme.lower()}{sep}{rest}" if sep else u
+
+
 def _matches(dest: str, rule: str) -> bool:
     """Una destinazione (URI) contro una regola (URI).
 
@@ -207,12 +245,17 @@ def _matches(dest: str, rule: str) -> bool:
     perché un indirizzo non è un percorso, ed è esattamente il caso in cui un
     prefisso ingenuo aprirebbe un dominio ostile.
     """
-    r = (rule or "").strip().lower()
-    d = (dest or "").strip().lower()
+    r = canonical(rule).lower()
+    d = canonical(dest).lower()
     if not r or not d:
         return False
     if r == "*":
         return True
+    # Anche qui, non solo in `allowed_uris`: una regola degenere che arrivasse da
+    # un altro chiamante aprirebbe l'intero tipo in silenzio, e la difesa non deve
+    # dipendere da quale porta si è usata per entrare.
+    if _is_degenerate(r):
+        return False
     if r == d:
         return True
     if "*" in r:
@@ -267,10 +310,32 @@ def allowed_uris(cfg: dict | None = None) -> list[str]:
                     out.append(u)
                     LOG.info("egress: migrata voce legacy %s/%s → %s (era di '%s')",
                              dtype, r, u, name)
+    out = [canonical(u) for u in out]
     bad = [u for u in out if u != "*" and u.partition(":")[0] not in EGRESS_SCHEMES]
     for u in bad:
         LOG.warning("egress: voce con schema non ammesso in uscita, IGNORATA: %s", u)
-    return [u for u in out if u not in bad]
+    # Voce DEGENERE: un prefisso senza nulla dopo apre l'intero tipo — `gdrive:folder/`
+    # consentirebbe qualunque cartella. Chi vuole quello scrive `*`, che si vede;
+    # una barra finale dimenticata no.
+    degenerate = [u for u in out if u not in bad and _is_degenerate(u)]
+    for u in degenerate:
+        LOG.warning("egress: voce che aprirebbe l'intero tipo, IGNORATA: %s "
+                    "(per aprire tutto scrivi '*', così si vede)", u)
+    drop = set(bad) | set(degenerate)
+    return [u for u in out if u not in drop]
+
+
+def _is_degenerate(uri: str) -> bool:
+    """True se la regola non vincola nulla dentro il proprio schema."""
+    scheme, sep, rest = uri.partition(":")
+    if not sep:
+        return False
+    rest = rest.strip()
+    if scheme in ("http", "https"):
+        # `https://` senza host non vincola; `https://host/` sì.
+        return not (urlsplit(uri).hostname or "")
+    # `gdrive:folder/`, `mailto:`, `tg:` → niente dopo il separatore
+    return rest in ("", "/") or rest.rstrip("/").endswith(":") or rest in ("folder/", "doc/")
 
 
 def source_uris(cfg: dict | None = None) -> list[str]:
