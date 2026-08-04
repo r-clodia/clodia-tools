@@ -210,6 +210,8 @@ _CANON = (
      lambda m: f"gsheets:{m.group(1)}"),
     (re.compile(r"^https?://docs\.google\.com/document/d/([\w-]+)"),
      lambda m: f"gdrive:doc/{m.group(1)}"),
+    (re.compile(r"^https?://drive\.google\.com/file/d/([\w-]+)"),
+     lambda m: f"gdrive:file/{m.group(1)}"),
 )
 
 
