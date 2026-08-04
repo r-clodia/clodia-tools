@@ -63,9 +63,20 @@ async def profile(request: Request):
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     from . import egress
-    return JSONResponse({"mode": egress.mode(),
-                         "egress": _shape(egress.allowed_uris()),
-                         "source": _shape(egress.source_uris())})
+    out = {"mode": egress.mode(),
+           "egress": _shape(egress.allowed_uris()),
+           "source": _shape(egress.source_uris())}
+    # Query di APPARTENENZA, non dump: `?uri=gdrive:folder/1AbC` risponde
+    # `allowed: true|false`. Serve al punteggio trifecta, che deve sapere se il
+    # remote di un canale punta a una destinazione vagliata — ma NON deve
+    # ricevere la lista: una rubrica è dato privato. Il chiamante conosce già
+    # l'URI (viene dal meta del topic), quindi chiedendo non impara nulla di
+    # nuovo; ricevendo la lista imparerebbe tutto.
+    q = (request.query_params.get("uri") or "").strip()
+    if q:
+        out["query"] = q
+        out["allowed"] = any(egress._matches(q, r) for r in egress.allowed_uris())
+    return JSONResponse(out)
 
 
 async def observations(request: Request):
