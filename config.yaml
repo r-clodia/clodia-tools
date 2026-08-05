@@ -9,16 +9,15 @@ agents:
     - .
     allowed_shell_cmds: []
     denied_shell_patterns: []
+    # `*` è il set RAGGIUNGIBILE, non quello libero: per un super il limite è il
+    # `profile_tools` qui sotto, che rende gated tutto ciò che non è il suo
+    # mestiere. Prima qui c'erano 9 verbi espliciti (email.*, fs.list_dir,
+    # topic.*, runtime.*) — un residuo da agente-messaggero, non il disegno di un
+    # super — e con l'enforcement acceso avrebbero prodotto RIFIUTI dove serve una
+    # DOMANDA: `agents.show` e `logs.tail` negati a chi deve diagnosticare, invece
+    # di chiesti. Misurato sul registro: 12 chiamate reali su 387.
     allowed_tools:
-    - email.send
-    - email.folders
-    - email.list
-    - email.read
-    - email.search
-    - email.reply
-    - fs.list_dir
-    - topic.*
-    - runtime.*
+    - '*'
     # PROFILO dichiarato: il mestiere di questo agente. Questi verbi sono LIBERI e
     # sono quelli che compaiono nella sua scheda. Tutto ciò che il grant `*` copre e
     # che NON è qui resta raggiungibile ma passa da un consenso umano.
@@ -87,16 +86,15 @@ agents:
     - .
     allowed_shell_cmds: []
     denied_shell_patterns: []
+    # `*` è il set RAGGIUNGIBILE, non quello libero: per un super il limite è il
+    # `profile_tools` qui sotto, che rende gated tutto ciò che non è il suo
+    # mestiere. Prima qui c'erano 9 verbi espliciti (email.*, fs.list_dir,
+    # topic.*, runtime.*) — un residuo da agente-messaggero, non il disegno di un
+    # super — e con l'enforcement acceso avrebbero prodotto RIFIUTI dove serve una
+    # DOMANDA: `agents.show` e `logs.tail` negati a chi deve diagnosticare, invece
+    # di chiesti. Misurato sul registro: 12 chiamate reali su 387.
     allowed_tools:
-    - email.send
-    - email.folders
-    - email.list
-    - email.read
-    - email.search
-    - email.reply
-    - fs.list_dir
-    - topic.*
-    - runtime.*
+    - '*'
     # PROFILO dichiarato: il mestiere di questo agente. Questi verbi sono LIBERI e
     # sono quelli che compaiono nella sua scheda. Tutto ciò che il grant `*` copre e
     # che NON è qui resta raggiungibile ma passa da un consenso umano.
