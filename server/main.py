@@ -3071,18 +3071,45 @@ def _require_local_hook_caller(svc, tier, name) -> str:
 
 
 def _filter_member_rows(rows: list, caller: str) -> list:
-    """Filtra allo scope need-to-know dell'AGENTE.
+    """Filtra allo scope need-to-know dell'AGENTE, su ENTRAMBI gli assi.
 
     La membership umana non amplia l'elenco: l'accesso aggiuntivo è per-topic e
-    passa dal gate, non diventa un lasciapassare globale. Righe con shape diversa
-    (senza participants/owner) restano invariate.
+    passa dal gate, non diventa un lasciapassare globale.
+
+    FAIL CLOSED. Una riga che non si può valutare viene ESCLUSA. Prima passava
+    invariata, e quel ramo difensivo era l'unico percorso vivo: `search` non
+    restituiva `participants` né `owner`, quindi il filtro non filtrava niente —
+    un agente riceveva titolo e tldr di ogni topic corrispondente, compartimento
+    e tier ignorati. Misurato: 97 righe a `segretario`, 27 delle quali SEAL-2.
+    Il tldr è la prima riga del summary, cioè la riga più informativa di un
+    dossier: era la peggior cosa da esporre.
+
+    Un default che ammette ciò che non sa valutare non è difensivo: è una porta
+    aperta con un commento rassicurante sopra.
+
+    Si controlla anche il LIVELLO, non solo il compartimento: le due condizioni
+    sono la stessa regola applicata su `open` e `read_file`, e un elenco che le
+    tratta più larghe è un modo di leggere ciò che non si potrebbe aprire.
     """
     out = []
+    my_rank = _rank(current_clearance())
     for r in rows:
-        if not isinstance(r, dict) or ("participants" not in r and "owner" not in r):
-            out.append(r)
-        elif _topic_is_member(r, caller):
-            out.append(r)
+        if not isinstance(r, dict):
+            continue
+        if "participants" not in r and "owner" not in r:
+            # Nessun rumore per riga: un log per chiamata basta a scoprire un
+            # cambio di forma, e un log per riga renderebbe illeggibile il resto.
+            import logging as _lg
+            _lg.getLogger("clodia-tools").warning(
+                "filtro need-to-know: riga senza participants/owner, esclusa "
+                "(forma inattesa: %s)", sorted(r)[:6])
+            continue
+        if not _topic_is_member(r, caller):
+            continue
+        tier_r = r.get("tier")
+        if tier_r and my_rank < _rank(tier_r):
+            continue
+        out.append(r)
     return out
 
 

@@ -1372,8 +1372,15 @@ class TopicService:
                     if info.get("agents_md"):
                         parts.append(info["agents_md"])
                     if q in "\n".join(parts).lower():
+                        # `participants` e `owner` NON sono un extra: sono i campi su
+                        # cui il chiamante decide se questa riga gli spetta. Senza,
+                        # il filtro need-to-know a valle non ha nulla da valutare e
+                        # (per come era scritto) lasciava passare tutto.
                         hits.append({"tier": tr, "name": e.name,
-                                     "title": info["meta"].get("title"), "tldr": info["tldr"]})
+                                     "title": info["meta"].get("title"),
+                                     "tldr": info["tldr"],
+                                     "owner": info["meta"].get("owner"),
+                                     "participants": list(info["meta"].get("participants") or [])})
                 except (TopicError, UnicodeDecodeError, ValueError) as ex:
                     LOG.warning("search: topic %s/%s saltato (contenuto non leggibile): %s",
                                 tr, e.name, str(ex)[:120])
