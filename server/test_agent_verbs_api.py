@@ -20,11 +20,20 @@ class _Req:
         self.path_params = {"name": name}
 
 
-def _call(name="avvocato", cfg=None, catalogue=None, gated_global=()):
-    from . import whitelist as wl, gate, main
+def _call(name="avvocato", cfg=None, catalogue=None, gated_global=(),
+          proxied=(), proxy_ok=True):
+    from . import whitelist as wl, gate, main, proxy as pmod
+    from types import SimpleNamespace
+
+    async def _list_proxied():
+        if not proxy_ok:
+            raise RuntimeError("backend MCP non raggiungibile")
+        return [SimpleNamespace(name=n) for n in proxied]
+
     with patch.object(agents_api, "_authorize", lambda r: ("clodia", None)), \
             patch.object(wl, "CONFIG", {"agents": cfg or {}}), \
             patch.object(main, "all_native_verb_names", lambda: list(catalogue or [])), \
+            patch.object(pmod, "list_proxied_tools", _list_proxied), \
             patch.object(gate, "is_gated", lambda v: v in gated_global), \
             patch.object(gate, "gated_verbs_spec", lambda: {"exact": sorted(gated_global),
                                                             "prefixes": []}):
@@ -102,6 +111,39 @@ class ExpansionTests(unittest.TestCase):
         b = _call(name="fantasma", cfg={}, catalogue=CAT)
         self.assertEqual(b["verbs"], [])
         self.assertEqual(b["groups"], [])
+
+
+
+class McpNamespaceTests(unittest.TestCase):
+    """Un namespace MCP montato fa parte del catalogo.
+
+    `normattiva.*` copriva 0 verbi perché il catalogo era solo quello nativo — e
+    avvocato ha chiamato `normattiva.articolo` dieci volte. Un pannello che
+    dichiara zero su qualcosa di vivo è peggio di un pannello che non dichiara.
+    """
+
+    def test_a_proxied_namespace_reports_its_verbs(self):
+        b = _call(cfg={"avvocato": {"allowed_tools": ["normattiva.*"]}},
+                  catalogue=CAT, proxied=["normattiva.articolo", "normattiva.indice"])
+        g = b["groups"][0]
+        self.assertEqual(g["count"], 2)
+        self.assertTrue(b["catalogue_complete"])
+
+    def test_a_gated_proxied_verb_triggers_expansion(self):
+        b = _call(cfg={"avvocato": {"allowed_tools": ["normattiva.*"],
+                                    "gated_tools": ["normattiva.articolo"]}},
+                  catalogue=CAT, proxied=["normattiva.articolo", "normattiva.indice"])
+        g = b["groups"][0]
+        self.assertTrue(g["expanded"])
+        self.assertEqual([v["verb"] for v in g["verbs"] if v["gated"]],
+                         ["normattiva.articolo"])
+
+    def test_an_unreachable_proxy_is_DECLARED_not_hidden(self):
+        """Senza il flag, i gruppi MCP mostrerebbero un conteggio che sembra
+        completo. Chi legge deve sapere che l'elenco è parziale."""
+        b = _call(cfg={"avvocato": {"allowed_tools": ["normattiva.*"]}},
+                  catalogue=CAT, proxy_ok=False)
+        self.assertFalse(b["catalogue_complete"])
 
 
 if __name__ == "__main__":
