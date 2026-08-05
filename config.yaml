@@ -73,35 +73,6 @@ agents:
     - packs.install_pip
     - packs.install_npm
     - packs.import_url
-  # Wainston (agent di sistema, normal): helpdesk widget + amministrazione delle
-  # capability degli ALTRI agent editabili. Non super → la whitelist è esplicita.
-  wainston:
-    allowed_paths:
-    - .
-    allowed_shell_cmds: []
-    denied_shell_patterns: []
-    allowed_tools:
-    - agents.*
-    - runtime.*
-    - app_runtime.*
-  # Mercuria (agent di sistema, normal): agente MESSAGGERO — email + Telegram.
-  # Non super → whitelist esplicita. La fruizione degli account email e del bot
-  # Telegram resta gated dai grant del VAULT (delega per-agent): la whitelist apre
-  # i namespace, i grant scelgono quali account/token.
-  mercuria:
-    allowed_paths:
-    - .
-    allowed_shell_cmds: []
-    denied_shell_patterns: []
-    allowed_tools:
-    - email.send
-    - email.folders
-    - email.list
-    - email.read
-    - email.search
-    - email.reply
-    - telegram.*
-    - fs.list_dir
   # Impiegato Tomato (agent di dominio, normal): back-office virtuale Tomato Srl.
   # Accede a email (info@tomato.blue) e Google Drive Tomato.
   # Il grant vault per la credenziale google_info_tomato_blue va assegnato
@@ -125,8 +96,15 @@ agents:
     - gcalendar.*
     - gdocs.*
     - fs.list_dir
-    - topic.*
     - runtime.*
+    - topic.open
+    - topic.files
+    - topic.read_file
+    - topic.read_document
+    - topic.write_file
+    - topic.put
+    - topic.fetch
+    - topic.save_summary
     # §8: letture libere, SCRITTURE gated. Sono gli stessi verbi che per altri
     # agent restano liberi, quindi la granularità non può essere globale.
     gated_tools:
