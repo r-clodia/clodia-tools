@@ -48,9 +48,17 @@ async def register(request: Request):
     name = (body.get("agent") or "").strip()
     if not name:
         return JSONResponse({"error": "agent richiesto"}, status_code=400)
-    spec = whitelist.upsert_agent(name, allowed_tools=body.get("allowed_tools"))
+    # `gated_tools` arriva dal SEED (dichiarazione) e viene custodito qui
+    # (autorità): il seed vive sulla datadir insieme al codice degli agenti, e un
+    # agente capace di riscriverlo cancellerebbe i propri gate. Assente nel corpo
+    # → non si tocca ciò che è già registrato: un chiamante vecchio non deve
+    # poter azzerare i gate per omissione.
+    spec = whitelist.upsert_agent(name, allowed_tools=body.get("allowed_tools"),
+                                  gated_tools=body.get("gated_tools"))
     whitelist.reload_config()
-    return JSONResponse({"ok": True, "agent": name, "allowed_tools": spec.get("allowed_tools")})
+    return JSONResponse({"ok": True, "agent": name,
+                         "allowed_tools": spec.get("allowed_tools"),
+                         "gated_tools": spec.get("gated_tools") or []})
 
 
 async def flow_allow(request: Request):
@@ -104,7 +112,70 @@ async def flow_allow(request: Request):
     return JSONResponse(out)
 
 
+async def verbs(request: Request):
+    """GET /internal/agents/{name}/verbs → verbi EFFETTIVI con il flag gated.
+
+    Serve alla scheda del seed. Espande i wildcard, ma **solo dove serve**: un
+    `ns.*` che non contiene nessun verbo gated resta compatto. La regola è di
+    Davide e ha una buona ragione — si espande dove c'è qualcosa da vedere,
+    altrimenti `clodia` con `*` diventa un muro di duecento righe in cui il
+    lucchetto che conta non si nota.
+
+    Sta nel gateway perché è l'unico posto che conosce tutte e quattro le cose
+    insieme: l'elenco dei verbi nativi, la lista gated GLOBALE, i `gated_tools`
+    per-agente e i `denied_tools`. Il backend ne ha solo la dichiarazione del
+    seed, e una risposta costruita là sarebbe una seconda verità.
+    """
+    _agent, err = _authorize(request)
+    if err:
+        return err
+    name = (request.path_params.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "agent richiesto"}, status_code=400)
+    from . import gate as _gate, main as _main
+    # Si legge la config DIRETTAMENTE: `agent_config()` risolve l'agente della
+    # richiesta corrente, che qui è il principal privilegiato, non il soggetto.
+    spec = (whitelist.CONFIG.get("agents") or {}).get(name) or {}
+    allowed = [str(x) for x in (spec.get("allowed_tools") or [])]
+    denied = {str(x) for x in (spec.get("denied_tools") or [])}
+    per_agent = {str(x) for x in (spec.get("gated_tools") or [])}
+    catalogue = sorted(_main.all_native_verb_names())
+
+    def _row(v: str, via: str) -> dict:
+        g_global = _gate.is_gated(v)
+        g_agent = v in per_agent
+        return {"verb": v, "gated": bool(g_global or g_agent),
+                "gated_by": ("global" if g_global else ("agent" if g_agent else None)),
+                "via": via}
+
+    out: list[dict] = []
+    groups: list[dict] = []
+    for grant in allowed:
+        if grant == "*" or grant.endswith(".*"):
+            ns = None if grant == "*" else grant[:-2]
+            covered = [v for v in catalogue
+                       if v not in denied and (ns is None or v.split(".", 1)[0] == ns)]
+            gated_inside = [v for v in covered if _gate.is_gated(v) or v in per_agent]
+            if gated_inside:
+                groups.append({"grant": grant, "expanded": True,
+                               "verbs": [_row(v, grant) for v in covered]})
+            else:
+                # Nessun lucchetto dentro: niente da espandere. Si dice QUANTI
+                # verbi copre, perché «compatto» non deve leggersi come «pochi».
+                groups.append({"grant": grant, "expanded": False,
+                               "count": len(covered), "verbs": []})
+        else:
+            if grant in denied:
+                continue
+            out.append(_row(grant, grant))
+    return JSONResponse({"agent": name, "verbs": out, "groups": groups,
+                         "denied": sorted(denied),
+                         "gated_agent": sorted(per_agent),
+                         "gated_global_spec": _gate.gated_verbs_spec()})
+
+
 routes = [
     Route("/internal/agents/whitelist", register, methods=["POST"]),
     Route("/internal/agents/flow-allow", flow_allow, methods=["POST"]),
+    Route("/internal/agents/{name}/verbs", verbs, methods=["GET"]),
 ]

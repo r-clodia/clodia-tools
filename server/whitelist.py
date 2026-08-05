@@ -93,7 +93,8 @@ def agent_has_tool(agent: str, tool: str) -> bool:
 
 
 def upsert_agent(agent: str, allowed_tools: list | None = None,
-                 allowed_paths: list | None = None) -> dict:
+                 allowed_paths: list | None = None,
+                 gated_tools: list | None = None) -> dict:
     """Registra/aggiorna un agent nella whitelist del gateway e persiste. Serve
     all'auto-provisioning dei responder confinati (clone per-topic): senza una
     entry in config.yaml la sessione MCP dell'agent non può aprirsi (agent_name).
@@ -107,6 +108,12 @@ def upsert_agent(agent: str, allowed_tools: list | None = None,
         spec["allowed_tools"] = list(allowed_tools)
     else:
         spec.setdefault("allowed_tools", [])
+    # `gated_tools`: dichiarati nel seed, custoditi QUI. `None` significa «il
+    # chiamante non si pronuncia» e NON azzera: un chiamante vecchio, o una
+    # registrazione parziale, non deve poter togliere i gate per omissione — è
+    # la direzione d'errore silenziosa.
+    if gated_tools is not None:
+        spec["gated_tools"] = list(gated_tools)
     save_config()
     return spec
 # Override portabile: rispetta CLODIA_WORKSPACE_ROOT se settato

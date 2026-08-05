@@ -2077,6 +2077,25 @@ def _tool_allowed(name: str, allowed: set) -> bool:
 NS_SEP_DOT = "."
 
 
+def all_native_verb_names() -> list[str]:
+    """Nomi di TUTTI i verbi nativi del gateway, indipendentemente dal chiamante.
+
+    Distinto da `list_tools()`, che filtra per l'agente corrente: qui serve il
+    CATALOGO, per poter espandere un wildcard nella scheda di un seed. Espone i
+    soli nomi — nessuna descrizione, nessuno schema: chi chiede l'elenco vuole
+    sapere cosa esiste, non come si invoca.
+    """
+    native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS
+                  + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS
+                  + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS
+                  + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
+                  + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS + _PACKS_TOOLS + _WORKFLOWS_TOOLS
+                  + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
+    if instance_profile.rag_enabled():
+        native += list(_EU_CORPUS_TOOLS + _RAG_TOOLS)
+    return [t.name for t in native]
+
+
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     """Return only the tools allowed for the calling agent (native + proxied)."""
