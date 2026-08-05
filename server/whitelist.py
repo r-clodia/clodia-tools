@@ -99,6 +99,16 @@ def upsert_agent(agent: str, allowed_tools: list | None = None,
     all'auto-provisioning dei responder confinati (clone per-topic): senza una
     entry in config.yaml la sessione MCP dell'agent non può aprirsi (agent_name).
     Non tocca gli altri campi se l'agent esiste già (merge non distruttivo)."""
+    # RILETTURA prima della scrittura. `save_config()` serializza l'INTERO CONFIG
+    # in memoria: se un altro processo ha modificato il file da quando questo lo ha
+    # caricato, salvare senza rileggere sovrascrive le sue modifiche con una copia
+    # stantia. È già successo, e in silenzio: un `profile_tools` scritto da uno
+    # script è sparito al primo upsert del gateway, cioè un vincolo di sicurezza è
+    # stato rimosso da un'operazione che non c'entrava (l'update di un pack).
+    #
+    # Non è un lock — due scritture simultanee restano un problema teorico — ma
+    # elimina il caso reale, che è "modificato altrove minuti fa".
+    reload_config()
     agents = CONFIG.setdefault("agents", {})
     spec = agents.setdefault(agent, {})
     spec.setdefault("allowed_paths", allowed_paths or ["."])
