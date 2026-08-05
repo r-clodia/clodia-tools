@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from . import gdrive_root
 from .google_svc import build_service
 
 _URL = "https://docs.google.com/spreadsheets/d/{}/edit"
@@ -46,6 +47,7 @@ def _tabs(svc, spreadsheet_id: str) -> list[dict]:
 def list_tabs(spreadsheet_id: str, account: Optional[str] = None) -> dict:
     """Tabs of a spreadsheet: title, id, position and size."""
     svc, acct = _svc(account)
+    gdrive_root.guard_id(account, spreadsheet_id, "gsheets")
     meta = svc.spreadsheets().get(spreadsheetId=spreadsheet_id,
                                   fields="properties.title").execute()
     tabs = _tabs(svc, spreadsheet_id)
@@ -70,6 +72,7 @@ def read(spreadsheet_id: str, range: Optional[str] = None,  # noqa: A002 - MCP a
     this module exists to preserve.
     """
     svc, acct = _svc(account)
+    gdrive_root.guard_id(account, spreadsheet_id, "gsheets")
     rng = range or tab
     if not rng:
         tabs = _tabs(svc, spreadsheet_id)
@@ -95,6 +98,7 @@ def add_tab(spreadsheet_id: str, title: str, index: Optional[int] = None,
     are not read, not sent and not rewritten.
     """
     svc, acct = _svc(account)
+    gdrive_root.guard_id(account, spreadsheet_id, "gsheets")
     props: dict[str, Any] = {"title": title}
     if index is not None:
         props["index"] = int(index)
@@ -124,6 +128,7 @@ def append_rows(spreadsheet_id: str, tab: str, rows: list[list],
     stays a date.
     """
     svc, acct = _svc(account)
+    gdrive_root.guard_id(account, spreadsheet_id, "gsheets")
     if not rows:
         raise ValueError("rows vuoto: niente da aggiungere")
     res = svc.spreadsheets().values().append(
@@ -145,6 +150,7 @@ def write_range(spreadsheet_id: str, range: str,  # noqa: A002 - MCP arg name
     did not name is how formulas disappear. For adding data use `append_rows`.
     """
     svc, acct = _svc(account)
+    gdrive_root.guard_id(account, spreadsheet_id, "gsheets")
     if not (range or "").strip():
         raise ValueError("range obbligatorio (es. 'Foglio1!A1:C10'): "
                          "write_range sovrascrive, quindi non ha un default")

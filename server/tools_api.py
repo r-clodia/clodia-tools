@@ -108,6 +108,138 @@ def _authorized(request: Request) -> bool:
     return ag in ("clodia", "ophelia") or _is_human_admin(ag)
 
 
+def _authorized_owner(request: Request) -> bool:
+    """Come `_authorized`, MA senza la scorciatoia dei super-agent.
+
+    `_authorized` accetta `clodia`/`ophelia`, e per gestire i connettori va bene.
+    Per il confinamento di Drive no: allargare il perimetro è più privilegiato di
+    qualunque uso del perimetro, e un agente che può spostare il proprio confine
+    non ha un confine. Qui passa solo un UMANO admin (o il trusted-core interno,
+    che un agente non può impersonare perché non ha il token).
+    """
+    hdr = request.headers.get("authorization", "")
+    if _UI_TOKEN and hdr == f"Bearer {_UI_TOKEN}":
+        return True
+    token = hdr[7:] if hdr.lower().startswith("bearer ") else ""
+    if not token:
+        return False
+    from .pki_verify import verify_session_token
+    try:
+        p = verify_session_token(token)
+    except Exception:
+        return False
+    if p.get("on_behalf"):
+        return (p.get("human_role") or "user") == "admin"
+    return _is_human_admin(str(p.get("agent") or ""))
+
+
+def _folder_id(raw: str) -> str:
+    """Accetta un id o una URL di Drive e ritorna l'id.
+
+    Incollare la URL è ciò che una persona fa davvero; pretendere l'id nudo
+    sposta su chi configura un lavoro di estrazione a mano, ed è lì che si
+    incolla la cosa sbagliata.
+    """
+    raw = (raw or "").strip()
+    if "/" in raw:
+        import re as _re
+        m = _re.search(r"/folders/([A-Za-z0-9_-]+)", raw) or \
+            _re.search(r"[?&]id=([A-Za-z0-9_-]+)", raw)
+        if m:
+            return m.group(1)
+        raw = raw.rstrip("/").rsplit("/", 1)[-1].split("?")[0]
+    return raw
+
+
+def _describe_folder(account: str, fid: str) -> dict:
+    """Nome e tipo di una cartella, per far CONFERMARE un nome invece di un id.
+
+    Un id di 33 caratteri non è verificabile a occhio: senza il nome, l'unico
+    errore possibile — confinare alla cartella sbagliata — è anche invisibile.
+    """
+    from .tools import gdrive
+    out = {"id": fid}
+    try:
+        svc, _ = gdrive._service(account)
+        meta = svc.files().get(fileId=fid, fields="id, name, mimeType",
+                               supportsAllDrives=True).execute()
+        out["name"] = meta.get("name")
+        out["is_folder"] = meta.get("mimeType") == \
+            "application/vnd.google-apps.folder"
+    except Exception as e:                       # noqa: BLE001
+        out["error"] = f"{type(e).__name__}: {str(e)[:100]}"
+        out["is_folder"] = False
+    return out
+
+
+async def gdrive_confinement(request: Request):
+    """GET /tools/gdrive/confinement → stato del confinamento per account."""
+    if not _authorized_owner(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import whitelist
+    from .tools import gdrive
+    whitelist.reload_config()
+    roots = whitelist.gdrive_roots_all()
+    out = []
+    for acct in gdrive.gworkspace_accounts():
+        ids = roots.get(acct) or roots.get("*") or []
+        out.append({"account": acct, "confined": bool(ids),
+                    "folders": [_describe_folder(acct, i) for i in ids]})
+    return JSONResponse({
+        "accounts": out,
+        # Il costo va detto DOVE si prende la decisione, non solo in un commento
+        # del config: chi confina perde il calendario, e deve saperlo prima.
+        "closes_verbs": ["gcalendar.*"],
+        "note": ("Confinare un account limita gdrive/gdocs/gsheets a quella "
+                 "cartella e CHIUDE gcalendar: un'agenda non sta in una "
+                 "cartella, quindi non può essere tenuta allo stesso perimetro.")})
+
+
+async def gdrive_confinement_set(request: Request):
+    """POST /tools/gdrive/confinement → imposta o rimuove il confinamento.
+
+    Rimuovere (lista vuota) è l'operazione che CONCEDE, quindi è esplicita: serve
+    `confirm_widen: true`. Non è un attrito decorativo — è l'unica azione qui che
+    trasforma un account confinato in un account che vede tutto il Drive.
+    """
+    if not _authorized_owner(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    body = await request.json()
+    account = str(body.get("account") or "").strip()
+    raw = body.get("folders") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    from . import whitelist
+    from .tools import gdrive, gdrive_root
+    if account not in gdrive.gworkspace_accounts():
+        return JSONResponse({"error": f"account '{account}' non collegato"},
+                            status_code=400)
+    ids = [_folder_id(r) for r in raw]
+    ids = [i for i in ids if i]
+    if not ids:
+        if not body.get("confirm_widen"):
+            return JSONResponse({"error": (
+                "rimuovere il confinamento rende raggiungibile TUTTO il Drive di "
+                f"'{account}' da qualunque agente con il grant: ripeti la "
+                "richiesta con confirm_widen=true")}, status_code=409)
+        whitelist.set_gdrive_roots(account, [])
+        gdrive_root.reset_cache()
+        LOG.warning("gdrive confinement RIMOSSO per %s", account)
+        return JSONResponse({"account": account, "confined": False, "folders": []})
+    described = [_describe_folder(account, i) for i in ids]
+    bad = [d for d in described if not d.get("is_folder")]
+    if bad:
+        # Un id non risolvibile non va scritto: un confinamento a una cartella
+        # inesistente non è "più stretto", è un tool che non funziona e che
+        # qualcuno riaprirà per sbloccarsi.
+        return JSONResponse({"error": "non sono cartelle raggiungibili da questo "
+                                      "account", "folders": bad}, status_code=400)
+    whitelist.set_gdrive_roots(account, ids)
+    gdrive_root.reset_cache()
+    LOG.info("gdrive confinement per %s → %s", account, ids)
+    return JSONResponse({"account": account, "confined": True, "folders": described})
+
+
 def _gc_states() -> None:
     now = time.time()
     for k in [k for k, v in _states.items() if v["exp"] < now]:
@@ -1004,6 +1136,8 @@ async def test_connector(request: Request):
 
 
 routes = [
+    Route("/tools/gdrive/confinement", gdrive_confinement, methods=["GET"]),
+    Route("/tools/gdrive/confinement", gdrive_confinement_set, methods=["POST"]),
     Route("/clodia/delegations", delegation_list, methods=["GET"]),
     Route("/clodia/delegations", delegation_register, methods=["POST"]),
     Route("/clodia/delegations/revoke", delegation_revoke, methods=["POST"]),

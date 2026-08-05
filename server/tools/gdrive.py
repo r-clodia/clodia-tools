@@ -18,6 +18,7 @@ from typing import Optional
 
 from .. import vault
 from ..whitelist import agent_name, tool_allowed
+from . import gdrive_root
 
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
 _FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -28,7 +29,10 @@ _GOOGLE_EXPORT = {
         ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),
     "application/vnd.google-apps.presentation": ("application/pdf", ".pdf"),
 }
-_FIELDS = "id, name, mimeType, modifiedTime, size, webViewLink, parents, md5Checksum"
+# shortcutDetails è obbligatorio: gdrive_root decide sulla riga, e senza
+# questo campo una scorciatoia passerebbe il filtro degli elenchi.
+_FIELDS = ("id, name, mimeType, modifiedTime, size, webViewLink, parents, "
+           "md5Checksum, shortcutDetails")
 # Shared Drive (Team Drive): senza questi flag l'API vede solo il "My Drive".
 # supportsAllDrives → opera anche su file in shared drive; includeItemsFromAllDrives
 # + corpora=allDrives → list/search includono i contenuti dei shared drive.
@@ -117,7 +121,10 @@ def list_files(folder_id: Optional[str] = None, query: Optional[str] = None,
         q=" and ".join(clauses), pageSize=max(1, min(int(limit), 1000)),
         fields=f"files({_FIELDS})", orderBy="folder,name",
         corpora="allDrives", **_ALL_DRIVES).execute()
-    return {"account": acct, "files": [_clean(f) for f in res.get("files", [])]}
+    # Il confinamento sta nel FILTRO degli id, non in una clausola aggiunta a
+    # `query`: quella stringa la controlla il chiamante.
+    rows = gdrive_root.keep_inside(svc, acct, res.get("files", []))
+    return {"account": acct, "files": [_clean(f) for f in rows]}
 
 
 def search(name: str, limit: int = 20, account: Optional[str] = None) -> dict:
@@ -132,7 +139,8 @@ def search(name: str, limit: int = 20, account: Optional[str] = None) -> dict:
         pageSize=max(1, min(int(limit), 1000)),
         fields=f"files({_FIELDS})", orderBy="folder,name",
         corpora="allDrives", **_ALL_DRIVES).execute()
-    return {"account": acct, "files": [_clean(f) for f in res.get("files", [])]}
+    rows = gdrive_root.keep_inside(svc, acct, res.get("files", []))
+    return {"account": acct, "files": [_clean(f) for f in rows]}
 
 
 def mkdir(name: str, parent_id: Optional[str] = None,
@@ -143,6 +151,7 @@ def mkdir(name: str, parent_id: Optional[str] = None,
     if not name:
         raise ValueError("'name' non può essere vuoto")
     svc, acct = _service(account)
+    parent_id = gdrive_root.assert_writable_parent(svc, acct, parent_id, "gdrive.mkdir")
     safe = name.replace("'", "\\'")
     q = (f"name = '{safe}' and mimeType = '{_FOLDER_MIME}' and trashed = false"
          + (f" and '{parent_id}' in parents" if parent_id else ""))
@@ -166,6 +175,7 @@ def upload(src: str, name: Optional[str] = None, folder_id: Optional[str] = None
     from googleapiclient.http import MediaFileUpload
     import os
     svc, acct = _service(account)
+    folder_id = gdrive_root.assert_writable_parent(svc, acct, folder_id, "gdrive.upload")
     fname = name or os.path.basename(src)
     body = {"name": fname}
     if folder_id:
@@ -183,6 +193,7 @@ def download(file_id: str, dest: str, account: Optional[str] = None) -> dict:
     tool_allowed("gdrive.download")
     from googleapiclient.http import MediaIoBaseDownload
     svc, acct = _service(account)
+    gdrive_root.assert_inside(svc, acct, file_id, "gdrive.download")
     meta = svc.files().get(fileId=file_id, fields="id, name, mimeType",
                            supportsAllDrives=True).execute()
     mime = meta.get("mimeType", "")
@@ -215,6 +226,7 @@ def share(file_id: str, email: str, role: str = "writer",
     if role not in ("writer", "reader", "commenter"):
         raise ValueError("role deve essere writer | reader | commenter")
     svc, acct = _service(account)
+    gdrive_root.assert_inside(svc, acct, file_id, "gdrive.share")
     perm = svc.permissions().create(
         fileId=file_id, sendNotificationEmail=True, supportsAllDrives=True,
         body={"type": "user", "role": role, "emailAddress": email},
@@ -233,6 +245,7 @@ def rename(file_id: str, new_name: str, account: Optional[str] = None) -> dict:
     if not new_name:
         raise ValueError("'new_name' non può essere vuoto")
     svc, acct = _service(account)
+    gdrive_root.assert_inside(svc, acct, file_id, "gdrive.rename")
     f = svc.files().update(fileId=file_id, body={"name": new_name},
                            fields=_FIELDS, supportsAllDrives=True).execute()
     return {"account": acct, "renamed": True, **_clean(f)}
@@ -246,6 +259,11 @@ def move(file_id: str, folder_id: str, account: Optional[str] = None) -> dict:
     if not (folder_id or "").strip():
         raise ValueError("'folder_id' non può essere vuoto")
     svc, acct = _service(account)
+    # Entrambi gli estremi: senza il controllo sulla destinazione uno
+    # spostamento porterebbe il file FUORI dal perimetro, che è esfiltrazione
+    # per rilocazione — non serve leggere niente per riuscirci.
+    gdrive_root.assert_inside(svc, acct, file_id, "gdrive.move")
+    gdrive_root.assert_inside(svc, acct, folder_id.strip(), "gdrive.move (destinazione)")
     cur = svc.files().get(fileId=file_id, fields="parents",
                           supportsAllDrives=True).execute()
     prev = ",".join(cur.get("parents") or [])

@@ -3,6 +3,29 @@
 # (l'owner aggiunge i server via Add-MCP). Default tool: email+fs+agent (no Trello).
 workspace_root: /Users/erreclaudea/erre-claudia
 mcp_backends: []
+
+# Confinamento delle credenziali Google a un sottoalbero di Drive.
+# Chiave assente o vuota = nessun confinamento (comportamento storico).
+#
+#   gdrive_roots:
+#     ceouncommoncreative: ["<id-cartella>"]
+#     "*": ["<id-cartella>"]        # vale per tutti gli account
+#
+# Serve quando l'account collegato NON è dedicato: lo scope OAuth è `drive`
+# pieno, quindi senza questo un agente raggiunge tutto ciò che quell'account
+# vede. Con una radice impostata: ogni id che entra in un verbo gdrive/gdocs/
+# gsheets deve avere un antenato nella lista, e gli elenchi sono filtrati.
+#
+# Vive in questo file — volume del gateway, NON raggiungibile da un agente —
+# per la stessa ragione dei gate: chi può riscrivere il confine si autoconcede
+# l'accesso. In particolare NON è derivato dalla cartella del remote di un
+# topic: chi può creare un remote allargherebbe il perimetro da solo.
+#
+# Costo consapevole: `gcalendar.*` viene CHIUSO sugli account confinati. Il
+# calendario non sta in una cartella, quindi non c'è modo di limitarlo allo
+# stesso perimetro, e lasciarlo aperto renderebbe falsa l'affermazione
+# "l'agente vede solo quella cartella".
+gdrive_roots: {}
 agents:
   clodia:
     allowed_paths:
