@@ -19,6 +19,47 @@ agents:
     - fs.list_dir
     - topic.*
     - runtime.*
+    # PROFILO dichiarato: il mestiere di questo agente. Questi verbi sono LIBERI e
+    # sono quelli che compaiono nella sua scheda. Tutto ciò che il grant `*` copre e
+    # che NON è qui resta raggiungibile ma passa da un consenso umano.
+    #
+    # Sposta la least authority dalla RIMOZIONE alla SUPERVISIONE: un verbo tolto a
+    # un super è un verbo che deve fare Davide a mano; un verbo fuori profilo è un
+    # verbo che il super fa con la sua approvazione. Stesso umano, ma niente si
+    # rompe.
+    #
+    # Derivato dal RUOLO DICHIARATO, non dai verbi misurati — e qui la distinzione
+    # è sostanziale. La telemetria di clodia include `email.save_attachment`,
+    # `email.search`, `topic.put`: li ha usati perché ha fatto il mestiere del
+    # POSTINO il giorno in cui il postino era rotto. Un registro d'uso misura ciò
+    # che è ACCADUTO, supplenze comprese; il profilo deve dire il MANDATO.
+    #
+    # Mandato di clodia: costruire la squadra per gli obiettivi del topic
+    # (primario), facilitare la cooperazione identificando strategie e attori
+    # (secondario). Da qui i verbi: comporre la squadra, vedere chi c'è e cosa sa
+    # fare, leggere il contesto del canale e parlarci.
+    #
+    # Cosa NON c'è, di proposito: posta, Drive, binari, uscita verso l'esterno. Non
+    # perché proibiti — restano raggiungibili — ma perché non sono il suo mestiere.
+    # Il gate è la forma in cui la modalità super si attiva su richiesta invece di
+    # essere sempre accesa.
+    profile_tools:
+    - topic.suggest_team
+    - topic.add_participant
+    - topic.remove_participant
+    - agents.list
+    - agents.show
+    - agents.list_scoped
+    - runtime.agents
+    - topic.open
+    - topic.list
+    - topic.files
+    - topic.read_file
+    - topic.read_document
+    - topic.search
+    - topic.post_message
+    - topic.save_summary
+    - topic.add_minute
     # Il terzo bit del vettore di contesto (scrittura verso l'esterno) era acceso
     # per DEFAULT in tutta la colonia: `topic.*` contiene quattro verbi che
     # spingono i file del canale FUORI dall'istanza, e nessuno l'aveva deciso.
@@ -56,6 +97,42 @@ agents:
     - fs.list_dir
     - topic.*
     - runtime.*
+    # PROFILO dichiarato: il mestiere di questo agente. Questi verbi sono LIBERI e
+    # sono quelli che compaiono nella sua scheda. Tutto ciò che il grant `*` copre e
+    # che NON è qui resta raggiungibile ma passa da un consenso umano.
+    #
+    # Sposta la least authority dalla RIMOZIONE alla SUPERVISIONE: un verbo tolto a
+    # un super è un verbo che deve fare Davide a mano; un verbo fuori profilo è un
+    # verbo che il super fa con la sua approvazione. Stesso umano, ma niente si
+    # rompe.
+    #
+    # Derivato dal RUOLO DICHIARATO, non dai verbi misurati — e qui la distinzione
+    # è sostanziale. La telemetria di clodia include `email.save_attachment`,
+    # `email.search`, `topic.put`: li ha usati perché ha fatto il mestiere del
+    # POSTINO il giorno in cui il postino era rotto. Un registro d'uso misura ciò
+    # che è ACCADUTO, supplenze comprese; il profilo deve dire il MANDATO.
+    #
+    # Mandato di clodia: costruire la squadra per gli obiettivi del topic
+    # (primario), facilitare la cooperazione identificando strategie e attori
+    # (secondario). Da qui i verbi: comporre la squadra, vedere chi c'è e cosa sa
+    # fare, leggere il contesto del canale e parlarci.
+    #
+    # Cosa NON c'è, di proposito: posta, Drive, binari, uscita verso l'esterno. Non
+    # perché proibiti — restano raggiungibili — ma perché non sono il suo mestiere.
+    # Il gate è la forma in cui la modalità super si attiva su richiesta invece di
+    # essere sempre accesa.
+    profile_tools:
+    - topic.open
+    - topic.list
+    - topic.files
+    - topic.read_file
+    - topic.read_document
+    - topic.search
+    - topic.post_message
+    - topic.save_summary
+    - topic.add_minute
+    - agents.list
+    - agents.show
     # Il terzo bit del vettore di contesto (scrittura verso l'esterno) era acceso
     # per DEFAULT in tutta la colonia: `topic.*` contiene quattro verbi che
     # spingono i file del canale FUORI dall'istanza, e nessuno l'aveva deciso.

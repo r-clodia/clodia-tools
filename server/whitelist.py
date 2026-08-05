@@ -340,6 +340,36 @@ def agent_gates(verb: str, name: str | None = None) -> bool:
     return _listed(verb, set(cfg.get("gated_tools") or []))
 
 
+def outside_profile(verb: str, name: str | None = None) -> bool:
+    """True se `verb` è RAGGIUNGIBILE ma fuori dal profilo dichiarato dell'agente.
+
+    Il profilo (`profile_tools`) è l'insieme che l'agente dichiara come proprio
+    mestiere: quello che mostra nella sua scheda e che usa senza chiedere. Ciò che
+    il suo grant copre e che il profilo NON dichiara resta raggiungibile, ma passa
+    da un consenso umano.
+    
+    Sposta la least authority dalla RIMOZIONE alla SUPERVISIONE, ed è la ragione
+    per cui esiste: un verbo tolto a clodia è un verbo che deve fare Davide a mano;
+    un verbo fuori profilo è un verbo che clodia fa con la sua approvazione. Stesso
+    umano coinvolto, ma niente si rompe — e togliere verbi a un super per
+    disciplina si è già rotto addosso una volta (a un postino, levandogli
+    `post_message`, cioè il mestiere).
+
+    Profilo vuoto o assente → nessun vincolo: un agente che non dichiara un profilo
+    non è un agente senza mestiere, è un agente che non l'ha ancora dichiarato, e
+    trattarlo come «tutto gated» renderebbe la piattaforma inservibile al primo
+    aggiornamento incompleto.
+    """
+    try:
+        cfg = agent_config(name)
+    except KeyError:
+        return False
+    profile = [str(x) for x in (cfg.get("profile_tools") or [])]
+    if not profile:
+        return False
+    return not _listed(verb, set(profile))
+
+
 def resolve_safe_path(rel_or_abs: str) -> Path:
     """Resolve a path and verify it's inside one of the agent's allowed_paths."""
     cfg = agent_config()

@@ -156,11 +156,23 @@ async def verbs(request: Request):
             "risulterebbero vuoti", str(e)[:120])
     catalogue = sorted(set(catalogue))
 
+    profile = [str(x) for x in (spec.get("profile_tools") or [])]
+    has_profile = bool(profile)
+    descriptions = _main.native_verb_descriptions()
+
     def _row(v: str, via: str) -> dict:
         g_global = _gate.is_gated(v)
         g_agent = v in per_agent
-        return {"verb": v, "gated": bool(g_global or g_agent),
-                "gated_by": ("global" if g_global else ("agent" if g_agent else None)),
+        off = has_profile and not whitelist._listed(v, set(profile))
+        # `gated_by` distingue le tre ragioni perché chiedono all'umano di
+        # valutare cose diverse: pericoloso per chiunque, pericoloso per costui,
+        # o semplicemente fuori dal suo mestiere.
+        by = "global" if g_global else ("agent" if g_agent else ("profile" if off else None))
+        return {"verb": v, "gated": bool(g_global or g_agent or off),
+                "gated_by": by, "in_profile": (not off) if has_profile else None,
+                # Una riga di descrizione: senza, un elenco di verbi è un elenco di
+                # nomi, e `topic.fetch` contro `topic.read_file` non si distingue.
+                "description": descriptions.get(v, ""),
                 "via": via}
 
     out: list[dict] = []
@@ -183,7 +195,27 @@ async def verbs(request: Request):
             if grant in denied:
                 continue
             out.append(_row(grant, grant))
+    # Vista ad ALBERO: un nodo per namespace. Serve perché un elenco piatto di 159
+    # verbi non si legge — e perché il criterio di apertura è chiaro: si apre ciò
+    # che ha un lucchetto o è fuori profilo, si tiene chiuso il resto.
+    tree: dict[str, dict] = {}
+    for r in out + [v for g in groups for v in g["verbs"]]:
+        ns = r["verb"].split(".", 1)[0]
+        node = tree.setdefault(ns, {"namespace": ns, "verbs": [], "gated": 0, "outside": 0})
+        node["verbs"].append(r)
+        if r["gated"]:
+            node["gated"] += 1
+        if r.get("in_profile") is False:
+            node["outside"] += 1
+    tree_list = sorted(tree.values(), key=lambda n: n["namespace"])
+    for node in tree_list:
+        node["verbs"].sort(key=lambda r: r["verb"])
+        # Aperto di default dove c'è qualcosa da guardare.
+        node["open_by_default"] = bool(node["gated"] or node["outside"])
     return JSONResponse({"agent": name, "verbs": out, "groups": groups,
+                         "tree": tree_list,
+                         "profile": sorted(profile),
+                         "has_profile": has_profile,
                          "denied": sorted(denied),
                          "gated_agent": sorted(per_agent),
                          # `False` → i gruppi su namespace MCP sono INCOMPLETI, e il
