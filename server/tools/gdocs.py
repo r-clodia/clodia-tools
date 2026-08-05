@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from . import gdrive_root
 from .google_svc import build_service
 
 
@@ -19,15 +20,20 @@ def create(title: str, text: Optional[str] = None, account: Optional[str] = None
     svc, acct = _svc(account)
     doc = svc.documents().create(body={"title": title}).execute()
     doc_id = doc.get("documentId")
+    # L'API Docs crea sempre nella radice di «Il mio Drive»: se la credenziale è
+    # confinata il file va adottato subito nella cartella consentita.
+    folder = gdrive_root.adopt(account, doc_id, "gdocs.create")
     if text:
         svc.documents().batchUpdate(documentId=doc_id, body={"requests": [
             {"insertText": {"location": {"index": 1}, "text": text}}]}).execute()
     return {"account": acct, "document_id": doc_id, "title": title,
+            "folder_id": folder,
             "url": f"https://docs.google.com/document/d/{doc_id}/edit"}
 
 
 def read(document_id: str, account: Optional[str] = None) -> dict:
     svc, acct = _svc(account)
+    gdrive_root.guard_id(account, document_id, "gdocs.read")
     doc = svc.documents().get(documentId=document_id).execute()
     text = _extract_text(doc)
     return {"account": acct, "document_id": document_id,
@@ -37,6 +43,7 @@ def read(document_id: str, account: Optional[str] = None) -> dict:
 def append_text(document_id: str, text: str, account: Optional[str] = None) -> dict:
     """Aggiunge testo in fondo al documento."""
     svc, acct = _svc(account)
+    gdrive_root.guard_id(account, document_id, "gdocs.append_text")
     doc = svc.documents().get(documentId=document_id).execute()
     end = _end_index(doc)
     svc.documents().batchUpdate(documentId=document_id, body={"requests": [
@@ -48,6 +55,7 @@ def replace_text(document_id: str, find: str, replace: str,
                  match_case: bool = True, account: Optional[str] = None) -> dict:
     """Sostituisce TUTTE le occorrenze di `find` con `replace`."""
     svc, acct = _svc(account)
+    gdrive_root.guard_id(account, document_id, "gdocs.replace_text")
     res = svc.documents().batchUpdate(documentId=document_id, body={"requests": [
         {"replaceAllText": {"containsText": {"text": find, "matchCase": match_case},
                             "replaceText": replace}}]}).execute()

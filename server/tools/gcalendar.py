@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from . import gdrive_root
 from .google_svc import build_service
 
 
@@ -17,6 +18,7 @@ def _svc(account: Optional[str]):
 
 
 def list_calendars(account: Optional[str] = None) -> dict:
+    gdrive_root.guard_calendar(account, "gcalendar")
     svc, acct = _svc(account)
     items = svc.calendarList().list().execute().get("items", [])
     cals = [{"id": c.get("id"), "summary": c.get("summary"),
@@ -28,6 +30,7 @@ def list_calendars(account: Optional[str] = None) -> dict:
 def list_events(calendar_id: str = "primary", time_min: Optional[str] = None,
                 time_max: Optional[str] = None, query: Optional[str] = None,
                 limit: int = 25, account: Optional[str] = None) -> dict:
+    gdrive_root.guard_calendar(account, "gcalendar")
     svc, acct = _svc(account)
     params = {"calendarId": calendar_id, "singleEvents": True, "orderBy": "startTime",
               "maxResults": max(1, min(int(limit or 25), 250))}
@@ -46,6 +49,7 @@ def create_event(summary: str, start: str, end: str, calendar_id: str = "primary
                  description: Optional[str] = None, location: Optional[str] = None,
                  attendees: Optional[list] = None, all_day: bool = False,
                  account: Optional[str] = None) -> dict:
+    gdrive_root.guard_calendar(account, "gcalendar")
     svc, acct = _svc(account)
     body = {"summary": summary}
     if description:
@@ -68,6 +72,7 @@ def update_event(event_id: str, calendar_id: str = "primary",
                  summary: Optional[str] = None, start: Optional[str] = None,
                  end: Optional[str] = None, description: Optional[str] = None,
                  location: Optional[str] = None, account: Optional[str] = None) -> dict:
+    gdrive_root.guard_calendar(account, "gcalendar")
     svc, acct = _svc(account)
     e = svc.events().get(calendarId=calendar_id, eventId=event_id).execute()
     if summary is not None:
@@ -88,6 +93,7 @@ def update_event(event_id: str, calendar_id: str = "primary",
 
 def delete_event(event_id: str, calendar_id: str = "primary",
                  account: Optional[str] = None) -> dict:
+    gdrive_root.guard_calendar(account, "gcalendar")
     svc, acct = _svc(account)
     svc.events().delete(calendarId=calendar_id, eventId=event_id).execute()
     return {"account": acct, "deleted": event_id, "ok": True}
@@ -95,6 +101,7 @@ def delete_event(event_id: str, calendar_id: str = "primary",
 
 def freebusy(time_min: str, time_max: str, calendar_id: str = "primary",
              account: Optional[str] = None) -> dict:
+    gdrive_root.guard_calendar(account, "gcalendar")
     svc, acct = _svc(account)
     body = {"timeMin": time_min, "timeMax": time_max, "items": [{"id": calendar_id}]}
     res = svc.freebusy().query(body=body).execute()
