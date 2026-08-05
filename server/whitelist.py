@@ -74,6 +74,40 @@ def save_config() -> None:
         yaml.safe_dump(CONFIG, f, sort_keys=False, allow_unicode=True)
 
 
+def set_gdrive_roots(account: str, folders: list[str]) -> list[str]:
+    """Imposta (o rimuove, con lista vuota) il confinamento Drive di un account.
+
+    `reload_config()` PRIMA di mutare, non per prudenza: `save_config()` scrive
+    l'intero CONFIG in memoria, quindi mutare un dict stantio riscrive sopra
+    tutto ciò che qualcun altro ha cambiato nel frattempo. È il difetto che
+    stamattina ha azzerato i gate di clodia, e questo campo è della stessa
+    natura — chi lo riscrive per sbaglio apre un Drive.
+    """
+    reload_config()
+    roots = CONFIG.setdefault("gdrive_roots", {})
+    if not isinstance(roots, dict):
+        roots = {}
+        CONFIG["gdrive_roots"] = roots
+    clean = []
+    for f in folders or []:
+        f = str(f).strip()
+        if f and f not in clean:
+            clean.append(f)
+    if clean:
+        roots[account] = clean
+    else:
+        roots.pop(account, None)
+    save_config()
+    return clean
+
+
+def gdrive_roots_all() -> dict:
+    """Confinamenti configurati, per account. Sola lettura."""
+    raw = CONFIG.get("gdrive_roots") or {}
+    return {k: (v if isinstance(v, list) else [v]) for k, v in raw.items()} \
+        if isinstance(raw, dict) else {}
+
+
 def set_agent_tool(agent: str, tool: str, present: bool) -> None:
     """Aggiunge/rimuove un tool (o wildcard '<ns>.*') dalla whitelist di `agent`
     e persiste. Usato per delegare connettori MCP per-agent."""
