@@ -17,6 +17,7 @@ from .tools import email, fs, logs, runtime
 from .tools import web_post
 from .tools import eu_corpus
 from .whitelist import (agent_config, agent_denies, agent_gates, agent_name,
+                        outside_profile,
                         current_chat, current_clearance, current_human_role,
                         current_principal, current_scoped_tools, is_on_behalf,
                         is_unattended)
@@ -1762,7 +1763,15 @@ def _dispatch_memory(name: str, a: dict):
 
 
 def _native_tool_namespaces() -> list[str]:
-    """Namespace dei tool nativi del gateway (per agents.list_tools)."""
+    """Namespace dei tool nativi del gateway (per agents.list_tools).
+
+    ⚠️ Questa lista NON è `_all_native_tools()` e la differenza è reale: omette
+    `_SETTINGS_TOOLS`, quindi `settings` non compare fra i namespace concedibili.
+    Non la si allinea qui perché cambiare cosa è concedibile è una scelta di
+    policy, non un refactor — e `settings.*` è gated globalmente per prefisso,
+    quindi l'omissione può essere deliberata. Va deciso, non uniformato di
+    soppiatto: clodia-platform#140.
+    """
     tools = (_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
              + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS
              + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
@@ -2077,13 +2086,31 @@ def _tool_allowed(name: str, allowed: set) -> bool:
 NS_SEP_DOT = "."
 
 
-def all_native_verb_names() -> list[str]:
-    """Nomi di TUTTI i verbi nativi del gateway, indipendentemente dal chiamante.
+def native_verb_descriptions() -> dict[str, str]:
+    """Verbo → prima frase della sua descrizione, per la scheda del seed.
 
-    Distinto da `list_tools()`, che filtra per l'agente corrente: qui serve il
-    CATALOGO, per poter espandere un wildcard nella scheda di un seed. Espone i
-    soli nomi — nessuna descrizione, nessuno schema: chi chiede l'elenco vuole
-    sapere cosa esiste, non come si invoca.
+    Solo la prima frase: la descrizione completa di alcuni verbi è un paragrafo
+    che spiega quando NON usarli, e in un albero di 159 righe sarebbe illeggibile.
+    Chi vuole il resto invoca `--help` del tool.
+    """
+    out: dict[str, str] = {}
+    for t in _all_native_tools():
+        d = " ".join((t.description or "").split())
+        # Si taglia alla prima frase, ma non su un'abbreviazione tipo `es.`
+        for stop in (". ", " — ", ": "):
+            i = d.find(stop)
+            if 0 < i < 160:
+                d = d[:i]
+                break
+        out[t.name] = d[:160]
+    return out
+
+
+def _all_native_tools() -> list:
+    """I Tool nativi. Sorgente unica per `list_tools`, i nomi e le descrizioni.
+
+    Resta fuori `_native_tool_namespaces`, che omette `settings` — una divergenza
+    preesistente che non si sana con un refactor (vedi la nota là).
     """
     native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS
                   + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS
@@ -2093,7 +2120,18 @@ def all_native_verb_names() -> list[str]:
                   + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     if instance_profile.rag_enabled():
         native += list(_EU_CORPUS_TOOLS + _RAG_TOOLS)
-    return [t.name for t in native]
+    return native
+
+
+def all_native_verb_names() -> list[str]:
+    """Nomi di TUTTI i verbi nativi del gateway, indipendentemente dal chiamante.
+
+    Distinto da `list_tools()`, che filtra per l'agente corrente: qui serve il
+    CATALOGO, per poter espandere un wildcard nella scheda di un seed. Espone i
+    soli nomi — nessuna descrizione, nessuno schema: chi chiede l'elenco vuole
+    sapere cosa esiste, non come si invoca.
+    """
+    return [t.name for t in _all_native_tools()]
 
 
 @app.list_tools()
@@ -2103,12 +2141,10 @@ async def list_tools() -> list[Tool]:
         allowed = set(agent_config().get("allowed_tools", [])) | set(current_scoped_tools())
     except PermissionError:
         return []
-    native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS
-                  + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
-    # Feature `rag` (profilo istanza): off → i verbi rag.*/eu_corpus.* non
-    # esistono proprio (né in lista né al dispatch).
-    if instance_profile.rag_enabled():
-        native += list(_EU_CORPUS_TOOLS + _RAG_TOOLS)
+    # Stessa sorgente della scheda del seed: due concatenazioni identiche
+    # divergerebbero al primo namespace aggiunto — ed è già successo, vedi la nota
+    # in `_native_tool_namespaces`.
+    native = list(_all_native_tools())
     # C1: tool dei backend MCP montati (namespaced), aggregati dal proxy.
     try:
         proxied = await proxy.list_proxied_tools()
@@ -2625,7 +2661,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # scritture di impiegato-tomato, quelle github di fullstack-dev —
             # stessi verbi che per altri restano liberi, quindi la granularità
             # non può essere globale).
-            if _gate.is_gated(name) or agent_gates(name, _ag):
+            # Tre ragioni per un gate, e vanno distinte nel messaggio perché
+            # chiedono all'umano di valutare cose diverse:
+            #  - GLOBALE: il verbo è pericoloso per chiunque
+            #  - PER-AGENTE: è pericoloso per QUESTO agente (le scritture di un
+            #    factotum, le mutazioni github di uno sviluppatore)
+            #  - FUORI PROFILO: l'agente può raggiungerlo ma non lo dichiara come
+            #    proprio mestiere. Non è «pericoloso», è «inatteso da lui».
+            _off_profile = outside_profile(name, _ag)
+            if _gate.is_gated(name) or agent_gates(name, _ag) or _off_profile:
                 if name == "web.post":
                     reason = web_post.gate_summary(arguments)
                 elif name in ("egress.allow", "ingress.allow"):
@@ -2638,6 +2682,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                              else "destinazione ammessa")
                     reason = (f"@{_ag} chiede di aggiungere {_u} come {_what}, "
                               f"per TUTTI gli agenti. {_eg.admin_note(_dir, _u)}")
+                elif _off_profile:
+                    reason = (f"@{_ag} chiede di usare `{name}`, che PUÒ raggiungere ma "
+                              f"non dichiara nel proprio profilo. Non è un verbo "
+                              f"pericoloso di per sé: è un verbo fuori dal suo mestiere. "
+                              f"Se lo usa spesso, dichiararlo nel profilo del suo pack "
+                              f"toglie questa domanda; approvarlo qui vale una volta.")
                 else:
                     reason = ""
                 gate_approval = await _require_gate_consent(
