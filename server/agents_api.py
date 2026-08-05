@@ -139,7 +139,22 @@ async def verbs(request: Request):
     allowed = [str(x) for x in (spec.get("allowed_tools") or [])]
     denied = {str(x) for x in (spec.get("denied_tools") or [])}
     per_agent = {str(x) for x in (spec.get("gated_tools") or [])}
-    catalogue = sorted(_main.all_native_verb_names())
+    # I backend MCP montati fanno parte del catalogo: `normattiva.*` copre i verbi
+    # di quel server, e senza di essi il gruppo direbbe «0 verbi» per un namespace
+    # che l'agente usa dieci volte al giorno. Un pannello che dichiara zero su
+    # qualcosa di vivo è peggio di un pannello che non dichiara.
+    catalogue = list(_main.all_native_verb_names())
+    proxied_ok = True
+    try:
+        from . import proxy as _proxy
+        catalogue += [t.name for t in await _proxy.list_proxied_tools()]
+    except Exception as e:  # noqa: BLE001
+        proxied_ok = False
+        import logging as _lg
+        _lg.getLogger("clodia-tools").warning(
+            "verbs: elenco dei tool MCP non disponibile (%s): i namespace proxied "
+            "risulterebbero vuoti", str(e)[:120])
+    catalogue = sorted(set(catalogue))
 
     def _row(v: str, via: str) -> dict:
         g_global = _gate.is_gated(v)
@@ -171,6 +186,10 @@ async def verbs(request: Request):
     return JSONResponse({"agent": name, "verbs": out, "groups": groups,
                          "denied": sorted(denied),
                          "gated_agent": sorted(per_agent),
+                         # `False` → i gruppi su namespace MCP sono INCOMPLETI, e il
+                         # consumatore deve poterlo dire invece di mostrare un conteggio
+                         # che sembra completo.
+                         "catalogue_complete": proxied_ok,
                          "gated_global_spec": _gate.gated_verbs_spec()})
 
 
