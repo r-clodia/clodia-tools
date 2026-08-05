@@ -128,7 +128,8 @@ def agent_has_tool(agent: str, tool: str) -> bool:
 
 def upsert_agent(agent: str, allowed_tools: list | None = None,
                  allowed_paths: list | None = None,
-                 gated_tools: list | None = None) -> dict:
+                 gated_tools: list | None = None,
+                 gated_in_channel: list | None = None) -> dict:
     """Registra/aggiorna un agent nella whitelist del gateway e persiste. Serve
     all'auto-provisioning dei responder confinati (clone per-topic): senza una
     entry in config.yaml la sessione MCP dell'agent non può aprirsi (agent_name).
@@ -158,6 +159,12 @@ def upsert_agent(agent: str, allowed_tools: list | None = None,
     # la direzione d'errore silenziosa.
     if gated_tools is not None:
         spec["gated_tools"] = list(gated_tools)
+    # `gated_in_channel`: stessa custodia e stessa regola sul `None`. Un
+    # chiamante che non si pronuncia non deve poter togliere il gate del canale
+    # per omissione — è la direzione d'errore silenziosa, e su `gated_tools` è
+    # già accaduta una volta oggi.
+    if gated_in_channel is not None:
+        spec["gated_in_channel"] = list(gated_in_channel)
     save_config()
     return spec
 # Override portabile: rispetta CLODIA_WORKSPACE_ROOT se settato
@@ -382,6 +389,52 @@ def agent_gates(verb: str, name: str | None = None) -> bool:
     except KeyError:
         return False
     return _listed(verb, set(cfg.get("gated_tools") or []))
+
+
+def in_channel() -> bool:
+    """True se la chiamata corrente arriva dal turno di un CANALE di topic.
+
+    Il discriminante è il claim `chat` del token di sessione, che per un canale
+    vale `chan:<tier>:<topic>:<agente>`. È **firmato** dall'agent-server: un
+    agente non può dichiararsi fuori da un canale per sfuggire a un gate, né
+    dichiararne uno altrui. Senza questa proprietà la condizione sarebbe
+    un'autodichiarazione, cioè niente.
+    """
+    c = current_chat() or ""
+    return c.startswith("chan:")
+
+
+def current_channel() -> str | None:
+    """`<tier>/<topic>` del canale corrente, per i messaggi di gate. None fuori."""
+    c = current_chat() or ""
+    if not c.startswith("chan:"):
+        return None
+    parts = c[len("chan:"):].split(":")
+    return f"{parts[0]}/{parts[1]}" if len(parts) >= 2 else None
+
+
+def agent_gates_in_channel(verb: str, name: str | None = None) -> bool:
+    """True se `verb` è gated per questo agente **solo dentro un canale**.
+
+    Perché una terza lista invece di allargare `gated_tools`. Per un postino
+    spedire non è un'anomalia: fuori da un canale — la posta in arrivo che
+    smista, una conversazione diretta con l'owner — è il suo mestiere, e chiedere
+    ogni volta renderebbe il gate un riflesso, che è il modo in cui un gate
+    smette di essere letto. Dentro un canale cambia una cosa sola: chi può
+    chiedere. I partecipanti non sono l'owner, e il contenuto che possono far
+    uscire è tutto quello che sta nella stanza.
+
+    Quindi la condizione non è sul verbo né sull'agente: è sul CONTESTO. Solo un
+    admin può approvare un gate (`_can_approve` lato agent-server), ed è
+    esattamente il «grant dall'admin» che questo serve a ottenere.
+    """
+    if not in_channel():
+        return False
+    try:
+        cfg = agent_config(name)
+    except KeyError:
+        return False
+    return _listed(verb, set(cfg.get("gated_in_channel") or []))
 
 
 def outside_profile(verb: str, name: str | None = None) -> bool:

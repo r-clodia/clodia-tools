@@ -54,11 +54,13 @@ async def register(request: Request):
     # → non si tocca ciò che è già registrato: un chiamante vecchio non deve
     # poter azzerare i gate per omissione.
     spec = whitelist.upsert_agent(name, allowed_tools=body.get("allowed_tools"),
-                                  gated_tools=body.get("gated_tools"))
+                                  gated_tools=body.get("gated_tools"),
+                                  gated_in_channel=body.get("gated_in_channel"))
     whitelist.reload_config()
     return JSONResponse({"ok": True, "agent": name,
                          "allowed_tools": spec.get("allowed_tools"),
-                         "gated_tools": spec.get("gated_tools") or []})
+                         "gated_tools": spec.get("gated_tools") or [],
+                         "gated_in_channel": spec.get("gated_in_channel") or []})
 
 
 async def flow_allow(request: Request):
