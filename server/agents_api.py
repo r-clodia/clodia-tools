@@ -55,12 +55,14 @@ async def register(request: Request):
     # poter azzerare i gate per omissione.
     spec = whitelist.upsert_agent(name, allowed_tools=body.get("allowed_tools"),
                                   gated_tools=body.get("gated_tools"),
-                                  gated_in_channel=body.get("gated_in_channel"))
+                                  gated_in_channel=body.get("gated_in_channel"),
+                                  profile_tools=body.get("profile_tools"))
     whitelist.reload_config()
     return JSONResponse({"ok": True, "agent": name,
                          "allowed_tools": spec.get("allowed_tools"),
                          "gated_tools": spec.get("gated_tools") or [],
-                         "gated_in_channel": spec.get("gated_in_channel") or []})
+                         "gated_in_channel": spec.get("gated_in_channel") or [],
+                         "profile_tools": spec.get("profile_tools") or []})
 
 
 async def flow_allow(request: Request):
