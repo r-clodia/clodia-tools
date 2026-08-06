@@ -56,22 +56,97 @@ def _load_config() -> dict:
     return cfg
 
 
+#: Copia di CONFIG come era all'ultimo caricamento. Serve a `save_config` per
+#: sapere COSA ha cambiato questo processo, invece di riversare tutto.
+#:
+#: Popolata anche al PRIMO caricamento, non solo su `reload_config`: un processo
+#: che carica all'import e salva senza aver mai ricaricato ricadrebbe altrimenti
+#: sul comportamento vecchio — cioè proprio il caso che ha riportato i verbi di
+#: clodia da 53 a 130 su venere.
+_LOADED: dict = {}
+
 CONFIG = _load_config()
+import copy as _copy
+_LOADED.update(_copy.deepcopy(CONFIG))
 
 
 def reload_config() -> dict:
     """Ricarica config.yaml MUTANDO il dict CONFIG in-place, così tutti gli
     importatori (`from .whitelist import CONFIG`) vedono i nuovi valori."""
+    import copy
     fresh = _load_config()
     CONFIG.clear()
     CONFIG.update(fresh)
+    _LOADED.clear()
+    _LOADED.update(copy.deepcopy(fresh))
     return CONFIG
 
 
+def _merge_my_changes(disco: dict) -> dict:
+    """Riporta sullo stato SU DISCO solo ciò che questo processo ha cambiato.
+
+    «Cambiato» = differente rispetto a `_LOADED`, la copia scattata all'ultimo
+    caricamento. Tutto il resto arriva dal disco, quindi le modifiche di un altro
+    processo sopravvivono.
+
+    `agents` si fonde per-agente e non in blocco: due processi che toccano due
+    agenti diversi non devono sovrascriversi, ed è precisamente quello che è
+    successo — un processo con la lista di clodia in memoria da prima ha riversato
+    la propria copia su un'altra scritta nel frattempo.
+    """
+    import copy
+    out = copy.deepcopy(disco)
+    for k, v in CONFIG.items():
+        if k == "agents" and isinstance(v, dict) and isinstance(out.get("agents"), dict):
+            base = _LOADED.get("agents") or {}
+            for nome, spec in v.items():
+                if spec != base.get(nome):
+                    out["agents"][nome] = copy.deepcopy(spec)
+            for nome in list(out["agents"]):
+                if nome in base and nome not in v:
+                    out["agents"].pop(nome, None)   # rimosso da questo processo
+            continue
+        if v != _LOADED.get(k):
+            out[k] = copy.deepcopy(v)
+    for k in list(out):
+        if k in _LOADED and k not in CONFIG:
+            out.pop(k, None)                        # chiave rimossa da questo processo
+    return out
+
+
 def save_config() -> None:
-    """Persiste CONFIG su config.yaml (usato da Add-MCP per registrare backend)."""
+    """Persiste su config.yaml SOLO le modifiche di questo processo.
+
+    Perché non scrive più `CONFIG` così com'è. `save_config` serializzava l'intero
+    dict in memoria, quindi un processo che aveva caricato la config e la salvava
+    più tardi riversava la propria copia STANTIA su tutto ciò che era cambiato nel
+    frattempo. Non è teorico: il 6 ago l'insieme di verbi di clodia su venere è
+    tornato da 53 a 130 — misurato, `config.yaml` riscritto alle 17:14 con i
+    valori di prima delle 13:00, dal processo del gateway che li aveva in memoria
+    dall'avvio.
+    #
+    Avevo già visto questa classe di difetto e l'avevo corretta in DUE chiamanti
+    (`upsert_agent`, `set_gdrive_roots`) mettendoci un `reload_config()` davanti.
+    Ma i chiamanti sono nove, e far dipendere la correttezza dalla disciplina di
+    nove punti significa che il decimo la rompe. La correzione appartiene qui.
+
+    Rilettura + merge del solo delta, non un lock: due scritture simultanee
+    restano un problema teorico. Elimina il caso reale, che è «un altro processo
+    ha scritto fra il mio load e il mio save».
+    """
+    import copy
+    try:
+        disco = _load_config()
+    except Exception:                                # noqa: BLE001
+        disco = copy.deepcopy(_LOADED)
+    finale = _merge_my_changes(disco) if _LOADED else dict(CONFIG)
     with open(CONFIG_PATH, "w") as f:
-        yaml.safe_dump(CONFIG, f, sort_keys=False, allow_unicode=True)
+        yaml.safe_dump(finale, f, sort_keys=False, allow_unicode=True)
+    # Da qui in avanti «cambiato» si misura da ciò che è appena stato scritto.
+    CONFIG.clear()
+    CONFIG.update(finale)
+    _LOADED.clear()
+    _LOADED.update(copy.deepcopy(finale))
 
 
 def set_gdrive_roots(account: str, folders: list[str]) -> list[str]:
