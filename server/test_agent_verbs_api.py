@@ -58,13 +58,41 @@ class ExpansionTests(unittest.TestCase):
         locked = [v["verb"] for v in g["verbs"] if v["gated"]]
         self.assertEqual(locked, ["topic.remote_push"])
 
-    def test_a_wildcard_without_gated_verbs_stays_compact(self):
-        """Ma dice QUANTI verbi copre: «compatto» non deve leggersi come «pochi»."""
+    def test_a_wildcard_without_gated_verbs_still_carries_its_verbs(self):
+        """Regola cambiata il 6 ago, e il perché conta più del cosa.
+
+        Prima un wildcard senza lucchetti restava «compatto» — verbi non
+        restituiti, solo un conteggio — per non trasformare il `*` di clodia in un
+        muro di 145 righe. Il criterio era quello sbagliato: ciò che rende un
+        gruppo un muro è la sua DIMENSIONE, non l'assenza di serrature. Misurato
+        sulla scheda di `messaggero`: `email.*` e `telegram.*`, 8 verbi ciascuno e
+        il suo mestiere, non comparivano affatto mentre `topic` e `jobs` sì.
+
+        Ora i verbi ci sono sempre; è il DEFAULT DI APERTURA a variare (vedi
+        `open_by_default`). «Chiuso» significa «un clic», non «assente».
+        """
         b = _call(cfg={"avvocato": {"allowed_tools": ["normattiva.*"]}}, catalogue=CAT)
         g = b["groups"][0]
-        self.assertFalse(g["expanded"])
+        self.assertTrue(g["expanded"])
         self.assertEqual(g["count"], 2)
-        self.assertEqual(g["verbs"], [])
+        self.assertEqual(len(g["verbs"]), 2)
+        self.assertFalse(g["has_gated"])
+        # e il nodo dell'albero esiste, chiuso di default perché non c'è nulla da
+        # guardare: è lì che la vecchia regola sopravvive, dove appartiene
+        node = next(n for n in b["tree"] if n["namespace"] == "normattiva")
+        self.assertEqual(node["count"], 2)
+        self.assertFalse(node["open_by_default"])
+
+    def test_a_narrow_namespace_that_is_the_agents_trade_is_visible(self):
+        """Il caso concreto che ha fatto cambiare la regola: un postino la cui
+        posta non compariva nella propria scheda."""
+        b = _call(cfg={"messaggero": {"allowed_tools": ["email.*", "topic.open"]}},
+                  catalogue=CAT + ["email.send", "email.read", "email.list"],
+                  name="messaggero")
+        namespaces = {n["namespace"] for n in b["tree"]}
+        self.assertIn("email", namespaces, "il mestiere dell'agente deve comparire")
+        email_node = next(n for n in b["tree"] if n["namespace"] == "email")
+        self.assertEqual(email_node["count"], 3)
 
     def test_a_globally_gated_verb_also_triggers_expansion(self):
         """Il lucchetto non viene solo dal seed: `topic.add_participant` è gated
@@ -148,3 +176,70 @@ class McpNamespaceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HumanPrincipalTests(unittest.TestCase):
+    """La scheda di un umano deve mostrare la sua matrice, non zero verbi.
+
+    Il difetto che questo chiude non è cosmetico. Un umano non sta in
+    `config.yaml`, quindi l'endpoint leggeva una spec vuota e rispondeva «nessun
+    verbo». Ma lo stato reale di un umano senza matrice è l'opposto — ricade sulla
+    regola precedente e può quasi tutto. Un pannello che mostra «bloccato» dove il
+    sistema è «aperto» è peggio di nessun pannello: l'owner smette di guardare
+    proprio dove dovrebbe.
+    """
+
+    def _body(self, name, seed):
+        import asyncio, json
+        from unittest.mock import patch as _p
+        from . import agents_api, human
+
+        class R:
+            path_params = {"name": name}
+            query_params: dict = {}
+            headers: dict = {}
+
+        with _p.object(agents_api, "_authorize", lambda _r: ("admin", None)), \
+                _p.object(human, "_seed", lambda n: seed if n == name else {}):
+            r = asyncio.run(agents_api.verbs(R()))
+        return json.loads(r.body)
+
+    def test_a_declared_matrix_is_returned_as_verbs(self):
+        b = self._body("giovanni", {"type": "human", "role": "member",
+                                    "clearance": "SEAL-2",
+                                    "tool_permissions": ["topic.open", "topic.files"]})
+        self.assertEqual(b["principal_kind"], "human")
+        self.assertTrue(b["matrix_declared"])
+        self.assertEqual(sorted(v["verb"] for v in b["verbs"]),
+                         ["topic.files", "topic.open"])
+        self.assertEqual(b["role"], "member")
+        self.assertEqual(b["clearance"], "SEAL-2")
+
+    def test_an_undeclared_matrix_is_flagged_not_shown_as_zero(self):
+        b = self._body("nuovo", {"type": "human", "role": "member"})
+        self.assertEqual(b["principal_kind"], "human")
+        self.assertFalse(b["matrix_declared"],
+                         "senza questo flag la UI mostrerebbe «nessun verbo» "
+                         "dove lo stato vero è «ricade sulla regola precedente»")
+
+    def test_an_empty_matrix_is_declared_and_really_empty(self):
+        b = self._body("chiuso", {"type": "human", "role": "member",
+                                  "tool_permissions": []})
+        self.assertTrue(b["matrix_declared"])
+        self.assertEqual(b["verbs"], [])
+
+    def test_for_a_human_the_lock_means_admin_not_approval(self):
+        from unittest.mock import patch as _p
+        with _p("server.gate.is_gated", lambda v: v == "packs.remove"):
+            b = self._body("giovanni", {"type": "human", "role": "member",
+                                        "tool_permissions": ["packs.remove",
+                                                             "topic.open"]})
+        by = {v["verb"]: v["gated_by"] for v in b["verbs"]}
+        self.assertEqual(by["packs.remove"], "admin")
+        self.assertIsNone(by["topic.open"])
+
+    def test_an_agent_is_unaffected(self):
+        b = self._body("messaggero", {})       # nessun seed umano
+        self.assertEqual(b["principal_kind"], "agent")
+        self.assertTrue(b["matrix_declared"])
+        self.assertIsNone(b["role"])
