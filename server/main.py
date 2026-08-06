@@ -8,6 +8,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from . import __version__
+from . import origin
 from . import instance_profile
 from . import proxy
 from . import taint as _taint
@@ -21,6 +22,7 @@ from .whitelist import (agent_config, agent_denies, agent_gates, agent_name,
                         current_chat, current_clearance, current_human_role,
                         current_principal, current_scoped_tools, is_on_behalf,
                         agent_gates_in_channel, current_channel,
+                        current_origin,
                         is_unattended)
 
 import os as _os
@@ -1991,6 +1993,29 @@ def _is_super(name: str | None) -> bool:
     return (name or "") in _SUPER_AGENTS
 
 
+def _origin_chain(verb: str) -> list:
+    """Catena d'origine del turno corrente, con un fallback ESPLICITO.
+
+    Quando il claim non c'è — un agent-server non ancora aggiornato, un percorso
+    non strumentato — si ricostruisce la catena minima da ciò che si sa: il
+    principal umano se la chiamata è on-behalf, e l'agente che esegue. Non è la
+    catena vera (mancano gli anelli intermedi) ma non è nemmeno un via libera, e
+    soprattutto non è silenziosa: `origin.evaluate` distingue «sconosciuta» da
+    «vuota», e la modalità di osservazione mostra la differenza.
+    """
+    chain = origin.parse(current_origin())
+    if chain:
+        return chain
+    out = []
+    p = current_principal()
+    if p and is_on_behalf():
+        out.append(("human", p))
+    ag = agent_name()
+    if ag:
+        out.append(("agent", ag))
+    return out
+
+
 def _human_tool_allowed(name: str) -> bool:
     """RBAC UMANA (chiamata on-behalf): il gateway è il PDP unico anche per gli
     umani. Un tool `super-only` (packs/providers/mcp/agents/settings/pki/ca…,
@@ -2648,6 +2673,31 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 _obs.note("deny", name, _ag or "", detail="unattended")
             else:
                 raise PermissionError(_un)
+        # INTERSEZIONE DELLA CATENA D'ORIGINE (docs/security-model.md §4).
+        # Prima dei gate, e non per efficienza: se la catena non regge, chiedere
+        # l'approvazione del VERBO sarebbe la domanda sbagliata. «@messaggero
+        # vuole spedire, approvi?» nasconde il fatto rilevante, che è «Giovanni
+        # non ha questo permesso e sta usando messaggero per averlo».
+        #
+        # Intersezione, non sostituzione: far girare la chiamata sull'autorità di
+        # chi ha iniziato rovescerebbe il difetto — Davide che chiede shell.exec a
+        # un postino riuscirebbe. Entrambi devono permettere, e ogni anello.
+        _org = origin.evaluate(_origin_chain(name), name)
+        if _org.get("action") == "deny":
+            _omode = origin.mode()
+            if _omode == "on":
+                raise PermissionError(origin.denial_message(_org))
+            if _omode == "report":
+                # Osservazione: decide e registra, non blocca. L'enforcement segue
+                # la misura — è così che sono state trovate le lacune delle altre
+                # due whitelist, e accenderlo alla cieca produrrebbe rifiuti su
+                # lavoro legittimo e la perdita di fiducia nel controllo.
+                from . import observe as _obs_o
+                _obs_o.note("would_deny", name, _ag or "",
+                            detail=f"origin:{_org.get('refused_by')}")
+                LOG.info("origin (osservazione): %s rifiuterebbe %s — catena %s",
+                         _org.get("refused_by"), name, " → ".join(_org["chain"]))
+
         # M-gate: conferma umana su azioni sotto supervisione — UN SOLO meccanismo.
         # (a) VERBI gated (packs/mcp/agents/…): consenso one-shot per-verbo.
         # (b) CROSS-TOPIC: un agente che tocca un topic di cui NON è participant

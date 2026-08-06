@@ -391,6 +391,28 @@ def agent_gates(verb: str, name: str | None = None) -> bool:
     return _listed(verb, set(cfg.get("gated_tools") or []))
 
 
+_CURRENT_ORIGIN: ContextVar[tuple | None] = ContextVar("mcp_current_origin",
+                                                      default=None)
+
+
+def set_current_origin(chain) -> object:
+    return _CURRENT_ORIGIN.set(tuple(chain) if chain else None)
+
+
+def reset_current_origin(token: object) -> None:
+    _CURRENT_ORIGIN.reset(token)
+
+
+def current_origin() -> tuple:
+    """Catena d'origine del turno, dal claim FIRMATO. Vuota se non dichiarata.
+
+    Firmata per la stessa ragione di `chat`: se un agente potesse comporla,
+    l'intersezione sarebbe la sua parola su sé stesso. Vuota ≠ permessa — chi la
+    legge deve trattarla come «sconosciuta», che è un caso esplicito.
+    """
+    return _CURRENT_ORIGIN.get() or ()
+
+
 def in_channel() -> bool:
     """True se la chiamata corrente arriva dal turno di un CANALE di topic.
 
