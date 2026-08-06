@@ -138,7 +138,21 @@ async def verbs(request: Request):
     # Si legge la config DIRETTAMENTE: `agent_config()` risolve l'agente della
     # richiesta corrente, che qui è il principal privilegiato, non il soggetto.
     spec = (whitelist.CONFIG.get("agents") or {}).get(name) or {}
-    allowed = [str(x) for x in (spec.get("allowed_tools") or [])]
+    # UN SOLO TIPO DI PRINCIPAL (security-model §1). Un umano non sta in
+    # `config.yaml`: la sua matrice vive nel seed, dove `/datadir/agents/` è
+    # `drwx------ root` e uno spawn (uid 60000) non riesce né a leggerlo né a
+    # scriverlo — il confine lo mette il kernel. Senza questo ramo la scheda di
+    # un umano mostra zero verbi, che è il contrario di quello che accade: senza
+    # matrice dichiarata l'umano ricade sulla regola precedente, cioè può
+    # QUASI TUTTO. Dire «nessun verbo» dove il vero stato è «illimitato» è la
+    # direzione d'errore peggiore per un pannello.
+    from . import human as _human
+    is_human = _human.is_human(name)
+    human_matrix = _human.matrix(name) if is_human else None
+    if is_human:
+        allowed = [str(x) for x in (human_matrix or [])]
+    else:
+        allowed = [str(x) for x in (spec.get("allowed_tools") or [])]
     denied = {str(x) for x in (spec.get("denied_tools") or [])}
     per_agent = {str(x) for x in (spec.get("gated_tools") or [])}
     # I backend MCP montati fanno parte del catalogo: `normattiva.*` copre i verbi
@@ -160,6 +174,13 @@ async def verbs(request: Request):
 
     profile = [str(x) for x in (spec.get("profile_tools") or [])]
     has_profile = bool(profile)
+    # Distinzione che il pannello DEVE poter mostrare: matrice assente
+    # (`None` → ricade sulla regola precedente, quindi ampia) contro matrice
+    # vuota (`[]` → nessun verbo). Confonderle farebbe leggere «illimitato» come
+    # «bloccato», e un owner che crede di aver chiuso un accesso che è aperto è
+    # peggio servito di uno che non ha il pannello.
+    principal_kind = "human" if is_human else "agent"
+    matrix_declared = (human_matrix is not None) if is_human else True
     descriptions = _main.native_verb_descriptions()
 
     def _row(v: str, via: str) -> dict:
@@ -170,6 +191,11 @@ async def verbs(request: Request):
         # valutare cose diverse: pericoloso per chiunque, pericoloso per costui,
         # o semplicemente fuori dal suo mestiere.
         by = "global" if g_global else ("agent" if g_agent else ("profile" if off else None))
+        # Per un umano il lucchetto ha un significato diverso e va detto: non
+        # «serve un'approvazione», ma «serve essere admin». È la RBAC umana, ed è
+        # l'unica ragione di gate che si applica a una persona.
+        if is_human and g_global:
+            by = "admin"
         return {"verb": v, "gated": bool(g_global or g_agent or off),
                 "gated_by": by, "in_profile": (not off) if has_profile else None,
                 # Una riga di descrizione: senza, un elenco di verbi è un elenco di
@@ -224,7 +250,20 @@ async def verbs(request: Request):
                          # consumatore deve poterlo dire invece di mostrare un conteggio
                          # che sembra completo.
                          "catalogue_complete": proxied_ok,
-                         "gated_global_spec": _gate.gated_verbs_spec()})
+                         "gated_global_spec": _gate.gated_verbs_spec(),
+                         # Un solo tipo di principal, ma il pannello deve poter
+                         # dire QUALE ha davanti: per un umano il lucchetto
+                         # significa «serve essere admin», non «serve
+                         # un'approvazione una volta».
+                         "principal_kind": principal_kind,
+                         # il ruolo DICHIARATO (es. `member`), non il suo bucket di
+                         # autorizzazione: la scheda deve riconciliare col seed
+                         "role": _human.declared_role(name) if is_human else None,
+                         "is_admin": _human.is_admin(name) if is_human else None,
+                         "clearance": _human.clearance(name) if is_human else None,
+                         # `False` = nessuna matrice dichiarata → si ricade sulla
+                         # regola precedente, che è AMPIA. Non è «zero verbi».
+                         "matrix_declared": matrix_declared})
 
 
 routes = [

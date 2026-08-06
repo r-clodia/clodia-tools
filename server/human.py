@@ -74,6 +74,21 @@ def role(name: str) -> str:
     return r if r in _ADMIN_ROLES else "user"
 
 
+def declared_role(name: str) -> Optional[str]:
+    """Il ruolo COSÌ COME È SCRITTO nel seed, per la visualizzazione.
+
+    Diverso da `role()`, che normalizza a `admin|superadmin|user` perché serve
+    alla decisione. Confonderli fa mostrare `user` a una persona il cui seed dice
+    `member`, e allora la scheda non riconcilia col file — chi la legge conclude
+    che il sistema stia guardando un altro dato.
+    """
+    d = _seed(name)
+    if d.get("type") != "human":
+        return None
+    r = d.get("role")
+    return str(r) if r else "user"
+
+
 def is_admin(name: str) -> bool:
     return role(name) in _ADMIN_ROLES
 

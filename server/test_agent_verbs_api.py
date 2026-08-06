@@ -148,3 +148,70 @@ class McpNamespaceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HumanPrincipalTests(unittest.TestCase):
+    """La scheda di un umano deve mostrare la sua matrice, non zero verbi.
+
+    Il difetto che questo chiude non è cosmetico. Un umano non sta in
+    `config.yaml`, quindi l'endpoint leggeva una spec vuota e rispondeva «nessun
+    verbo». Ma lo stato reale di un umano senza matrice è l'opposto — ricade sulla
+    regola precedente e può quasi tutto. Un pannello che mostra «bloccato» dove il
+    sistema è «aperto» è peggio di nessun pannello: l'owner smette di guardare
+    proprio dove dovrebbe.
+    """
+
+    def _body(self, name, seed):
+        import asyncio, json
+        from unittest.mock import patch as _p
+        from . import agents_api, human
+
+        class R:
+            path_params = {"name": name}
+            query_params: dict = {}
+            headers: dict = {}
+
+        with _p.object(agents_api, "_authorize", lambda _r: ("admin", None)), \
+                _p.object(human, "_seed", lambda n: seed if n == name else {}):
+            r = asyncio.run(agents_api.verbs(R()))
+        return json.loads(r.body)
+
+    def test_a_declared_matrix_is_returned_as_verbs(self):
+        b = self._body("giovanni", {"type": "human", "role": "member",
+                                    "clearance": "SEAL-2",
+                                    "tool_permissions": ["topic.open", "topic.files"]})
+        self.assertEqual(b["principal_kind"], "human")
+        self.assertTrue(b["matrix_declared"])
+        self.assertEqual(sorted(v["verb"] for v in b["verbs"]),
+                         ["topic.files", "topic.open"])
+        self.assertEqual(b["role"], "member")
+        self.assertEqual(b["clearance"], "SEAL-2")
+
+    def test_an_undeclared_matrix_is_flagged_not_shown_as_zero(self):
+        b = self._body("nuovo", {"type": "human", "role": "member"})
+        self.assertEqual(b["principal_kind"], "human")
+        self.assertFalse(b["matrix_declared"],
+                         "senza questo flag la UI mostrerebbe «nessun verbo» "
+                         "dove lo stato vero è «ricade sulla regola precedente»")
+
+    def test_an_empty_matrix_is_declared_and_really_empty(self):
+        b = self._body("chiuso", {"type": "human", "role": "member",
+                                  "tool_permissions": []})
+        self.assertTrue(b["matrix_declared"])
+        self.assertEqual(b["verbs"], [])
+
+    def test_for_a_human_the_lock_means_admin_not_approval(self):
+        from unittest.mock import patch as _p
+        with _p("server.gate.is_gated", lambda v: v == "packs.remove"):
+            b = self._body("giovanni", {"type": "human", "role": "member",
+                                        "tool_permissions": ["packs.remove",
+                                                             "topic.open"]})
+        by = {v["verb"]: v["gated_by"] for v in b["verbs"]}
+        self.assertEqual(by["packs.remove"], "admin")
+        self.assertIsNone(by["topic.open"])
+
+    def test_an_agent_is_unaffected(self):
+        b = self._body("messaggero", {})       # nessun seed umano
+        self.assertEqual(b["principal_kind"], "agent")
+        self.assertTrue(b["matrix_declared"])
+        self.assertIsNone(b["role"])
