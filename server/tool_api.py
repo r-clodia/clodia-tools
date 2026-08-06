@@ -61,6 +61,7 @@ class _Ctx:
             whitelist.set_current_on_behalf(bool(p.get("on_behalf"))),
             whitelist.set_current_human_role(p.get("human_role") or None),
             whitelist.set_current_chat(p.get("chat") or None),
+            whitelist.set_current_origin(p.get("origin") or None),
             whitelist.set_current_scoped_tools(p.get("scoped_tools") or None),
         ]
         return self
