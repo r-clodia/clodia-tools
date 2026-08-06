@@ -558,6 +558,20 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name", "text"]},
     ),
     Tool(
+        name="topic.save_agents_md",
+        description=("Riscrive le ISTRUZIONI di scope del topic (AGENTS.md) in optimistic "
+                     "lock, come il summary. Non è un file del topic: vive nel "
+                     "control-plane, non è sincronizzato dai remote e non si carica con "
+                     "topic.put. Testo vuoto = rimuove le istruzioni."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "text": {"type": "string", "description": "markdown; vuoto = rimuove"},
+            "base_version": {"type": ["string", "null"],
+                             "description": "agents_md_version letto con topic.open"},
+        }, "required": ["tier", "name", "text"]},
+    ),
+    Tool(
         name="topic.add_minute",
         description="Aggiunge una minuta (file append-only datato). Niente contesa concorrente.",
         inputSchema={"type": "object", "properties": {
@@ -3217,7 +3231,7 @@ def _safe_scratch_path(p: str) -> str:
 # caller sia participant/owner (compartimento, need-to-know). `new`/`list`/`search`
 # sono gestiti a parte (creazione / risultati filtrati per membership).
 _TOPIC_SCOPED_VERBS = {
-    "open", "save_summary", "add_minute", "archive", "files", "read_file",
+    "open", "save_summary", "save_agents_md", "add_minute", "archive", "files", "read_file",
     "read_document", "write_file", "fetch", "put", "delete_file", "migrate_storage",
     "post_message",
     "remote_enable", "remote_disable", "remote_add", "remote_commit",
@@ -3579,6 +3593,8 @@ def _dispatch_topic(name: str, a: dict):
         return res
     if verb == "save_summary":
         return svc.save_summary(a["tier"], a["name"], a["text"], a.get("base_version"))
+    if verb == "save_agents_md":
+        return svc.save_agents_md(a["tier"], a["name"], a["text"], a.get("base_version"))
     if verb == "add_minute":
         return svc.add_minute(a["tier"], a["name"], a["text"])
     if verb == "archive":

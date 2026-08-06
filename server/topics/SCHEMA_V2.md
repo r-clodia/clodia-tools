@@ -13,9 +13,31 @@ Removed fields:
 
 - `minutes`
 
-Topic-level instructions live in `files/AGENTS.md` when present. The file is
-optional Markdown and is versioned with the topic files instead of being parsed
-as meta.
+Topic-level instructions live in `AGENTS.md` at the topic root, beside
+`meta.json` and `summary.md` — **control plane, not `files/`**. Optional
+Markdown, written only through `topic.save_agents_md` under the same optimistic
+lock as the summary, and read back from `topic.open` as `agents_md` /
+`agents_md_version`.
+
+It moved out of `files/` on 6 Aug 2026 for three measured reasons: there it was
+writable by **any participant** through `put_file` — the same store the reader
+reads — so anyone in the room could dictate the text injected into every agent's
+context on every turn; the read used the control-plane store while `put_file`
+uses the files backend, so on a Drive-backed topic the UI showed one file while
+the system injected another; and anything under `files/` is synchronised by a
+remote, which meant a remote could rewrite a scope's instructions.
+
+`files/AGENTS.md` is still **read** as a fallback for topics that have not been
+migrated, and any file found there is retired to the topic's trash — never
+deleted — the first time the new one is written. Migration:
+
+```bash
+python3 -c "from server.topics.service import TopicService; ..."   # or topic.migrate_agents_md
+```
+
+A file named `AGENTS.md` at the root of `files/` is now refused by `put_file`.
+The refusal is only for the root: `files/procedure/AGENTS.md` is an ordinary
+document and nothing injects it.
 
 Snapshots:
 

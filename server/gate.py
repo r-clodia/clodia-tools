@@ -64,6 +64,12 @@ _DEFAULT_GATED_EXACT = frozenset({
     # `remote_status` e `remote_pull` NON sono gated: leggere lo stato e tirare
     # dentro i contenuti non spostano il confine.
     "topic.remote_add", "topic.remote_enable", "topic.remote_disable",
+    # Le istruzioni di scope entrano nel contesto di OGNI agente della stanza a
+    # OGNI turno: scriverle è un atto di autorità, non una preferenza. Finché il
+    # gate non sarà rivolto all'owner dello scope (modello «titolo», voci 23-25
+    # del system-notebook) qui vale la regola generale — per un umano un verbo
+    # gated richiede il ruolo admin.
+    "topic.save_agents_md",
     # HTTP egress mutante: consenso umano obbligatorio per ogni singola POST.
     "web.post",
     # Allargamento delle whitelist: `allow` rende silenziosa una destinazione o

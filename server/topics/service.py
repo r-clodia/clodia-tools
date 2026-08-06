@@ -1,7 +1,7 @@
 """Servizio Topic v2 — i verbi, sopra lo storage astratto.
 
 Backend-agnostico: lavora SOLO tramite l'interfaccia `Storage`. Implementa la
-meccanica (file meta.json + summary.md + files/AGENTS.md opzionale, optimistic lock sul
+meccanica (file meta.json + summary.md + AGENTS.md opzionale, optimistic lock sul
 summary); la disciplina editoriale (cos'è un buon TLDR) sta nella
 skill `topic-management`, non qui.
 
@@ -12,7 +12,7 @@ classe del topic, e coincide col livello di privacy usato dall'enforcement.
 Layout per topic nello storage:
     <tier>/<name>/meta.json
     <tier>/<name>/summary.md
-    <tier>/<name>/files/AGENTS.md
+    <tier>/<name>/AGENTS.md
 """
 from __future__ import annotations
 
@@ -504,6 +504,52 @@ class TopicService:
     def _summary_p(self, tier, name):
         return f"{self._dir(tier, name)}/summary.md"
 
+    def _agents_p(self, tier, name):
+        # Istruzioni di scope — control-plane, accanto a meta.json e summary.md,
+        # NON in files/. Ci sta per tre ragioni, tutte misurate:
+        #
+        # 1. In `files/` era scrivibile da QUALUNQUE partecipante con un upload
+        #    (`put_file` → stesso store da cui questo file viene letto), cioè
+        #    chiunque nella stanza poteva dettare il testo iniettato nel contesto
+        #    di ogni agente a ogni turno. È la via d'iniezione più diretta che un
+        #    canale abbia.
+        # 2. La lettura usava `self.s` mentre `put_file` usa `_files_backend()`:
+        #    su un topic con remote Drive l'upload finiva su Drive e la lettura
+        #    restava locale, quindi la UI mostrava un file e il sistema ne
+        #    iniettava un altro. Un solo posto, un solo backend, elimina lo
+        #    scarto.
+        # 3. Fuori da `files/` non viene sincronizzato da nessun remote: un
+        #    remote non può più riscrivere le istruzioni dello scope.
+        #
+        # Scrivere questo file è un ATTO DI AUTORITÀ, non una preferenza: passa
+        # da `save_agents_md` con optimistic lock, come il summary.
+        return f"{self._dir(tier, name)}/AGENTS.md"
+
+    def _legacy_agents_p(self, tier, name):
+        # Posizione storica. Letta ancora in fallback finché la migrazione non è
+        # passata su tutti i topic: un topic non migrato deve continuare a
+        # funzionare, non a perdere silenziosamente le sue istruzioni.
+        return f"{self._dir(tier, name)}/files/AGENTS.md"
+
+    def _read_agents_md(self, tier, name) -> tuple[str | None, str | None]:
+        """Testo e versione delle istruzioni di scope. `(None, None)` se assenti.
+
+        Preferisce SEMPRE la posizione nuova: se un topic ha entrambi i file —
+        perché qualcuno ha ricaricato il vecchio dopo la migrazione — vince il
+        control-plane, altrimenti l'upload di un partecipante tornerebbe a
+        sovrascrivere l'autorità.
+        """
+        try:
+            r = self.s.read(self._agents_p(tier, name))
+            return r.data.decode("utf-8", "replace"), r.version
+        except NotFound:
+            pass
+        try:
+            r = self.s.read(self._legacy_agents_p(tier, name))
+            return r.data.decode("utf-8", "replace"), None
+        except NotFound:
+            return None, None
+
     def _recap_history_p(self, tier, name):
         # Storia dei recap (TLDR) del topic — control-plane, NON in files/ → non
         # sincronizzata dai remote git/drive.
@@ -871,10 +917,12 @@ class TopicService:
         except NotFound:
             summary, summary_version = "", None
         d = self._dir(tier, name)
-        # updated_at = mtime più recente tra meta, summary e files/AGENTS.md
+        # updated_at = mtime più recente tra meta, summary e AGENTS.md (nuova
+        # posizione o legacy: un topic non ancora migrato non deve sembrare più
+        # vecchio di quanto è).
         mts: list[float] = []
-        agents_path = f"{d}/files/AGENTS.md"
-        for p in (self._meta_p(tier, name), self._summary_p(tier, name), agents_path):
+        for p in (self._meta_p(tier, name), self._summary_p(tier, name),
+                  self._agents_p(tier, name), self._legacy_agents_p(tier, name)):
             st = self.s.stat(p)
             if st:
                 mts.append(st.mtime)
@@ -907,14 +955,12 @@ class TopicService:
         fmt.sort(reverse=True)
         recent_files = [{"name": n, "path": f"files/{n}", "mtime_iso": _iso(mt)}
                         for mt, n in fmt[:3]]
-        try:
-            agents_md = self.s.read(agents_path).data.decode("utf-8", "replace")
-        except NotFound:
-            agents_md = None
+        agents_md, agents_md_version = self._read_agents_md(tier, name)
         return {
             "tier": meta["tier"], "tier_name": TIER_NAMES.get(meta["tier"], meta["tier"]), "name": name,
             "meta": meta, "summary": summary, "summary_version": summary_version,
             "tldr": _tldr(summary), "minutes": [], "agents_md": agents_md,
+            "agents_md_version": agents_md_version,
             "updated_at": updated_at, "recent_files": recent_files,
             # True when the file backend could not be listed: the caller must not
             # read an empty `recent_files` as "this topic has no files".
@@ -965,6 +1011,91 @@ class TopicService:
             pass
         return {"summary_version": new_v, "tldr": _tldr(text)}
 
+    def save_agents_md(self, tier: str, name: str, text: str,
+                       base_version: str | None) -> dict:
+        """Scrive le istruzioni di scope in optimistic lock, come il summary.
+
+        `text` vuoto RIMUOVE le istruzioni: senza questa via l'unico modo per
+        toglierle sarebbe lasciarci un file vuoto che continua a occupare spazio
+        nel contesto di ogni turno.
+
+        La migrazione lascia dietro di sé la copia legacy in `files/`; qui viene
+        cestinata, perché due file con lo stesso nome e autorità diversa sono
+        precisamente ciò che questa modifica esiste per eliminare.
+        """
+        meta, _ = self._read_meta(tier, name)
+        self._assert_content_available(meta)
+        p = self._agents_p(tier, name)
+        if (text or "").strip():
+            new_v = self.s.write(p, (text or "").encode(), if_version=base_version)
+        else:
+            if self.s.exists(p):
+                self.s.delete(p)
+            new_v = None
+        self._retire_legacy_agents_md(tier, name)
+        return {"agents_md_version": new_v, "removed": not (text or "").strip()}
+
+    def _retire_legacy_agents_md(self, tier: str, name: str) -> bool:
+        """Toglie di mezzo `files/AGENTS.md`, se c'è. Best-effort.
+
+        Non cancella: sposta nel cestino del topic, così un contenuto che
+        qualcuno aveva scritto resta recuperabile — una migrazione non deve poter
+        perdere il lavoro di nessuno.
+
+        Agisce su `self.s` e NON via `delete_file`, di proposito: `delete_file`
+        passa da `_files_backend()`, che su un topic con remote Drive punta a
+        Drive. Il file legacy che ci interessa è quello LOCALE — è l'unico che
+        veniva davvero letto e iniettato — quindi delegare avrebbe cercato di
+        cancellare un file su Drive lasciando in piedi proprio quello che stiamo
+        ritirando.
+        """
+        try:
+            lp = self._legacy_agents_p(tier, name)
+            if not self.s.exists(lp):
+                return False
+            ts = _now().strftime("%Y%m%d-%H%M%S")
+            self.s.move(lp, f"{self._dir(tier, name)}/.trash/{ts}/files/AGENTS.md")
+            return True
+        except Exception as e:  # noqa: BLE001 — mai fatale
+            LOG.warning("topic %s/%s: AGENTS.md legacy non ritirato (%s)",
+                        tier, name, str(e)[:120])
+        return False
+
+    def migrate_agents_md(self, tier: str | None = None) -> dict:
+        """One-shot: `files/AGENTS.md` → `AGENTS.md` nel control-plane.
+
+        Idempotente. Un topic che ha già il file nella posizione nuova viene
+        saltato senza toccare nulla: la posizione nuova è autorevole e non deve
+        essere sovrascritta da una copia vecchia rimasta indietro.
+        """
+        moved, skipped, failed = [], [], []
+        # Enumerazione diretta dallo storage, non via `list()`: quella apre ogni
+        # topic e scarta quelli che non si aprono, mentre una migrazione deve
+        # passare anche sui topic rotti o archiviati — sono esattamente quelli
+        # che nessuno guarderà mai più e in cui un file dimenticato resterebbe.
+        for t in ([_normalize_tier(tier)] if tier else list(VALID_TIER)):
+            for e in self.s.list(t):
+                if e.kind != "dir":
+                    continue
+                n = e.name
+                try:
+                    if self.s.exists(self._agents_p(t, n)):
+                        if self._retire_legacy_agents_md(t, n):
+                            skipped.append(f"{t}/{n}")
+                        continue
+                    lp = self._legacy_agents_p(t, n)
+                    if not self.s.exists(lp):
+                        continue
+                    data = self.s.read(lp).data
+                    self.s.write(self._agents_p(t, n), data, if_version=None)
+                    self._retire_legacy_agents_md(t, n)
+                    moved.append(f"{t}/{n}")
+                except Exception as e:  # noqa: BLE001
+                    failed.append({"topic": f"{t}/{n}", "error": str(e)[:160]})
+                    LOG.warning("migrate_agents_md %s/%s: %s", t, n, str(e)[:160])
+        return {"moved": moved, "skipped_already_migrated": skipped,
+                "failed": failed, "moved_count": len(moved)}
+
     def _read_recap_entries(self, tier: str, name: str) -> list[dict]:
         p = self._recap_history_p(tier, name)
         if not self.s.exists(p):
@@ -1011,7 +1142,7 @@ class TopicService:
 
     def add_minute(self, tier: str, name: str, text: str) -> dict:
         """Compat legacy: minutes è rimosso dallo schema topic v2."""
-        raise TopicError("minutes rimosso dallo schema topic v2: usa summary.md o files/AGENTS.md")
+        raise TopicError("minutes rimosso dallo schema topic v2: usa summary.md o AGENTS.md")
 
     # ── canale: partecipanti / messaggi / file ──────────────────────────────
     def _read_meta(self, tier: str, name: str) -> tuple[dict, str | None]:
@@ -1254,6 +1385,18 @@ class TopicService:
         parts = rel.split("/")
         if any(p in ("", ".", "..") or p.startswith(".") for p in parts):
             raise TopicError(f"nome file non valido: {filename}")
+        # `files/AGENTS.md` NON è più un file: è il control-plane dello scope.
+        # Il rifiuto è qui e non a valle perché questa è la riga che rendeva la
+        # vulnerabilità reale — chiunque partecipi a un topic poteva caricare il
+        # testo che entra nel contesto di ogni agente a ogni turno. Solo la
+        # radice: `files/procedure/AGENTS.md` è un documento come un altro e non
+        # viene iniettato da nessuno.
+        if len(parts) == 1 and parts[0].upper() == "AGENTS.MD":
+            raise TopicError(
+                "AGENTS.md non è un file del topic ma le sue ISTRUZIONI di scope: "
+                "vive nel control-plane e si scrive con `topic.save_agents_md` "
+                "(optimistic lock, come il summary). Un upload lo lascerebbe "
+                "scrivibile da qualunque partecipante.")
         store, base = self._files_backend(tier, name)
         store.write(f"{base}/{rel}".strip("/"), data)
         prov = (provenance or "untrusted").strip().lower()
