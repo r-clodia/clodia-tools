@@ -129,7 +129,8 @@ def agent_has_tool(agent: str, tool: str) -> bool:
 def upsert_agent(agent: str, allowed_tools: list | None = None,
                  allowed_paths: list | None = None,
                  gated_tools: list | None = None,
-                 gated_in_channel: list | None = None) -> dict:
+                 gated_in_channel: list | None = None,
+                 profile_tools: list | None = None) -> dict:
     """Registra/aggiorna un agent nella whitelist del gateway e persiste. Serve
     all'auto-provisioning dei responder confinati (clone per-topic): senza una
     entry in config.yaml la sessione MCP dell'agent non può aprirsi (agent_name).
@@ -165,6 +166,14 @@ def upsert_agent(agent: str, allowed_tools: list | None = None,
     # già accaduta una volta oggi.
     if gated_in_channel is not None:
         spec["gated_in_channel"] = list(gated_in_channel)
+    # `profile_tools`: il MESTIERE dichiarato. Non aveva nessuna catena — non era
+    # nel modello del seed, non lo trasportava la registrazione, non lo custodiva
+    # questa funzione: viveva solo nella config live, quindi un rebuild o una
+    # nuova istanza si ritrovavano clodia senza profilo e niente gated per
+    # mestiere. Una dichiarazione che nessuno trasporta è un controllo che sembra
+    # esserci: terza volta oggi, dopo `gated_tools` e `gated_in_channel`.
+    if profile_tools is not None:
+        spec["profile_tools"] = list(profile_tools)
     save_config()
     return spec
 # Override portabile: rispetta CLODIA_WORKSPACE_ROOT se settato
@@ -511,7 +520,11 @@ def resolve_safe_path(rel_or_abs: str) -> Path:
 # Super-agent: bypassano la whitelist (coerente con main.py call_tool). Estendibile
 # via env CLODIA_SUPER_AGENTS (CSV).
 import os as _os
-_SUPER_AGENTS = {"clodia", "ophelia", *(
+# `clodia` rimossa anche qui: questo è il SECONDO insieme super (gate a livello
+# adapter), e toglierla da uno solo l'avrebbe lasciata bypassare dall'altro.
+# Estendibile via env: chi rimette `clodia` in `CLODIA_SUPER_AGENTS` annulla la
+# modifica, ed è deliberato che sia possibile — ma va saputo.
+_SUPER_AGENTS = {"ophelia", *(
     a.strip() for a in _os.environ.get("CLODIA_SUPER_AGENTS", "").split(",") if a.strip()
 )}
 

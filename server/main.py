@@ -1986,7 +1986,14 @@ def _dispatch_mcp(name: str, a: dict):
 
 # Super-agent nativi: hanno accesso a TUTTI i tool (inclusi i connettori/email
 # delegati), bypassando la whitelist per-agent.
-_SUPER_AGENTS = {"clodia", "ophelia"}
+# `clodia` NON è più qui (6 ago 2026): «clodia è solo un agent con tanti verbi».
+# Il concetto di super resta per ora — rimuoverlo del tutto significa riscrivere
+# sette punti con tre definizioni indipendenti, di cui due non riguardano
+# l'autorità di un agente ma l'identità di SERVIZIO dell'agent-server (i profili
+# umani non hanno una chiave server-side per coniare un token a proprio nome).
+# Quel lavoro è tracciato e si fa separatamente; togliere l'attributo è
+# l'incremento che si può verificare oggi.
+_SUPER_AGENTS = {"ophelia"}
 
 
 def _is_super(name: str | None) -> bool:
@@ -2154,8 +2161,21 @@ _UNIVERSAL_NS = {"memory"}
 
 
 def _tool_allowed(name: str, allowed: set) -> bool:
-    """True se il tool è in whitelist. Supporta il wildcard ``<backend>.*`` che
-    concede TUTTI i tool di un backend MCP montato (usato dall'Add-MCP UI)."""
+    """True se il tool è in whitelist.
+
+    Supporta il wildcard ``<backend>.*`` (tutti i tool di un backend MCP montato,
+    usato dall'Add-MCP UI) e il ``*`` NUDO (tutti i verbi).
+
+    Il `*` nudo non era gestito, e l'asimmetria era una trappola: `allowed_tools:
+    ["*"]` sembrava concedere tutto e concedeva **zero**. Funzionava solo per
+    `clodia` e `ophelia`, che bypassavano da `_SUPER_AGENTS` — quindi la stessa
+    configurazione dava «tutto» o «niente» a seconda del NOME dell'agente. Emerso
+    togliendo l'attributo super a clodia: due test sono passati da verdi a rossi
+    non perché la logica fosse cambiata, ma perché per la prima volta veniva
+    consultata.
+    """
+    if "*" in allowed:
+        return True
     if NS_SEP_DOT in name and name.split(NS_SEP_DOT, 1)[0] in _UNIVERSAL_NS:
         return True
     if name in allowed:
@@ -3530,9 +3550,22 @@ def _dispatch_topic(name: str, a: dict):
         # topic (es. mail in arrivo / handoff). Se il testo ha una @menzione,
         # innesca il risponditore → l'agente taggato prende in carico il messaggio.
         ag = agent_name()
-        if not (_is_super(ag) or ag == "messaggero"):
-            raise PermissionError(
-                "topic.post_message riservato a messaggero e ai super-agent")
+        # Nessun controllo sul nome qui: il dispatch ha GIÀ verificato che
+        # `topic.post_message` sia fra i verbi di questo agente. Prima c'era
+        # `if not (_is_super(ag) or ag == "messaggero"): raise` — un elenco di
+        # nomi che produceva due errori opposti, misurati su entrambe le istanze:
+        #
+        #   sysadmin   dichiara=True   ammesso=False   → dichiarava e restava muto
+        #   clodia     dichiara=False  ammesso=True    → parlava senza dichiararlo
+        #
+        # Cioè la dichiarazione non contava in nessuna delle due direzioni. E un
+        # elenco di nomi va aggiornato a mano ogni volta che nasce un agente che
+        # deve rispondere in chat: `sysadmin` è entrato nei canali con la modalità
+        # debug e il suo diritto di parlare è rimasto indietro.
+        #
+        # Rimosso invece che riscritto: rifarlo qui duplicherebbe la whitelist in
+        # un secondo punto — il «doppio gate incoerente» di cui avverte
+        # `whitelist.tool_allowed` — e due copie della stessa regola divergono.
         text = a.get("text") or ""
         res = svc.post_message(a["tier"], a["name"], author=ag or "agente",
                                text=text, kind="ai")
