@@ -251,23 +251,51 @@ async def verbs(request: Request):
     tree: dict[str, dict] = {}
     for r in out + [v for g in groups for v in g["verbs"]]:
         ns = r["verb"].split(".", 1)[0]
-        node = tree.setdefault(ns, {"namespace": ns, "verbs": [], "gated": 0, "outside": 0})
+        node = tree.setdefault(ns, {"namespace": ns, "verbs": [], "gated": 0,
+                                    "outside": 0, "free": 0, "hard_gated": 0})
         node["verbs"].append(r)
         if r["gated"]:
             node["gated"] += 1
         if r.get("in_profile") is False:
             node["outside"] += 1
+        else:
+            if not r["gated"]:
+                node["free"] += 1
+        # «Duro» = pericoloso per chiunque, per questo agente, o dentro un canale.
+        # Distinto da «fuori profilo», che è solo «inatteso da lui»: da quando un
+        # profilo dichiara 53 verbi su 130 raggiungibili, fuori-profilo è la
+        # MAGGIORANZA e ha smesso di essere un segnale.
+        if r.get("gated_by") in ("global", "agent", "channel", "admin"):
+            node["hard_gated"] += 1
     tree_list = sorted(tree.values(), key=lambda n: n["namespace"])
     for node in tree_list:
-        node["verbs"].sort(key=lambda r: r["verb"])
-        # Aperto di default dove c'è qualcosa da GUARDARE — un lucchetto o un
-        # verbo fuori profilo. È l'unico criterio di apertura, e ora è anche
-        # l'unico posto in cui si decide: i verbi sono tutti presenti, quindi
-        # «chiuso» significa «richiudibile con un clic» e non «assente».
-        node["open_by_default"] = bool(node["gated"] or node["outside"])
+        # Prima il MESTIERE, poi ciò che passa da un'approvazione. L'ordine non è
+        # estetico: la vista mostra le prime righe e nasconde le altre dietro un
+        # conteggio, quindi da quest'ordine dipende cosa si legge di un agente.
+        node["verbs"].sort(key=lambda r: (r["gated"] or r.get("in_profile") is False,
+                                          r["verb"]))
+        # Aperto di default dove c'è il MESTIERE, o un lucchetto duro.
+        #
+        # Prima il criterio era «un lucchetto o un verbo fuori profilo», e
+        # funzionava quando fuori profilo erano pochi. Con clodia — profilo di 53
+        # su 130 raggiungibili — fuori profilo sono 77, quindi 20 namespace su 25
+        # si aprivano e la scheda tornava a essere un muro di 130 righe. Una
+        # proprietà quasi sempre vera non discrimina: è lo stesso modo in cui il
+        # punteggio trifecta contava le capacità invece degli eventi.
+        #
+        # Ora la scheda si apre su ciò che l'agente FA senza chiedere, e i
+        # namespace che sono solo «modalità super» — raggiungibili con
+        # approvazione e nient'altro — restano chiusi, con il loro conteggio.
+        node["open_by_default"] = bool(node["free"] or node["hard_gated"])
         node["count"] = len(node["verbs"])
+    libero = sum(n["free"] for n in tree_list)
     return JSONResponse({"agent": name, "verbs": out, "groups": groups,
                          "tree": tree_list,
+                         # Riepilogo: senza, il lettore deve contare le righe per
+                         # sapere cosa fa questo agente — che è la prima domanda.
+                         "summary": {"reachable": sum(n["count"] for n in tree_list),
+                                     "free": libero,
+                                     "on_approval": sum(n["count"] for n in tree_list) - libero},
                          "profile": sorted(profile),
                          "has_profile": has_profile,
                          "denied": sorted(denied),

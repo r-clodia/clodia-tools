@@ -81,7 +81,32 @@ class ExpansionTests(unittest.TestCase):
         # guardare: è lì che la vecchia regola sopravvive, dove appartiene
         node = next(n for n in b["tree"] if n["namespace"] == "normattiva")
         self.assertEqual(node["count"], 2)
-        self.assertFalse(node["open_by_default"])
+        # Aperto: questo agente non dichiara un profilo, quindi tutto ciò che ha è
+        # il suo mestiere ed è libero. La regola d'apertura è cambiata il 6 ago —
+        # «ha verbi liberi o un lucchetto duro» invece di «ha un lucchetto» — e
+        # questa asserzione fissava la precedente.
+        self.assertTrue(node["open_by_default"])
+        self.assertEqual(node["free"], 2)
+
+    def test_a_namespace_that_is_all_out_of_profile_stays_closed(self):
+        """Il caso per cui la regola è cambiata.
+
+        Con un profilo che dichiara 53 verbi su 130 raggiungibili, «fuori profilo»
+        sono la maggioranza: aprire dove ce n'è uno apriva 20 namespace su 25 e la
+        scheda tornava un muro. I namespace che sono solo «modalità super» —
+        raggiungibili con approvazione e nient'altro — restano chiusi col loro
+        conteggio.
+        """
+        b = _call(cfg={"avvocato": {"allowed_tools": ["normattiva.*", "topic.open"],
+                                    "profile_tools": ["topic.open"]}}, catalogue=CAT)
+        n = next(x for x in b["tree"] if x["namespace"] == "normattiva")
+        self.assertEqual(n["free"], 0)
+        self.assertEqual(n["outside"], 2)
+        self.assertFalse(n["open_by_default"], "un namespace di sola modalità super "
+                                               "non deve aprirsi da solo")
+        # mentre quello del mestiere sì
+        t = next(x for x in b["tree"] if x["namespace"] == "topic")
+        self.assertTrue(t["open_by_default"])
 
     def test_a_narrow_namespace_that_is_the_agents_trade_is_visible(self):
         """Il caso concreto che ha fatto cambiare la regola: un postino la cui
