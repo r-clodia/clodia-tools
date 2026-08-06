@@ -51,6 +51,19 @@ _DEFAULT_GATED_EXACT = frozenset({
     "workflows.start", "workflows.cancel", "workflows.delete_run",
     # gestione partecipanti di un topic (auto-invito / confused-deputy)
     "topic.add_participant", "topic.remove_participant",
+    # Il remote Drive di un topic È il suo perimetro di accesso (la cartella del
+    # remote è la radice del confine per le chiamate dentro quel canale). Quindi
+    # impostarlo, cambiarlo o TOGLIERLO non è una preferenza: è una dichiarazione
+    # di autorità, e va autorizzata come tale — per un umano un verbo gated
+    # richiede il ruolo admin.
+    #
+    # `remote_disable` è nella lista per la ragione meno ovvia: disabilitare il
+    # remote fa ricadere gli accessi sulle radici d'ACCOUNT, che possono essere
+    # più larghe. Togliere il perimetro è un allargamento.
+    #
+    # `remote_status` e `remote_pull` NON sono gated: leggere lo stato e tirare
+    # dentro i contenuti non spostano il confine.
+    "topic.remote_add", "topic.remote_enable", "topic.remote_disable",
     # HTTP egress mutante: consenso umano obbligatorio per ogni singola POST.
     "web.post",
     # Allargamento delle whitelist: `allow` rende silenziosa una destinazione o

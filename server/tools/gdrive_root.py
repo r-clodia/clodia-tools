@@ -95,7 +95,97 @@ def roots_for(account: str) -> list[str]:
 
 
 def confined(account: str) -> bool:
-    return bool(roots_for(account))
+    """Vero se la CHIAMATA CORRENTE è confinata (per topic o per account)."""
+    return bool(roots_for_call(account)[0])
+
+
+_topic_cache: dict[tuple[str, str], tuple[float, Optional[str]]] = {}
+_TOPIC_TTL = 20.0
+
+
+def _topic_drive_folder(tier: str, name: str) -> Optional[str]:
+    """La cartella Drive del remote di un topic, o None.
+
+    Cache breve: questa lettura avviene su ogni chiamata Drive dentro un canale,
+    e il meta di un topic cambia raramente. La finestra di staleness è
+    accettabile perché cambiare il remote è ora un'azione da admin — e un admin
+    che sposta il perimetro può attendere venti secondi.
+    """
+    import time
+    key = (tier, name)
+    now = time.time()
+    hit = _topic_cache.get(key)
+    if hit and (now - hit[0]) < _TOPIC_TTL:
+        return hit[1]
+    folder = None
+    try:
+        from .. import main as _m
+        meta = (_m._topics().open(tier, name) or {}).get("meta") or {}
+        rem = meta.get("remote") or {}
+        if str(rem.get("type") or "").lower() == "drive":
+            folder = ((rem.get("config") or {}).get("folder") or "").strip() or None
+    except Exception as e:                       # noqa: BLE001
+        # Meta illeggibile → nessuna radice DAL TOPIC. Non è un via libera: il
+        # chiamante ricade sulle radici d'account, che possono essere vuote o
+        # strette. Inventare un perimetro da un meta che non si è riusciti a
+        # leggere sarebbe la direzione d'errore sbagliata.
+        LOG.warning("gdrive_root: meta di %s/%s illeggibile (%s)",
+                    tier, name, type(e).__name__)
+    _topic_cache[key] = (now, folder)
+    return folder
+
+
+def roots_for_call(account: str) -> tuple[list[str], str]:
+    """Radici valide per la CHIAMATA CORRENTE, e da dove vengono.
+
+    Il perimetro è **per topic**, non per account: la cartella che l'owner ha
+    messo come remote di un topic è la radice del confine per gli accessi che
+    avvengono dentro quel canale. È la regola che Davide ha chiesto, e diventa
+    implementabile perché il topic arriva in un claim FIRMATO
+    (`chan:<tier>:<topic>:<agente>`): un agente non può dichiarare il topic di
+    un altro per prenderne il perimetro.
+
+    Perché non l'avevo fatto stamattina, e cosa è cambiato. L'obiezione era che
+    chi può creare un remote si allarga il perimetro da sé — e l'ho verificata:
+    l'endpoint della webui chiedeva `_require_member`, quindi **qualunque
+    partecipante** poteva puntare il remote a `30-legale`. Il disegno regge solo
+    con la conseguenza: impostare, cambiare o TOGLIERE un remote Drive è ora
+    un'azione da admin, perché non è più una preferenza ma una dichiarazione di
+    perimetro. Anche `remote_disable`, perché disabilitare fa ricadere sulle
+    radici d'account: è un allargamento.
+
+    Le radici d'account restano come **tetto**, non come alternativa: se
+    esistono, la cartella del topic deve starci dentro, altrimenti viene
+    rifiutata. Un topic non può sfondare il pavimento posato dall'owner.
+
+    Fuori da un canale — un job, una DM — valgono le radici d'account.
+    """
+    acct_roots = roots_for(account)
+    from ..whitelist import current_channel
+    ch = current_channel()
+    if not ch:
+        return acct_roots, "account"
+    tier, _, name = ch.partition("/")
+    if not (tier and name):
+        return acct_roots, "account"
+    folder = _topic_drive_folder(tier, name)
+    if not folder:
+        # Canale senza remote Drive: si ricade sulle radici d'account. Negare
+        # qui romperebbe un uso legittimo — allegare a una mail un file preso da
+        # Drive in un topic che non ha un remote.
+        return acct_roots, "account"
+    if acct_roots and folder not in acct_roots:
+        # TETTO. La cartella del topic deve stare dentro una radice d'account.
+        # Il controllo di discendenza costerebbe una risalita a ogni chiamata:
+        # qui si accetta l'uguaglianza e si delega il resto alla verifica di
+        # `inside`, che intersecando entrambe le liste non può concedere più del
+        # minore dei due perimetri.
+        return sorted(set(acct_roots) | {folder}), "topic+tetto"
+    return [folder], "topic"
+
+
+def reset_topic_cache() -> None:
+    _topic_cache.clear()
 
 
 def _parents(svc, account: str, file_id: str) -> tuple[tuple[str, ...], bool]:
@@ -137,7 +227,7 @@ def inside(svc, account: str, file_id: str,
     legittimamente nella cartella. Per lo SPOSTAMENTO conta la destinazione, che
     è un controllo separato in `move`.
     """
-    roots = roots_for(account)
+    roots, _fonte = roots_for_call(account)
     if not roots:
         return True
     if file_id in roots:
@@ -197,13 +287,23 @@ def _row_is_conclusive(row: dict) -> bool:
 
 
 def _refusal(account: str, verb: str, file_id: str) -> OutsideRoot:
-    roots = roots_for(account)
+    roots, fonte = roots_for_call(account)
+    from ..whitelist import current_channel
+    if fonte.startswith("topic"):
+        dove = (f"il canale {current_channel()} è confinato alla cartella del proprio "
+                f"remote Drive ({roots})")
+        rimedio = ("Se il file serve a questo canale, va messo dentro quella cartella, "
+                   "oppure un admin deve cambiare il remote del topic — il perimetro "
+                   "è la cartella del remote, per costruzione.")
+    else:
+        dove = f"l'accesso con l'account '{account}' è confinato a {roots}"
+        rimedio = ("Se il file ti serve, va spostato in quella cartella da chi ne ha i "
+                   "diritti.")
     return OutsideRoot(
-        f"{verb}: '{file_id}' è fuori dalla cartella consentita per l'account "
-        f"'{account}'. Questa credenziale è confinata a {roots} e a tutto ciò che "
-        f"sta sotto: puoi leggere e scrivere là dentro, e nient'altro dell'account "
-        f"è raggiungibile da un agente. Se il file ti serve, va spostato nella "
-        f"cartella da chi ne ha i diritti — il confine non è aggirabile da qui.")
+        f"{verb}: '{file_id}' è fuori dal perimetro — {dove}, e a tutto ciò che sta "
+        f"sotto. {rimedio} Il confine non è aggirabile da qui, e delegare a un altro "
+        f"agente non lo sposta: userebbe la propria credenziale su un perimetro che "
+        f"nessuno ha autorizzato per questa richiesta.")
 
 
 def assert_inside(svc, account: str, file_id: str, verb: str,
@@ -222,7 +322,7 @@ def keep_inside(svc, account: str, rows: list[dict]) -> list[dict]:
     `shortcutDetails`, quindi il figlio diretto della radice non costa nessuna
     chiamata in più e la scorciatoia viene comunque riconosciuta.
     """
-    if not roots_for(account):
+    if not roots_for_call(account)[0]:
         return rows
     out = []
     for r in rows:
@@ -239,22 +339,22 @@ def default_parent(account: str) -> Optional[str]:
     di «Il mio Drive» — fuori dal confine, e per un verbo di SCRITTURA il
     rifiuto secco sarebbe una regressione gratuita: la destinazione ovvia esiste.
     """
-    roots = roots_for(account)
+    roots, _ = roots_for_call(account)
     return roots[0] if len(roots) == 1 else None
 
 
 def assert_writable_parent(svc, account: str, parent_id: Optional[str],
                            verb: str) -> Optional[str]:
     """Valida (o sceglie) la cartella di destinazione di una scrittura."""
-    if not roots_for(account):
+    if not roots_for_call(account)[0]:
         return parent_id
     if not (parent_id or "").strip():
         dp = default_parent(account)
         if dp:
             return dp
         raise OutsideRoot(
-            f"{verb}: indica la cartella di destinazione. Questa credenziale è "
-            f"confinata a {roots_for(account)} e senza destinazione il file "
+            f"{verb}: indica la cartella di destinazione. L'accesso è "
+            f"confinato a {roots_for_call(account)[0]} e senza destinazione il file "
             f"finirebbe fuori; con più radici consentite non posso indovinare "
             f"quale intendi.")
     assert_inside(svc, account, parent_id, verb)
@@ -264,7 +364,8 @@ def assert_writable_parent(svc, account: str, parent_id: Optional[str],
 def guard_calendar(account: Optional[str], verb: str) -> None:
     """Come `assert_not_confined`, ma risolve l'account da sé (comodo per
     gcalendar, che non ne ha uno in mano prima di costruire il client)."""
-    if not _config():
+    from ..whitelist import in_channel
+    if not _config() and not in_channel():
         return
     from . import gdrive
     try:
@@ -283,10 +384,10 @@ def assert_not_confined(account: str, verb: str) -> None:
     l'agenda dell'account sarebbe leggibile. Il confinamento va scelto sapendo
     che costa questi verbi.
     """
-    if roots_for(account):
+    if roots_for_call(account)[0]:
         raise OutsideRoot(
-            f"{verb}: non disponibile su '{account}'. Questa credenziale è "
-            f"confinata a una cartella di Drive, e il calendario non sta in una "
+            f"{verb}: non disponibile qui. L'accesso è "
+            f"confinato a una cartella di Drive, e il calendario non sta in una "
             f"cartella: non c'è modo di limitarlo allo stesso perimetro, quindi "
             f"è chiuso invece di essere concesso per intero. Per il calendario "
             f"serve un account non confinato.")
@@ -306,11 +407,15 @@ def guard_id(account: Optional[str], file_id: str, verb: str) -> None:
     non costruisce niente e non fa nessuna chiamata. Un account non confinato non
     paga il confinamento — altrimenti la misura si farebbe togliere per lentezza.
     """
-    if not _config():
-        return          # nessuna radice configurata: non toccare nemmeno il vault
+    from ..whitelist import in_channel
+    if not _config() and not in_channel():
+        # Nessuna radice d'account E fuori da un canale: niente può confinare
+        # questa chiamata, quindi non si tocca nemmeno il vault. Dentro un canale
+        # invece il perimetro può venire dal remote del topic, e va verificato.
+        return
     from . import gdrive
     acct = gdrive._resolve_account(account)
-    if not roots_for(acct):
+    if not roots_for_call(acct)[0]:
         return
     svc, _ = gdrive._service(acct)
     assert_inside(svc, acct, file_id, verb)
@@ -327,12 +432,13 @@ def adopt(account: Optional[str], file_id: str, verb: str) -> Optional[str]:
     Se l'adozione FALLISCE il file resta fuori: l'errore viene propagato, perché
     un «creato» silenzioso su un file non confinato sarebbe la bugia peggiore.
     """
-    if not _config():
+    from ..whitelist import in_channel
+    if not _config() and not in_channel():
         return None
     from . import gdrive
     acct = gdrive._resolve_account(account)
     dest = default_parent(acct)
-    if not roots_for(acct):
+    if not roots_for_call(acct)[0]:
         return None
     if not dest:
         raise OutsideRoot(
