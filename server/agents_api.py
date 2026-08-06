@@ -155,6 +155,12 @@ async def verbs(request: Request):
         allowed = [str(x) for x in (spec.get("allowed_tools") or [])]
     denied = {str(x) for x in (spec.get("denied_tools") or [])}
     per_agent = {str(x) for x in (spec.get("gated_tools") or [])}
+    # Quarto motivo di gate (1.30.0): libero fuori da un canale, gated dentro.
+    # Non compariva nel pannello, quindi la scheda di `messaggero` mostrava
+    # `email.send` senza lucchetto mentre in un canale richiede un admin. Un
+    # pannello che non mostra un controllo esistente insegna a fidarsi meno del
+    # pannello, che è il danno peggiore di un'omissione in una vista di sicurezza.
+    in_channel = {str(x) for x in (spec.get("gated_in_channel") or [])}
     # I backend MCP montati fanno parte del catalogo: `normattiva.*` copre i verbi
     # di quel server, e senza di essi il gruppo direbbe «0 verbi» per un namespace
     # che l'agente usa dieci volte al giorno. Un pannello che dichiara zero su
@@ -186,17 +192,20 @@ async def verbs(request: Request):
     def _row(v: str, via: str) -> dict:
         g_global = _gate.is_gated(v)
         g_agent = v in per_agent
+        g_chan = v in in_channel
         off = has_profile and not whitelist._listed(v, set(profile))
         # `gated_by` distingue le tre ragioni perché chiedono all'umano di
         # valutare cose diverse: pericoloso per chiunque, pericoloso per costui,
         # o semplicemente fuori dal suo mestiere.
-        by = "global" if g_global else ("agent" if g_agent else ("profile" if off else None))
+        by = ("global" if g_global else
+              ("agent" if g_agent else
+               ("channel" if g_chan else ("profile" if off else None))))
         # Per un umano il lucchetto ha un significato diverso e va detto: non
         # «serve un'approvazione», ma «serve essere admin». È la RBAC umana, ed è
         # l'unica ragione di gate che si applica a una persona.
         if is_human and g_global:
             by = "admin"
-        return {"verb": v, "gated": bool(g_global or g_agent or off),
+        return {"verb": v, "gated": bool(g_global or g_agent or off or g_chan),
                 "gated_by": by, "in_profile": (not off) if has_profile else None,
                 # Una riga di descrizione: senza, un elenco di verbi è un elenco di
                 # nomi, e `topic.fetch` contro `topic.read_file` non si distingue.
@@ -210,15 +219,26 @@ async def verbs(request: Request):
             ns = None if grant == "*" else grant[:-2]
             covered = [v for v in catalogue
                        if v not in denied and (ns is None or v.split(".", 1)[0] == ns)]
-            gated_inside = [v for v in covered if _gate.is_gated(v) or v in per_agent]
-            if gated_inside:
-                groups.append({"grant": grant, "expanded": True,
-                               "verbs": [_row(v, grant) for v in covered]})
-            else:
-                # Nessun lucchetto dentro: niente da espandere. Si dice QUANTI
-                # verbi copre, perché «compatto» non deve leggersi come «pochi».
-                groups.append({"grant": grant, "expanded": False,
-                               "count": len(covered), "verbs": []})
+            gated_inside = [v for v in covered
+                            if _gate.is_gated(v) or v in per_agent or v in in_channel]
+            # I verbi coperti da un wildcard entrano SEMPRE nella risposta.
+            #
+            # Prima ci entravano solo se il gruppo conteneva un lucchetto, e la
+            # regola sembrava giusta — non trasformare il `*` di clodia in un muro
+            # di 145 righe. Ma il criterio era quello sbagliato: ciò che rende un
+            # gruppo un muro è la sua DIMENSIONE, non l'assenza di serrature.
+            # L'effetto misurato: sulla scheda di `messaggero`, `email.*` e
+            # `telegram.*` — 8 verbi ciascuno, il suo mestiere — non comparivano
+            # affatto, mentre `topic` e `jobs` sì. Un pannello che nasconde
+            # proprio il mestiere dell'agente non si legge meglio: si legge male.
+            #
+            # La parte buona della regola resta, e si sposta dove appartiene:
+            # `open_by_default` (sotto) apre solo ciò che ha un lucchetto o è
+            # fuori profilo. Tutto il resto c'è, chiuso, e si apre con un clic.
+            groups.append({"grant": grant, "expanded": True,
+                           "count": len(covered),
+                           "has_gated": bool(gated_inside),
+                           "verbs": [_row(v, grant) for v in covered]})
         else:
             if grant in denied:
                 continue
@@ -238,14 +258,19 @@ async def verbs(request: Request):
     tree_list = sorted(tree.values(), key=lambda n: n["namespace"])
     for node in tree_list:
         node["verbs"].sort(key=lambda r: r["verb"])
-        # Aperto di default dove c'è qualcosa da guardare.
+        # Aperto di default dove c'è qualcosa da GUARDARE — un lucchetto o un
+        # verbo fuori profilo. È l'unico criterio di apertura, e ora è anche
+        # l'unico posto in cui si decide: i verbi sono tutti presenti, quindi
+        # «chiuso» significa «richiudibile con un clic» e non «assente».
         node["open_by_default"] = bool(node["gated"] or node["outside"])
+        node["count"] = len(node["verbs"])
     return JSONResponse({"agent": name, "verbs": out, "groups": groups,
                          "tree": tree_list,
                          "profile": sorted(profile),
                          "has_profile": has_profile,
                          "denied": sorted(denied),
                          "gated_agent": sorted(per_agent),
+                         "gated_in_channel": sorted(in_channel),
                          # `False` → i gruppi su namespace MCP sono INCOMPLETI, e il
                          # consumatore deve poterlo dire invece di mostrare un conteggio
                          # che sembra completo.

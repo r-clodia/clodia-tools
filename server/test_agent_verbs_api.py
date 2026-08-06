@@ -58,13 +58,41 @@ class ExpansionTests(unittest.TestCase):
         locked = [v["verb"] for v in g["verbs"] if v["gated"]]
         self.assertEqual(locked, ["topic.remote_push"])
 
-    def test_a_wildcard_without_gated_verbs_stays_compact(self):
-        """Ma dice QUANTI verbi copre: «compatto» non deve leggersi come «pochi»."""
+    def test_a_wildcard_without_gated_verbs_still_carries_its_verbs(self):
+        """Regola cambiata il 6 ago, e il perché conta più del cosa.
+
+        Prima un wildcard senza lucchetti restava «compatto» — verbi non
+        restituiti, solo un conteggio — per non trasformare il `*` di clodia in un
+        muro di 145 righe. Il criterio era quello sbagliato: ciò che rende un
+        gruppo un muro è la sua DIMENSIONE, non l'assenza di serrature. Misurato
+        sulla scheda di `messaggero`: `email.*` e `telegram.*`, 8 verbi ciascuno e
+        il suo mestiere, non comparivano affatto mentre `topic` e `jobs` sì.
+
+        Ora i verbi ci sono sempre; è il DEFAULT DI APERTURA a variare (vedi
+        `open_by_default`). «Chiuso» significa «un clic», non «assente».
+        """
         b = _call(cfg={"avvocato": {"allowed_tools": ["normattiva.*"]}}, catalogue=CAT)
         g = b["groups"][0]
-        self.assertFalse(g["expanded"])
+        self.assertTrue(g["expanded"])
         self.assertEqual(g["count"], 2)
-        self.assertEqual(g["verbs"], [])
+        self.assertEqual(len(g["verbs"]), 2)
+        self.assertFalse(g["has_gated"])
+        # e il nodo dell'albero esiste, chiuso di default perché non c'è nulla da
+        # guardare: è lì che la vecchia regola sopravvive, dove appartiene
+        node = next(n for n in b["tree"] if n["namespace"] == "normattiva")
+        self.assertEqual(node["count"], 2)
+        self.assertFalse(node["open_by_default"])
+
+    def test_a_narrow_namespace_that_is_the_agents_trade_is_visible(self):
+        """Il caso concreto che ha fatto cambiare la regola: un postino la cui
+        posta non compariva nella propria scheda."""
+        b = _call(cfg={"messaggero": {"allowed_tools": ["email.*", "topic.open"]}},
+                  catalogue=CAT + ["email.send", "email.read", "email.list"],
+                  name="messaggero")
+        namespaces = {n["namespace"] for n in b["tree"]}
+        self.assertIn("email", namespaces, "il mestiere dell'agente deve comparire")
+        email_node = next(n for n in b["tree"] if n["namespace"] == "email")
+        self.assertEqual(email_node["count"], 3)
 
     def test_a_globally_gated_verb_also_triggers_expansion(self):
         """Il lucchetto non viene solo dal seed: `topic.add_participant` è gated
