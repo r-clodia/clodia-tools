@@ -145,6 +145,25 @@ def get_secret(agent: str, credential: str) -> dict:
     Il chiamante è codice del gateway: il valore NON deve raggiungere un modello.
     """
     grant = grants_for(agent).get(credential)
+    if grant is None and not has_credential(credential):
+        # TERZO caso, che il messaggio sotto non distingueva e che ha mandato un
+        # admin a concedere una cosa inesistente. Su venere `telegram_bot_token`
+        # non è nel vault: nessuno può averne il grant, e messaggero ha riferito
+        # «serve che un amministratore conceda il permesso» — vero in generale,
+        # falso su quell'istanza, dove il connettore non è mai stato collegato.
+        #
+        # Il rimedio è diverso e va nominato: collegare l'integrazione, non dare
+        # un permesso. È la quarta volta oggi che l'informazione sul guasto esiste
+        # (`has_credential` è False) e non raggiunge chi può agire.
+        _audit(agent, "fetch", credential, "DENIED", reason="credential absent")
+        raise VaultDenied(
+            f"la credenziale '{credential}' NON ESISTE su questa istanza, quindi "
+            f"non è questione di permessi: nessuno può concederla. Il connettore "
+            f"non è collegato qui. Serve che un admin lo colleghi da Tools → "
+            f"Integrations, e solo dopo ha senso concedere il grant a '{agent}'. "
+            f"Riferiscilo così: chiedere un permesso non risolve, e nemmeno "
+            f"delegare a un altro agente — su questa istanza quel canale non c'è "
+            f"per nessuno.")
     if grant is None:
         _audit(agent, "fetch", credential, "DENIED", reason="no grant")
         # Il rifiuto deve distinguere DUE cose che un modello confonde, e la

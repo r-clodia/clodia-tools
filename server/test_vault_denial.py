@@ -23,7 +23,13 @@ from . import vault
 
 class DenialMessageTests(unittest.TestCase):
     def _msg(self):
+        # `has_credential=True`: questi test riguardano il caso «la credenziale
+        # c'è, il grant no». Prima non lo dichiaravano, e si appoggiavano al fatto
+        # che il codice non controllasse l'esistenza — quindi al primo controllo
+        # aggiunto sono caduti nel ramo sbagliato. Un test deve dire quale caso
+        # verifica, o verifica quello che capita.
         with patch.object(vault, "grants_for", lambda _a: {}), \
+                patch.object(vault, "has_credential", lambda _c: True), \
                 patch.object(vault, "_audit", lambda *a, **k: None):
             try:
                 vault.get_secret("messaggero", "google_devnullboxx")
@@ -60,6 +66,7 @@ class DenialMessageTests(unittest.TestCase):
         delegare: suggerirebbe la mossa che il messaggio esiste per impedire."""
         with patch.object(vault, "grants_for",
                           lambda a: {} if a == "messaggero" else {"google_devnullboxx": {}}), \
+                patch.object(vault, "has_credential", lambda _c: True), \
                 patch.object(vault, "_audit", lambda *a, **k: None), \
                 patch.object(vault, "agents_with_grant", lambda _c: ["clodia", "ophelia"]):
             try:
@@ -72,3 +79,53 @@ class DenialMessageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AbsentCredentialTests(unittest.TestCase):
+    """Credenziale ASSENTE ≠ grant mancante: il rimedio è un altro.
+
+    Osservato su venere. `telegram_bot_token` non è nel vault di quell'istanza —
+    il connettore non è mai stato collegato — e messaggero ha riferito «è
+    necessario che un amministratore conceda a questo agente il permesso
+    telegram_bot_token». Vero in generale, falso lì: non c'è niente da
+    concedere, e l'admin sarebbe andato a cercare un permesso invece di
+    collegare un'integrazione.
+
+    Quarta occorrenza oggi della stessa forma: l'informazione sul guasto esiste
+    (`has_credential` risponde False) e non raggiunge chi può agire.
+    """
+
+    def _msg(self, esiste: bool):
+        with patch.object(vault, "grants_for", lambda _a: {}), \
+                patch.object(vault, "has_credential", lambda _c: esiste), \
+                patch.object(vault, "_audit", lambda *a, **k: None):
+            try:
+                vault.get_secret("messaggero", "telegram_bot_token")
+            except vault.VaultDenied as e:
+                return str(e)
+        self.fail("get_secret non ha rifiutato")
+
+    def test_an_absent_credential_says_it_cannot_be_granted(self):
+        m = self._msg(esiste=False)
+        self.assertIn("NON ESISTE", m)
+        self.assertIn("nessuno può concederla", m)
+
+    def test_it_names_the_right_remedy(self):
+        """Collegare, non concedere. Un rimedio sbagliato costa più di nessun
+        rimedio: manda chi legge nel posto sbagliato con fiducia."""
+        m = self._msg(esiste=False)
+        self.assertIn("Integrations", m)
+
+    def test_a_present_credential_still_asks_for_the_grant(self):
+        """L'altro caso non deve regredire: se la credenziale c'è, il rimedio è
+        il grant."""
+        m = self._msg(esiste=True)
+        self.assertIn("conceda", m)
+        self.assertNotIn("NON ESISTE", m)
+
+    def test_neither_message_suggests_delegating(self):
+        for esiste in (True, False):
+            with self.subTest(esiste=esiste):
+                m = self._msg(esiste)
+                self.assertIn("altro agente", m)   # lo NOMINA per escluderlo
+                self.assertIn("non", m.lower())
