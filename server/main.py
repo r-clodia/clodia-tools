@@ -2038,16 +2038,72 @@ def _vault_grants(agent: str | None) -> set:
         return set()
 
 
+def _declared_tools(agent: str | None) -> set:
+    """Verbi DICHIARATI da un principal: la config del gateway, e in mancanza il
+    suo seed.
+
+    Il fallback sul seed serve agli agenti non registrati — un clone per-topic,
+    un responder appena materializzato — per i quali `agent_config` solleva
+    KeyError. Senza, l'intersezione qui sotto li ridurrebbe a zero verbi di
+    connettore, cioè romperebbe proprio il caso che `_connector_allows` esisteva
+    per servire.
+
+    Il seed è la fonte autorevole della dichiarazione (il repo lo è del seed), e
+    vive dove uno spawn non può riscriverlo: `/datadir/agents/` è `drwx------
+    root` e gli spawn girano come uid 60000.
+    """
+    try:
+        return set(agent_config(agent).get("allowed_tools") or [])
+    except KeyError:
+        pass
+    from . import human as _seedreader   # lettore di seed (vale per ogni principal)
+    d = _seedreader._seed(agent or "")
+    return {str(x) for x in (d.get("tool_permissions") or [])}
+
+
+def _connector_intersect_on() -> bool:
+    """Interruttore d'emergenza. Acceso per default perché la misura lo sostiene —
+    nessuno dei verbi che l'intersezione toglie è mai stato usato secondo la
+    telemetria delle due istanze — ma una telemetria è una finestra, non la
+    storia completa, e se salta fuori un flusso legittimo va sbloccato in un
+    minuto senza un deploy."""
+    return (_os.environ.get("CLODIA_CONNECTOR_INTERSECT") or "on").strip().lower() != "off"
+
+
 def _connector_allows(name: str, agent: str | None) -> bool:
-    """Accesso a un tool di connettore derivato dai grant vault (persistente):
-    - email.*      se l'agent ha un grant su un account gmail_<account>;
-    - trello.*     se l'agent ha un grant sulla credenziale 'trello'.
-    - gdrive.*     se l'agent ha un grant google_/gworkspace_;
-    - gcalendar.*  idem (stessa credenziale Google Workspace);
-    - gdocs.*      idem.
-    - gsheets.*    idem (l'API Sheets accetta lo scope `drive`).
-    Così la delega non dipende da config.yaml (effimero al rebuild)."""
+    """Un grant sul vault apre la CREDENZIALE, non i verbi.
+
+    Com'era e perché è cambiato. Questa funzione ritornava True per l'intero
+    namespace di una credenziale concessa: chi aveva `google_<account>` otteneva
+    `email.*`, `gdrive.*`, `gdocs.*`, `gsheets.*` e `gcalendar.*` — 23 verbi —
+    **indipendentemente da ciò che il suo seed dichiara**. Il commento originale
+    lo giustificava così: «la delega non dipende da config.yaml (effimero al
+    rebuild)».
+
+    Due ragioni per cambiarlo. La prima è che quel presupposto non vale più:
+    `config.yaml` sta su un volume del gateway (`/gateway-state`, bind mount) e
+    sopravvive alla ricreazione del container — verificato. La seconda è che
+    rendeva la dichiarazione **decorativa** su cinque namespace: il refactoring
+    per classe di seed, i `profile_tools`, il modello del mestiere non decidevano
+    nulla là dove decideva il grant. E il modello di sicurezza afferma che la
+    matrice del principal delimita i suoi verbi: su quei namespace era falso.
+
+    Ora servono ENTRAMBI: il grant sulla credenziale **e** la dichiarazione del
+    verbo. Concedere l'account a un postino gli dà la posta che dichiara, non il
+    Drive che non dichiara. Per dargli il Drive si aggiunge il verbo al suo seed —
+    cioè lo si decide, invece di ottenerlo come effetto collaterale.
+    """
     grants = _vault_grants(agent)
+    if not _grant_covers(name, grants):
+        return False
+    if not _connector_intersect_on():
+        return True          # interruttore spento: comportamento storico
+    # L'INTERSEZIONE. Il grant è necessario, non sufficiente.
+    return _tool_allowed(name, _declared_tools(agent))
+
+
+def _grant_covers(name: str, grants: set) -> bool:
+    """Il grant copre il namespace del verbo? (metà «credenziale» della regola)"""
     # La credenziale Google UNIFICATA (google_<account>) abilita SIA email.* SIA
     # gdrive.* (ha entrambi gli scope); i legacy gmail_/gworkspace_ restano validi.
     if name.startswith("email.") and any(
