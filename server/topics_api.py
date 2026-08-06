@@ -27,6 +27,7 @@ from starlette.routing import Route
 from .pki_verify import verify_session_token
 from .topics.local_fs import LocalFsStorage
 from .topics.service import SCHEMA_VERSION, TopicError, TopicService, normalize_meta_v2
+from .topics.storage import VersionConflict
 
 LOG = logging.getLogger("clodia-tools.topics")
 
@@ -137,6 +138,47 @@ async def archive_topic(request: Request):
         meta = _service().archive(request.path_params["tier"], request.path_params["name"])
         _invalidate_list_cache()
         return JSONResponse({"archived": True, "meta": meta})
+    except TopicError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+async def set_agents_md(request: Request):
+    """Istruzioni di scope del topic. GET restituisce testo + versione, POST le
+    riscrive in optimistic lock.
+
+    Rotta separata da `files`, e non un caso particolare di quella, perché
+    l'oggetto è di natura diversa: un file del topic è contenuto, questo è
+    control-plane — entra nel contesto di ogni agente della stanza a ogni turno.
+    Confonderli è come sono finite in `files/` in origine.
+    """
+    tier = request.path_params["tier"]
+    name = request.path_params["name"]
+    _, err = _authorize(request)
+    if err:
+        return err
+    if request.method == "GET":
+        try:
+            info = _service().open(tier, name)
+        except TopicError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        return JSONResponse({"text": info.get("agents_md"),
+                             "version": info.get("agents_md_version"),
+                             # `authoritative=False` = il testo viene ancora dalla
+                             # posizione legacy in files/, dove QUALUNQUE
+                             # partecipante poteva scriverlo. Chi lo inietta in un
+                             # prompt deve poterlo sapere: è la differenza fra una
+                             # nota di canale e una direttiva.
+                             "authoritative": info.get("agents_md_version") is not None})
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    try:
+        res = _service().save_agents_md(tier, name, (body or {}).get("text", ""),
+                                        (body or {}).get("base_version"))
+        return JSONResponse(res)
+    except VersionConflict as e:
+        return JSONResponse({"error": f"conflitto di versione: {e}"}, status_code=409)
     except TopicError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -488,6 +530,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/messages", post_message, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/archive", archive_topic, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/status", set_status, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/agents-md", set_agents_md, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/deadline", set_deadline, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/participants", participants, methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
