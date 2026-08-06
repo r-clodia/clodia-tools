@@ -147,8 +147,29 @@ def get_secret(agent: str, credential: str) -> dict:
     grant = grants_for(agent).get(credential)
     if grant is None:
         _audit(agent, "fetch", credential, "DENIED", reason="no grant")
+        # Il rifiuto deve distinguere DUE cose che un modello confonde, e la
+        # confusione ha una conseguenza precisa: messaggero, letto «non ha
+        # grant», ha riferito in canale «non ho il capability email.send» e ha
+        # chiesto a un altro agente di spedire per lui. Ma il verbo lo AVEVA —
+        # quando questa funzione gira, la whitelist è già passata — e quello che
+        # gli mancava era la credenziale.
+        #
+        # Delegare intorno a una credenziale mancante è un tentativo di confused
+        # deputy: l'altro agente userebbe la PROPRIA credenziale, cioè un'uscita
+        # che nessuno ha autorizzato per questa richiesta. Il messaggio lo dice,
+        # perché è l'istinto dell'agente e va contraddetto dove nasce.
+        #
+        # Non si elenca CHI ha il grant: sarebbe indicare l'agente a cui
+        # delegare, cioè suggerire proprio la mossa da evitare.
         raise VaultDenied(
-            f"agent '{agent}' non ha grant 'fetch' per la credenziale '{credential}'")
+            f"agent '{agent}' non ha grant 'fetch' per la credenziale "
+            f"'{credential}'. Il VERBO ti è consentito — se sei arrivato qui la "
+            f"whitelist è già passata: manca la credenziale, che è una cosa "
+            f"diversa. NON si risolve chiedendo a un altro agente di farlo per "
+            f"te: userebbe la propria credenziale, e sarebbe un'uscita che "
+            f"nessuno ha autorizzato per questa richiesta. Serve che un admin "
+            f"conceda '{credential}' a '{agent}'. Riferiscilo così a chi ti ha "
+            f"chiesto l'operazione.")
     bundle_path = _store_dir() / f"{credential}.json"
     try:
         bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
