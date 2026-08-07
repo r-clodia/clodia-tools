@@ -2409,11 +2409,49 @@ async def _require_gate_consent(
     return approval
 
 
+def _spawn_compartment_mode() -> str:
+    """`off` | `report` | `on`. Default `report`: si osserva prima di rifiutare.
+
+    Stessa forma della catena origin, e per la stessa ragione — questa regola
+    stringe un permesso che oggi è larghissimo, e stringerlo alla cieca
+    romperebbe l'orchestrazione senza che nessuno sappia dove.
+    """
+    m = (_os.environ.get("CLODIA_SPAWN_COMPARTMENT") or "report").strip().lower()
+    return m if m in ("off", "report", "on") else "report"
+
+
+def _carries(agent: str | None) -> set:
+    """Topic che il SEED dichiara di portare con sé, in forma `tier/nome`."""
+    try:
+        raw = agent_config(agent).get("carries") or []
+    except Exception:  # noqa: BLE001
+        return set()
+    return {str(x).strip().strip("/") for x in raw if str(x).strip()}
+
+
 def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
-    """Chiave di gate per l'accesso CROSS-TOPIC: se `name` è un verbo topic-scoped
-    e l'agente NON è participant/owner del topic target → ritorna
-    'topic-access:<tier>/<name>'. La membership del principal umano non concede
-    accesso implicito all'agente: il consenso passa sempre dal gate esplicito."""
+    """Chiave di gate per l'accesso CROSS-TOPIC.
+
+    La regola, dal 7 ago 2026: **la membership del seed non basta più**. Conta la
+    stanza in cui lo spawn STA, presa dal claim `chat` FIRMATO — mai da un
+    argomento, che sarebbe la parola dell'agente su dove si trova.
+
+        T == qui               → consentito   (agisci nel tuo scope)
+        T ∈ carries            → consentito   (dichiarato, verificabile)
+        agent ∈ participants(T) → GATE        ← il cambiamento
+        altrimenti             → GATE         (invariato)
+
+    Perché. `_topic_is_member` confrontava il nome del SEED con i partecipanti, e
+    nessuno guardava da dove partiva la chiamata. Su marte clodia è participant
+    di 135 topic su 157: uno spawn di clodia, stando in una stanza qualunque,
+    poteva leggere gli altri 134 senza gate e riversarli lì dentro. Il modello
+    dichiara due assi — clearance E compartimento — ma il secondo compartimenta
+    solo se valutato per SPAWN. Per seed era un permesso globale vestito da
+    compartimento.
+
+    La membership resta rilevante, ma cambia ruolo: non toglie il gate, decide a
+    CHI è rivolto — l'owner della stanza bersaglio può approvare la propria.
+    """
     if NS_SEP_DOT not in name:
         return None
     ns, verb = name.split(NS_SEP_DOT, 1)
@@ -2426,8 +2464,40 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
         meta = _topics().open(tier, tname).get("meta", {})
     except Exception:  # noqa: BLE001 — topic inesistente → lascia decidere al dispatch
         return None
-    return (None if _topic_is_member(meta, agent)
-            else f"topic-access:{meta.get('tier', tier)}/{tname}")
+    target = f"{meta.get('tier', tier)}/{tname}"
+    if _spawn_compartment_mode() == "off":
+        return None if _topic_is_member(meta, agent) else f"topic-access:{target}"
+
+    from .whitelist import current_channel
+    qui = current_channel()
+    if qui and _norm_scope(qui) == _norm_scope(target):
+        return None                      # la propria stanza
+    if _norm_scope(target) in {_norm_scope(c) for c in _carries(agent)}:
+        return None                      # dichiarato nel seed
+    if _spawn_compartment_mode() == "report":
+        if _topic_is_member(meta, agent):
+            import logging as _lg
+            _lg.getLogger("clodia-tools").warning(
+                "compartimento spawn · %s leggerebbe %s stando in %s: consentito "
+                "solo perche' participant del seed (con enforcement: GATE)",
+                agent, target, qui or "nessuna stanza")
+            return None
+        return f"topic-access:{target}"
+    return f"topic-access:{target}"
+
+
+def _norm_scope(x: str) -> str:
+    """`SEAL-1/acme` in forma confrontabile. I due lati arrivano da sorgenti
+    diverse — il claim firmato e il meta del topic — e un confronto per stringa
+    grezza fallirebbe sul primo alias di tier."""
+    t, _, n = (x or "").partition("/")
+    return f"{_norm_tier_str(t)}/{n.strip().lower()}"
+
+
+def _norm_tier_str(t: str) -> str:
+    t = (t or "").strip().upper()
+    legacy = {"P0": "SEAL-0", "P1": "SEAL-1", "P2": "SEAL-2", "P3": "SEAL-3"}
+    return legacy.get(t, t)
 
 
 #: L'UNICO verbo `topic.*` ammesso a una sessione non presidiata: spedire
