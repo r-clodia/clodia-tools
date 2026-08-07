@@ -61,7 +61,8 @@ class WriteePathTests(Base):
         `AGENTS.md` dentro una sottocartella non viene iniettato da nessuno, ed è
         legittimo (una procedura, un allegato di un cliente)."""
         r = self.svc.put_file("SEAL-1", "acme", "procedure/AGENTS.md", b"# nota")
-        self.assertEqual(r["path"], "files/procedure/AGENTS.md")
+        # Il path risponde col mount: `local/…` dal 7 ago 2026.
+        self.assertEqual(r["path"], "local/procedure/AGENTS.md")
 
     def test_saving_and_reading_back(self):
         self.svc.save_agents_md("SEAL-1", "acme", "# Regole\nParla in italiano.",

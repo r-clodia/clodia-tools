@@ -50,7 +50,9 @@ class ChannelTests(unittest.TestCase):
         # shows the real structure and one navigates into it. The test predates
         # that change and used to assert the old files/-relative listing.
         root = self.svc.list_files("P1", "ch")
-        self.assertEqual([f["name"] for f in root], ["files", "meta.json", "summary.md"])
+        self.assertEqual([f["name"] for f in root], # 7 ago 2026: la radice espone i MOUNT, non `files/`. Il contenuto
+        # non si è spostato — si raggiunge da `local/`.
+        ["local", "meta.json", "summary.md"])
         inside = self.svc.list_files("P1", "ch", "files")
         self.assertEqual([f["name"] for f in inside], ["report.md"])
         self.assertEqual(self.svc.read_file("P1", "ch", "files/report.md"), b"# R\n")
@@ -69,9 +71,9 @@ class ChannelTests(unittest.TestCase):
         arch = [f for f in entries if f["name"] == "archivio"]
         self.assertEqual(len(arch), 1)
         self.assertEqual(arch[0]["kind"], "dir")
-        self.assertEqual(arch[0]["path"], "files/archivio")
+        self.assertEqual(arch[0]["path"], "local/archivio")
         # and it is navigable one level deeper
-        deeper = self.svc.list_files("P1", "ch", "files/archivio")
+        deeper = self.svc.list_files("P1", "ch", "local/archivio")
         self.assertEqual([f["name"] for f in deeper], ["2026"])
         self.assertEqual(deeper[0]["kind"], "dir")
 
