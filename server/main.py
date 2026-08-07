@@ -3331,7 +3331,26 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
     return caller == meta.get("owner") or caller in (meta.get("participants") or [])
 
 
-def _require_topic_member(svc, tier, name) -> None:
+#: Verbi `topic.*` che MUTANO lo stato dello scope. Il resto legge.
+#:
+#: `post_message` non c'è, di proposito: parlare non è mutare. Un reader — umano
+#: o agente — resta nella stanza per seguirne il lavoro e dire la sua, e
+#: azzittirlo sarebbe una cosa diversa da quella che il ruolo descrive.
+#:
+#: Non ci sono nemmeno `add_participant`/`remove_participant`: non passano da
+#: `_TOPIC_SCOPED_VERBS`, quindi classificarli qui sarebbe una regola che non si
+#: applica mai e che sembra applicarsi. Sono GATED, che è un controllo più
+#: stretto del ruolo. L'ha colto un test scritto apposta — «una classificazione
+#: su un verbo che non esiste è una regola che non si applica mai».
+_TOPIC_MUTATING_VERBS = frozenset({
+    "save_summary", "save_agents_md", "add_minute", "archive",
+    "write_file", "put", "delete_file", "migrate_storage",
+    "remote_enable", "remote_disable", "remote_add", "remote_commit",
+    "remote_push", "remote_pull",
+})
+
+
+def _require_topic_member(svc, tier, name, mutating: bool = False) -> None:
     """ACL compartimento (need-to-know).
 
     Consentito solo se l'AGENTE è participant/owner del target oppure esiste un
@@ -3355,6 +3374,20 @@ def _require_topic_member(svc, tier, name) -> None:
             f"accesso negato al topic {tier}/{name}: l'agente '{caller}' non è "
             "partecipante (compartimento need-to-know; "
             f"il cross-topic richiede un consenso gate)")
+    # asse RUOLO: un reader non muta. Fino al 7 ago 2026 il ruolo era applicato
+    # solo sul percorso UMANO (gli endpoint della webui); un agente passa da qui,
+    # quindi metterlo a `reader` non aveva alcun effetto — poteva comunque
+    # chiamare `topic.put` o `save_summary`. Il ruolo esisteva e nessuno lo
+    # guardava dove serviva di più: un agente reader è precisamente il caso
+    # dell'osservatore che deve poter guardare e commentare senza toccare.
+    if mutating and agent_ok:
+        from .topics.service import TopicService as _T
+        if _T.participant_role(meta, caller) == _T.ROLE_READER:
+            raise PermissionError(
+                f"'{caller}' è reader in {tier_t}/{name}: può leggere e parlare, "
+                "non modificare. Chiedi all'owner del topic di cambiargli ruolo. "
+                "(Il consenso puntuale per una singola modifica arriverà col "
+                "modello a gate: oggi è un rifiuto.)")
     # asse livello: clearance ≥ tier (difesa in profondità oltre al compartimento).
     if _rank(current_clearance()) < _rank(tier_t):
         raise PermissionError(
@@ -3612,7 +3645,8 @@ def _dispatch_topic(name: str, a: dict):
     svc = _topics()
     verb = name.split(".", 1)[1]
     if verb in _TOPIC_SCOPED_VERBS:
-        _require_topic_member(svc, a.get("tier"), a.get("name"))
+        _require_topic_member(svc, a.get("tier"), a.get("name"),
+                              mutating=verb in _TOPIC_MUTATING_VERBS)
     if verb == "suggest_team":
         # proposta di squadra: proxy read-only all'agent-server (registry+rilevanza)
         return runtime.suggest_team(a.get("tier") or "SEAL-0", a.get("description") or "")
