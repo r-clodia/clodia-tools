@@ -3290,17 +3290,44 @@ _SPAWNS_ROOT = _os.environ.get("CLODIA_SPAWNS_ROOT", "/datadir/spawns")
 
 
 def _safe_scratch_path(p: str) -> str:
-    """Valida che `p` stia nello scratch di uno spawn (`/datadir/spawns/**`):
-    il gateway scrive/legge SOLO lì, mai nel topic store o nei secrets, anche se
-    l'agent passa un path arbitrario. Difesa contro path-traversal/abuso."""
+    """Valida che `p` stia DENTRO lo scratch di uno spawn, non nel cortile.
+
+    Il gateway scrive/legge solo qui, mai nel topic store o nei secrets, anche se
+    l'agent passa un path arbitrario. Difesa contro path-traversal/abuso.
+
+    La radice `/datadir/spawns` NON è una destinazione. Accettarla — la versione
+    precedente lo faceva con `rp == root` e con uno `startswith` che non chiedeva
+    un livello — ha prodotto su marte **226 documenti sciolti in cima al
+    cortile**: PDF, DOCX, lettere su carta intestata, root:root e modo 644.
+
+    Perché contava, misurato: la cartella è `drwx--x--x`, quindi un agente non
+    può ELENCARLI (`ls` → Permission denied), ma può traversarla, e 644 significa
+    che chi ne conosce il nome li legge. Un file finito lì esce dal perimetro del
+    suo scope senza che nulla lo dica, ed è il modo silenzioso di sbagliare:
+    l'operazione riesce.
+
+    **Questo NON è ancora il confinamento per spawn** della voce 2. Per esigerlo
+    servirebbe sapere QUALE spawn sta chiamando, e il gateway non lo sa: conosce
+    il seed (`agent_name()`), mentre l'istanza è `"-"` ovunque. Qui si richiede
+    solo che ci sia un livello sotto la radice — che chiude il caso osservato,
+    non l'accesso di uno spawn allo scratch di un altro.
+    """
     rp = _os.path.realpath(p or "")
     root = _os.path.realpath(_SPAWNS_ROOT)
-    if not (rp == root or rp.startswith(root + "/")):
+    if not rp.startswith(root + "/"):
         raise ValueError(
             f"path non consentito (deve stare sotto {_SPAWNS_ROOT}): {p}. "
             f"Se stai archiviando un allegato di posta non serve un file locale: "
             f"email.save_attachment(email_id, filename) lo scrive nel topic del "
             f"canale, e i byte non passano da te.")
+    resto = rp[len(root) + 1:]
+    if "/" not in resto:
+        raise ValueError(
+            f"path non consentito: '{p}' finirebbe nella RADICE del cortile "
+            f"degli spawn, non nello scratch di uno spawn. Usa un path dentro la "
+            f"tua directory di lavoro (es. `{_SPAWNS_ROOT}/<spawn>/{resto}`), "
+            f"oppure — se stai archiviando un allegato — `email.save_attachment` "
+            f"senza `dest`, che lo scrive nel topic del canale.")
     return rp
 
 
