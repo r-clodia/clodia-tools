@@ -2045,7 +2045,18 @@ def _human_tool_allowed(name: str) -> bool:
     non forgiabile dal modello. Chiude la Broken Access Control del path REST."""
     from . import gate as _gate
     if _gate.is_gated(name):
-        return (current_human_role() or "user") == "admin"
+        # `in _ADMIN_ROLES` e NON `== "admin"`. Il confronto letterale escludeva
+        # `superadmin`, cioè l'unica persona che possiede l'istanza: il 7 ago 2026
+        # Davide si è visto rifiutare `packs.import_url` da amministratore.
+        #
+        # Il difetto stava in piedi perché ovunque altrove — `human.is_admin`,
+        # `admin._is_admin_yaml`, `origin.principal_may`, `tools_api` — la
+        # verifica passa da `_ADMIN_ROLES = ("superadmin", "admin")`. Un solo
+        # punto duplicava la regola invece di usarla, e le duplicazioni di una
+        # regola divergono: questa divergeva sul caso più privilegiato, quindi
+        # sbagliava verso il rifiuto e nessun test la vedeva.
+        from .human import _ADMIN_ROLES
+        return (current_human_role() or "user") in _ADMIN_ROLES
     return True
 
 
