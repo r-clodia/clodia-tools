@@ -686,6 +686,57 @@ class TopicService:
         return f"{self._dir(tier, name)}/.recap-history.jsonl"
 
     # ── verbi ──────────────────────────────────────────────────────────────
+    #: Il topic di CONFIGURAZIONE (voce 22). Uno solo, con un nome noto: se
+    #: fosse designato da un campo, due topic potrebbero dichiararsi tali e
+    #: nessuno saprebbe quale vince.
+    CONFIG_TIER = "SEAL-4"
+    CONFIG_NAME = "configuration"
+
+    def config_agents_md(self) -> str | None:
+        """Le istruzioni dichiarate nel topic di configurazione, se esiste."""
+        try:
+            text, _ = self._read_agents_md(self.CONFIG_TIER, self.CONFIG_NAME)
+        except Exception:  # noqa: BLE001 — assente o illeggibile: nessuna eredità
+            return None
+        # `strip()` solo per decidere se c'è qualcosa: il testo va ereditato
+        # com'è. Normalizzarlo qui farebbe divergere la copia dall'originale per
+        # un dettaglio che nessuno ha chiesto.
+        return text if (text or "").strip() else None
+
+    def _inherit_config_agents_md(self, tier: str, name: str) -> None:
+        """Un topic nuovo nasce con le istruzioni del topic di configurazione.
+
+        Il caso più semplice della voce 22, e quello che Davide ha nominato:
+        «l'AGENTS.md di questo topic è ereditato da tutti i nuovi topic».
+
+        **Copia alla creazione, non lettura viva.** La parola è «nuovi», ed è la
+        lettura con il profilo di rischio più basso: i topic esistenti non
+        ricevono nulla e una modifica successiva non si propaga. La lettura viva
+        sarebbe il metascope della voce 9 — un file solo capace di cambiare il
+        comportamento di ogni agente in ogni stanza nello stesso istante, la
+        superficie più potente del sistema, e meriterebbe un gate suo.
+
+        Non sovrascrive: un topic creato CON istruzioni proprie le tiene. E il
+        topic di configurazione non eredita da sé stesso.
+        """
+        if (tier, name) == (self.CONFIG_TIER, self.CONFIG_NAME):
+            return
+        try:
+            if self.s.exists(self._agents_p(tier, name)):
+                return                                  # istruzioni proprie
+            text = self.config_agents_md()
+            if not text:
+                return
+            self.s.write(self._agents_p(tier, name), text.encode("utf-8"))
+        except Exception as e:  # noqa: BLE001
+            # Best-effort come il remote Drive: un problema qui non deve
+            # impedire la creazione del topic. Un topic senza istruzioni
+            # ereditate è utilizzabile; un topic non creato no.
+            import logging
+            logging.getLogger("clodia-tools.topics").warning(
+                "eredità AGENTS.md per %s/%s fallita (topic creato lo stesso): %s",
+                tier, name, e)
+
     def new(self, tier: str | None, name: str, meta: dict | None = None) -> dict:
         """Scaffold idempotente: se il topic esiste già ritorna il suo meta."""
         tier = _normalize_tier(tier or DEFAULT_TIER)
@@ -723,6 +774,14 @@ class TopicService:
         meta.setdefault("contact_agent", _iprof0.topic_default_contact_agent())
         # Canale (Slack-like): owner = chi amministra il canale (invita/rimuove);
         # participants = agenti (umani/AI) abilitati a parlare nel canale.
+        if (tier, name) == (self.CONFIG_TIER, self.CONFIG_NAME) and not meta.get("owner"):
+            # La configurazione non può essere di un agente: ne sbloccherebbe i
+            # propri gate (voce 24, precisazione 2). Se non c'è un umano
+            # proprietario dell'istanza si lascia il campo VUOTO invece di
+            # ripiegare su `clodia` — meglio un topic senza owner, che si vede,
+            # di un topic il cui owner è l'agente che dovrebbe esserne soggetto.
+            from .. import human as _hu
+            meta["owner"] = _hu.instance_owner() or ""
         meta.setdefault("owner", meta.get("contact_agent", "clodia"))
         # Partecipanti di default dell'edizione (terraformazione): UNIONE con
         # gli espliciti — "sempre partecipanti ai topic nuovi". ECCEZIONE: i DM
@@ -730,16 +789,24 @@ class TopicService:
         # (altrimenti clodia si intrufola in ogni DM, es. dm-avvocato--davide).
         from .. import instance_profile as _iprof
         is_dm = (meta.get("kind") == "dm") or (meta.get("type") == "dm")
-        _defaults = [] if is_dm else _iprof.topic_default_participants()
+        # Il topic di CONFIGURAZIONE non prende i partecipanti di default, e non
+        # è un dettaglio: è l'unico controllo reale della voce 22. Se un agente
+        # vi fosse partecipante avrebbe `topic.put` sulla configurazione — il
+        # confused deputy nella forma più pura, l'agente ha il verbo, l'admin ha
+        # l'autorità, e il file è la config. «Solo admin» significa zero
+        # partecipanti agenti, e la terraformazione ce li metterebbe da sola.
+        is_config = (tier, name) == (self.CONFIG_TIER, self.CONFIG_NAME)
+        _defaults = [] if (is_dm or is_config) else _iprof.topic_default_participants()
         explicit = meta.get("participants") or []
         meta["participants"] = list(dict.fromkeys(
-            [meta["owner"], *explicit, *_defaults]))
+            [x for x in [meta["owner"], *explicit, *_defaults] if x]))
         meta = normalize_meta_v2(meta, tier)
         meta["created_at"] = _now().isoformat(timespec="seconds")
         self.s.write(mp, json.dumps(meta, ensure_ascii=False, indent=2).encode())
         if not self.s.exists(self._summary_p(tier, name)):
             self.s.write(self._summary_p(tier, name),
                          f"{meta.get('title', name)}\n\n## Prossimi passi\n".encode())
+        self._inherit_config_agents_md(tier, name)
         if want_drive:
             # Remote Drive dalla nascita: risolve/crea la cartella e abilita la
             # vista live. Best-effort: un problema Drive non
