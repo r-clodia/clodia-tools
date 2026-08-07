@@ -964,6 +964,44 @@ class TopicService:
     #: conferma alla prima riformulazione della frase.
     CONFIRMABLE_HIDES_LOCAL = "confirmable:hides-local"
 
+    @staticmethod
+    def _require_approved_folder(folder: str | None, tier: str, name: str) -> None:
+        """Una cartella Drive è una VOCE DI WHITELIST, non un sottoalbero.
+
+        Correzione di Davide, 7 ago 2026: «non esiste questo concetto di root per
+        devnullboxx, devnull è un account google al quale condivido file e
+        cartelle in modo sparso». Un account condiviso non ha una radice: le
+        cartelle arrivano da «Condivisi con me», ognuna di un proprietario
+        diverso, senza antenato comune. Non c'è tetto da mettere — e forzarne uno
+        proteggerebbe niente (troppo largo) o bloccherebbe tutto (troppo
+        stretto).
+
+        Questa è la seconda metà della voce 24. Un owner può spostare i muri del
+        proprio scope, ma solo verso cartelle **già approvate**: approvarne una
+        nuova resta un atto di chi amministra. È il caso di Davide del 30 lug —
+        Giovanni crea un topic suo, invita clodia, e chiede i documenti che
+        Davide ha condiviso con `devnullboxx`.
+
+        Se NESSUNA cartella è dichiarata, non si confina: è il comportamento
+        storico e la direzione giusta della retrocompatibilità. Una lista vuota
+        che chiudesse tutto verrebbe spenta il giorno stesso, e allora non
+        proteggerebbe niente.
+        """
+        fid = str(folder or "").strip()
+        if not fid:
+            return
+        from ..tools import gdrive_root as _gr
+        approvate = _gr.approved_folders()
+        if not approvate:
+            return
+        if fid not in approvate:
+            raise TopicError(
+                f"la cartella Drive '{fid}' non è fra quelle approvate: "
+                f"collegarla a {tier}/{name} allargherebbe il perimetro. "
+                f"Approvarla è un atto di chi amministra — va aggiunta come "
+                f"`gdrive:folder/{fid}` alla lista egress (globale o dello "
+                f"scope), poi il collegamento passa.")
+
     def remote_enable(self, tier: str, name: str, rtype: str, config: dict | None = None,
                       confirm_hides_local: bool = False,
                       credential: str | None = None) -> dict:
@@ -1021,6 +1059,7 @@ class TopicService:
         config = dict(config or {})
         if rtype == "drive":
             config.update(self._provision_drive_folder(config, name))  # risolve/crea la cartella
+            self._require_approved_folder(config.get("folder"), tier, name)
         config["name"] = self._remote_display_name(rtype, config)
         keep = ("url", "branch", "folder", "account", "user_name", "user_email", "message", "name")
         meta["remote"] = {"type": rtype, "config": {k: v for k, v in config.items() if k in keep}}
