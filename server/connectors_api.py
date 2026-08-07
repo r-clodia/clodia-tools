@@ -44,6 +44,21 @@ def _mailboxes() -> list[str]:
     return sorted(n[len("mailbox_"):] for n in vault.store_names() if n.startswith("mailbox_"))
 
 
+def _google_accounts() -> list[str]:
+    """Account Google UNIFICATI (`google_<account>`), che abilitano SIA email.*
+    SIA gdrive./gcalendar./gdocs./gsheets. — vedi `_grant_covers` in main.py.
+
+    Perché mancavano. Questa vista enumerava solo `gmail_*` e `mailbox_*`, cioè
+    le due forme legacy, mentre il controllo dei permessi riconosce da tempo
+    anche `google_*`. Le due metà erano in disaccordo, e il disaccordo aveva un
+    costo preciso: su un'istanza con la sola credenziale unificata la sezione
+    Integrations risultava VUOTA, quindi un admin non poteva concedere a un
+    agente un accesso che il gateway avrebbe accettato. Non un permesso
+    mancante: un permesso concedibile e non mostrato."""
+    return sorted(n[len("google_"):] for n in vault.store_names()
+                  if n.startswith("google_"))
+
+
 def _cred_for(connector_id: str) -> str | None:
     """Mappa l'id del connettore alla credenziale vault. 'trello' → 'trello';
     un account Gmail → 'gmail_<account>'; una casella → 'mailbox_<account>'."""
@@ -51,6 +66,8 @@ def _cred_for(connector_id: str) -> str | None:
         return "trello" if vault.has_credential("trello") else None
     if connector_id in vault.email_connectors():
         return f"gmail_{connector_id}"
+    if connector_id in _google_accounts():
+        return f"google_{connector_id}"
     if connector_id in _mailboxes():
         return f"mailbox_{connector_id}"
     return None
@@ -58,6 +75,17 @@ def _cred_for(connector_id: str) -> str | None:
 
 def _connectors(agent: str | None) -> list[dict]:
     out = []
+    for acct in _google_accounts():
+        cred = f"google_{acct}"
+        out.append({
+            # `type: google` e non `email`: la credenziale unificata porta anche
+            # Drive/Calendar/Docs, e chiamarla «email» farebbe credere a chi
+            # concede di aprire un canale solo, mentre ne apre cinque.
+            "id": acct, "type": "google", "credential": cred,
+            "enables": ["email", "gdrive", "gcalendar", "gdocs", "gsheets"],
+            "granted": bool(agent) and agent in vault.agents_with_grant(cred),
+            "agents": vault.agents_with_grant(cred),
+        })
     for acct in vault.email_connectors():
         cred = f"gmail_{acct}"
         out.append({
