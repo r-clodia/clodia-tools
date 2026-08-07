@@ -52,7 +52,8 @@ class ChannelTests(unittest.TestCase):
         root = self.svc.list_files("P1", "ch")
         self.assertEqual([f["name"] for f in root], # 7 ago 2026: la radice espone i MOUNT, non `files/`. Il contenuto
         # non si è spostato — si raggiunge da `local/`.
-        ["local", "meta.json", "summary.md"])
+        # 7 ago 2026: e la radice e' quella dei DATI — niente control-plane.
+        ["local"])
         inside = self.svc.list_files("P1", "ch", "files")
         self.assertEqual([f["name"] for f in inside], ["report.md"])
         self.assertEqual(self.svc.read_file("P1", "ch", "files/report.md"), b"# R\n")
