@@ -1,30 +1,5 @@
-# Gateway clodia-tools — config pristine (clonabile).
-# agents: solo clodia (ophelia quando si cabla codex→gateway). mcp_backends: vuoto
-# (l'owner aggiunge i server via Add-MCP). Default tool: email+fs+agent (no Trello).
 workspace_root: /Users/erreclaudea/erre-claudia
 mcp_backends: []
-
-# Confinamento delle credenziali Google a un sottoalbero di Drive.
-# Chiave assente o vuota = nessun confinamento (comportamento storico).
-#
-#   gdrive_roots:
-#     ceouncommoncreative: ["<id-cartella>"]
-#     "*": ["<id-cartella>"]        # vale per tutti gli account
-#
-# Serve quando l'account collegato NON è dedicato: lo scope OAuth è `drive`
-# pieno, quindi senza questo un agente raggiunge tutto ciò che quell'account
-# vede. Con una radice impostata: ogni id che entra in un verbo gdrive/gdocs/
-# gsheets deve avere un antenato nella lista, e gli elenchi sono filtrati.
-#
-# Vive in questo file — volume del gateway, NON raggiungibile da un agente —
-# per la stessa ragione dei gate: chi può riscrivere il confine si autoconcede
-# l'accesso. In particolare NON è derivato dalla cartella del remote di un
-# topic: chi può creare un remote allargherebbe il perimetro da solo.
-#
-# Costo consapevole: `gcalendar.*` viene CHIUSO sugli account confinati. Il
-# calendario non sta in una cartella, quindi non c'è modo di limitarlo allo
-# stesso perimetro, e lasciarlo aperto renderebbe falsa l'affermazione
-# "l'agente vede solo quella cartella".
 gdrive_roots: {}
 agents:
   clodia:
@@ -32,39 +7,8 @@ agents:
     - .
     allowed_shell_cmds: []
     denied_shell_patterns: []
-    # `*` è il set RAGGIUNGIBILE, non quello libero: per un super il limite è il
-    # `profile_tools` qui sotto, che rende gated tutto ciò che non è il suo
-    # mestiere. Prima qui c'erano 9 verbi espliciti (email.*, fs.list_dir,
-    # topic.*, runtime.*) — un residuo da agente-messaggero, non il disegno di un
-    # super — e con l'enforcement acceso avrebbero prodotto RIFIUTI dove serve una
-    # DOMANDA: `agents.show` e `logs.tail` negati a chi deve diagnosticare, invece
-    # di chiesti. Misurato sul registro: 12 chiamate reali su 387.
     allowed_tools:
     - '*'
-    # PROFILO dichiarato: il mestiere di questo agente. Questi verbi sono LIBERI e
-    # sono quelli che compaiono nella sua scheda. Tutto ciò che il grant `*` copre e
-    # che NON è qui resta raggiungibile ma passa da un consenso umano.
-    #
-    # Sposta la least authority dalla RIMOZIONE alla SUPERVISIONE: un verbo tolto a
-    # un super è un verbo che deve fare Davide a mano; un verbo fuori profilo è un
-    # verbo che il super fa con la sua approvazione. Stesso umano, ma niente si
-    # rompe.
-    #
-    # Derivato dal RUOLO DICHIARATO, non dai verbi misurati — e qui la distinzione
-    # è sostanziale. La telemetria di clodia include `email.save_attachment`,
-    # `email.search`, `topic.put`: li ha usati perché ha fatto il mestiere del
-    # POSTINO il giorno in cui il postino era rotto. Un registro d'uso misura ciò
-    # che è ACCADUTO, supplenze comprese; il profilo deve dire il MANDATO.
-    #
-    # Mandato di clodia: costruire la squadra per gli obiettivi del topic
-    # (primario), facilitare la cooperazione identificando strategie e attori
-    # (secondario). Da qui i verbi: comporre la squadra, vedere chi c'è e cosa sa
-    # fare, leggere il contesto del canale e parlarci.
-    #
-    # Cosa NON c'è, di proposito: posta, Drive, binari, uscita verso l'esterno. Non
-    # perché proibiti — restano raggiungibili — ma perché non sono il suo mestiere.
-    # Il gate è la forma in cui la modalità super si attiva su richiesta invece di
-    # essere sempre accesa.
     profile_tools:
     - topic.suggest_team
     - topic.add_participant
@@ -82,21 +26,11 @@ agents:
     - topic.post_message
     - topic.save_summary
     - topic.add_minute
-    # Il terzo bit del vettore di contesto (scrittura verso l'esterno) era acceso
-    # per DEFAULT in tutta la colonia: `topic.*` contiene quattro verbi che
-    # spingono i file del canale FUORI dall'istanza, e nessuno l'aveva deciso.
-    # Non si rimuovono, si gatano: è la differenza fra togliere un mestiere e
-    # chiedere conferma.
     gated_tools:
     - topic.remote_add
     - topic.remote_enable
     - topic.remote_commit
     - topic.remote_push
-    # §8 di clodia-platform#104 — verbi che NON sono operazioni da turno di
-    # chat. Sottrazione, non enumerazione: dove c'è un wildcard resta, perché
-    # enumerarlo renderebbe stale il punteggio trifecta al primo pack nuovo
-    # (#119). Il DENY vince sull'allow, super-agent inclusi: è l'unico ordine
-    # in cui la lista toglie qualcosa.
     denied_tools:
     - settings.backup_run
     - mcp.add
@@ -104,44 +38,14 @@ agents:
     - packs.install_pip
     - packs.install_npm
     - packs.import_url
+    memory_declared: true
   ophelia:
     allowed_paths:
     - .
     allowed_shell_cmds: []
     denied_shell_patterns: []
-    # `*` è il set RAGGIUNGIBILE, non quello libero: per un super il limite è il
-    # `profile_tools` qui sotto, che rende gated tutto ciò che non è il suo
-    # mestiere. Prima qui c'erano 9 verbi espliciti (email.*, fs.list_dir,
-    # topic.*, runtime.*) — un residuo da agente-messaggero, non il disegno di un
-    # super — e con l'enforcement acceso avrebbero prodotto RIFIUTI dove serve una
-    # DOMANDA: `agents.show` e `logs.tail` negati a chi deve diagnosticare, invece
-    # di chiesti. Misurato sul registro: 12 chiamate reali su 387.
     allowed_tools:
     - '*'
-    # PROFILO dichiarato: il mestiere di questo agente. Questi verbi sono LIBERI e
-    # sono quelli che compaiono nella sua scheda. Tutto ciò che il grant `*` copre e
-    # che NON è qui resta raggiungibile ma passa da un consenso umano.
-    #
-    # Sposta la least authority dalla RIMOZIONE alla SUPERVISIONE: un verbo tolto a
-    # un super è un verbo che deve fare Davide a mano; un verbo fuori profilo è un
-    # verbo che il super fa con la sua approvazione. Stesso umano, ma niente si
-    # rompe.
-    #
-    # Derivato dal RUOLO DICHIARATO, non dai verbi misurati — e qui la distinzione
-    # è sostanziale. La telemetria di clodia include `email.save_attachment`,
-    # `email.search`, `topic.put`: li ha usati perché ha fatto il mestiere del
-    # POSTINO il giorno in cui il postino era rotto. Un registro d'uso misura ciò
-    # che è ACCADUTO, supplenze comprese; il profilo deve dire il MANDATO.
-    #
-    # Mandato di clodia: costruire la squadra per gli obiettivi del topic
-    # (primario), facilitare la cooperazione identificando strategie e attori
-    # (secondario). Da qui i verbi: comporre la squadra, vedere chi c'è e cosa sa
-    # fare, leggere il contesto del canale e parlarci.
-    #
-    # Cosa NON c'è, di proposito: posta, Drive, binari, uscita verso l'esterno. Non
-    # perché proibiti — restano raggiungibili — ma perché non sono il suo mestiere.
-    # Il gate è la forma in cui la modalità super si attiva su richiesta invece di
-    # essere sempre accesa.
     profile_tools:
     - topic.open
     - topic.list
@@ -154,11 +58,6 @@ agents:
     - topic.add_minute
     - agents.list
     - agents.show
-    # Il terzo bit del vettore di contesto (scrittura verso l'esterno) era acceso
-    # per DEFAULT in tutta la colonia: `topic.*` contiene quattro verbi che
-    # spingono i file del canale FUORI dall'istanza, e nessuno l'aveva deciso.
-    # Non si rimuovono, si gatano: è la differenza fra togliere un mestiere e
-    # chiedere conferma.
     gated_tools:
     - topic.remote_add
     - topic.remote_enable
@@ -171,11 +70,7 @@ agents:
     - packs.install_pip
     - packs.install_npm
     - packs.import_url
-  # Impiegato Tomato (agent di dominio, normal): back-office virtuale Tomato Srl.
-  # Accede a email (info@tomato.blue) e Google Drive Tomato.
-  # Il grant vault per la credenziale google_info_tomato_blue va assegnato
-  # a runtime: webui → Tools → Integrations → Edit grant, oppure:
-  #   python3 -m server.colony.vault set-grant <cred> impiegato-tomato fetch
+    memory_declared: true
   impiegato-tomato:
     allowed_paths:
     - .
@@ -203,8 +98,7 @@ agents:
     - topic.put
     - topic.fetch
     - topic.save_summary
-    # §8: letture libere, SCRITTURE gated. Sono gli stessi verbi che per altri
-    # agent restano liberi, quindi la granularità non può essere globale.
+    - memory.*
     gated_tools:
     - email.send
     - email.reply
@@ -225,7 +119,4 @@ agents:
     - topic.remote_enable
     - topic.remote_commit
     - topic.remote_push
-  # NB: i responder confinati dei canali (eco-<topic>) sono CLONI per-topic
-  # registrati a RUNTIME dal backend (channel_responder → /internal/agents/whitelist),
-  # non qui: sono istanza-specifici. Il backend li ri-registra a ogni tick, così
-  # sopravvivono ai rebuild del gateway (config.yaml baked nell'immagine).
+    memory_declared: true

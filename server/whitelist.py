@@ -30,6 +30,41 @@ def _read_yaml(p: Path) -> dict:
         return {}
 
 
+def _declare_memory(agents: dict) -> bool:
+    """Scrive `memory.*` in chiaro per chi ce l'aveva dalla scorciatoia.
+
+    `memory` era un namespace UNIVERSALE: concesso a ogni agente senza comparire
+    da nessuna parte. Davide, 7 ago 2026: «lasciamo i verbi memory.* espliciti».
+
+    Toglierlo e basta avrebbe rotto **6 agenti su 8 su venere e 5 su 5 su
+    marte** — misurato — e li avrebbe rotti in silenzio: un verbo che sparisce da
+    un insieme implicito non lascia traccia da nessuna parte, e l'agente scopre
+    di non poterlo più fare mentre lavora.
+
+    Quindi la migrazione va PRIMA della rimozione, e non concede nulla di nuovo:
+    scrive ciò che quegli agenti già potevano fare. Una sola volta, perché chi
+    dopo toglie `memory.*` di proposito non se lo deve ritrovare rimesso — è la
+    differenza fra una migrazione e una regola che sovrascrive una decisione.
+    """
+    if not isinstance(agents, dict):
+        return False
+    fatta = False
+    for nome, spec in agents.items():
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("memory_declared"):
+            continue
+        at = spec.setdefault("allowed_tools", [])
+        if not isinstance(at, list):
+            continue
+        gia = "*" in at or any(str(t).startswith("memory.") for t in at)
+        if not gia:
+            at.append("memory.*")
+        spec["memory_declared"] = True     # marcatore: la migrazione è passata
+        fatta = True
+    return fatta
+
+
 def _load_config() -> dict:
     base = _read_yaml(_DEFAULT_CONFIG_PATH)
     if not CONFIG_PATH.exists():
@@ -50,6 +85,8 @@ def _load_config() -> dict:
             changed = True
     cfg.setdefault("workspace_root", base.get("workspace_root"))
     cfg.setdefault("mcp_backends", base.get("mcp_backends", []))
+    if _declare_memory(c_agents):
+        changed = True
     if changed:
         with open(CONFIG_PATH, "w") as f:
             yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
