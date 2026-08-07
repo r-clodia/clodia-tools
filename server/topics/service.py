@@ -449,6 +449,21 @@ class TopicService:
         r = meta.get("remote") or {}
         if not r:
             return None
+        # SOLO i remote che sono davvero un altro FILESYSTEM si montano.
+        #
+        # Un remote **git** non lo è: i file stanno in locale e vengono spinti,
+        # quindi il remoto è lo stesso contenuto in un altro momento — una
+        # relazione di sincronizzazione, non un secondo piano. Montarlo produceva
+        # una cartella `remote/` annunciata nella radice e non risolvibile:
+        # entrandoci, «remote non raggiungibile» → 404 (7 ago 2026, su
+        # `proof-of-flex-sviluppo`).
+        #
+        # È la precisazione che mancava alla voce 17.6: i due piani convivono su
+        # Drive, dove il remoto è davvero un filesystem diverso. Su git i due
+        # piani sono gli stessi file, ed è per questo che lì la convivenza era già
+        # vera prima di A2.
+        if str(r.get("type") or "").strip().lower() != "drive":
+            return None
         cfg = r.get("config") or {}
         mid = str(cfg.get("id") or r.get("type") or "").strip().lower()
         return mid if re.match(r"^[a-z0-9][a-z0-9-]{0,30}$", mid) else None
