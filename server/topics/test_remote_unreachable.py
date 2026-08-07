@@ -50,12 +50,20 @@ class RemoteUnreachableTests(unittest.TestCase):
         self.assertIn("note.md", [e["name"] for e in out])
 
     def test_topic_root_listing_is_unaffected(self) -> None:
-        # root listing does not touch the remote backend: it must keep working
-        # even with the remote down, since meta/summary are local.
+        """La radice non tocca il backend remoto: deve funzionare col remote
+        morto. La proprieta' resta, l'aspettativa cambia — dal 7 ago 2026 la
+        radice e' quella dei DATI e mostra i mount, non piu' meta/summary.
+
+        Anzi la proprieta' e' piu' forte di prima: `data_mounts` legge il meta
+        LOCALE per sapere se un remote c'e', e non prova mai a raggiungerlo. Se
+        un giorno lo facesse, un token Drive scaduto renderebbe illeggibile
+        anche l'elenco delle cartelle."""
         with patch.object(TopicService, "_files_backend",
                           side_effect=RuntimeError("invalid_grant")):
             out = self.svc.list_files("SEAL-1", "t", "")
-        self.assertIn("summary.md", [e["name"] for e in out])
+        # La fixture non configura un remote nel meta: qui conta che la radice
+        # RISPONDA invece di propagare il guasto del backend.
+        self.assertEqual([e["name"] for e in out], ["local"])
 
 
 if __name__ == "__main__":

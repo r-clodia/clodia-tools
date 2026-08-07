@@ -103,12 +103,32 @@ class RootTests(Base):
         nomi = [e["name"] for e in self.svc.list_files("SEAL-1", "acme")]
         self.assertNotIn("files", nomi)
 
-    def test_the_control_plane_stays_visible_but_is_not_a_mount(self):
-        """Vedere meta.json e summary.md è utile; renderli scrivibili per path
-        sarebbe disfare A1. Restano voci della radice, non mount."""
-        voci = {e["name"]: e for e in self.svc.list_files("SEAL-1", "acme")}
-        self.assertIn("summary.md", voci)
-        self.assertEqual(voci["summary.md"]["kind"], "file")
+    def test_the_control_plane_is_not_in_the_data_tree(self):
+        """La radice è quella dei DATI. Prima mostrava anche meta.json,
+        summary.md e i `meta.json.bak-*` di vecchie migrazioni: rumore in un
+        browser di file, e — peggio — insegnava che quei file sono raggiungibili
+        per path come gli altri, cioè il contrario di ciò che A1 ha stabilito.
+
+        Si leggono coi loro verbi: stato e deadline nella sezione Meta della
+        sidebar, il TLDR nell'intestazione, AGENTS.md nel suo pannello."""
+        nomi = [e["name"] for e in self.svc.list_files("SEAL-1", "acme")]
+        for cp in ("meta.json", "summary.md", "AGENTS.md"):
+            self.assertNotIn(cp, nomi)
+        self.assertEqual(sorted(nomi), ["local"])
+
+    def test_migration_backups_no_longer_leak_into_the_view(self):
+        """Il caso concreto visto su proof-of-flex-2: due `meta.json.bak-*`
+        mostrati a un utente che non li aveva chiesti."""
+        import pathlib as _p
+        d = self.root / "SEAL-1" / "acme"
+        (d / "meta.json.bak-20260728").write_text("{}", encoding="utf-8")
+        nomi = [e["name"] for e in self.svc.list_files("SEAL-1", "acme")]
+        self.assertFalse([n for n in nomi if ".bak" in n])
+
+    def test_the_control_plane_is_still_readable_by_path(self):
+        """Non più navigabile non vuol dire sparito: chi sa cosa cerca lo legge."""
+        self.assertIn(b"", self.svc.read_file("SEAL-1", "acme", "meta.json")[:0] or b"")
+        self.assertTrue(self.svc.read_file("SEAL-1", "acme", "meta.json"))
 
     def test_the_root_shows_both_mounts_with_a_remote(self):
         ctx, _ = self._with_remote()

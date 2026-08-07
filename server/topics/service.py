@@ -1449,10 +1449,29 @@ class TopicService:
                             # su dati storici è la direzione d'errore sbagliata.
                             "provenance": (prov_map.get(rel_in_files) or {}).get(
                                 "provenance", "unknown")})
+        elif not rel:
+            # LA RADICE DELL'ALBERO DEI DATI: solo i mount.
+            #
+            # Prima mostrava anche il control-plane — `meta.json`, `summary.md` e
+            # perfino i `meta.json.bak-*` lasciati da vecchie migrazioni. Erano
+            # rumore in un browser di file: nessuno naviga un topic per leggere
+            # il JSON dei suoi metadati, e i backup non li aveva chiesti nessuno.
+            #
+            # E non è solo estetica: la voce 17.6 dice che il control-plane NON
+            # ha un path in questo albero. Mostrarcelo insegnava il contrario, cioè
+            # che quei file sono raggiungibili per path come tutti gli altri —
+            # esattamente l'idea da cui A1 li ha tolti.
+            #
+            # Dove si leggono adesso: stato e deadline nella sezione Meta della
+            # sidebar, il TLDR nell'intestazione, `AGENTS.md` nel suo pannello.
+            # Ognuno col suo verbo, che è il punto.
+            out.extend(self.data_mounts(tier, name))
         else:
-            # root o control-plane (summary/meta) → local
+            # Sotto-path fuori dai mount: control-plane indirizzato
+            # esplicitamente. Resta leggibile per chi sa cosa cerca — non è più
+            # raggiungibile navigando.
             d = self._dir(tier, name)
-            base = f"{d}/{rel}" if rel else d
+            base = f"{d}/{rel}"
             seen_files = False
             for e in self.s.list(base):
                 if e.name.startswith("."):
@@ -1472,16 +1491,7 @@ class TopicService:
                                 "size": getattr(st, "size", None) if st else None,
                                 "mtime_iso": _iso(st.mtime) if st else None,
                                 "md5": getattr(st, "md5", None) if st else None})
-            # La radice dell'albero dei DATI: i due mount, sempre, anche quando
-            # una delle due cartelle è vuota — ci si deve poter entrare per
-            # caricare. `local/` esiste sempre; `remote/` solo se ce n'è uno.
-            #
-            # Il control-plane (meta.json, summary.md, AGENTS.md) resta VISIBILE
-            # qui sopra ma non ha un path in questo albero: si legge e si scrive
-            # coi suoi verbi, non navigandolo. Mostrarlo è utile, renderlo
-            # scrivibile per path sarebbe disfare A1.
-            if not rel:
-                out.extend(self.data_mounts(tier, name))
+
         dirs = sorted((f for f in out if f.get("kind") == "dir"),
                       key=lambda f: f.get("name", "").lower())
         files = sorted((f for f in out if f.get("kind") != "dir"),
