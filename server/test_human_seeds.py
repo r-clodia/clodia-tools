@@ -86,21 +86,37 @@ class MatrixTests(unittest.TestCase):
         with _as(ADMIN):
             self.assertIn("*", H.seed_matrix("x"))
 
-    def test_a_member_may_do_ordinary_work(self):
+    def test_a_member_may_work_inside_a_room(self):
+        """Aprire, leggere, scrivere, parlare, cercare."""
         with _as(MEMBER):
-            m = H.seed_matrix("x")
-            for ns in ("topic", "email", "memory", "gdrive"):
-                self.assertIn(f"{ns}.*", m)
+            for v in ("topic.open", "topic.read_file", "topic.put",
+                      "topic.post_message", "topic.search"):
+                with self.subTest(verbo=v):
+                    self.assertTrue(origin._human_may("x", v))
 
     def test_a_member_may_not_touch_the_rules_of_the_machine(self):
         """Non duplica i gate: li rinforza dall'altro verso. Un gate chiede un
         consenso quando l'azione parte; questa lista dice che per un member
         certe azioni non partono affatto."""
         with _as(MEMBER):
-            m = H.seed_matrix("x")
-            for ns in ("agents", "packs", "providers", "mcp", "settings"):
-                with self.subTest(namespace=ns):
-                    self.assertNotIn(f"{ns}.*", m)
+            for v in ("settings.set", "packs.import_url", "agents.grant_tool",
+                      "providers.pause", "mcp.add"):
+                with self.subTest(verbo=v):
+                    self.assertFalse(origin._human_may("x", v))
+
+    def test_a_member_may_not_move_the_walls_directly(self):
+        """La sua richiesta non viene ignorata: la porta un agente, e diventa un
+        gate rivolto all'owner (voci 25 e 26). Il punto è che non passi *senza*
+        valutazione."""
+        with _as(MEMBER):
+            for v in ("topic.add_participant", "topic.remote_add"):
+                with self.subTest(verbo=v):
+                    self.assertFalse(origin._human_may("x", v))
+
+    def test_the_member_list_is_explicit_not_derived_by_subtraction(self):
+        """Una regola per sottrazione includerebbe in silenzio ogni verbo nuovo,
+        che è il contrario di ciò che una matrice serve a fare."""
+        self.assertTrue(all("*" not in v for v in H._MEMBER_VERBS))
 
 
 class IntersectionTests(unittest.TestCase):
@@ -115,11 +131,13 @@ class IntersectionTests(unittest.TestCase):
             self.assertTrue(origin._human_may("x", "topic.put"))
 
     def test_an_individual_declaration_can_narrow(self):
-        """«Questo member, meno»: è l'unico verso in cui ha senso."""
-        d = dict(MEMBER, tool_permissions=["topic.*"])
+        """«Questo member, meno»: è l'unico verso in cui ha senso. Il verbo
+        scelto è concesso dal SEED e negato dalla dichiarazione individuale —
+        altrimenti il test passerebbe anche senza l'intersezione."""
+        d = dict(MEMBER, tool_permissions=["topic.open", "topic.read_file"])
         with _as(d):
-            self.assertTrue(origin._human_may("x", "topic.put"))
-            self.assertFalse(origin._human_may("x", "email.send"))
+            self.assertTrue(origin._human_may("x", "topic.open"))
+            self.assertFalse(origin._human_may("x", "topic.put"))
 
     def test_without_an_individual_declaration_the_seed_decides(self):
         with _as(MEMBER):
@@ -152,10 +170,10 @@ class NonHumanTests(unittest.TestCase):
 class ConfigOverrideTests(unittest.TestCase):
     def test_config_may_narrow_a_seed(self):
         with patch("server.whitelist.CONFIG",
-                   {"human_seeds": {"member": {"tool_permissions": ["topic.*"]}}}):
+                   {"human_seeds": {"member": {"tool_permissions": ["topic.open"]}}}):
             with _as(MEMBER):
-                self.assertTrue(origin._human_may("x", "topic.put"))
-                self.assertFalse(origin._human_may("x", "email.send"))
+                self.assertTrue(origin._human_may("x", "topic.open"))
+                self.assertFalse(origin._human_may("x", "topic.put"))
 
     def test_a_broken_override_does_not_erase_the_seeds(self):
         with patch("server.whitelist.CONFIG", {"human_seeds": "spazzatura"}):
