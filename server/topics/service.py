@@ -965,6 +965,53 @@ class TopicService:
     CONFIRMABLE_HIDES_LOCAL = "confirmable:hides-local"
 
     @staticmethod
+    def _require_approved_repo(url: str | None, tier: str, name: str) -> None:
+        """Un repository è una VOCE DI WHITELIST, non un remote (voce 31).
+
+        Stessa forma della cartella Drive, e per la stessa ragione: chi può
+        collegare un remote non deve poterlo puntare ovunque arrivi la
+        credenziale di piattaforma. Finché il concetto di remote git esiste —
+        la voce 31 lo fa sparire, ed è la #28 — questo è il perimetro.
+
+        Il confronto è per **prefisso di repository**, non per host. Un cap per
+        host direbbe solo «github sì», che con una credenziale di piattaforma
+        significa ogni repository che quel token raggiunge: il perimetro sarebbe
+        nominale. La voce che serve è quella che il vocabolario già rende,
+        `https://github.com/<owner>/<repo>`.
+        """
+        u = str(url or "").strip()
+        if not u:
+            return
+        from .. import egress as _eg
+
+        def _e_un_repo(entry: str) -> bool:
+            """Una voce approva un repository solo se NE HA LA FORMA.
+
+            `https` sta in lista anche per il web, e una voce di host — un
+            `https://github.com/` ammesso per una fetch — approverebbe altrimenti
+            *ogni* repository di quell'host. Servono owner e repo: due segmenti
+            di path non vuoti.
+            """
+            resto = entry.split("://", 1)[-1]
+            pezzi = [p for p in resto.split("/")[1:] if p]
+            return len(pezzi) >= 2
+
+        approvati = [str(r).lower().rstrip("/") for r in _eg.effective_uris("egress")
+                     if str(r).lower().startswith(("https://", "http://"))
+                     and _e_un_repo(str(r).lower())]
+        if not approvati:
+            return                      # nessun perimetro dichiarato: come prima
+        norm = _eg.canonical(u.removesuffix(".git")).lower().rstrip("/")
+        for r in approvati:
+            if norm == r or norm.startswith(r + "/"):
+                return
+        raise TopicError(
+            f"il repository '{u}' non è fra quelli approvati: collegarlo a "
+            f"{tier}/{name} allargherebbe il perimetro fino a tutto ciò che la "
+            f"credenziale raggiunge. Approvarlo è un atto di chi amministra — "
+            f"va aggiunto alla lista egress (globale o dello scope).")
+
+    @staticmethod
     def _require_approved_folder(folder: str | None, tier: str, name: str) -> None:
         """Una cartella Drive è una VOCE DI WHITELIST, non un sottoalbero.
 
@@ -1015,6 +1062,8 @@ class TopicService:
         """
         if rtype not in ("git", "drive"):
             raise TopicError(f"remote type non supportato: {rtype}")
+        if rtype == "git":
+            self._require_approved_repo((config or {}).get("url"), tier, name)
         if credential is not None and rtype == "git":
             # Prima di abilitare: se l'abilitazione fallisce non deve restare in
             # giro una credenziale per un remote che non esiste.
