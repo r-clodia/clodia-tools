@@ -120,13 +120,29 @@ def _human_may(name: str, verb: str) -> bool:
     prima che il rifiuto diventi reale.
     """
     from . import human as _h
-    matrix = _h.matrix(name)
-    if matrix is None:
+    seed = _h.seed_matrix(name)      # per CLASSE: sta nel codice/config
+    own = _h.matrix(name)            # per PERSONA: sta nel suo agent.yaml
+
+    if seed is None and own is None:
         from . import gate as _gate
         if _gate.is_gated(verb):
             return _h.role(name) in ("admin", "superadmin")
         return True
-    return _matrix_allows(verb, matrix)
+
+    # Ogni dichiarazione che esiste deve consentire: INTERSEZIONE, mai
+    # sostituzione. Una persona non può eccedere il proprio seed — se potesse,
+    # il seed non definirebbe più i verbi (voce 20) e torneremmo alla matrice
+    # per persona che deriva. Nell'altro verso, una dichiarazione individuale
+    # può solo restringere: è il modo di dire «questo member, meno».
+    #
+    # L'intersezione è valutata sul VERBO invece che sulle liste: intersecare
+    # `topic.*` con `topic.put` richiederebbe un'algebra di pattern, e ogni
+    # algebra di pattern che ho visto sbaglia su un caso limite.
+    if seed is not None and not _matrix_allows(verb, seed):
+        return False
+    if own is not None and not _matrix_allows(verb, own):
+        return False
+    return True
 
 
 def _scope_role_of(name: str) -> str | None:
