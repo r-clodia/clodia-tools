@@ -323,7 +323,15 @@ async def remote(request: Request):
         if action == "enable":
             return JSONResponse(svc.remote_enable(
                 tier, name, body.get("type"), body.get("config"),
-                confirm_hides_local=bool(body.get("confirm_hides_local"))))
+                confirm_hides_local=bool(body.get("confirm_hides_local")),
+                credential=body.get("credential")))
+        if action == "set_credential":
+            # Cambiare o togliere la credenziale di uno scope senza ricollegare
+            # il remote: serve per la ROTAZIONE, che è il costo ricorrente di
+            # questo disegno. Senza una via per ruotare, una credenziale per
+            # topic si trasforma in N credenziali che nessuno rinnova più.
+            return JSONResponse(svc.set_git_credential(
+                tier, name, body.get("credential")))
         if action == "disable":
             return JSONResponse(svc.remote_disable(tier, name))
         if action == "add":

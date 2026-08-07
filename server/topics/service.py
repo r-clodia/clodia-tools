@@ -825,13 +825,68 @@ class TopicService:
         # il token non deve raggiungere altri host).
         gh_token = None
         if r["type"] == "git" and "github.com" in ((r.get("config") or {}).get("url") or ""):
-            gh_token = self._github_token()
+            gh_token, _fonte = self.git_credential(tier, name)
         return make_remote(r["type"], self._abs(tier, name, "files"),
                            self._abs(tier, name, ".remote-drive.json"),
                            drive_factory=self._remote_drive_factory,
                            github_token=gh_token)
 
-    def _github_token(self) -> str | None:
+    @staticmethod
+    def scope_credential_name(tier: str, name: str, kind: str = "git") -> str:
+        """Nome nel vault della credenziale legata a UNO scope.
+
+        Derivato dallo scope e non scelto da chi la deposita: se il nome fosse
+        libero, due topic potrebbero puntare alla stessa credenziale senza che
+        nessuno lo veda, e il confinamento sarebbe una convenzione invece di una
+        proprietà.
+        """
+        t = _normalize_tier(tier).replace("-", "").lower()
+        return f"scope_{kind}__{t}__{name}"
+
+    def git_credential(self, tier: str, name: str) -> tuple[str | None, str]:
+        """`(token, provenienza)` per il remote git di questo topic.
+
+        Provenienza è `scope` o `platform`, e viene restituita perché DEVE essere
+        visibile: un topic senza credenziale propria ricade su quella della
+        piattaforma, e un ripiego silenzioso è il modo in cui ci si convince di
+        essere isolati quando non lo si è.
+
+        Perché lo scope viene prima. Il PAT di piattaforma è letto con
+        `read_internal` — nessun controllo di grant — e viene iniettato in OGNI
+        remote git di OGNI topic: un token raggiunge tutti i repo per cui ha
+        scope, da qualunque stanza. Una credenziale di scope ne raggiunge uno.
+        """
+        from .. import vault
+        cred = self.scope_credential_name(tier, name, "git")
+        try:
+            bundle = vault.read_internal(cred) or {}
+            tok = bundle.get("value")
+            if tok:
+                return tok, "scope"
+        except Exception:  # noqa: BLE001 — assente o illeggibile → ripiego
+            pass
+        return self._platform_github_token(), "platform"
+
+    def set_git_credential(self, tier: str, name: str, token: str | None) -> dict:
+        """Deposita (o rimuove) la credenziale git di questo scope.
+
+        `grant_agents=[]`: nessun agente la legge. La usa il GATEWAY quando
+        esegue un verbo remote per QUESTO topic — è legata allo scope, non a un
+        agente, ed è la prima credenziale del sistema a esserlo.
+        """
+        from .. import vault
+        cred = self.scope_credential_name(tier, name, "git")
+        if not (token or "").strip():
+            try:
+                vault.remove(cred)
+            except Exception:  # noqa: BLE001 — già assente
+                pass
+            return {"credential": None, "source": "platform"}
+        vault.deposit(cred, {"value": token.strip()},
+                      cred_type="git-token", grant_agents=[], actions=[])
+        return {"credential": cred, "source": "scope"}
+
+    def _platform_github_token(self) -> str | None:
         """PAT GitHub dal vault (deposto da tools_api.github_connect come
         {'value': pat}); None se assente."""
         from .. import vault
@@ -877,7 +932,16 @@ class TopicService:
                 self._write_meta(tier, name, meta, base_version=ver)
             except Exception:  # noqa: BLE001 — race sul meta: riproverà al prossimo status
                 pass
-        return rem.status() if rem else {"enabled": False}
+        st = rem.status() if rem else {"enabled": False}
+        # QUALE credenziale usa questo remote, sempre. Un topic senza credenziale
+        # propria ricade su quella della piattaforma, e il ripiego silenzioso è il
+        # modo in cui ci si convince di essere isolati quando non lo si è: chi
+        # guarda lo stato deve poter distinguere «ha la sua» da «usa quella di
+        # tutti». Il VALORE non compare mai — solo la provenienza.
+        if (meta.get("remote") or {}).get("type") == "git":
+            tok, fonte = self.git_credential(tier, name)
+            st["credential_source"] = fonte if tok else "none"
+        return st
 
     #: Marcatore nel messaggio d'errore: dice alla UI che questo rifiuto è
     #: CONFERMABILE, non definitivo. Senza un marcatore il frontend dovrebbe
@@ -886,9 +950,22 @@ class TopicService:
     CONFIRMABLE_HIDES_LOCAL = "confirmable:hides-local"
 
     def remote_enable(self, tier: str, name: str, rtype: str, config: dict | None = None,
-                      confirm_hides_local: bool = False) -> dict:
+                      confirm_hides_local: bool = False,
+                      credential: str | None = None) -> dict:
+        """`credential`: PAT valido SOLO per questo scope. Opzionale — senza, il
+        topic ricade sulla credenziale di piattaforma, e `remote_status` lo dice.
+
+        Il momento del collegamento è quello giusto per chiederla: è l'unico in
+        cui chi la fornisce sa a quale repository serve, e una credenziale
+        ristretta a un repo limita il danno di una stanza compromessa a quel
+        repo — invece che a tutto ciò che il token di piattaforma raggiunge.
+        """
         if rtype not in ("git", "drive"):
             raise TopicError(f"remote type non supportato: {rtype}")
+        if credential is not None and rtype == "git":
+            # Prima di abilitare: se l'abilitazione fallisce non deve restare in
+            # giro una credenziale per un remote che non esiste.
+            self.set_git_credential(tier, name, credential)
         # Guard SEAL sul VERO punto di attivazione di Drive (non solo in
         # migrate_storage): dati confidenziali di tier > cap non devono finire su
         # Google come filesystem live (#45 review, Prima Legge/GDPR). Copre anche
