@@ -34,7 +34,8 @@ CFG = {"agents": {
 }}
 
 # davide: admin, tutto. giovanni: membro, solo lettura di topic. matteo: senza
-# matrice dichiarata → si ricade sulla regola precedente.
+# matrice PROPRIA → vale quella del suo seed (`member`), non più la regola
+# precedente: dal 7 ago 2026 è il seed a definire i verbi (voce 20).
 SEEDS = {
     "davide": {"type": "human", "role": "superadmin", "tool_permissions": ["*"]},
     "giovanni": {"type": "human", "role": "member",
@@ -136,16 +137,32 @@ class TheRuleTests(Base):
 
 
 class HumanMatrixTests(Base):
-    def test_a_human_with_no_declared_matrix_falls_back_to_the_previous_rule(self):
-        """Direzione della retrocompatibilità: «come prima», non «tutto chiuso».
+    def test_a_human_with_no_matrix_of_their_own_gets_their_seeds(self):
+        """Contratto cambiato il 7 ago 2026 (voce 20: «il loro seed definisce
+        verbi e tier»).
 
-        Introdurre il modello non deve disconnettere gli utenti esistenti — che
-        oggi non hanno matrice — perché un controllo che rompe il lavoro viene
-        spento, e allora non protegge niente. La modalità di osservazione serve a
-        scoprire quali matrici scrivere prima che il rifiuto diventi reale.
+        Prima, un umano senza matrice ricadeva sulla regola precedente — tutto
+        ciò che non è gated. Ora ricade sul proprio SEED, che è il punto: se
+        l'assenza di una dichiarazione individuale significasse ancora «tutto»,
+        i due seed non definirebbero nulla e sarebbero il settimo meccanismo
+        dichiarato che nessuno porta.
+
+        Questo RESTRINGE, e va detto. La direzione della retrocompatibilità
+        resta «come prima» in un senso preciso: nessuno perde niente **oggi**,
+        perché l'enforcement dell'origin è `report` e il rifiuto è osservato, non
+        applicato. Il momento in cui questa modifica morde è E1 — accendere
+        `CLODIA_ORIGIN_ENFORCE=on` — ed è esattamente per questo che E1 è un
+        passo separato e annunciato invece di un effetto collaterale.
         """
         v = self.verdict(["human:matteo", "agent:messaggero"], "email.send")
-        self.assertEqual(v["action"], "allow")
+        self.assertEqual(v["action"], "deny")
+
+    def test_and_the_room_verbs_of_that_seed_still_pass(self):
+        """Il contrappeso del test sopra: un member non è azzittito, lavora
+        nella sua stanza."""
+        self.assertEqual(
+            self.verdict(["human:matteo", "agent:clodia"], "topic.put")["action"],
+            "allow")
 
     def test_but_a_gated_verb_still_needs_admin_in_the_fallback(self):
         with patch("server.gate.is_gated", lambda v: v == "packs.remove"):

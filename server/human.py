@@ -114,25 +114,30 @@ def is_admin(name: str) -> bool:
 SEED_ADMIN = "admin"
 SEED_MEMBER = "member"
 
-#: Cosa un member può invocare DIRETTAMENTE. Derivata dai namespace reali, non
-#: inventata: fuori restano i cinque che cambiano le regole della macchina —
-#: `agents`, `packs`, `providers`, `mcp`, `settings` — più `workflows`, che è in
-#: via di rimozione.
+#: Cosa un member può invocare. NON inventata: è la lista che i tre member
+#: dell'istanza portavano già, identica in tutti e tre — tre scelte indipendenti
+#: convergenti sono la policy, e questo la mette in UN posto invece di tre copie
+#: mantenute a mano (tre copie della stessa regola sono il modo in cui una
+#: regola diverge; qui non era ancora successo).
 #:
-#: Non è una duplicazione dei gate: è difesa in profondità nell'altro verso. Un
-#: gate chiede un consenso quando l'azione parte; questa lista dice che per un
-#: member certe azioni non partono affatto. Se un verbo amministrativo restasse
-#: gated per errore, il member lo troverebbe comunque chiuso.
-_MEMBER_NAMESPACES = (
-    "artifact", "egress", "email", "eu_corpus", "fs", "gcalendar", "gdocs",
-    "gdrive", "gsheets", "image", "ingress", "integrations", "jobs", "logs",
-    "memory", "profile", "rag", "runtime", "telegram", "topic", "trello",
-    "web",
+#: Lavorare dentro una stanza, insomma: aprire, leggere, scrivere, parlare,
+#: cercare. Fuori restano i verbi che cambiano le regole della macchina e quelli
+#: che spostano il confine di uno scope — per quelli un member non ha titolo
+#: diretto, e la sua richiesta passa da un agente e diventa un gate rivolto
+#: all'owner (voci 25 e 26).
+#:
+#: Esplicita e non ricavata per sottrazione: una regola per sottrazione
+#: includerebbe in silenzio ogni verbo nuovo, che è il contrario di ciò che una
+#: matrice serve a fare. Sovrascrivibile in `config.yaml` (`human_seeds`).
+_MEMBER_VERBS = (
+    "topic.open", "topic.list", "topic.files", "topic.search", "topic.fetch",
+    "topic.read_file", "topic.read_document",
+    "topic.put", "topic.write_file", "topic.save_summary", "topic.post_message",
 )
 
 _BUILTIN_SEEDS: dict[str, dict] = {
     SEED_ADMIN: {"tool_permissions": ["*"]},
-    SEED_MEMBER: {"tool_permissions": [f"{ns}.*" for ns in _MEMBER_NAMESPACES]},
+    SEED_MEMBER: {"tool_permissions": list(_MEMBER_VERBS)},
 }
 
 
