@@ -311,8 +311,15 @@ def list_requests() -> list:
     live = {k: v for k, v in d.items() if now - float((v or {}).get("at", 0)) <= _REQ_TTL}
     if len(live) != len(d):
         _save(_req_path(), live)
+    # `class` viaggia con la richiesta perché l'autorità sulla classificazione è
+    # QUI: chi approva sta in un altro servizio e non deve riderivarla: una
+    # regola duplicata diverge (è la lezione del confronto `== "admin"`).
+    # `chat` è registrato da noi al momento della richiesta, da `current_chat()`
+    # — claim firmato. Chi approva NON deve dirci in quale stanza si trovava
+    # l'azione: sarebbe la parola di chi chiede su dove si trova.
     return [{"id": k, "agent": v["agent"], "instance": v.get("instance", "-"),
              "verb": v["verb"], "context": v.get("context"), "human": v.get("human"),
+             "class": gate_class(v["verb"]),
              "chat": v.get("chat"), "mode": v.get("mode", "sync"),
              "reason": v.get("reason", ""), "age_s": int(now - float(v.get("at", 0)))}
             for k, v in live.items()]
