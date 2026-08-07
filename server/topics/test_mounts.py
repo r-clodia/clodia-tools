@@ -176,6 +176,44 @@ class BothPlanesVisibleTests(Base):
         self.run_with(ctx, go)
 
 
+class GitRemoteTests(Base):
+    """Un remote GIT non monta un secondo piano.
+
+    Difetto introdotto da A2 e trovato in esercizio il 7 ago 2026 su
+    `proof-of-flex-sviluppo`: la radice annunciava una cartella `remote/` che non
+    si poteva aprire — «remote non raggiungibile» → 404 → 502 nella UI.
+
+    La ragione non è un errore di codice ma di modello: con git i file stanno in
+    locale e vengono spinti, quindi il remoto è LO STESSO contenuto in un altro
+    momento — una relazione di sincronizzazione, non un filesystem diverso. È il
+    motivo per cui, su git, i due piani convivevano già prima di A2.
+    """
+
+    def _with_git_remote(self):
+        meta, ver = self.svc._read_meta("SEAL-1", "acme")
+        meta["remote"] = {"type": "git", "config": {"url": "https://github.com/x/y.git"}}
+        self.svc._write_meta("SEAL-1", "acme", meta, base_version=ver)
+
+    def test_a_git_remote_does_not_advertise_a_remote_folder(self):
+        self._with_git_remote()
+        nomi = [e["name"] for e in self.svc.list_files("SEAL-1", "acme")]
+        self.assertEqual(nomi, ["local"])
+
+    def test_the_files_stay_reachable_under_local(self):
+        """Il contenuto non sparisce: è lo stesso di prima, sotto `local/`."""
+        self._with_git_remote()
+        locali = [e["name"] for e in self.svc.list_files("SEAL-1", "acme", "local")]
+        self.assertIn("nota-locale.md", locali)
+
+    def test_navigating_remote_says_there_is_no_mount(self):
+        """E se qualcuno ci prova lo stesso, il rifiuto spiega perché — invece di
+        un 404 che sembra un guasto."""
+        self._with_git_remote()
+        with self.assertRaises(TopicError) as cm:
+            self.svc.read_file("SEAL-1", "acme", "remote/git/x.md")
+        self.assertIn("non ha un remote", str(cm.exception))
+
+
 class LegacyPathTests(Base):
     """La forma `files/x` non deve cambiare bersaglio: mapparla su `local/`
     farebbe puntare a file locali invisibili ogni riferimento già scritto."""
