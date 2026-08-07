@@ -2179,10 +2179,15 @@ def _email_account(arguments: dict) -> str:
     )
 
 
-# Namespace UNIVERSALI: disponibili a OGNI agente senza grant per-agente.
-# `memory` = la seed memory dell'agente stesso (scoped alla sua sola cartella),
-# accumulo di esperienza scrivibile da tutti (inclusi i nativi).
-_UNIVERSAL_NS = {"memory"}
+# Nessun namespace è più universale (Davide, 7 ago 2026: «lasciamo i verbi
+# memory.* espliciti»). `memory` lo era: concesso a ogni agente senza comparire
+# nella sua scheda, quindi impossibile da vedere leggendo la configurazione e
+# impossibile da togliere a qualcuno in particolare.
+#
+# L'insieme resta, vuoto, invece di sparire con la sua funzione: se domani
+# tornasse la tentazione di un namespace implicito, il posto in cui metterlo è
+# questo, con il commento che dice perché ne siamo usciti.
+_UNIVERSAL_NS: set = set()
 
 
 def _tool_allowed(name: str, allowed: set) -> bool:
@@ -2440,6 +2445,53 @@ def _carries(agent: str | None) -> set:
     return {str(x).strip().strip("/") for x in raw if str(x).strip()}
 
 
+def _require_room_carries(meta: dict, tier: str, tname: str, qui: str | None) -> None:
+    """La portabilità avviene solo se la STANZA regge il tier del topic portato.
+
+    Regola di Davide, 7 ago 2026: «se il topic portabile TP ha SEAL-3, allora di
+    sicuro un participant Alice sarà SEAL-3 o superiore. Se Alice viene convocata
+    in un topic T SEAL-1 semplicemente non avviene la portabilità dei dati».
+
+    È l'anello più debole applicato al trasporto. Il vincolo non sta
+    sull'appartenenza — chi partecipa a TP ha già la clearance — ma sulla stanza:
+    dati SEAL-3 non entrano in una stanza SEAL-1, perché lì li leggerebbero i
+    partecipanti di quella.
+
+    **Si rifiuta, non si gata.** Un gate lascerebbe a qualcuno la facoltà di
+    approvare proprio il travaso che questa regola esiste per impedire, e il
+    consenso di un owner non alza il tier di una stanza.
+
+    **In un job si porta, e si segnala.** Un job ha un tier dal 7 ago (voce 33),
+    ma quel tier non arriva al gateway: `current_channel()` è `None` e il claim
+    non lo porta. Qui NON si chiude, e la scelta è deliberata contro la direzione
+    tenuta altrove — un `carries` in un job è **dichiarato** da qualcuno, non è
+    un accesso che si insinua, e l'output di un run va al suo owner, non a una
+    stanza piena di partecipanti altrui. Chiudere romperebbe una cosa scritta
+    apposta per far valere una regola che l'infrastruttura non sa ancora
+    valutare, ed è così che un controllo viene spento.
+
+    Il pezzo mancante è preciso e sta scritto fra i punti aperti: il tier del job
+    deve arrivare nel claim firmato. Finché non arriva, si logga.
+    """
+    t_topic = _rank(meta.get("tier", tier))
+    if not qui:
+        if t_topic > 0:
+            import logging as _lg
+            _lg.getLogger("clodia-tools").warning(
+                "portabilità · %s/%s è SEAL-%s e si porta in un'esecuzione senza "
+                "stanza nota (job): consentito, ma il tier non è verificabile qui",
+                tier, tname, t_topic)
+        return
+    q_tier, _, _q = qui.partition("/")
+    if _rank(q_tier) >= t_topic:
+        return
+    raise PermissionError(
+        f"il topic portabile {tier}/{tname} è SEAL-{t_topic}, questa stanza è "
+        f"{q_tier}: qui la portabilità non avviene, e i suoi dati non sono "
+        f"disponibili. Non è un permesso che manca — è il livello della stanza. "
+        f"Se ti servono quei dati, il posto in cui leggerli è {tier}/{tname}.")
+
+
 def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
     """Chiave di gate per l'accesso CROSS-TOPIC.
 
@@ -2484,7 +2536,8 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
     if qui and _norm_scope(qui) == _norm_scope(target):
         return None                      # la propria stanza
     if _norm_scope(target) in {_norm_scope(c) for c in _carries(agent)}:
-        return None                      # dichiarato nel seed
+        _require_room_carries(meta, tier, tname, qui)
+        return None                      # portabile, e la stanza lo regge
     if _spawn_compartment_mode() == "report":
         if _topic_is_member(meta, agent):
             import logging as _lg
