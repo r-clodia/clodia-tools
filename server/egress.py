@@ -316,11 +316,70 @@ def is_vetted_source(uri: str) -> bool:
     """
     if not uri:
         return False
+    # Chi è NELLA stanza è fidato in quanto tale: l'appartenenza al perimetro è
+    # già la decisione, e riscriverne i recapiti in una lista sarebbe la stessa
+    # regola scritta due volte. Le due copie divergono — un partecipante rimosso
+    # dal topic resterebbe fidato finché qualcuno non si ricorda di togliere
+    # anche il suo indirizzo, e nessuno se ne accorgerebbe perché un taint che
+    # non si accende non si vede.
+    if is_perimeter_source(uri):
+        return True
     # Anche in ingresso vale l'unione globale + scope: una fonte approvata in una
     # stanza è fidata LÌ. Simmetrico all'uscita, e per la stessa ragione — la
     # lista globale ha un asse solo, quindi una fonte approvata per un topic
     # diventerebbe fidata per tutti.
     return any(_matches(uri, r) for r in effective_uris("ingress"))
+
+
+def perimeter_addresses(scope: str | None = None) -> set[str]:
+    """Recapiti email di chi appartiene allo scope: owner e partecipanti.
+
+    Vuoto fuori da una stanza, o se il topic non è leggibile. **Fail-closed**:
+    non riuscire a leggere il perimetro non rende nessuno fidato — degradare ad
+    «autorizzato» su un guasto trasformerebbe un errore in un permesso.
+    """
+    s = scope if scope is not None else _scope_of_call()
+    if not s:
+        return set()
+    tier, _, name = s.partition("/")
+    if not (tier and name):
+        return set()
+    try:
+        from .main import _topics
+        from . import human as _h
+        meta = (_topics().open(tier, name) or {}).get("meta") or {}
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("perimetro di %s illeggibile (%s)", s, type(e).__name__)
+        return set()
+    membri = [meta.get("owner")]
+    parts = meta.get("participants")
+    if isinstance(parts, dict):
+        membri += list(parts.keys())
+    elif isinstance(parts, list):
+        membri += list(parts)
+    out: set[str] = set()
+    for m in membri:
+        if not m:
+            continue
+        addr = address_of(str(_h.contact_email(str(m)) or ""))
+        if addr:
+            out.add(addr)
+    return out
+
+
+def is_perimeter_source(uri: str) -> bool:
+    """True se `uri` identifica qualcuno che è NELLA stanza corrente.
+
+    Oggi vale per la posta (`mailfrom:`), dove la domanda «di chi è questo
+    messaggio» ha una risposta netta. Un URL o una cartella non appartengono a
+    nessuno allo stesso modo, e allargare qui senza una risposta netta
+    spegnerebbe il taint per motivi che non si possono spiegare.
+    """
+    u = (uri or "").strip().lower()
+    if not u.startswith("mailfrom:"):
+        return False
+    addr = address_of(u[len("mailfrom:"):])
+    return bool(addr) and addr in perimeter_addresses()
 
 
 #: Chiavi delle liste PER SCOPE nella config del gateway. Vivono lì e non nel

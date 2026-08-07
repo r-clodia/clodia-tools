@@ -212,6 +212,18 @@ def matrix(name: str) -> Optional[list[str]]:
     return [str(x) for x in tp] if isinstance(tp, list) else []
 
 
+def contact_email(name: str) -> Optional[str]:
+    """Recapito email dichiarato nel seed, umano o agente che sia.
+
+    Non filtra su `type: human`: un agente con un proprio recapito è comunque
+    qualcuno che sta nella stanza, e il perimetro non distingue fra i due —
+    distinguerli qui renderebbe fidato un partecipante e non l'altro senza che
+    la differenza sia stata decisa da nessuno.
+    """
+    e = _seed(name).get("email")
+    return str(e).strip() if e else None
+
+
 def clearance(name: str) -> Optional[str]:
     c = _seed(name).get("clearance")
     return str(c) if c else None
