@@ -129,9 +129,67 @@ def _human_may(name: str, verb: str) -> bool:
     return _matrix_allows(verb, matrix)
 
 
+def _scope_role_of(name: str) -> str | None:
+    """Ruolo del principal nello scope CORRENTE, o `None` fuori da uno scope.
+
+    Lo scope arriva dal claim `chat` FIRMATO — mai da un argomento, che sarebbe
+    la parola di chi chiede su dove si trova.
+    """
+    try:
+        from .whitelist import current_channel
+        scope = current_channel()
+        if not scope:
+            return None
+        tier, _, tname = scope.partition("/")
+        from . import main as _m
+        meta = _m._topics().open(tier, tname).get("meta", {})
+        from .topics.service import TopicService as _T
+        return _T.participant_role(meta, name)
+    except Exception:  # noqa: BLE001 — uno scope illeggibile non è un permesso
+        return None
+
+
+def _scope_allows(name: str, verb: str) -> bool:
+    """Il RUOLO nello scope consente questo verbo?
+
+    Terzo termine dell'intersezione. Fino a oggi la catena diceva «ha chiesto
+    Giovanni» e si fermava lì: contribuiva la matrice GLOBALE di Giovanni, la
+    stessa in ogni stanza. Ma Giovanni è owner del job che ha creato e reader in
+    `proof-of-flex`, e il modello dice da stamattina che l'accesso appartiene
+    allo scope e non al seed — né, per gli umani, al solo profilo.
+
+    Fuori da uno scope, o per chi non ne è partecipante, questo termine non si
+    pronuncia: `True`. Non è una scappatoia — la partecipazione è già verificata
+    altrove, e far rifiutare QUI qualcosa che non riguarda uno scope
+    trasformerebbe un termine in un secondo controllo di appartenenza, con due
+    posti che possono divergere.
+    """
+    r = _scope_role_of(name)
+    if r is None:
+        return True
+    from .topics.service import TopicService as _T
+    if r != _T.ROLE_READER:
+        return True
+    from . import main as _m
+    ns, _, tail = verb.partition(".")
+    if ns == "topic":
+        return tail not in _m._TOPIC_MUTATING_VERBS
+    # Fuori dai verbi `topic.*` il criterio è l'uscita: un reader non fa uscire
+    # nulla dalla stanza. Leggere e parlare restano suoi.
+    from . import egress as _eg
+    return _eg.spec_for(verb) is None
+
+
 def principal_may(kind: str, name: str, verb: str) -> bool:
-    """Un singolo anello della catena può usare `verb`?"""
-    return _human_may(name, verb) if kind == "human" else _agent_may(name, verb)
+    """Un singolo anello della catena può usare `verb`?
+
+    INTERSEZIONE, mai unione: per un umano contano la matrice del suo profilo E
+    il ruolo che ha nella stanza in cui sta. Un ruolo non concede ciò che il
+    profilo nega, e un profilo non concede ciò che il ruolo nega.
+    """
+    if kind != "human":
+        return _agent_may(name, verb)
+    return _human_may(name, verb) and _scope_allows(name, verb)
 
 
 def evaluate(chain: Iterable[tuple[str, str]], verb: str) -> dict:
@@ -149,9 +207,18 @@ def evaluate(chain: Iterable[tuple[str, str]], verb: str) -> dict:
         return {"action": "unknown", "chain": [], "verb": verb}
     for kind, name in links:
         if not principal_may(kind, name, verb):
+            # PERCHÉ ha rifiutato, non solo chi. «Il tuo profilo non ha questo
+            # verbo» e «qui sei reader» si risolvono con due persone diverse — un
+            # admin il primo, l'owner del topic il secondo — e un messaggio che
+            # non distingue manda a chiedere alla persona sbagliata.
+            motivo = "profilo"
+            if kind == "human" and _human_may(name, verb) and not _scope_allows(name, verb):
+                motivo = "ruolo-nello-scope"
             return {"action": "deny", "verb": verb,
                     "chain": [f"{k}:{n}" for k, n in links],
-                    "refused_by": f"{kind}:{name}", "kind": kind, "name": name}
+                    "refused_by": f"{kind}:{name}", "kind": kind, "name": name,
+                    "reason": motivo, "scope_role": _scope_role_of(name)
+                    if kind == "human" else None}
     return {"action": "allow", "verb": verb,
             "chain": [f"{k}:{n}" for k, n in links]}
 
@@ -162,6 +229,13 @@ def denial_message(v: dict) -> str:
     di sapere cosa gli manca."""
     who, kind = v.get("refused_by"), v.get("kind")
     verb, chain = v.get("verb"), " → ".join(v.get("chain") or [])
+    if kind == "human" and v.get("reason") == "ruolo-nello-scope":
+        return (
+            f"`{verb}` non è consentito lungo questa catena: {chain}. Il blocco "
+            f"NON è il profilo di {who} — quel permesso ce l'ha — ma il suo ruolo "
+            f"in QUESTA stanza: è reader, e un reader legge e parla senza "
+            f"modificare. Si risolve con l'owner del topic, non con un admin: "
+            f"chiedigli di cambiare ruolo, oppure di eseguire lui l'azione.")
     if kind == "human":
         return (
             f"`{verb}` non è consentito lungo questa catena: {chain}. Il blocco è "
