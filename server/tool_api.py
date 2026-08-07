@@ -48,33 +48,65 @@ class _Ctx:
     Necessario perché questi endpoint sono FUORI dal mount `/mcp` (che ha il suo
     middleware) → qui li settiamo a mano, identici a `_AuthMiddleware`."""
 
+    # I token si tengono per NOME, non per posizione.
+    #
+    # Erano una lista rilasciata per indice, e il 5 ago 2026 l'aggiunta di
+    # `origin` per la catena di delega ha spostato tutto di uno: `__exit__`
+    # passava il token di `origin` al reset di `scoped_tools` — che solleva
+    # `ValueError: was created by a different ContextVar` — e `origin` non veniva
+    # rilasciato affatto.
+    #
+    # L'effetto visibile era irriconoscibile dalla causa: `/internal/authorize`
+    # DECIDEVA correttamente e poi esplodeva in uscita, rispondendo 500. Il
+    # chiamante traduce ogni non-200 in «negato», e all'utente arrivava
+    # «azione riservata agli admin» — mandando a cercare un problema di permessi
+    # per tre giri. Un difetto di teardown travestito da rifiuto di autorizzazione.
+    #
+    # Con un dizionario di (setter, resetter) aggiungere una variabile non può
+    # più disallineare nulla: non c'è più un ordine da tenere a mente.
+    _VARS = (
+        ("agent", "set_current_agent", "reset_current_agent",
+         lambda p, t: str(p.get("agent") or "")),
+        ("principal", "set_current_principal", "reset_current_principal",
+         lambda p, t: p.get("principal") or None),
+        ("token", "set_current_token", "reset_current_token",
+         lambda p, t: t or None),
+        ("clearance", "set_current_clearance", "reset_current_clearance",
+         lambda p, t: p.get("clearance") or None),
+        ("on_behalf", "set_current_on_behalf", "reset_current_on_behalf",
+         lambda p, t: bool(p.get("on_behalf"))),
+        ("human_role", "set_current_human_role", "reset_current_human_role",
+         lambda p, t: p.get("human_role") or None),
+        ("chat", "set_current_chat", "reset_current_chat",
+         lambda p, t: p.get("chat") or None),
+        ("origin", "set_current_origin", "reset_current_origin",
+         lambda p, t: p.get("origin") or None),
+        ("scoped_tools", "set_current_scoped_tools", "reset_current_scoped_tools",
+         lambda p, t: p.get("scoped_tools") or None),
+    )
+
     def __init__(self, payload: dict, token: str):
-        self.payload, self.token, self._toks = payload, token, []
+        self.payload, self.token, self._toks = payload, token, {}
 
     def __enter__(self):
         p = self.payload
-        self._toks = [
-            whitelist.set_current_agent(str(p.get("agent") or "")),
-            whitelist.set_current_principal(p.get("principal") or None),
-            whitelist.set_current_token(self.token or None),
-            whitelist.set_current_clearance(p.get("clearance") or None),
-            whitelist.set_current_on_behalf(bool(p.get("on_behalf"))),
-            whitelist.set_current_human_role(p.get("human_role") or None),
-            whitelist.set_current_chat(p.get("chat") or None),
-            whitelist.set_current_origin(p.get("origin") or None),
-            whitelist.set_current_scoped_tools(p.get("scoped_tools") or None),
-        ]
+        for nome, setter, _res, val in self._VARS:
+            self._toks[nome] = getattr(whitelist, setter)(val(p, self.token))
         return self
 
     def __exit__(self, *exc):
-        whitelist.reset_current_scoped_tools(self._toks[7])
-        whitelist.reset_current_chat(self._toks[6])
-        whitelist.reset_current_human_role(self._toks[5])
-        whitelist.reset_current_on_behalf(self._toks[4])
-        whitelist.reset_current_clearance(self._toks[3])
-        whitelist.reset_current_token(self._toks[2])
-        whitelist.reset_current_principal(self._toks[1])
-        whitelist.reset_current_agent(self._toks[0])
+        # In ordine inverso, e ogni reset protetto: un rilascio che solleva non
+        # deve impedire i successivi, altrimenti un contextvar resta impostato
+        # per la richiesta seguente sullo stesso task.
+        for nome, _set, resetter, _val in reversed(self._VARS):
+            tok = self._toks.get(nome)
+            if tok is None:
+                continue
+            try:
+                getattr(whitelist, resetter)(tok)
+            except Exception:  # noqa: BLE001
+                LOG.warning("ctx: reset di '%s' fallito", nome, exc_info=True)
+        self._toks.clear()
         return False
 
 
