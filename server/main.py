@@ -21,7 +21,7 @@ from .whitelist import (agent_config, agent_denies, agent_gates, agent_name,
                         outside_profile,
                         current_chat, current_clearance, current_human_role,
                         current_principal, current_scoped_tools, is_on_behalf,
-                        agent_gates_in_channel, current_channel,
+                        current_channel,
                         current_origin,
                         is_unattended)
 
@@ -2891,16 +2891,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             #  - FUORI PROFILO: l'agente può raggiungerlo ma non lo dichiara come
             #    proprio mestiere. Non è «pericoloso», è «inatteso da lui».
             _off_profile = outside_profile(name, _ag)
-            # QUARTO motivo: gated solo DENTRO un canale. Per un postino spedire
-            # non è un'anomalia — fuori da un canale è il suo mestiere. Dentro,
-            # cambia chi può chiedere: i partecipanti non sono l'owner, e il
-            # contenuto che possono far uscire è tutto quello che sta nella
-            # stanza. Solo un admin approva un gate, quindi questa è la forma in
-            # cui «serve il grant dell'admin quando sta in un canale» diventa
-            # eseguibile invece che una convenzione.
-            _in_chan = agent_gates_in_channel(name, _ag)
-            if _gate.is_gated(name) or agent_gates(name, _ag) or _off_profile \
-                    or _in_chan:
+            # `gated_in_channel` era il QUARTO motivo ed è stato RITIRATO il
+            # 7 ago 2026, dopo B2. Era il surrogato della domanda «chi sta
+            # chiedendo?», posta per approssimazione — *qualcuno è in un canale* —
+            # e l'approssimazione era grossolana due volte: una DM È un canale,
+            # quindi chiedeva l'approvazione anche all'owner per la propria
+            # richiesta nella propria DM; e non guardava affatto CHI avesse
+            # chiesto, che è precisamente ciò che diceva di proteggere.
+            #
+            # Ora quella domanda ha una risposta esatta: la catena `origin` nomina
+            # `human:giovanni` o `human:davide` e ne interseca il ruolo nella
+            # stanza. Un surrogato che sopravvive alla cosa che surrogava diventa
+            # un secondo controllo che dice altro — e due controlli sulla stessa
+            # domanda divergono, come oggi hanno fatto tre volte.
+            if _gate.is_gated(name) or agent_gates(name, _ag) or _off_profile:
                 if name == "web.post":
                     reason = web_post.gate_summary(arguments)
                 elif name in ("egress.allow", "ingress.allow"):
@@ -2913,14 +2917,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                              else "destinazione ammessa")
                     reason = (f"@{_ag} chiede di aggiungere {_u} come {_what}, "
                               f"per TUTTI gli agenti. {_eg.admin_note(_dir, _u)}")
-                elif _in_chan:
-                    _ch = current_channel() or "un canale"
-                    reason = (f"@{_ag} vuole usare `{name}` dentro il canale "
-                              f"{_ch}. Fuori da un canale lo fa senza chiedere: "
-                              f"qui no, perché i partecipanti non sono l'owner e "
-                              f"il contenuto che può uscire è tutto quello che sta "
-                              f"nella stanza. Approvi TU, come admin, e vale una "
-                              f"volta.")
                 elif _off_profile:
                     reason = (f"@{_ag} chiede di usare `{name}`, che PUÒ raggiungere ma "
                               f"non dichiara nel proprio profilo. Non è un verbo "
@@ -2931,11 +2927,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     reason = ""
                 gate_approval = await _require_gate_consent(
                     _ag, name, consume=True, reason=reason,
-                    # Nessuna delega prefirmata quando il gate è quello del
-                    # canale: una delega renderebbe silenziosi gli invii
-                    # successivi per tutta la sua finestra, cioè l'opposto del
-                    # motivo per cui il gate esiste.
-                    allow_delegation=(not _in_chan) and name not in {
+                    # Niente delega prefirmata sui verbi che aprono un'uscita o
+                    # allargano un'autorità: una delega li renderebbe silenziosi
+                    # per tutta la sua finestra, cioè l'opposto del motivo per cui
+                    # il gate esiste.
+                    allow_delegation=name not in {
                         "web.post", "agents.grant_scoped", "agents.revoke_scoped"},
                 )
             _ck = _cross_topic_gate_key(name, arguments, _ag)
