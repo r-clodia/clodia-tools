@@ -109,3 +109,42 @@ class NoFourthClassTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClassTravelsWithTheRequestTests(unittest.TestCase):
+    """La classe deve arrivare a chi decide, che sta in un altro servizio.
+
+    Se sparisse da `list_requests()`, `clodia-logic` non riderivarebbe nulla:
+    tornerebbe IN SILENZIO ad «admin per tutto», e l'owner perderebbe l'autorità
+    sui gate della propria stanza senza che niente fallisca. È lo stesso modo in
+    cui `gated_in_channel` era dichiarato e non portato da nessuno.
+    """
+
+    def setUp(self):
+        import tempfile
+        from unittest.mock import patch
+        from pathlib import Path
+        self.d = tempfile.mkdtemp(prefix="gate-req-")
+        self.p = patch.object(gate, "_req_path",
+                              lambda: Path(self.d) / "req.json")
+        self.p.start()
+        self.addCleanup(self.p.stop)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_a_pending_request_carries_its_class(self):
+        gate.request("clodia", "-", "topic.add_participant",
+                     chat="chan:SEAL-1:acme:clodia")
+        r = gate.list_requests()
+        self.assertEqual(len(r), 1)
+        self.assertEqual(r[0]["class"], gate.GATE_WALLS)
+
+    def test_a_system_request_carries_its_class(self):
+        gate.request("clodia", "-", "agents.grant_tool")
+        self.assertEqual(gate.list_requests()[0]["class"], gate.GATE_SYSTEM)
+
+    def test_the_room_comes_from_the_request_not_from_the_approver(self):
+        gate.request("clodia", "-", "web.post", chat="chan:SEAL-2:proof:clodia")
+        self.assertEqual(gate.list_requests()[0]["chat"], "chan:SEAL-2:proof:clodia")
