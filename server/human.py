@@ -212,6 +212,30 @@ def matrix(name: str) -> Optional[list[str]]:
     return [str(x) for x in tp] if isinstance(tp, list) else []
 
 
+def instance_owner() -> Optional[str]:
+    """Il `superadmin`: chi possiede questa istanza. `None` se non c'è.
+
+    Serve dove un topic non può essere di un agente — la configurazione (voce
+    22) — perché un agente owner di uno scope sbloccherebbe i propri gate: il
+    confused deputy nella sua forma più pulita, e legittimato dal disegno (voce
+    24, precisazione 2).
+    """
+    root = Path(os.environ.get("CLODIA_DATA", "/datadir")) / "agents"
+    try:
+        import yaml
+        for d in sorted(root.iterdir()):
+            f = d / "agent.yaml"
+            if not f.is_file():
+                continue
+            y = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+            if y.get("type") == "human" and str(y.get("role") or "") == "superadmin":
+                return d.name
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("proprietario dell'istanza non determinabile (%s)",
+                    type(e).__name__)
+    return None
+
+
 def contact_email(name: str) -> Optional[str]:
     """Recapito email dichiarato nel seed, umano o agente che sia.
 
