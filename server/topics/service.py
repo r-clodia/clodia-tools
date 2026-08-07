@@ -1369,35 +1369,126 @@ class TopicService:
                      json.dumps(meta, ensure_ascii=False, indent=2).encode(),
                      if_version=base_version)
 
+    # ── Appartenenza graduata (system-notebook 25) ─────────────────────────
+    #
+    # Fino al 7 ago 2026 l'appartenenza era BINARIA: dieci endpoint, una guardia
+    # sola, owner e partecipante trattati allo stesso modo. Un invitato poteva
+    # azzerare la memoria conversazionale del canale e caricare l'`AGENTS.md`
+    # iniettato nel contesto di ogni agente a ogni turno.
+    #
+    # Tre ruoli, insieme CHIUSO. Non una lista di verbi per persona per scope:
+    # sarebbe l'argomento della #128 moltiplicato — là erano quattordici agenti e
+    # lo stesso indirizzo chiesto quattordici volte, qui sarebbero 156 topic per N
+    # persone, e nessuno saprebbe più dire cosa può fare qualcuno senza aprire 156
+    # file. Un insieme di tre si legge; una lista no.
+    ROLE_OWNER = "owner"
+    ROLE_CONTRIBUTOR = "contributor"
+    ROLE_READER = "reader"
+    ROLES = (ROLE_OWNER, ROLE_CONTRIBUTOR, ROLE_READER)
+
+    @staticmethod
+    def participants_map(meta: dict) -> dict:
+        """`{nome: ruolo}` dai partecipanti, qualunque forma abbiano nel meta.
+
+        Una LISTA legacy diventa tutta `contributor`, non `reader`. La direzione
+        conta: `reader` sarebbe più stretta ma toglierebbe di colpo a ogni
+        partecipante di ogni topic la possibilità di scrivere — una rottura
+        silenziosa mascherata da irrigidimento. Il comportamento resta quello di
+        oggi, e la novità è poter DICHIARARE un lettore.
+        """
+        raw = meta.get("participants")
+        owner = meta.get("owner")
+        out: dict = {}
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                r = str(v or "").strip().lower()
+                out[str(k)] = r if r in TopicService.ROLES else TopicService.ROLE_CONTRIBUTOR
+        elif isinstance(raw, list):
+            for k in raw:
+                out[str(k)] = TopicService.ROLE_CONTRIBUTOR
+        if owner:
+            # L'owner è owner ovunque compaia, e anche se non compare: il campo
+            # `owner` resta la fonte di verità per la proprietà dello scope.
+            out[str(owner)] = TopicService.ROLE_OWNER
+        return out
+
+    @staticmethod
+    def participant_role(meta: dict, chi: str | None) -> str | None:
+        """Ruolo di `chi` in questo scope, o `None` se non è partecipante."""
+        if not chi:
+            return None
+        return TopicService.participants_map(meta).get(str(chi))
+
+    @staticmethod
+    def may_mutate(meta: dict, chi: str | None) -> bool:
+        """Può MUTARE qualcosa dentro lo scope? Owner e contributor sì.
+
+        Un reader parla ma non muta (voce 26): la sua richiesta viene comunque
+        risposta, e se implica una mutazione diventa un gate rivolto all'owner —
+        non un rifiuto secco, che sarebbe scortese verso una richiesta legittima.
+        """
+        return TopicService.participant_role(meta, chi) in (
+            TopicService.ROLE_OWNER, TopicService.ROLE_CONTRIBUTOR)
+
+    @staticmethod
+    def participant_names(meta: dict) -> list[str]:
+        """Solo i nomi, per chi non ha bisogno dei ruoli — e per i chiamanti che
+        si aspettano ancora una lista."""
+        return list(TopicService.participants_map(meta).keys())
+
     def set_owner(self, tier: str, name: str, owner: str) -> dict:
         meta, v = self._read_meta(tier, name)
         meta["owner"] = owner
-        if owner not in meta.get("participants", []):
-            meta.setdefault("participants", []).append(owner)
+        # L'owner NON si duplica fra i partecipanti: `participants_map` lo
+        # aggiunge leggendo il campo `owner`, e tenerlo in due posti significa
+        # poterli far divergere.
+        if isinstance(meta.get("participants"), dict):
+            meta["participants"].pop(owner, None)
+        elif isinstance(meta.get("participants"), list):
+            meta["participants"] = [p for p in meta["participants"] if p != owner]
         self._write_meta(tier, name, meta, v)
-        return {"owner": owner, "participants": meta.get("participants", [])}
+        return {"owner": owner, "participants": meta.get("participants")}
 
-    def add_participant(self, tier: str, name: str, agent: str) -> dict:
+    def add_participant(self, tier: str, name: str, agent: str,
+                        role: str | None = None) -> dict:
+        """Invita, con un ruolo. Default `contributor`: è ciò che «invitato»
+        significava finora, e cambiarlo di nascosto renderebbe muti gli invitati
+        di ieri."""
         meta, v = self._read_meta(tier, name)
         self._assert_content_available(meta)
-        parts = meta.setdefault("participants", [])
-        added = agent not in parts
-        if added:
-            parts.append(agent)
+        r = (role or self.ROLE_CONTRIBUTOR).strip().lower()
+        if r not in self.ROLES:
+            raise TopicError(f"ruolo non valido: {role} (ammessi: {', '.join(self.ROLES)})")
+        if r == self.ROLE_OWNER:
+            raise TopicError(
+                "l'owner non si aggiunge fra i partecipanti: si imposta col campo "
+                "`owner`, che è la proprietà dello scope e non un grado di accesso")
+        mappa = self.participants_map(meta)
+        added = agent not in mappa
+        cambiato = added or mappa.get(agent) != r
+        mappa[agent] = r
+        if cambiato:
+            # Si riscrive SEMPRE come mappa: convertire alla prima modifica evita
+            # una migrazione a tappeto e lascia intatti i topic che nessuno tocca.
+            meta["participants"] = {k: val for k, val in mappa.items()
+                                    if k != meta.get("owner")}
             self._write_meta(tier, name, meta, v)
-            self.post_message(
-                tier, name, "system", f"{agent} è entrato nel topic", kind="system"
-            )
-        return {"participants": parts, "added": added}
+            if added:
+                self.post_message(
+                    tier, name, "system",
+                    f"{agent} è entrato nel topic come {r}", kind="system")
+        return {"participants": meta.get("participants"), "added": added, "role": r}
 
     def remove_participant(self, tier: str, name: str, agent: str) -> dict:
         meta, v = self._read_meta(tier, name)
         self._assert_content_available(meta)
-        parts = meta.setdefault("participants", [])
-        if agent in parts:
-            parts.remove(agent)
+        mappa = self.participants_map(meta)
+        if agent in mappa and agent != meta.get("owner"):
+            mappa.pop(agent, None)
+            meta["participants"] = {k: val for k, val in mappa.items()
+                                    if k != meta.get("owner")}
             self._write_meta(tier, name, meta, v)
-        return {"participants": parts}
+        return {"participants": meta.get("participants")}
 
     def post_message(self, tier: str, name: str, author: str, text: str,
                      kind: str = "human", attachments: list[str] | None = None) -> dict:
