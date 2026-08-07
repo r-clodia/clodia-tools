@@ -316,7 +316,81 @@ def is_vetted_source(uri: str) -> bool:
     """
     if not uri:
         return False
-    return any(_matches(uri, r) for r in source_uris())
+    # Anche in ingresso vale l'unione globale + scope: una fonte approvata in una
+    # stanza è fidata LÌ. Simmetrico all'uscita, e per la stessa ragione — la
+    # lista globale ha un asse solo, quindi una fonte approvata per un topic
+    # diventerebbe fidata per tutti.
+    return any(_matches(uri, r) for r in effective_uris("ingress"))
+
+
+#: Chiavi delle liste PER SCOPE nella config del gateway. Vivono lì e non nel
+#: meta del topic per la stessa ragione della lista globale (#80): il meta è
+#: raggiungibile dai verbi `topic.*`, mentre `/gateway-state` non è montato
+#: dall'agent-server. Una whitelist scrivibile da chi ne è soggetto non è una
+#: whitelist.
+_SCOPE_KEYS = {"egress": "scope_egress_allow", "ingress": "scope_source_allow"}
+
+
+def _scope_of_call() -> str | None:
+    """Lo scope della chiamata corrente, `<tier>/<nome>`, dal claim FIRMATO.
+
+    `None` fuori da un canale — un job, una chiamata interna. Lì vale solo la
+    lista globale: uno scope che non esiste non può avere una lista propria, e
+    dedurlo da un argomento sarebbe la parola dell'agente su dove si trova.
+    """
+    try:
+        from .whitelist import current_channel
+        return current_channel()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def scope_uris(direction: str, scope: str | None, cfg: dict | None = None) -> list[str]:
+    """Voci della lista di UNO scope. Vuota se lo scope non ne ha.
+
+    Queste liste esistono perché la lista globale ha un asse solo: approvare un
+    indirizzo lì lo apre per OGNI stanza e per sempre (#150). Con la lista per
+    scope, un'approvazione data nel topic A non autorizza niente nel topic B —
+    che è il caso Giovanni, e la ragione per cui l'asse serviva.
+    """
+    if not scope:
+        return []
+    from . import whitelist as _wl
+    c = cfg if cfg is not None else _wl.CONFIG
+    per_scope = (c.get(_SCOPE_KEYS[direction]) or {})
+    # Normalizza ENTRAMBI i lati. Normalizzare solo la chiave cercata lasciava
+    # invisibile una lista salvata sotto un alias — `P1/acme` contro
+    # `SEAL-1/acme` — cioè esattamente il caso dei due elenchi per una stanza
+    # sola di cui uno non si vede mai.
+    voluta = _norm_scope_key(scope)
+    raw: list = []
+    for k, v in per_scope.items():
+        if _norm_scope_key(str(k)) == voluta:
+            raw.extend(v or [])
+    return [canonical(str(x).strip()) for x in raw if str(x).strip()]
+
+
+def _norm_scope_key(scope: str) -> str:
+    """`P1/acme` e `SEAL-1/acme` sono lo stesso posto: due chiavi darebbero due
+    liste per una stanza sola, e una delle due resterebbe invisibile."""
+    t, _, n = (scope or "").partition("/")
+    t = t.strip().upper()
+    legacy = {"P0": "SEAL-0", "P1": "SEAL-1", "P2": "SEAL-2", "P3": "SEAL-3"}
+    return f"{legacy.get(t, t)}/{n.strip().lower()}"
+
+
+def effective_uris(direction: str = "egress", scope: str | None = None,
+                   cfg: dict | None = None) -> list[str]:
+    """Regole in vigore per una chiamata: globali PIÙ quelle dello scope.
+
+    L'unione, non la sostituzione. La lista globale resta il canale che raggiunge
+    ogni stanza — e proprio per questo dovrebbe restringersi ai recapiti
+    d'infrastruttura dell'owner, non allargarsi (voce 18).
+    """
+    base = allowed_uris(cfg) if direction == "egress" else source_uris(cfg)
+    extra = scope_uris(direction, scope if scope is not None else _scope_of_call(), cfg)
+    fuori = [u for u in extra if u not in base]
+    return list(base) + fuori
 
 
 def allowed_uris(cfg: dict | None = None) -> list[str]:
@@ -433,7 +507,7 @@ def decide(agent_cfg: dict, verb: str, arguments: dict) -> dict:
     except Exception as e:  # noqa: BLE001 — una chiamata malformata non è una decisione
         LOG.warning("egress: destinatari non estraibili da %s (%s)", verb, e)
         dests = []
-    rules = allowed_uris()
+    rules = effective_uris("egress")
 
     if not dests:
         # Destinazione non leggibile dalla chiamata → nego, a meno che la lista
@@ -621,14 +695,33 @@ def remember(agent: str, dtype: str, dests: list[str]) -> list[str]:
     added = [d for d in dests if d and d != UNKNOWN]
     if not added:
         return []
+    scope = _scope_of_call()
+    if scope:
+        # Dentro una stanza si ricorda NELLA STANZA. Approvare qui non deve
+        # aprire la destinazione altrove: è la #150, ed è la ragione per cui
+        # queste liste esistono. Alla lista globale si arriva solo con
+        # `egress.allow`, che è gated — cioè si decide, non si eredita da
+        # un'approvazione data per un caso concreto.
+        chiave = _norm_scope_key(scope)
+        per_scope = dict(_wl.CONFIG.get("scope_egress_allow") or {})
+        cur = list(per_scope.get(chiave) or [])
+        for d in added:
+            if d not in cur:
+                cur.append(d)
+        per_scope[chiave] = cur
+        _wl.CONFIG["scope_egress_allow"] = per_scope
+        _wl.save_config()
+        LOG.warning("egress · %s += %s (approvato da un umano, richiesto da %s)",
+                    chiave, ", ".join(added), agent or "?")
+        return cur
     cur = list(_wl.CONFIG.get("egress_allow") or [])
     for d in added:
         if d not in cur:
             cur.append(d)
     _wl.CONFIG["egress_allow"] = cur
     _wl.save_config()
-    LOG.warning("egress whitelist · += %s (approvato da un umano, richiesto da %s)",
-                ", ".join(added), agent or "?")
+    LOG.warning("egress whitelist GLOBALE · += %s (fuori da ogni stanza; "
+                "richiesto da %s)", ", ".join(added), agent or "?")
     return cur
 
 
