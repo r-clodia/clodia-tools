@@ -23,6 +23,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
+from typing import Optional
 
 from . import mentions
 from .storage import NotFound, Storage, StorageError, VersionConflict
@@ -416,6 +417,120 @@ class TopicService:
                 raise TopicError("remote drive: nessuna cartella configurata")
             return ds, ""
         return self.s, f"{self._dir(tier, name)}/files"
+
+    # ── L'albero dei dati: UNA vista, due mount ─────────────────────────────
+    #
+    # `local/` e `remote/<nome>/` sono due CARTELLE dello stesso albero, ognuna
+    # delle quali monta un filesystem. Non due viste affiancate: una sola, in cui
+    # nessuno deve scegliere quale aprire.
+    #
+    # Il montaggio non è decorazione, fissa cosa significa un path. `local/x` e
+    # `remote/drive/x` sono file DIVERSI che possono avere lo stesso nome — ed è
+    # per questo che la domanda «quale dei due risponde a una lettura?» non si
+    # pone: non è esprimibile. Con due viste affiancate lo stesso `x` comparirebbe
+    # in entrambe senza modo di dire quale intendesse un agente.
+    #
+    # Prima di questo, i due piani erano in XOR: collegare Drive faceva SPARIRE i
+    # file locali dalla vista (`DRIVE_REMOTE.md`: «Drive è la source of truth […]
+    # i file locali spariscono»). Su `proof-of-flex-2` significava 26 file
+    # mostrati e 65 invisibili su disco.
+    MOUNT_LOCAL = "local"
+    MOUNT_REMOTE = "remote"
+    _MOUNTS = (MOUNT_LOCAL, MOUNT_REMOTE)
+
+    def _remote_mount_name(self, meta: dict) -> Optional[str]:
+        """Nome del mount di un remote. Identificatore stabile, default sul tipo.
+
+        Il `config.name` NON va usato: è un nome di VISUALIZZAZIONE derivato dal
+        remote stesso (il titolo della cartella Drive), quindi può essere `None`,
+        può contenere spazi e slash, e cambia se qualcuno rinomina la cartella —
+        portandosi dietro ogni path memorizzato che lo citava.
+        """
+        r = meta.get("remote") or {}
+        if not r:
+            return None
+        cfg = r.get("config") or {}
+        mid = str(cfg.get("id") or r.get("type") or "").strip().lower()
+        return mid if re.match(r"^[a-z0-9][a-z0-9-]{0,30}$", mid) else None
+
+    def _local_mount(self, tier: str, name: str):
+        """Il mount locale È la cartella `files/` di oggi. Nessun file spostato:
+        `local/` è una vista su ciò che c'è già, quindi la migrazione non esiste e
+        le chiavi di provenienza già memorizzate continuano a valere."""
+        return self.s, f"{self._dir(tier, name)}/files"
+
+    def _remote_mount(self, tier: str, name: str, meta: dict):
+        """`(store, base)` del remote, o `None` se il topic non ne ha."""
+        cfg = self._drive_remote_config(meta)
+        if cfg is None:
+            return None
+        ds = self._drive_backend_for(tier, name, cfg)
+        if ds is None:
+            raise TopicError("remote drive: nessuna cartella configurata")
+        return ds, ""
+
+    def _resolve_data_path(self, tier: str, name: str, relpath: str):
+        """`(store, base, sub, mount)` per un path dell'albero dati.
+
+        Tre forme, e la terza è la ragione per cui questa funzione esiste:
+
+        - `local/x`          → mount locale, esplicito;
+        - `remote/<n>/x`     → mount del remote `<n>`, esplicito;
+        - `files/x` o `x`    → **LEGACY**, e risolve al backend EFFETTIVO, cioè a
+          ciò a cui risolveva prima di questa modifica: Drive su un topic con
+          remote Drive, locale altrimenti.
+
+        La terza forma non è pigrizia. Mapparla su `local/` avrebbe cambiato in
+        silenzio il bersaglio di ogni riferimento già scritto — nei messaggi, nelle
+        etichette di provenienza, nella memoria degli agenti — facendo puntare a
+        file locali invisibili path che oggi consegnano documenti di Drive. Un
+        cambiamento di significato senza errore è il modo peggiore di migrare.
+        """
+        rel = (relpath or "").strip().lstrip("/")
+        if ".." in rel.split("/") or "\\" in rel:
+            raise TopicError(f"path non valido: {relpath}")
+        meta, _ = self._read_meta(tier, name)
+        parts = [x for x in rel.split("/") if x]
+
+        if parts and parts[0] == self.MOUNT_LOCAL:
+            store, base = self._local_mount(tier, name)
+            return store, base, "/".join(parts[1:]), self.MOUNT_LOCAL
+
+        if parts and parts[0] == self.MOUNT_REMOTE:
+            rn = self._remote_mount_name(meta)
+            if rn is None:
+                raise TopicError(
+                    f"il topic {tier}/{name} non ha un remote: `remote/` non è montato")
+            if len(parts) == 1:
+                raise TopicError(
+                    f"`remote/` è un contenitore di mount: usa `remote/{rn}/…`")
+            if parts[1] != rn:
+                raise TopicError(
+                    f"remote '{parts[1]}' non montato su {tier}/{name} "
+                    f"(disponibile: '{rn}')")
+            rm = self._remote_mount(tier, name, meta)
+            if rm is None:
+                raise TopicError("remote non raggiungibile")
+            store, base = rm
+            return store, base, "/".join(parts[2:]), f"{self.MOUNT_REMOTE}/{rn}"
+
+        # LEGACY: `files/x` o `x` → backend effettivo, comportamento invariato.
+        _, sub = self._files_rel(rel)
+        store, base = self._files_backend(tier, name)
+        mount = (f"{self.MOUNT_REMOTE}/{self._remote_mount_name(meta)}"
+                 if store is not self.s else self.MOUNT_LOCAL)
+        return store, base, sub, mount
+
+    def data_mounts(self, tier: str, name: str) -> list[dict]:
+        """I mount dell'albero dati, per la vista file."""
+        meta, _ = self._read_meta(tier, name)
+        out = [{"name": self.MOUNT_LOCAL, "path": self.MOUNT_LOCAL, "kind": "dir",
+                "mount": "local"}]
+        rn = self._remote_mount_name(meta)
+        if rn:
+            out.append({"name": self.MOUNT_REMOTE, "path": self.MOUNT_REMOTE,
+                        "kind": "dir", "mount": "remote", "remote_name": rn})
+        return out
 
     # storage drive: livello SEAL massimo (cap). eu-west-1 → SEAL-2.
     _DRIVE_SEAL_CAP = 2
@@ -976,13 +1091,17 @@ class TopicService:
         rel = (relpath or "").lstrip("/")
         if not rel or ".." in rel.split("/"):
             raise TopicError(f"path non valido: {relpath}")
-        is_files, sub = self._files_rel(rel)
-        if is_files:
+        first = rel.split("/", 1)[0]
+        if first in self._MOUNTS or self._files_rel(rel)[0]:
             try:
-                store, base = self._files_backend(tier, name)
+                store, base, sub, _mount = self._resolve_data_path(tier, name, rel)
+            except TopicError:
+                raise
             except Exception as exc:  # noqa: BLE001 - remote backend down
                 raise _remote_unreachable(exc, tier, name) from exc
             return store.read(f"{base}/{sub}".strip("/")).data
+        # Fuori dai mount: control-plane (summary.md, meta.json, AGENTS.md), che
+        # si legge ma non si naviga come dato.
         return self.s.read(f"{self._dir(tier, name)}/{rel}").data
 
     def save_summary(self, tier: str, name: str, text: str,
@@ -1240,12 +1359,43 @@ class TopicService:
             _meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
         _is_drive = self._drive_remote_config(_meta) is not None
         out: list[dict] = []
-        is_files, sub = self._files_rel(rel) if rel else (False, "")
-        prov_map = self.provenance_map(tier, name) if (rel and is_files) else {}
-        if rel and is_files:
-            # dentro files/ → storage del topic (local o drive)
+        # `remote/` senza nome è il CONTENITORE dei mount: elenca i mount, non
+        # delega a un backend. Senza questo ramo, navigare in `remote/` darebbe un
+        # errore là dove l'utente si aspetta di vedere cosa c'è montato.
+        if rel == self.MOUNT_REMOTE:
+            rn = self._remote_mount_name(_meta)
+            return ([{"name": rn, "path": f"{self.MOUNT_REMOTE}/{rn}", "kind": "dir",
+                      "mount": "remote"}] if rn else [])
+        first = rel.split("/", 1)[0] if rel else ""
+        is_files = bool(rel) and (first in self._MOUNTS or self._files_rel(rel)[0])
+        sub = ""
+        prov_map = {}
+        if is_files:
             try:
-                store, base = self._files_backend(tier, name)
+                store, base, sub, mount = self._resolve_data_path(tier, name, rel)
+            except TopicError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — backend remoto giù
+                # Un token Drive revocato deve dare un errore AZIONABILE, non una
+                # traccia di stack: è la ragione per cui `_remote_unreachable`
+                # esiste. Catturare solo TopicError qui lo aggirava.
+                raise _remote_unreachable(exc, tier, name) from exc
+            # La provenienza è etichettata sui file del mount LOCALE: quelli del
+            # remote non l'hanno, e mostrarla come `unknown` sarebbe corretto ma
+            # inutile — sul remote la domanda «chi l'ha messo qui» ha una risposta
+            # che non passa da noi.
+            prov_map = (self.provenance_map(tier, name)
+                        if mount == self.MOUNT_LOCAL else {})
+            _is_drive = mount != self.MOUNT_LOCAL
+        # I path emessi portano il prefisso del MOUNT, non `files/`: è ciò che
+        # rende la vista una sola. Un path senza mount sarebbe ambiguo appena i
+        # mount diventano due, ed è esattamente l'ambiguità che questo disegno
+        # elimina.
+        def _mp(subdir: str, nome: str) -> str:
+            return f"{mount}/" + (f"{subdir}/" if subdir else "") + nome
+
+        if is_files:
+            try:
                 entries = list(store.list(f"{base}/{sub}".strip("/")))
             except TopicError:
                 raise
@@ -1263,11 +1413,11 @@ class TopicService:
                 # so opening Drive stays available as an explicit choice.
                 if e.kind == "dir":
                     out.append({"name": e.name,
-                                "path": "files/" + (f"{sub}/" if sub else "") + e.name,
+                                "path": _mp(sub, e.name),
                                 "kind": "dir", "url": e.url or ""})
                     continue
                 if e.mime and e.mime.startswith(self._NATIVE_DOC_PREFIX):
-                    p = "files/" + (f"{sub}/" if sub else "") + e.name
+                    p = _mp(sub, e.name)
                     out.append({"name": e.name, "path": p, "kind": "file",
                                 "remote": True, "url": e.url or "", "mime": e.mime,
                                 "size": e.size, "md5": e.version})
@@ -1280,13 +1430,13 @@ class TopicService:
                         info = {}
                     real = e.name[:-len(".gdrive.json")]
                     out.append({"name": real,
-                                "path": "files/" + (f"{sub}/" if sub else "") + real,
+                                "path": _mp(sub, real),
                                 "kind": "file", "remote": True,
                                 "url": info.get("gdrive_url") or "",
                                 "mime": info.get("mimeType")})
                     continue
                 # dirs are handled above, so this is a plain file
-                p = "files/" + (f"{sub}/" if sub else "") + e.name
+                p = _mp(sub, e.name)
                 st = None if _is_drive else store.stat(
                     f"{base}/{sub}/{e.name}".strip("/"))
                 rel_in_files = (f"{sub}/" if sub else "") + e.name
@@ -1308,7 +1458,11 @@ class TopicService:
                 if e.name.startswith("."):
                     continue
                 if e.name == "files":
+                    # `files/` non compare più come cartella: al suo posto la
+                    # radice espone i MOUNT. Il contenuto non si è spostato — è lo
+                    # stesso, raggiunto da `local/`.
                     seen_files = True
+                    continue
                 p = f"{rel}/{e.name}" if rel else e.name
                 if e.kind == "dir":
                     out.append({"name": e.name, "path": p, "kind": "dir"})
@@ -1318,10 +1472,16 @@ class TopicService:
                                 "size": getattr(st, "size", None) if st else None,
                                 "mtime_iso": _iso(st.mtime) if st else None,
                                 "md5": getattr(st, "md5", None) if st else None})
-            # topic drive: espone sempre 'files/' come dir navigabile, anche se il
-            # cartella locale è vuota (così si può entrare e caricare).
-            if not rel and not seen_files and _is_drive:
-                out.append({"name": "files", "path": "files", "kind": "dir"})
+            # La radice dell'albero dei DATI: i due mount, sempre, anche quando
+            # una delle due cartelle è vuota — ci si deve poter entrare per
+            # caricare. `local/` esiste sempre; `remote/` solo se ce n'è uno.
+            #
+            # Il control-plane (meta.json, summary.md, AGENTS.md) resta VISIBILE
+            # qui sopra ma non ha un path in questo albero: si legge e si scrive
+            # coi suoi verbi, non navigandolo. Mostrarlo è utile, renderlo
+            # scrivibile per path sarebbe disfare A1.
+            if not rel:
+                out.extend(self.data_mounts(tier, name))
         dirs = sorted((f for f in out if f.get("kind") == "dir"),
                       key=lambda f: f.get("name", "").lower())
         files = sorted((f for f in out if f.get("kind") != "dir"),
@@ -1378,8 +1538,22 @@ class TopicService:
         # Normalizza il prefisso 'files/' ridondante: gli agenti spesso passano il
         # path completo che vedono (es. 'files/x.pdf') invece del nome relativo a
         # files/ → senza questo si crea files/files/x.pdf (annidamento + duplicati).
+        # Prefissi ammessi in ingresso. `local/` e `remote/<n>/` sono le forme
+        # esplicite; `files/` resta accettato perché gli agenti lo scrivono per
+        # abitudine e compare in messaggi già inviati. Il mount di destinazione
+        # viene deciso da `_resolve_data_path` sotto, che per la forma legacy
+        # conserva il bersaglio di oggi.
+        mount_prefix = ""
         while rel == "files" or rel.startswith("files/"):
             rel = rel[len("files"):].strip("/")
+        if rel == self.MOUNT_LOCAL or rel.startswith(self.MOUNT_LOCAL + "/"):
+            mount_prefix = self.MOUNT_LOCAL
+            rel = rel[len(self.MOUNT_LOCAL):].strip("/")
+        elif rel == self.MOUNT_REMOTE or rel.startswith(self.MOUNT_REMOTE + "/"):
+            resto = rel[len(self.MOUNT_REMOTE):].strip("/")
+            rn, _, resto = resto.partition("/")
+            mount_prefix = f"{self.MOUNT_REMOTE}/{rn}"
+            rel = resto.strip("/")
         if not rel or "\\" in rel:
             raise TopicError(f"nome file non valido: {filename}")
         parts = rel.split("/")
@@ -1397,13 +1571,18 @@ class TopicService:
                 "vive nel control-plane e si scrive con `topic.save_agents_md` "
                 "(optimistic lock, come il summary). Un upload lo lascerebbe "
                 "scrivibile da qualunque partecipante.")
-        store, base = self._files_backend(tier, name)
-        store.write(f"{base}/{rel}".strip("/"), data)
+        store, base, sub, mount = self._resolve_data_path(
+            tier, name, f"{mount_prefix}/{rel}".strip("/") if mount_prefix else rel)
+        store.write(f"{base}/{sub}".strip("/"), data)
         prov = (provenance or "untrusted").strip().lower()
         if prov not in ("trusted", "untrusted", "agent"):
             prov = "untrusted"
-        self.set_provenance(tier, name, rel, prov, by=by)
-        return {"name": parts[-1], "path": f"files/{rel}", "provenance": prov}
+        # La provenienza è etichettata SOLO sul mount locale: sul remote il file
+        # non l'ha messo lì il nostro upload, e attribuirgliene una sarebbe una
+        # classificazione inventata.
+        if mount == self.MOUNT_LOCAL:
+            self.set_provenance(tier, name, sub, prov, by=by)
+        return {"name": parts[-1], "path": f"{mount}/{sub}", "provenance": prov}
 
     def delete_file(self, tier: str, name: str, relpath: str) -> dict:
         """SOFT-DELETE: NON cancella mai davvero. Sposta un file o una cartella
@@ -1417,12 +1596,15 @@ class TopicService:
         parts = rel.split("/")
         if not rel or "\\" in rel or any(p in ("", ".", "..") for p in parts):
             raise TopicError(f"path non valido: {relpath}")
-        if parts[0] != "files" or len(parts) < 2:
+        if parts[0] not in self._MOUNTS and parts[0] != "files":
             raise TopicError(
-                "puoi rimuovere solo file/cartelle dentro 'files/' del topic "
-                "(meta, summary e messaggi sono protetti)")
-        sub = "/".join(parts[1:])   # path sotto files/
-        store, base = self._files_backend(tier, name)
+                "puoi rimuovere solo file dentro i mount del topic — "
+                f"`{self.MOUNT_LOCAL}/…` o `{self.MOUNT_REMOTE}/<nome>/…` "
+                "(meta, summary e AGENTS.md sono control-plane e non si "
+                "cancellano da qui)")
+        store, base, sub, _mount = self._resolve_data_path(tier, name, rel)
+        if not sub:
+            raise TopicError("un mount non si cancella: indica un file dentro di esso")
         target = f"{base}/{sub}".strip("/")
         if not store.exists(target):
             raise TopicError(f"non trovato: {relpath}")
