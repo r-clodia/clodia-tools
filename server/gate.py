@@ -29,6 +29,74 @@ LOG = logging.getLogger("clodia-tools.gate")
 # Gate SOLO i verbi MUTANTI (non le letture). Prefissi per famiglie in cui ogni
 # verbo è sensibile (settings/pki/ca); elenco esatto per le famiglie che hanno
 # anche letture (agents/mcp/packs/providers → list/show NON gated).
+# ── La REGOLA, invece della lista ────────────────────────────────────────────
+#
+# Un gate non è una proprietà del verbo: è ciò che accade quando un'azione
+# ATTRAVERSA un confine, o quando chi la chiede non ne ha titolo
+# (system-notebook 23, emendata dalla 26).
+#
+# Fino al 7 ago 2026 questa era una lista piatta di nomi. La lista funzionava,
+# ma la REGOLA non si vedeva: ogni verbo nuovo obbligava un umano a indovinare
+# in quale secchio andasse, ed è così che i meccanismi di gating sono diventati
+# quattro. Classificarli non cambia il comportamento — cambia che la regola sia
+# leggibile e che un verbo nuovo abbia un posto ovvio.
+#
+# Tre classi, misurate sui 28 verbi della lista il 6 ago:
+#
+#   SYSTEM    cambiano le REGOLE del sistema, non una risorsa di uno scope.
+#             Oggi 16 + tre prefissi. Quando esisterà il topic di configurazione
+#             (voce 22) diventeranno scritture in quello scope, e questa classe
+#             si dissolverà nelle altre due.
+#   WALLS     cambiano chi sta in uno scope o quanto è largo. Il gate va
+#             all'OWNER dello scope (voce 24), non a un admin qualunque.
+#   OUTWARD   attraversano il confine verso fuori.
+#
+# Non esiste una quarta classe «usa una risorsa del tuo scope»: la riga era vuota
+# quando l'ho misurata, e deve restarlo. Se un verbo finisse lì, sarebbe un gate
+# sul lavoro dentro la stanza — cioè la cosa che la voce 23 dice di non fare.
+GATE_SYSTEM = "system"
+GATE_WALLS = "walls"
+GATE_OUTWARD = "outward"
+
+_GATE_CLASS = {
+    # SYSTEM — cambiano le regole
+    "agents.grant_rule": GATE_SYSTEM, "agents.grant_skill": GATE_SYSTEM,
+    "agents.grant_tool": GATE_SYSTEM, "agents.revoke_rule": GATE_SYSTEM,
+    "agents.revoke_skill": GATE_SYSTEM, "agents.revoke_tool": GATE_SYSTEM,
+    "agents.grant_scoped": GATE_SYSTEM, "agents.revoke_scoped": GATE_SYSTEM,
+    "mcp.add": GATE_SYSTEM, "mcp.remove": GATE_SYSTEM,
+    "packs.import_url": GATE_SYSTEM, "packs.remove": GATE_SYSTEM,
+    "packs.install_pip": GATE_SYSTEM, "packs.install_npm": GATE_SYSTEM,
+    "providers.pause": GATE_SYSTEM, "providers.resume": GATE_SYSTEM,
+    # WALLS — chi sta nello scope, o quanto è largo
+    "topic.add_participant": GATE_WALLS, "topic.remove_participant": GATE_WALLS,
+    "topic.remote_add": GATE_WALLS, "topic.remote_enable": GATE_WALLS,
+    "topic.remote_disable": GATE_WALLS,
+    # OUTWARD — verso fuori
+    # In attesa di rimozione (Davide, 6 ago: «rimuoviamo completamente trello e
+    # workflow»). Classificati lo stesso, perché finché sono gated devono avere
+    # una ragione leggibile — e perché il test di completezza li ha trovati, che
+    # è il modo in cui una rimozione lasciata a metà si fa notare.
+    "workflows.start": GATE_SYSTEM, "workflows.cancel": GATE_SYSTEM,
+    "workflows.delete_run": GATE_SYSTEM,
+    "web.post": GATE_OUTWARD,
+    "egress.allow": GATE_OUTWARD, "ingress.allow": GATE_OUTWARD,
+    "topic.save_agents_md": GATE_WALLS,
+}
+
+_PREFIX_CLASS = {"settings.": GATE_SYSTEM, "pki.": GATE_SYSTEM, "ca.": GATE_SYSTEM}
+
+
+def gate_class(verb: str) -> str | None:
+    """In quale classe cade questo verbo? `None` se non è gated."""
+    if verb in _GATE_CLASS:
+        return _GATE_CLASS[verb]
+    for pref, cls in _PREFIX_CLASS.items():
+        if verb.startswith(pref):
+            return cls
+    return None
+
+
 _DEFAULT_GATED_PREFIXES = (
     "settings.", "pki.", "ca.",
 )
