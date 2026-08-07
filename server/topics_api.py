@@ -367,8 +367,18 @@ async def participants(request: Request):
     try:
         if request.method == "DELETE":
             return JSONResponse(svc.remove_participant(tier, name, agent))
-        return JSONResponse(svc.add_participant(tier, name, agent))
-    except TopicError:
+        # `role` opzionale: assente = `contributor`, che è ciò che «invitato» ha
+        # significato finora. Serve anche a CAMBIARE il ruolo di chi è già dentro,
+        # senza doverlo togliere e rimettere — un'operazione che nel frattempo lo
+        # farebbe uscire dal canale.
+        return JSONResponse(svc.add_participant(tier, name, agent,
+                                                role=body.get("role")))
+    except TopicError as e:
+        # Un ruolo non valido è una richiesta malformata, non un topic assente:
+        # rispondere 404 manderebbe a cercare il topic sbagliato.
+        msg = str(e)
+        if "ruolo" in msg or "owner" in msg:
+            return JSONResponse({"error": msg[:200]}, status_code=400)
         return JSONResponse({"error": "not_found"}, status_code=404)
 
 
