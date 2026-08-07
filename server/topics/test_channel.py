@@ -19,21 +19,33 @@ class ChannelTests(unittest.TestCase):
     def test_owner_and_default_participant(self) -> None:
         meta = self.svc.open("P1", "ch")["meta"]
         self.assertEqual(meta["owner"], "owner")
-        self.assertEqual(meta["participants"], ["owner"])
+        # L'owner non è duplicato fra i partecipanti: lo aggiunge participants_map.
+        from .service import TopicService
+        self.assertEqual(TopicService.participants_map(meta), {"owner": "owner"})
 
     def test_participants_add_remove(self) -> None:
+        # 7 ago 2026: i partecipanti sono una MAPPA nome→ruolo, e l'owner non vi
+        # è più duplicato — sta nel campo `owner`, che è la fonte di verità della
+        # proprietà. L'appartenenza EFFETTIVA non cambia: `participants_map` lo
+        # riporta dentro col ruolo owner. Si asserisce quella, non la forma.
+        from .service import TopicService
         first = self.svc.add_participant("P1", "ch", "clodia")
         again = self.svc.add_participant("P1", "ch", "clodia")  # idempotente
-        self.assertEqual(self.svc.open("P1", "ch")["meta"]["participants"], ["owner", "clodia"])
+        mappa = TopicService.participants_map(self.svc.open("P1", "ch")["meta"])
+        self.assertEqual(mappa, {"owner": "owner", "clodia": "contributor"})
         self.assertTrue(first["added"])
         self.assertFalse(again["added"])
         messages = self.svc.list_messages("P1", "ch")
         self.assertEqual(
             [(m["author"], m["kind"], m["text"]) for m in messages],
-            [("system", "system", "clodia è entrato nel topic")],
+            [("system", "system", "clodia è entrato nel topic come contributor")],
         )
+        # L'owner NON si rimuove dai partecipanti: uno scope senza owner non
+        # avrebbe più nessuno che risponde dei suoi gate (voce 24).
         self.svc.remove_participant("P1", "ch", "owner")
-        self.assertEqual(self.svc.open("P1", "ch")["meta"]["participants"], ["clodia"])
+        mappa2 = TopicService.participants_map(self.svc.open("P1", "ch")["meta"])
+        self.assertEqual(mappa2.get("owner"), "owner")
+        self.assertEqual(mappa2.get("clodia"), "contributor")
 
     def test_messages_ordered_with_kind_and_attachments(self) -> None:
         self.svc.post_message("P1", "ch", "owner", "ciao", kind="human")
