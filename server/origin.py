@@ -1,6 +1,6 @@
 """origin — la catena d'origine di un turno, e l'intersezione delle autorità.
 
-Il problema che risolve (docs/security-model.md §4). Gli agenti cooperano, e la
+Il problema che risolve (docs/specification.md §3.3). Gli agenti cooperano, e la
 cooperazione È delega. Una delega che non porta con sé l'autorità di chi ha
 chiesto è amplificazione di privilegio: il *confused deputy*. Osservato dal vivo —
 `messaggero`, senza credenziale di posta, ha chiesto in canale «@agente-mail
