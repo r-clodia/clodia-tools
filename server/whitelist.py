@@ -821,14 +821,18 @@ def resolve_safe_path(rel_or_abs: str) -> Path:
     )
 
 
-# Super-agent: bypassano la whitelist (coerente con main.py call_tool). Estendibile
-# via env CLODIA_SUPER_AGENTS (CSV).
+# Super-agent: bypassavano la whitelist. VUOTO dal 7 ago 2026 — `clodia` era uscita
+# il 6, `ophelia` esce ora. Questo è il SECONDO dei due insiemi: toglierla da uno
+# solo l'avrebbe lasciata bypassare dall'altro, che è precisamente il modo in cui
+# un concetto sopravvive alla propria rimozione.
+# Estendibile via env CLODIA_SUPER_AGENTS (CSV): rimetterci un nome resta
+# possibile, ma è un atto esplicito di chi amministra.
 import os as _os
 # `clodia` rimossa anche qui: questo è il SECONDO insieme super (gate a livello
 # adapter), e toglierla da uno solo l'avrebbe lasciata bypassare dall'altro.
 # Estendibile via env: chi rimette `clodia` in `CLODIA_SUPER_AGENTS` annulla la
 # modifica, ed è deliberato che sia possibile — ma va saputo.
-_SUPER_AGENTS = {"ophelia", *(
+_SUPER_AGENTS = {*(
     a.strip() for a in _os.environ.get("CLODIA_SUPER_AGENTS", "").split(",") if a.strip()
 )}
 

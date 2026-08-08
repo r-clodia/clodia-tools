@@ -2007,7 +2007,19 @@ def _dispatch_mcp(name: str, a: dict):
 # umani non hanno una chiave server-side per coniare un token a proprio nome).
 # Quel lavoro è tracciato e si fa separatamente; togliere l'attributo è
 # l'incremento che si può verificare oggi.
-_SUPER_AGENTS = {"ophelia"}
+#: VUOTO dal 7 ago 2026. Nessun agente bypassa più la whitelist per il proprio
+#: nome. `clodia` era uscita il 6, `ophelia` esce ora — e togliere l'ultima è
+#: quello che rende il concetto verificabile invece che convenzionale: finché
+#: uno solo resta dentro, la matrice non è mai davvero il documento che decide.
+#:
+#: Cosa NON era autorità dell'agente, e resta: l'identità di SERVIZIO con cui
+#: l'agent-server conia un token per conto di un umano (`clodia`, in gate.py) —
+#: i profili umani non hanno una chiave lato server per firmare a proprio nome.
+#: Sono due cose che portavano lo stesso nome; questa non passa di qui.
+#:
+#: L'insieme resta, vuoto, ed estendibile via env: rimetterci un nome è ancora
+#: possibile, ma deve essere un atto esplicito di chi amministra l'istanza.
+_SUPER_AGENTS: set = set()
 
 
 def _is_super(name: str | None) -> bool:

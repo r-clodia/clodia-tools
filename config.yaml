@@ -116,8 +116,14 @@ agents:
     # super — e con l'enforcement acceso avrebbero prodotto RIFIUTI dove serve una
     # DOMANDA: `agents.show` e `logs.tail` negati a chi deve diagnosticare, invece
     # di chiesti. Misurato sul registro: 12 chiamate reali su 387.
-    allowed_tools:
-    - '*'
+    # Dal 7 ago 2026 NON è più un super-agent, e non porta più il wildcard.
+    # I verbi base arrivano dall'arciseed per ereditarietà (§1.3): leggere nella
+    # stanza in cui sta, parlarci, e la propria memoria.
+    #
+    # Vuoto NON significa «nessun verbo»: significa «nessun verbo PROPRIO», cioè
+    # nessun mestiere ancora dichiarato. La revisione seed per seed, per dare a
+    # ciascuno i verbi che gli servono davvero, è un lavoro a parte.
+    allowed_tools: []
     # PROFILO dichiarato: il mestiere di questo agente. Questi verbi sono LIBERI e
     # sono quelli che compaiono nella sua scheda. Tutto ciò che il grant `*` copre e
     # che NON è qui resta raggiungibile ma passa da un consenso umano.
