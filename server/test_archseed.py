@@ -127,9 +127,19 @@ class ExistenceTests(unittest.TestCase):
         with _cfg():
             self.assertIn("topic.post_message", w.archseed_tools())
 
-    def test_crossing_verbs_are_not_in_it(self):
-        """Scrivere, spostare i muri, uscire: è mestiere, e il mestiere è del
-        seed."""
+    def test_producing_is_not_in_the_floor(self):
+        """Il pavimento è PARTECIPARE, non «tutto ciò che resta nella stanza».
+
+        `topic.put` scrive dentro la stanza in cui lo spawn già sta, e resta
+        fuori lo stesso: la linea è partecipare/produrre. La prova che è quella
+        giusta è `segretario`, che esiste proprio per scrivere lo stato del topic
+        e lo dichiara — se la scrittura fosse ereditata, quel seed non direbbe
+        più niente, e «cosa fa questo agente» smetterebbe di avere risposta
+        leggendo il suo file.
+
+        Scelta di Davide, 8 ago 2026, dopo aver notato che la regola come l'avevo
+        scritta non discriminava.
+        """
         with _cfg():
             t = w.archseed_tools()
             for v in ("topic.put", "topic.write_file", "topic.delete_file",

@@ -495,9 +495,13 @@ def _listed(verb: str, patterns: set) -> bool:
 # volume no. Ed essendo nel codice, «i due livelli esistono» è vero su ogni
 # istanza invece che dipendere da un file che qualcuno deve aver creato.
 #
-# La regola di appartenenza: un verbo sta nell'arciseed quando il suo BERSAGLIO è
-# l'agente stesso o la stanza in cui lo spawn già si trova. Tutto il resto
-# attraversa qualcosa, e attraversare è mestiere.
+# La regola: il pavimento è quello che serve a PARTECIPARE — leggere nella stanza
+# in cui lo spawn sta, e parlarci. Quello che un agente PRODUCE è il suo mestiere.
+#
+# Non è «dentro o fuori la stanza»: `topic.put` scrive dentro e resta fuori di qui
+# lo stesso. La prova che la linea è questa è `segretario`, che esiste proprio per
+# scrivere lo stato e lo dichiara — se la scrittura fosse nel pavimento, quel seed
+# non direbbe più niente.
 ARCHSEED = "archseed"
 
 #: PAVIMENTO DI BOOTSTRAP, non la definizione. La definizione è il seed
