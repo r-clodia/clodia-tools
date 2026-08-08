@@ -140,7 +140,7 @@ async def verbs(request: Request):
     # Si legge la config DIRETTAMENTE: `agent_config()` risolve l'agente della
     # richiesta corrente, che qui è il principal privilegiato, non il soggetto.
     spec = (whitelist.CONFIG.get("agents") or {}).get(name) or {}
-    # UN SOLO TIPO DI PRINCIPAL (security-model §1). Un umano non sta in
+    # UN SOLO TIPO DI PRINCIPAL (specification.md §3.0). Un umano non sta in
     # `config.yaml`: la sua matrice vive nel seed, dove `/datadir/agents/` è
     # `drwx------ root` e uno spawn (uid 60000) non riesce né a leggerlo né a
     # scriverlo — il confine lo mette il kernel. Senza questo ramo la scheda di

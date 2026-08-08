@@ -2897,7 +2897,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 _obs.note("deny", name, _ag or "", detail="unattended")
             else:
                 raise PermissionError(_un)
-        # INTERSEZIONE DELLA CATENA D'ORIGINE (docs/security-model.md §4).
+        # INTERSEZIONE DELLA CATENA D'ORIGINE (docs/specification.md §3.3).
         # Prima dei gate, e non per efficienza: se la catena non regge, chiedere
         # l'approvazione del VERBO sarebbe la domanda sbagliata. «@messaggero
         # vuole spedire, approvi?» nasconde il fatto rilevante, che è «Giovanni
