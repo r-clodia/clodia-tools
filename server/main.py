@@ -3358,11 +3358,16 @@ def _safe_scratch_path(p: str) -> str:
     suo scope senza che nulla lo dica, ed è il modo silenzioso di sbagliare:
     l'operazione riesce.
 
-    **Questo NON è ancora il confinamento per spawn** della voce 2. Per esigerlo
-    servirebbe sapere QUALE spawn sta chiamando, e il gateway non lo sa: conosce
-    il seed (`agent_name()`), mentre l'istanza è `"-"` ovunque. Qui si richiede
-    solo che ci sia un livello sotto la radice — che chiude il caso osservato,
-    non l'accesso di uno spawn allo scratch di un altro.
+    **Il confinamento per spawn** (specification §1.1) è la seconda metà, e dal
+    7 ago 2026 c'è: il token porta `execution_id`, quindi il gateway sa non solo
+    QUALE SEED chiama ma QUALE SPAWN. Prima conosceva solo il seed, e la voce 2
+    — «uno spawn possiede il proprio scratch e non raggiunge quello di un
+    altro» — era promessa dalla specifica e non mantenuta dal codice.
+
+    Se il claim manca — un chiamante vecchio, un percorso interno — resta il solo
+    controllo del livello. Rifiutare lì trasformerebbe l'assenza di un campo
+    nuovo in un guasto, e la direzione della retrocompatibilità va verso «come
+    prima».
     """
     rp = _os.path.realpath(p or "")
     root = _os.path.realpath(_SPAWNS_ROOT)
@@ -3380,6 +3385,15 @@ def _safe_scratch_path(p: str) -> str:
             f"tua directory di lavoro (es. `{_SPAWNS_ROOT}/<spawn>/{resto}`), "
             f"oppure — se stai archiviando un allegato — `email.save_attachment` "
             f"senza `dest`, che lo scrive nel topic del canale.")
+    from .whitelist import current_spawn
+    mio = current_spawn()
+    suo = resto.split("/", 1)[0]
+    if mio and suo != mio:
+        raise ValueError(
+            f"path non consentito: '{p}' sta nello scratch di '{suo}', e tu sei "
+            f"'{mio}'. Lo scratch di uno spawn è suo — scrivi sotto "
+            f"{_SPAWNS_ROOT}/{mio}/. Se devi passare un file a un altro spawn, "
+            f"la strada è il topic del canale, non il suo filesystem.")
     return rp
 
 

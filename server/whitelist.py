@@ -427,6 +427,31 @@ def current_clearance() -> str | None:
     return _CURRENT_CLEARANCE.get()
 
 
+_CURRENT_SPAWN: ContextVar = ContextVar("clodia_current_spawn", default=None)
+
+
+def set_current_spawn(v):
+    return _CURRENT_SPAWN.set(v)
+
+
+def reset_current_spawn(token: object) -> None:
+    _CURRENT_SPAWN.reset(token)  # type: ignore[arg-type]
+
+
+def current_spawn() -> str | None:
+    """Lo SPAWN chiamante (`clodia-1`), dal claim `execution_id` FIRMATO.
+
+    `agent_name()` dice il seed; questo dice l'istanza. La differenza è quella
+    fra «un clodia» e «questo clodia», ed è ciò che permette di esigere che uno
+    spawn scriva nel PROPRIO scratch invece che in quello di un altro.
+
+    `None` quando il token non lo porta — un chiamante vecchio, o un percorso
+    interno. Dedurlo da un argomento sarebbe la parola dell'agente su chi è.
+    """
+    v = _CURRENT_SPAWN.get()
+    return str(v) if v else None
+
+
 def agent_name() -> str:
     """Agente chiamante: prima il contextvar (HTTP per-richiesta), poi l'env
     MCP_AGENT_NAME (stdio legacy)."""
