@@ -1,10 +1,13 @@
 """Per-agent whitelist enforcement."""
 from contextvars import ContextVar
 from pathlib import Path
+import logging
 import os
 import yaml
 
 from . import state_paths
+
+_log = logging.getLogger("clodia-tools.whitelist")
 
 TOOL_ROOT = Path(__file__).resolve().parent.parent
 # Default BAKED nell'immagine (repo): è il SEED dei base-agent.
@@ -30,41 +33,6 @@ def _read_yaml(p: Path) -> dict:
         return {}
 
 
-def _declare_memory(agents: dict) -> bool:
-    """Scrive `memory.*` in chiaro per chi ce l'aveva dalla scorciatoia.
-
-    `memory` era un namespace UNIVERSALE: concesso a ogni agente senza comparire
-    da nessuna parte. Davide, 7 ago 2026: «lasciamo i verbi memory.* espliciti».
-
-    Toglierlo e basta avrebbe rotto **6 agenti su 8 su venere e 5 su 5 su
-    marte** — misurato — e li avrebbe rotti in silenzio: un verbo che sparisce da
-    un insieme implicito non lascia traccia da nessuna parte, e l'agente scopre
-    di non poterlo più fare mentre lavora.
-
-    Quindi la migrazione va PRIMA della rimozione, e non concede nulla di nuovo:
-    scrive ciò che quegli agenti già potevano fare. Una sola volta, perché chi
-    dopo toglie `memory.*` di proposito non se lo deve ritrovare rimesso — è la
-    differenza fra una migrazione e una regola che sovrascrive una decisione.
-    """
-    if not isinstance(agents, dict):
-        return False
-    fatta = False
-    for nome, spec in agents.items():
-        if not isinstance(spec, dict):
-            continue
-        if spec.get("memory_declared"):
-            continue
-        at = spec.setdefault("allowed_tools", [])
-        if not isinstance(at, list):
-            continue
-        gia = "*" in at or any(str(t).startswith("memory.") for t in at)
-        if not gia:
-            at.append("memory.*")
-        spec["memory_declared"] = True     # marcatore: la migrazione è passata
-        fatta = True
-    return fatta
-
-
 def _load_config() -> dict:
     base = _read_yaml(_DEFAULT_CONFIG_PATH)
     if not CONFIG_PATH.exists():
@@ -85,8 +53,6 @@ def _load_config() -> dict:
             changed = True
     cfg.setdefault("workspace_root", base.get("workspace_root"))
     cfg.setdefault("mcp_backends", base.get("mcp_backends", []))
-    if _declare_memory(c_agents):
-        changed = True
     if changed:
         with open(CONFIG_PATH, "w") as f:
             yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
@@ -471,6 +437,120 @@ def _listed(verb: str, patterns: set) -> bool:
     return False
 
 
+
+# ─────────────────────────── L'ARCISEED ────────────────────────────────────
+#
+# Un seed ASTRATTO, che non si può spawnare, da cui ogni seed discende. Tiene i
+# verbi base; il resto è mestiere, e il mestiere è del seed (specification §1.3).
+#
+# Sta QUI e non nella datadir per la regola della §3.5: l'autorità dev'essere
+# irraggiungibile dal suo soggetto. La datadir la scrive l'agent-server; questo
+# volume no. Ed essendo nel codice, «i due livelli esistono» è vero su ogni
+# istanza invece che dipendere da un file che qualcuno deve aver creato.
+#
+# La regola di appartenenza: un verbo sta nell'arciseed quando il suo BERSAGLIO è
+# l'agente stesso o la stanza in cui lo spawn già si trova. Tutto il resto
+# attraversa qualcosa, e attraversare è mestiere.
+ARCHSEED = "archseed"
+
+_ARCHSEED_TOOLS = (
+    # la propria memoria, confinata alla propria cartella
+    "memory.*",
+    # il pavimento di LETTURA dello scope corrente
+    "topic.open", "topic.files", "topic.read_file", "topic.read_document",
+    "topic.search", "topic.list", "topic.fetch",
+    # parlare non è mutare: uno spawn che non può parlare nella propria stanza
+    # non può fare niente (specification §2.9)
+    "topic.post_message",
+)
+
+#: Profondità massima della catena `parents`. Un ciclo non deve diventare un
+#: gateway che non risponde: si tronca e si logga.
+_MAX_ANCESTRY = 8
+
+
+def archseed_tools() -> list:
+    """I verbi dell'arciseed, con l'eventuale override da config (`archseed`)."""
+    over = (CONFIG or {}).get("archseed")
+    if isinstance(over, dict) and isinstance(over.get("allowed_tools"), list):
+        return [str(x) for x in over["allowed_tools"]]
+    return list(_ARCHSEED_TOOLS)
+
+
+def is_abstract(name: str) -> bool:
+    """Un seed astratto non si spawna. Dichiararlo non basta: va imposto, perché
+    un arciseed spawnato per errore è un agente con i verbi base e nessun
+    mestiere — e funziona abbastanza da non farsene accorgere."""
+    if str(name or "") == ARCHSEED:
+        return True
+    try:
+        return bool(agent_config(name).get("abstract"))
+    except KeyError:
+        return False
+
+
+def parents_of(name: str) -> list:
+    """Antenati dichiarati da un seed. L'arciseed è antenato di TUTTI, e non va
+    dichiarato: se lo fosse, un seed potrebbe non dichiararlo e uscire dal
+    modello senza che si veda."""
+    try:
+        raw = agent_config(name).get("parents") or []
+    except KeyError:
+        raw = []
+    out = [str(x).strip() for x in raw if str(x).strip()]
+    if name != ARCHSEED and ARCHSEED not in out:
+        out.append(ARCHSEED)
+    return out
+
+
+def effective_tools(name: str | None) -> set:
+    """Verbi EFFETTIVI di un principal: i propri PIÙ quelli ereditati.
+
+    Un punto solo, e questa è la ragione per cui esiste. La matrice era letta in
+    **tre** posti — `main._declared_tools`, `origin._agent_may` e
+    `ensure_tool_allowed` — e i tre non erano d'accordo: il terzo non consultava
+    nemmeno i `denied_tools`. Con l'ereditarietà innestata in uno solo, un verbo
+    sarebbe stato concesso da un percorso e negato da un altro, e il difetto
+    sarebbe stato invisibile perché nessuno confronta i tre esiti.
+
+    Il genitore è un DEFAULT, non un tetto (specification §1.4): quello che si
+    eredita è un pavimento, e il contenimento viene dai gate, dalle liste dello
+    scope e dall'intersezione della catena — mai dall'antenato.
+
+    La SOTTRAZIONE resta ai `denied_tools`, che battono tutto: è il verso in cui
+    un seed più stretto del proprio genitore si dichiara tale, ed è ciò che
+    impedisce all'arciseed di allargare chi era stretto di proposito.
+    """
+    n = str(name or "")
+    if not n:
+        return set()
+    visti: set = set()
+    fuori: set = set()
+    coda = [(n, 0)]
+    while coda:
+        chi, prof = coda.pop(0)
+        if chi in visti or prof > _MAX_ANCESTRY:
+            if prof > _MAX_ANCESTRY:
+                _log.warning("catena `parents` troppo profonda a '%s': troncata", chi)
+            continue
+        visti.add(chi)
+        if chi == ARCHSEED:
+            fuori.update(archseed_tools())
+            continue
+        try:
+            fuori.update(str(x) for x in (agent_config(chi).get("allowed_tools") or []))
+        except KeyError:
+            if chi == n:
+                # principal non registrato (umano, clone per-topic): il suo seed
+                # sulla datadir è la fonte. Senza, l'intersezione lo azzererebbe.
+                from . import human as _seedreader
+                d = _seedreader._seed(chi)
+                fuori.update(str(x) for x in (d.get("tool_permissions") or []))
+        for g in parents_of(chi):
+            coda.append((g, prof + 1))
+    return fuori
+
+
 def agent_denies(verb: str, name: str | None = None) -> bool:
     """True se `verb` è nella `denied_tools` dell'agente.
 
@@ -616,12 +696,21 @@ def tool_allowed(tool_name: str) -> None:
     nuovo (es. email.get_attachment) o un wildcard veniva bloccato qui anche se
     main.py lo consentiva (doppio gate incoerente)."""
     ag = agent_name()
+    # Il DENY per primo, e prima mancava del tutto qui: questo percorso rispondeva
+    # «consentito» su un verbo che gli altri due negavano. Tre lettori della
+    # stessa matrice con tre risposte possibili — invisibile, perché nessuno
+    # confronta i tre esiti.
+    if agent_denies(tool_name, ag):
+        raise PermissionError(
+            f"tool '{tool_name}' negato esplicitamente all'agente '{ag}'")
     if ag in _SUPER_AGENTS:
         return
-    allowed = agent_config().get("allowed_tools", [])
+    allowed = effective_tools(ag)          # propri + ereditati (arciseed incluso)
     if tool_name in allowed:
         return
     if "." in tool_name and f"{tool_name.split('.', 1)[0]}.*" in allowed:
+        return
+    if "*" in allowed:
         return
     raise PermissionError(
         f"tool '{tool_name}' not in allowed_tools of agent '{ag}'"

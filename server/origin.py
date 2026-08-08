@@ -76,11 +76,9 @@ def _agent_may(name: str, verb: str) -> bool:
         return False                     # il deny vince su tutto, anche su `*`
     if _m._is_super(name):
         return True
-    try:
-        allowed = set(agent_config(name).get("allowed_tools") or [])
-    except KeyError:
-        allowed = set()
-    return _m._tool_allowed(verb, allowed) or _m._connector_allows(verb, name)
+    from .whitelist import effective_tools
+    return (_m._tool_allowed(verb, effective_tools(name))
+            or _m._connector_allows(verb, name))
 
 
 def _matrix_allows(verb: str, matrix: list) -> bool:
