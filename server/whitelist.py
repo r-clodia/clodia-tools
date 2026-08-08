@@ -33,10 +33,24 @@ def _read_yaml(p: Path) -> dict:
         return {}
 
 
+#: Il default BAKED non si riscrive mai. `yaml.safe_dump` perde i commenti, e
+#: quel file ne ha 109 righe che spiegano `gdrive_roots`, il wildcard dei super e
+#: il resto — cioè la documentazione operativa del gateway.
+#:
+#: È già successo, il 7 ago 2026: eseguire il caricamento della config in un test
+#: locale ha riscritto `config.yaml` spogliato, e `git add -A` l'ha portato in una
+#: PR che parlava d'altro. Il file si scrive SOLO sul volume di stato
+#: (`CONFIG_PATH`), che è generato e non ha commenti da perdere.
+_DEFAULT_IS_READ_ONLY = True
+
+
 def _load_config() -> dict:
     base = _read_yaml(_DEFAULT_CONFIG_PATH)
     if not CONFIG_PATH.exists():
-        # Prima esecuzione sul volume: seed dal default baked.
+        # Prima esecuzione sul volume: seed dal default baked. Mai il contrario —
+        # vedi `_DEFAULT_IS_READ_ONLY`.
+        if CONFIG_PATH.resolve() == _DEFAULT_CONFIG_PATH.resolve():
+            return base
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_PATH, "w") as f:
             yaml.safe_dump(base, f, sort_keys=False, allow_unicode=True)
@@ -143,6 +157,14 @@ def save_config() -> None:
     except Exception:                                # noqa: BLE001
         disco = copy.deepcopy(_LOADED)
     finale = _merge_my_changes(disco) if _LOADED else dict(CONFIG)
+    if CONFIG_PATH.resolve() == _DEFAULT_CONFIG_PATH.resolve():
+        # Il default baked è di sola lettura (`_DEFAULT_IS_READ_ONLY`): scriverlo
+        # significa perderne i commenti, ed è già costato 109 righe di
+        # documentazione il 7 ago. In locale, senza volume di stato, i due path
+        # coincidono — ed è esattamente lì che è successo.
+        _log.warning("save_config: il default baked non si riscrive (nessun "
+                     "volume di stato configurato); modifiche non persistite")
+        return
     with open(CONFIG_PATH, "w") as f:
         yaml.safe_dump(finale, f, sort_keys=False, allow_unicode=True)
     # Da qui in avanti «cambiato» si misura da ciò che è appena stato scritto.
