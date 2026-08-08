@@ -96,10 +96,22 @@ def show(name: str) -> dict:
     a = _find(name)
     if a is None:
         raise ValueError(f"agent '{name}' non trovato")
+    # `tool_permissions` è ciò che il seed DICHIARA; `verbs` è ciò che vale
+    # davvero, con l'origine di ogni riga (§1.4). Convivono di proposito: senza
+    # la prima non si sa cosa toccare per cambiare, senza la seconda non si sa
+    # cosa l'agente può fare — e con l'ereditarietà le due cose hanno smesso di
+    # coincidere.
+    from .. import whitelist as _wl
+    try:
+        verbs = _wl.tools_with_provenance(name)
+    except Exception:  # noqa: BLE001 — la scheda si apre anche se la risoluzione fallisce
+        verbs = {}
     return {"name": name, "type": a.get("type"), "immutable": _immutable(a),
             "capabilities": a.get("capabilities", []) or [],
             "rules": a.get("rules", []) or [],
-            "tool_permissions": a.get("tool_permissions", []) or []}
+            "tool_permissions": a.get("tool_permissions", []) or [],
+            "verbs": verbs,
+            "abstract": bool(_wl.is_abstract(name))}
 
 
 def list_skills() -> dict:

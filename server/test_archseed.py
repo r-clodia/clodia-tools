@@ -221,3 +221,58 @@ class OneAnswerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProvenanceTests(unittest.TestCase):
+    """Terza condizione della §1.4, e senza di essa l'ereditarietà sarebbe un
+    cattivo affare.
+
+    Prima si leggeva un file e si sapeva cosa un agente potesse fare; con
+    l'ereditarietà non più. **Una duplicazione la vedi, un'opacità no** — quindi
+    l'insieme risolto deve dire da dove viene ogni pezzo.
+
+    E serve a una cosa pratica: capire se un verbo si toglie togliendolo
+    dall'agente o se va sottratto con `denied_tools` perché arriva da un
+    antenato. Sono due rimedi diversi, e sbagliarli significa modificare un file
+    e vedere che non cambia niente.
+    """
+
+    def test_an_own_verb_says_own(self):
+        with _cfg():
+            self.assertEqual(w.tools_with_provenance("clodia").get("email.*"), "own")
+
+    def test_an_inherited_verb_names_the_ancestor(self):
+        """«Ereditato» non basta: serve DA CHI, perché è il file da aprire."""
+        with _cfg():
+            self.assertEqual(
+                w.tools_with_provenance("avvocato").get("gdocs.*"), "professionista")
+
+    def test_a_base_verb_says_archseed(self):
+        with _cfg():
+            self.assertEqual(
+                w.tools_with_provenance("clodia").get("memory.*"), w.ARCHSEED)
+
+    def test_a_denied_verb_stays_visible_and_is_marked(self):
+        """Se sparisse dall'elenco, chi legge non saprebbe se non sia mai stato
+        ereditato — e la risposta che serve è «c'è, ed è stato sottratto qui»."""
+        with _cfg():
+            v = w.tools_with_provenance("segretario").get("topic.post_message", "")
+            self.assertIn("negato", v)
+            self.assertIn(w.ARCHSEED, v)
+
+    def test_the_resolved_set_matches_the_one_used_to_decide(self):
+        """Una scheda che mostrasse un insieme diverso da quello che decide
+        sarebbe peggio di nessuna scheda: si guarderebbe la cosa sbagliata
+        credendo di guardare quella giusta."""
+        with _cfg():
+            for a in ("clodia", "avvocato", "segretario"):
+                with self.subTest(agente=a):
+                    self.assertEqual(set(w.tools_with_provenance(a)),
+                                     w.effective_tools(a))
+
+    def test_the_card_carries_it(self):
+        import inspect
+        from .tools import agents_admin
+        src = inspect.getsource(agents_admin.show)
+        self.assertIn("tools_with_provenance", src)
+        self.assertIn("tool_permissions", src)   # la dichiarazione resta accanto
