@@ -427,6 +427,31 @@ def current_clearance() -> str | None:
     return _CURRENT_CLEARANCE.get()
 
 
+_CURRENT_SPAWN: ContextVar = ContextVar("clodia_current_spawn", default=None)
+
+
+def set_current_spawn(v):
+    return _CURRENT_SPAWN.set(v)
+
+
+def reset_current_spawn(token: object) -> None:
+    _CURRENT_SPAWN.reset(token)  # type: ignore[arg-type]
+
+
+def current_spawn() -> str | None:
+    """Lo SPAWN chiamante (`clodia-1`), dal claim `execution_id` FIRMATO.
+
+    `agent_name()` dice il seed; questo dice l'istanza. La differenza è quella
+    fra «un clodia» e «questo clodia», ed è ciò che permette di esigere che uno
+    spawn scriva nel PROPRIO scratch invece che in quello di un altro.
+
+    `None` quando il token non lo porta — un chiamante vecchio, o un percorso
+    interno. Dedurlo da un argomento sarebbe la parola dell'agente su chi è.
+    """
+    v = _CURRENT_SPAWN.get()
+    return str(v) if v else None
+
+
 def agent_name() -> str:
     """Agente chiamante: prima il contextvar (HTTP per-richiesta), poi l'env
     MCP_AGENT_NAME (stdio legacy)."""
@@ -470,11 +495,19 @@ def _listed(verb: str, patterns: set) -> bool:
 # volume no. Ed essendo nel codice, «i due livelli esistono» è vero su ogni
 # istanza invece che dipendere da un file che qualcuno deve aver creato.
 #
-# La regola di appartenenza: un verbo sta nell'arciseed quando il suo BERSAGLIO è
-# l'agente stesso o la stanza in cui lo spawn già si trova. Tutto il resto
-# attraversa qualcosa, e attraversare è mestiere.
+# La regola: il pavimento è quello che serve a PARTECIPARE — leggere nella stanza
+# in cui lo spawn sta, e parlarci. Quello che un agente PRODUCE è il suo mestiere.
+#
+# Non è «dentro o fuori la stanza»: `topic.put` scrive dentro e resta fuori di qui
+# lo stesso. La prova che la linea è questa è `segretario`, che esiste proprio per
+# scrivere lo stato e lo dichiara — se la scrittura fosse nel pavimento, quel seed
+# non direbbe più niente.
 ARCHSEED = "archseed"
 
+#: PAVIMENTO DI BOOTSTRAP, non la definizione. La definizione è il seed
+#: `agents/archseed/agent.yaml` del base-pack; questa lista serve solo prima che
+#: il pack sia materializzato, e tenerla allineata a mano sarebbe una seconda
+#: verità — è deliberatamente minima e il suo uso viene loggato.
 _ARCHSEED_TOOLS = (
     # la propria memoria, confinata alla propria cartella
     "memory.*",
@@ -492,10 +525,39 @@ _MAX_ANCESTRY = 8
 
 
 def archseed_tools() -> list:
-    """I verbi dell'arciseed, con l'eventuale override da config (`archseed`)."""
+    """I verbi dell'arciseed, letti dal SUO SEED.
+
+    L'arciseed è un seed del base-pack come gli altri — `agents/archseed/` — e
+    si legge dallo stesso posto da cui si legge il seed di un umano:
+    `/datadir/agents/`, che è `drwx------ root` mentre gli spawn girano
+    unprivileged. Il confine lo mette il kernel, non logica applicativa, ed è la
+    ragione per cui leggere di lì è sound (§3.5).
+
+    Tre fonti, in ordine, e la terza NON è una seconda verità:
+
+    1. **il seed** — la fonte. Un seed è un file, si legge, si diffa, si revisiona
+       in una PR;
+    2. **`config.yaml`** — override d'istanza, per chi vuole un pavimento diverso
+       senza toccare il pack;
+    3. **il built-in** — solo quando il pack non è ancora materializzato, cioè al
+       primo avvio di un'istanza nuova. Senza, ogni agente resterebbe senza verbi
+       base finché qualcuno non installa il pack, e «i due livelli esistono»
+       sarebbe falso proprio nel momento in cui l'istanza nasce. Si logga, perché
+       trovarlo in uso dopo il bootstrap significa che il seed è sparito.
+    """
+    try:
+        from . import human as _seedreader
+        d = _seedreader._seed(ARCHSEED)
+        tp = d.get("tool_permissions")
+        if isinstance(tp, list) and tp:
+            return [str(x) for x in tp]
+    except Exception as e:  # noqa: BLE001
+        _log.warning("seed dell'arciseed illeggibile (%s)", type(e).__name__)
     over = (CONFIG or {}).get("archseed")
     if isinstance(over, dict) and isinstance(over.get("allowed_tools"), list):
         return [str(x) for x in over["allowed_tools"]]
+    _log.warning("arciseed non trovato fra i seed: uso il pavimento built-in "
+                 "(atteso solo prima che il base-pack sia materializzato)")
     return list(_ARCHSEED_TOOLS)
 
 
@@ -506,8 +568,17 @@ def is_abstract(name: str) -> bool:
     if str(name or "") == ARCHSEED:
         return True
     try:
-        return bool(agent_config(name).get("abstract"))
+        if bool(agent_config(name).get("abstract")):
+            return True
     except KeyError:
+        pass
+    # Anche dal seed: `abstract` è una dichiarazione del seed, e un seed che non
+    # è registrato nella config del gateway resterebbe altrimenti spawnabile
+    # nonostante si dichiari astratto.
+    try:
+        from . import human as _seedreader
+        return bool(_seedreader._seed(str(name or "")).get("abstract"))
+    except Exception:  # noqa: BLE001
         return False
 
 

@@ -122,3 +122,64 @@ class CallersTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OwnScratchTests(unittest.TestCase):
+    """La seconda metà, e quella che la voce 2 prometteva: uno spawn possiede il
+    proprio scratch e non raggiunge quello di un altro.
+
+    Perché non era chiusa prima. Il gateway conosceva il SEED — `agent_name()` —
+    e non l'istanza, quindi non poteva distinguere «un clodia» da «questo
+    clodia». Il campo `execution_id` esisteva nel token firmato **e nessuno lo
+    riempiva**: i quattro punti di conio non lo passavano. Ottava volta in due
+    giorni che si trova un campo dichiarato e non trasportato, e questa era
+    quella che serviva davvero.
+    """
+
+    def setUp(self):
+        from . import whitelist as w
+        self.w = w
+        self.t = w.set_current_spawn("clodia-1")
+        self.addCleanup(lambda: w.reset_current_spawn(self.t))
+
+    def test_a_spawn_writes_in_its_own_scratch(self):
+        M._safe_scratch_path("/datadir/spawns/clodia-1/x.pdf")
+
+    def test_a_spawn_may_not_write_in_anothers(self):
+        with self.assertRaises(ValueError) as cm:
+            M._safe_scratch_path("/datadir/spawns/ophelia-2/x.pdf")
+        self.assertIn("ophelia-2", str(cm.exception))
+        self.assertIn("clodia-1", str(cm.exception))
+
+    def test_not_even_another_spawn_of_the_same_seed(self):
+        """`clodia-1` e `clodia-2` sono due esecuzioni distinte, e il compartimento
+        è dello spawn — è lo stesso principio della voce 29 applicato al
+        filesystem invece che ai topic."""
+        with self.assertRaises(ValueError):
+            M._safe_scratch_path("/datadir/spawns/clodia-2/x.pdf")
+
+    def test_the_refusal_says_the_road_for_passing_a_file(self):
+        """Chi ci arriva vuole quasi sempre consegnare qualcosa a un altro
+        spawn, e quella strada esiste: passa dal topic, non dal filesystem."""
+        with self.assertRaises(ValueError) as cm:
+            M._safe_scratch_path("/datadir/spawns/altro-3/x.pdf")
+        self.assertIn("topic del canale", str(cm.exception))
+
+    def test_a_prefix_of_a_spawn_name_is_not_that_spawn(self):
+        """`clodia-10` comincia per `clodia-1` e non è lo stesso spawn."""
+        with self.assertRaises(ValueError):
+            M._safe_scratch_path("/datadir/spawns/clodia-10/x.pdf")
+
+
+class NoClaimTests(unittest.TestCase):
+    def test_without_the_claim_only_the_level_is_required(self):
+        """Un chiamante vecchio o un percorso interno non porta
+        `execution_id`. Rifiutare qui trasformerebbe l'assenza di un campo nuovo
+        in un guasto, e la retrocompatibilità va verso «come prima»."""
+        M._safe_scratch_path("/datadir/spawns/chiunque-9/x.pdf")
+
+    def test_the_root_stays_refused_even_without_the_claim(self):
+        """Il controllo precedente non deve indebolirsi con l'aggiunta del
+        nuovo: sono due condizioni, non una scelta."""
+        with self.assertRaises(ValueError):
+            M._safe_scratch_path("/datadir/spawns/sciolto.pdf")

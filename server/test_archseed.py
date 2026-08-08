@@ -46,10 +46,65 @@ def _cfg(c=None):
     return patch.object(w, "CONFIG", c or CFG)
 
 
+SEED_ARCH = {"name": "archseed", "abstract": True, "tool_permissions": [
+    "memory.*", "topic.open", "topic.files", "topic.read_file",
+    "topic.read_document", "topic.search", "topic.list", "topic.fetch",
+    "topic.post_message"]}
+
+
+def _seed(d=None):
+    from . import human as H
+    return patch.object(H, "_seed", lambda n: (d if d is not None else SEED_ARCH)
+                        if n == "archseed" else {})
+
+
+class SourceTests(unittest.TestCase):
+    """L'arciseed è un seed del base-pack, e si legge da lì.
+
+    Osservazione di Davide, 8 ago 2026: «l'archseed fa parte del base-pack, non
+    istanziabile in quanto abstract, ma vive lì». Aveva ragione contro il mio
+    primo disegno, che lo teneva come tupla Python: **un seed è un file**, si
+    legge, si diffa e si revisiona in una PR.
+
+    L'obiezione che avevo — l'autorità non deve stare dove il soggetto la
+    riscrive — resta soddisfatta: `/datadir/agents/` è `drwx------ root` e gli
+    spawn girano unprivileged, quindi il confine lo mette il kernel. È lo stesso
+    posto da cui si legge il ruolo di un umano.
+    """
+
+    def test_the_verbs_come_from_the_seed(self):
+        with _cfg(), _seed():
+            self.assertEqual(sorted(w.archseed_tools()),
+                             sorted(SEED_ARCH["tool_permissions"]))
+
+    def test_a_changed_seed_changes_the_floor(self):
+        """La prova che la fonte è il file e non il codice."""
+        with _cfg(), _seed({"tool_permissions": ["topic.open"]}):
+            self.assertEqual(w.archseed_tools(), ["topic.open"])
+
+    def test_config_can_override_the_instance(self):
+        with patch.object(w, "CONFIG", {"agents": {},
+                                        "archseed": {"allowed_tools": ["memory.*"]}}), \
+             _seed({}):
+            self.assertEqual(w.archseed_tools(), ["memory.*"])
+
+    def test_the_builtin_is_only_a_bootstrap_floor(self):
+        """Prima che il pack sia materializzato. Senza, ogni agente resterebbe
+        senza verbi base proprio nel momento in cui l'istanza nasce — e «i due
+        livelli esistono» sarebbe falso alla nascita."""
+        with _cfg(), _seed({}):
+            self.assertTrue(w.archseed_tools())
+
+    def test_a_seed_that_declares_itself_abstract_is_abstract(self):
+        """Anche se non è registrato nella config del gateway: altrimenti
+        resterebbe spawnabile nonostante si dichiari astratto."""
+        from . import human as H
+        with _cfg(), patch.object(H, "_seed", lambda n: {"abstract": True}):
+            self.assertTrue(w.is_abstract("un-antenato"))
+
+
 class ExistenceTests(unittest.TestCase):
-    def test_the_archseed_exists_without_a_file(self):
-        """Se fosse un file, un'istanza potrebbe non averlo, e «i due livelli
-        esistono» smetterebbe di essere vero ovunque."""
+    def test_the_archseed_has_a_floor_even_at_bootstrap(self):
         with _cfg():
             self.assertTrue(w.archseed_tools())
 
@@ -72,9 +127,19 @@ class ExistenceTests(unittest.TestCase):
         with _cfg():
             self.assertIn("topic.post_message", w.archseed_tools())
 
-    def test_crossing_verbs_are_not_in_it(self):
-        """Scrivere, spostare i muri, uscire: è mestiere, e il mestiere è del
-        seed."""
+    def test_producing_is_not_in_the_floor(self):
+        """Il pavimento è PARTECIPARE, non «tutto ciò che resta nella stanza».
+
+        `topic.put` scrive dentro la stanza in cui lo spawn già sta, e resta
+        fuori lo stesso: la linea è partecipare/produrre. La prova che è quella
+        giusta è `segretario`, che esiste proprio per scrivere lo stato del topic
+        e lo dichiara — se la scrittura fosse ereditata, quel seed non direbbe
+        più niente, e «cosa fa questo agente» smetterebbe di avere risposta
+        leggendo il suo file.
+
+        Scelta di Davide, 8 ago 2026, dopo aver notato che la regola come l'avevo
+        scritta non discriminava.
+        """
         with _cfg():
             t = w.archseed_tools()
             for v in ("topic.put", "topic.write_file", "topic.delete_file",
@@ -276,3 +341,60 @@ class ProvenanceTests(unittest.TestCase):
         src = inspect.getsource(agents_admin.show)
         self.assertIn("tools_with_provenance", src)
         self.assertIn("tool_permissions", src)   # la dichiarazione resta accanto
+
+
+class InspectableTests(unittest.TestCase):
+    """L'arciseed non è un file, ma dev'essere ispezionabile.
+
+    Osservazione di Davide, 8 ago 2026: «non vedo l'archseed tra i seed del
+    base-pack». Giusto, e deliberato: i seed del pack vivono nella datadir, che
+    l'agent-server scrive, mentre l'autorità dev'essere irraggiungibile dal suo
+    soggetto (§3.5). Come codice sul volume del gateway, «i due livelli
+    esistono» è vero su ogni istanza invece di dipendere da un file che qualcuno
+    deve aver creato.
+
+    **Ma non essere un file non è una ragione per essere invisibile.** Si vedeva
+    che un verbo veniva dall'arciseed e non si poteva aprire l'arciseed: metà
+    della domanda senza risposta, e la §1.4 chiede il contrario.
+    """
+
+    def _adm(self):
+        from .tools import agents_admin
+        return agents_admin
+
+    def test_its_card_opens(self):
+        with _cfg():
+            c = self._adm().show(w.ARCHSEED)
+            self.assertEqual(c["name"], w.ARCHSEED)
+
+    def test_the_card_lists_the_base_verbs(self):
+        with _cfg():
+            c = self._adm().show(w.ARCHSEED)
+            self.assertEqual(sorted(c["tool_permissions"]),
+                             sorted(w.archseed_tools()))
+
+    def test_it_says_it_cannot_be_spawned(self):
+        with _cfg():
+            self.assertTrue(self._adm().show(w.ARCHSEED)["abstract"])
+
+    def test_it_says_where_it_comes_from(self):
+        """`source: gateway` risponde alla domanda vera di chi la legge: non si
+        modifica da qui, e non perché sia protetto — perché non è un file."""
+        with _cfg():
+            c = self._adm().show(w.ARCHSEED)
+            self.assertEqual(c["source"], "gateway")
+            self.assertTrue(c["immutable"])
+
+    def test_it_appears_in_the_list(self):
+        """Un elenco che lo omette fa sembrare che i verbi base vengano dal
+        nulla."""
+        with _cfg(), patch.object(self._adm(), "_all_agents", lambda: []):
+            nomi = [a["name"] for a in self._adm().list_agents()["agents"]]
+            self.assertIn(w.ARCHSEED, nomi)
+
+    def test_the_card_matches_what_the_gateway_actually_grants(self):
+        """Una scheda che mostrasse verbi diversi da quelli ereditati sarebbe
+        peggio dell'assenza: si guarderebbe la cosa sbagliata."""
+        with _cfg():
+            c = self._adm().show(w.ARCHSEED)
+            self.assertTrue(set(c["tool_permissions"]) <= w.effective_tools("clodia"))

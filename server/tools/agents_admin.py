@@ -83,16 +83,62 @@ def _immutable(a: dict) -> bool:
 
 
 # ── letture (metadati) ────────────────────────────────────────────────────
+def _archseed_card() -> dict:
+    """La scheda dell'ARCISEED, costruita dalla sua definizione nel gateway.
+
+    Non è un seed del pack, e questo è deliberato: l'autorità dev'essere
+    irraggiungibile dal suo soggetto (§3.5), e i seed del pack vivono nella
+    datadir, che l'agent-server scrive. Come codice sul volume del gateway, «i
+    due livelli esistono» è vero su ogni istanza invece di dipendere da un file
+    che qualcuno deve aver creato.
+
+    Ma non essere un file non è una ragione per essere **invisibile**: si vedeva
+    che un verbo veniva dall'arciseed e non si poteva aprire l'arciseed. La §1.4
+    chiede che l'insieme risolto sia leggibile, e un antenato che non si ispeziona
+    lascia metà della domanda senza risposta.
+
+    `immutable` e `source: gateway` dicono la cosa che serve a chi la legge: non
+    si modifica da qui, e non perché sia protetto — perché non è un file.
+    """
+    from .. import whitelist as _wl
+    verbi = list(_wl.archseed_tools())
+    return {
+        "name": _wl.ARCHSEED,
+        "type": "archseed",
+        "display_name": "Archseed",
+        "description": ("Antenato astratto di ogni seed: tiene i verbi base — la "
+                        "propria memoria, la lettura dello scope in cui lo spawn "
+                        "sta, e la parola. Non si spawna."),
+        "immutable": True,
+        "abstract": True,
+        "source": "gateway",
+        "capabilities": [],
+        "rules": [],
+        "tool_permissions": verbi,
+        "verbs": {v: _wl.ARCHSEED for v in verbi},
+    }
+
+
 def list_agents() -> dict:
-    """Tutti gli agent con tipo e immutabilità (per scegliere un target)."""
-    out = [{"name": a.get("name"), "type": a.get("type"),
-            "display_name": a.get("display_name"), "immutable": _immutable(a)}
-           for a in _all_agents()]
+    """Tutti gli agent con tipo e immutabilità (per scegliere un target).
+
+    L'arciseed compare in testa: è l'antenato di tutti, e un elenco che lo omette
+    fa sembrare che i verbi base vengano dal nulla.
+    """
+    from .. import whitelist as _wl
+    out = [{"name": _wl.ARCHSEED, "type": "archseed",
+            "display_name": "Archseed", "immutable": True, "abstract": True}]
+    out += [{"name": a.get("name"), "type": a.get("type"),
+             "display_name": a.get("display_name"), "immutable": _immutable(a)}
+            for a in _all_agents()]
     return {"count": len(out), "agents": out}
 
 
 def show(name: str) -> dict:
     """Capability correnti di un agent (skill/rules/tool) + immutabilità."""
+    from .. import whitelist as _wl
+    if str(name or "") == _wl.ARCHSEED:
+        return _archseed_card()
     a = _find(name)
     if a is None:
         raise ValueError(f"agent '{name}' non trovato")

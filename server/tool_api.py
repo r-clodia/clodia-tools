@@ -67,6 +67,11 @@ class _Ctx:
     _VARS = (
         ("agent", "set_current_agent", "reset_current_agent",
          lambda p, t: str(p.get("agent") or "")),
+        # Lo SPAWN, non il seed: `execution_id` esisteva nel token e nessuno lo
+        # riempiva. Aggiungere una riga qui è sicuro perché la tabella ha
+        # (nome, setter, resetter): è la struttura nata dal difetto opposto.
+        ("spawn", "set_current_spawn", "reset_current_spawn",
+         lambda p, t: p.get("execution_id") or None),
         ("principal", "set_current_principal", "reset_current_principal",
          lambda p, t: p.get("principal") or None),
         ("token", "set_current_token", "reset_current_token",
