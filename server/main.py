@@ -2084,13 +2084,8 @@ def _declared_tools(agent: str | None) -> set:
     vive dove uno spawn non può riscriverlo: `/datadir/agents/` è `drwx------
     root` e gli spawn girano come uid 60000.
     """
-    try:
-        return set(agent_config(agent).get("allowed_tools") or [])
-    except KeyError:
-        pass
-    from . import human as _seedreader   # lettore di seed (vale per ogni principal)
-    d = _seedreader._seed(agent or "")
-    return {str(x) for x in (d.get("tool_permissions") or [])}
+    from .whitelist import effective_tools
+    return effective_tools(agent)
 
 
 def _connector_intersect_on() -> bool:
@@ -2179,14 +2174,18 @@ def _email_account(arguments: dict) -> str:
     )
 
 
-# Nessun namespace è più universale (Davide, 7 ago 2026: «lasciamo i verbi
-# memory.* espliciti»). `memory` lo era: concesso a ogni agente senza comparire
-# nella sua scheda, quindi impossibile da vedere leggendo la configurazione e
-# impossibile da togliere a qualcuno in particolare.
+# Nessun namespace è più universale. `memory` lo era: concesso a ogni agente senza
+# comparire nella sua scheda, quindi invisibile leggendo la configurazione e
+# impossibile da togliere a uno in particolare.
 #
-# L'insieme resta, vuoto, invece di sparire con la sua funzione: se domani
-# tornasse la tentazione di un namespace implicito, il posto in cui metterlo è
-# questo, con il commento che dice perché ne siamo usciti.
+# Non è stato tolto e basta: lo dà ora l'ARCISEED, da cui ogni seed discende
+# (specification §1.3). La differenza è che adesso si vede — l'insieme risolto
+# dice da dove viene ogni verbo — e si può sottrarre con `denied_tools`, che con
+# un namespace universale era impossibile.
+#
+# L'insieme resta, vuoto, invece di sparire con la sua funzione: se tornasse la
+# tentazione di un namespace implicito, il posto è questo, col commento che dice
+# perché ne siamo usciti.
 _UNIVERSAL_NS: set = set()
 
 
