@@ -46,10 +46,65 @@ def _cfg(c=None):
     return patch.object(w, "CONFIG", c or CFG)
 
 
+SEED_ARCH = {"name": "archseed", "abstract": True, "tool_permissions": [
+    "memory.*", "topic.open", "topic.files", "topic.read_file",
+    "topic.read_document", "topic.search", "topic.list", "topic.fetch",
+    "topic.post_message"]}
+
+
+def _seed(d=None):
+    from . import human as H
+    return patch.object(H, "_seed", lambda n: (d if d is not None else SEED_ARCH)
+                        if n == "archseed" else {})
+
+
+class SourceTests(unittest.TestCase):
+    """L'arciseed è un seed del base-pack, e si legge da lì.
+
+    Osservazione di Davide, 8 ago 2026: «l'archseed fa parte del base-pack, non
+    istanziabile in quanto abstract, ma vive lì». Aveva ragione contro il mio
+    primo disegno, che lo teneva come tupla Python: **un seed è un file**, si
+    legge, si diffa e si revisiona in una PR.
+
+    L'obiezione che avevo — l'autorità non deve stare dove il soggetto la
+    riscrive — resta soddisfatta: `/datadir/agents/` è `drwx------ root` e gli
+    spawn girano unprivileged, quindi il confine lo mette il kernel. È lo stesso
+    posto da cui si legge il ruolo di un umano.
+    """
+
+    def test_the_verbs_come_from_the_seed(self):
+        with _cfg(), _seed():
+            self.assertEqual(sorted(w.archseed_tools()),
+                             sorted(SEED_ARCH["tool_permissions"]))
+
+    def test_a_changed_seed_changes_the_floor(self):
+        """La prova che la fonte è il file e non il codice."""
+        with _cfg(), _seed({"tool_permissions": ["topic.open"]}):
+            self.assertEqual(w.archseed_tools(), ["topic.open"])
+
+    def test_config_can_override_the_instance(self):
+        with patch.object(w, "CONFIG", {"agents": {},
+                                        "archseed": {"allowed_tools": ["memory.*"]}}), \
+             _seed({}):
+            self.assertEqual(w.archseed_tools(), ["memory.*"])
+
+    def test_the_builtin_is_only_a_bootstrap_floor(self):
+        """Prima che il pack sia materializzato. Senza, ogni agente resterebbe
+        senza verbi base proprio nel momento in cui l'istanza nasce — e «i due
+        livelli esistono» sarebbe falso alla nascita."""
+        with _cfg(), _seed({}):
+            self.assertTrue(w.archseed_tools())
+
+    def test_a_seed_that_declares_itself_abstract_is_abstract(self):
+        """Anche se non è registrato nella config del gateway: altrimenti
+        resterebbe spawnabile nonostante si dichiari astratto."""
+        from . import human as H
+        with _cfg(), patch.object(H, "_seed", lambda n: {"abstract": True}):
+            self.assertTrue(w.is_abstract("un-antenato"))
+
+
 class ExistenceTests(unittest.TestCase):
-    def test_the_archseed_exists_without_a_file(self):
-        """Se fosse un file, un'istanza potrebbe non averlo, e «i due livelli
-        esistono» smetterebbe di essere vero ovunque."""
+    def test_the_archseed_has_a_floor_even_at_bootstrap(self):
         with _cfg():
             self.assertTrue(w.archseed_tools())
 
