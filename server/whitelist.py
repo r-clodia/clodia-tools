@@ -551,6 +551,56 @@ def effective_tools(name: str | None) -> set:
     return fuori
 
 
+
+def tools_with_provenance(name: str | None) -> dict:
+    """Ogni verbo effettivo con la sua ORIGINE: `own`, il seed che lo eredita, o
+    `archseed`.
+
+    Terza condizione della §1.4, e senza di essa l'ereditarietà sarebbe un
+    cattivo affare: prima si leggeva un file e si sapeva cosa un agente potesse
+    fare; con l'ereditarietà non più. Una duplicazione la vedi, un'opacità no —
+    quindi l'insieme risolto deve dire da dove viene ogni pezzo.
+
+    Serve anche a una cosa pratica: capire se un verbo si toglie togliendolo
+    dall'agente, o se va sottratto con `denied_tools` perché arriva da un
+    antenato. Sono due rimedi diversi, e sbagliarli significa modificare un file
+    e vedere che non cambia niente.
+    """
+    n = str(name or "")
+    out: dict = {}
+    if not n:
+        return out
+    visti: set = set()
+    coda = [(n, 0)]
+    while coda:
+        chi, prof = coda.pop(0)
+        if chi in visti or prof > _MAX_ANCESTRY:
+            continue
+        visti.add(chi)
+        if chi == ARCHSEED:
+            for v in archseed_tools():
+                out.setdefault(str(v), ARCHSEED)
+            continue
+        try:
+            propri = agent_config(chi).get("allowed_tools") or []
+        except KeyError:
+            propri = []
+            if chi == n:
+                from . import human as _seedreader
+                propri = _seedreader._seed(chi).get("tool_permissions") or []
+        for v in propri:
+            out.setdefault(str(v), "own" if chi == n else chi)
+        for g in parents_of(chi):
+            coda.append((g, prof + 1))
+    # Il deny non toglie la riga: la MARCA. Un verbo che sparisce dall'elenco
+    # lascia chi legge a chiedersi se non sia mai stato ereditato — e la risposta
+    # («c'è, ed è stato sottratto qui») è quella che serve per intervenire.
+    for v in list(out):
+        if agent_denies(v, n):
+            out[v] = f"{out[v]} · negato"
+    return out
+
+
 def agent_denies(verb: str, name: str | None = None) -> bool:
     """True se `verb` è nella `denied_tools` dell'agente.
 
