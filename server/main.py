@@ -629,6 +629,18 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name"]},
     ),
     Tool(
+        name="topic.set_portable",
+        description=("Dichiara (o revoca) la PORTABILITÀ di un topic: i suoi "
+                     "partecipanti possono leggerne i contenuti anche da altre "
+                     "stanze, entro il tier della stanza in cui si trovano. "
+                     "Atto sui muri dello scope: lo decide l'owner."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "portable": {"type": "boolean", "description": "true = portabile, false = revoca"},
+        }, "required": ["tier", "name", "portable"]},
+    ),
+    Tool(
         name="topic.list",
         description="Elenca i topic (riga sintetica). Gli archived sono nascosti salvo include_archived.",
         inputSchema={"type": "object", "properties": {
@@ -3864,6 +3876,8 @@ def _dispatch_topic(name: str, a: dict):
         return svc.add_minute(a["tier"], a["name"], a["text"])
     if verb == "archive":
         return svc.archive(a["tier"], a["name"])
+    if verb == "set_portable":
+        return svc.set_portable(a["tier"], a["name"], bool(a["portable"]))
     if verb == "list":
         return _filter_member_rows(svc.list(a.get("tier"), a.get("include_archived", False)),
                                    agent_name())

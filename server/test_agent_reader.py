@@ -109,6 +109,28 @@ class VerbClassificationTests(unittest.TestCase):
             with self.subTest(verbo=v):
                 self.assertIn(v, M._TOPIC_SCOPED_VERBS)
 
+    def test_every_classified_verb_is_actually_declared(self):
+        """Il confronto che mancava, e il difetto che ha lasciato passare.
+
+        Il test qui sopra confronta DUE LISTE fra loro: un verbo scritto in
+        entrambe le supera, anche se non esiste alcun tool che lo esponga.
+        `topic.set_portable` era esattamente così — classificato `walls`, gated,
+        scoped, mutante, e **non dichiarato né dispatchato** (trovato il 9 ago
+        2026, quando Davide ha chiesto come si dichiara portabile un topic: la
+        risposta era «modificando meta.json a mano»).
+
+        Il confronto giusto è con la superficie REALE: i tool che il gateway
+        annuncia. Due liste coerenti fra loro descrivono un mondo che può non
+        esistere.
+        """
+        dichiarati = {t.name.split(".", 1)[1]
+                      for lst in (getattr(M, n) for n in dir(M) if n.endswith("_TOOLS"))
+                      for t in lst if t.name.startswith("topic.")}
+        for v in sorted(M._TOPIC_SCOPED_VERBS | set(M._TOPIC_MUTATING_VERBS)):
+            with self.subTest(verbo=v):
+                self.assertIn(v, dichiarati,
+                              f"'topic.{v}' è classificato ma nessun tool lo espone")
+
 
 class LegacyTests(Base):
     def test_a_legacy_list_leaves_everyone_able_to_mutate(self):
