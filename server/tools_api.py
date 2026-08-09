@@ -38,7 +38,7 @@ from . import whitelist
 from .tools import email as email_tool
 
 # Nomi backend: lowercase slug, niente collisione coi prefissi nativi.
-_NATIVE_PREFIXES = {"trello", "fs", "email", "agent", "topic", "runtime"}
+_NATIVE_PREFIXES = {"fs", "email", "agent", "topic", "runtime"}
 
 
 def _slugify(name: str) -> str:
@@ -297,15 +297,6 @@ async def list_tools(request: Request):
         "label": "Image generation (OpenAI)",
         "provider": "openai",
         "connected": vault.has_credential("openai_api_key"),
-        "accounts": [],
-    })
-    # Trello (nostra implementazione, tool trello.*): connesso se le creds sono
-    # nel vault. "Connetti" inserisce API key + token.
-    connectors.append({
-        "id": "trello",
-        "label": "Trello",
-        "provider": "trello",
-        "connected": vault.has_credential("trello"),
         "accounts": [],
     })
     # GitHub (server MCP ufficiale, tool github.*): connesso se il PAT è nel vault.
@@ -858,32 +849,6 @@ async def email_mailbox_remove(request: Request):
     return JSONResponse({"account": account, "removed": removed})
 
 
-async def trello_connect(request: Request):
-    g = _connector_guard("trello")
-    if g is not None:
-        return g
-    """Deposita le credenziali Trello nel vault. Body: {api_key, token}.
-    api_key/token vuoti → disconnette (rimuove la credenziale)."""
-    if not _authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "bad_json"}, status_code=400)
-    key = (body.get("api_key") or "").strip()
-    token = (body.get("token") or "").strip()
-    if not key and not token:
-        vault.remove("trello")
-        LOG.info("trello_connect: credenziali rimosse")
-        return JSONResponse({"connected": False})
-    if not key or not token:
-        return JSONResponse({"error": "servono sia api_key sia token"}, status_code=400)
-    vault.deposit("trello", {"api_key": key, "token": token},
-                  cred_type="api_key", grant_agents=[])
-    LOG.info("trello_connect: creds depositate (key len=%d)", len(key))
-    return JSONResponse({"connected": True})
-
-
 async def telegram_status(request: Request):
     """Stato non sensibile dell'integrazione Telegram (per la card di setup e
     per Wainston via app_runtime). Mai il token."""
@@ -1091,15 +1056,6 @@ def _test_connector(cid: str) -> dict:
                 return {"ok": True, "detail": f"autenticato come {r.json().get('login')}"}
             return {"ok": False, "detail": f"GitHub {r.status_code}: {r.json().get('message','')}"}
 
-        if cid == "trello":
-            b = _c("trello")
-            if not b:
-                return {"ok": False, "detail": "nessuna credenziale nel vault"}
-            r = _rq.get("https://api.trello.com/1/members/me",
-                        params={"key": b.get("api_key",""), "token": b.get("token","")}, timeout=15)
-            return ({"ok": True, "detail": f"utente {r.json().get('username')}"} if r.status_code == 200
-                    else {"ok": False, "detail": f"Trello {r.status_code}"})
-
         if cid == "telegram":
             b = _c("telegram_bot_token")
             tok = (b or {}).get("value") or (b or {}).get("token") or ""
@@ -1143,7 +1099,6 @@ routes = [
     Route("/clodia/delegations/revoke", delegation_revoke, methods=["POST"]),
     Route("/tools", list_tools, methods=["GET"]),
     Route("/tools/{id}/test", test_connector, methods=["POST"]),
-    Route("/tools/trello/connect", trello_connect, methods=["POST"]),
     Route("/tools/email/mailboxes", email_mailboxes, methods=["GET"]),
     Route("/tools/email/mailboxes", email_mailbox_add, methods=["POST"]),
     Route("/tools/email/mailboxes/{account}", email_mailbox_remove, methods=["DELETE"]),

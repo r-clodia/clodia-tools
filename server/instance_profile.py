@@ -162,7 +162,7 @@ def integrations_check(slug: str) -> None:
 
 
 def connectors_allowed() -> list[str] | None:
-    """Connettori NATIVI dell'edizione (gmail, mailboxes, trello, …).
+    """Connettori NATIVI dell'edizione (gmail, mailboxes, …).
     None = tutti (storico); lista = solo quelli (terraformazione, gap-1
     edizione acme-min, 6 lug)."""
     conf = load()["integrations"]

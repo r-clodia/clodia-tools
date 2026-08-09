@@ -60,10 +60,8 @@ def _google_accounts() -> list[str]:
 
 
 def _cred_for(connector_id: str) -> str | None:
-    """Mappa l'id del connettore alla credenziale vault. 'trello' → 'trello';
+    """Mappa l'id del connettore alla credenziale vault.
     un account Gmail → 'gmail_<account>'; una casella → 'mailbox_<account>'."""
-    if connector_id == "trello":
-        return "trello" if vault.has_credential("trello") else None
     if connector_id in vault.email_connectors():
         return f"gmail_{connector_id}"
     if connector_id in _google_accounts():
@@ -100,12 +98,6 @@ def _connectors(agent: str | None) -> list[dict]:
             "granted": bool(agent) and agent in vault.agents_with_grant(cred),
             "agents": vault.agents_with_grant(cred),
         })
-    if vault.has_credential("trello"):
-        out.append({
-            "id": "trello", "type": "trello", "credential": "trello",
-            "granted": bool(agent) and agent in vault.agents_with_grant("trello"),
-            "agents": vault.agents_with_grant("trello"),
-        })
     return out
 
 
@@ -134,7 +126,7 @@ async def grant_connector(request: Request):
     if cred is None:
         return JSONResponse({"error": f"connettore '{account}' inesistente"}, status_code=404)
     # Grant SOLO nel vault (montato → persistente). L'accesso ai tool del
-    # connettore (email.*, trello.*) è derivato dal grant vault nel gate del
+    # connettore (email.*, …) è derivato dal grant vault nel gate del
     # gateway (main._connector_allows), così non dipende da config.yaml
     # (baked → effimero al rebuild).
     vault.set_grant(cred, agent, granted)
