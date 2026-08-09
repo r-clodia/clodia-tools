@@ -3929,20 +3929,20 @@ def _dispatch_topic(name: str, a: dict):
         return svc.migrate_storage(a["tier"], a["name"], a["target"])
     # Remote pluggable (git/drive): storage sempre local, sync opzionale/manuale.
     if verb == "remote_status":
-        return svc.remote_status(a["tier"], a["name"])
+        return svc.remote_status(a["tier"], a["name"], a.get("mount"))
     if verb == "remote_enable":
         return svc.remote_enable(a["tier"], a["name"], a["type"], a.get("config"),
                                  mount_name=a.get("mount"))
     if verb == "remote_disable":
         return svc.remote_disable(a["tier"], a["name"], a.get("mount"))
     if verb == "remote_add":
-        return svc.remote_add(a["tier"], a["name"], a["path"])
+        return svc.remote_add(a["tier"], a["name"], a["path"], a.get("mount"))
     if verb == "remote_commit":
-        return svc.remote_commit(a["tier"], a["name"], a.get("message", ""))
+        return svc.remote_commit(a["tier"], a["name"], a.get("message", ""), a.get("mount"))
     if verb == "remote_push":
-        return svc.remote_push(a["tier"], a["name"])
+        return svc.remote_push(a["tier"], a["name"], a.get("mount"))
     if verb == "remote_pull":
-        return svc.remote_pull(a["tier"], a["name"])
+        return svc.remote_pull(a["tier"], a["name"], a.get("mount"))
     raise ValueError(f"unknown topic verb: {name}")
 
 
