@@ -118,14 +118,14 @@ class OutsideARoomTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
-    def test_the_check_guards_the_carries_shortcut(self):
-        """Se stesse altrove, la scorciatoia `carries` continuerebbe a
+    def test_the_tier_check_guards_the_portable_shortcut(self):
+        """Se stesse altrove, la scorciatoia della portabilità continuerebbe a
         consentire tutto e la regola sarebbe scritta e non applicata."""
         import inspect
         src = inspect.getsource(M._cross_topic_gate_key)
-        i_carries = src.index("_carries(agent)")
+        i_port = src.index("_is_portable(meta, agent)")
         i_check = src.index("_require_room_carries")
-        self.assertLess(abs(i_check - i_carries), 400)
+        self.assertLess(abs(i_check - i_port), 400)
 
     def test_it_raises_instead_of_returning_a_gate_key(self):
         """Un gate sarebbe la facoltà di approvare il travaso che la regola
@@ -137,3 +137,59 @@ class WiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeclaredByTheTopicTests(unittest.TestCase):
+    """La portabilità la dichiara il TOPIC, non il seed.
+
+    Rovesciata l'8 ago 2026 (specification §2.4). Prima era `carries` sul seed —
+    «i topic che questo agente si porta dietro» — ed era il lato sbagliato: un
+    agente che si aggiunge un topic alla propria lista **si dà da solo un canale**
+    fra le stanze. Dichiarata dal topic, la portabilità è una decisione di chi
+    possiede i contenuti.
+
+    Misurato prima di spostarla: **nessun agente** usava `carries`, su nessuna
+    delle due istanze. Lo spostamento non migra nulla e non rompe niente — e
+    saperlo prima è la differenza fra una modifica e una scommessa.
+    """
+
+    PORT = {"tier": "SEAL-2", "portable": True, "owner": "davide",
+            "participants": ["impiegato-tomato"]}
+
+    def test_a_participant_of_a_portable_topic_reaches_it(self):
+        self.assertTrue(M._is_portable(self.PORT, "impiegato-tomato"))
+
+    def test_the_owner_reaches_it_too(self):
+        self.assertTrue(M._is_portable(self.PORT, "davide"))
+
+    def test_a_stranger_does_not(self):
+        """Portabile non vuol dire pubblico: restano DUE condizioni."""
+        self.assertFalse(M._is_portable(self.PORT, "estraneo"))
+
+    def test_an_ordinary_topic_is_not_portable_for_its_participants(self):
+        """La sola membership non attraversa i muri (voce 29): se bastasse,
+        avremmo riaperto il compartimento dalla porta di servizio."""
+        normale = dict(self.PORT)
+        normale.pop("portable")
+        self.assertFalse(M._is_portable(normale, "impiegato-tomato"))
+
+    def test_only_an_explicit_true_makes_it_portable(self):
+        """Un valore strano non deve rendere un topic portabile per errore."""
+        for v in ("si", 1, "true", [], None):
+            with self.subTest(valore=v):
+                m = dict(self.PORT, portable=v)
+                from .topics.service import normalize_meta_v2
+                self.assertFalse(normalize_meta_v2(m, "SEAL-2")["portable"] is not False
+                                 and normalize_meta_v2(m, "SEAL-2")["portable"])
+
+    def test_the_seed_can_no_longer_grant_it_to_itself(self):
+        """Il difetto che il ribaltamento chiude: `carries` non esiste più."""
+        import inspect
+        src = inspect.getsource(M)
+        self.assertNotIn("def _carries(", src)
+
+    def test_declaring_it_is_an_act_on_the_walls(self):
+        """Rende i contenuti raggiungibili da ogni stanza: è un gate `walls`,
+        quindi dell'owner e non di un partecipante qualunque."""
+        from . import gate
+        self.assertEqual(gate.gate_class("topic.set_portable"), gate.GATE_WALLS)
