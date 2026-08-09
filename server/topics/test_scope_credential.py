@@ -177,3 +177,76 @@ class VisibleFallbackTests(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PerMountTests(Base):
+    """Voce 33: la credenziale la mette l'OWNER al momento del mount.
+
+    Con più mount la credenziale non può più essere dello scope. Due mount dello
+    stesso topic possono appartenere a owner diversi — è esattamente il caso per
+    cui esistono — e una credenziale sola li riporterebbe nello stesso
+    perimetro, cioè annullerebbe la ragione della modifica.
+    """
+
+    def test_the_credential_belongs_to_the_mount(self):
+        self.svc.set_git_credential("SEAL-1", "acme", "PAT-CONTRATTI", "contratti")
+        tok, fonte = self.svc.git_credential("SEAL-1", "acme", "contratti")
+        self.assertEqual(tok, "PAT-CONTRATTI")
+        self.assertEqual(fonte, "mount")
+
+    def test_two_mounts_of_the_same_topic_do_not_share_it(self):
+        """Il confinamento, un livello più in basso di ieri."""
+        self.svc.set_git_credential("SEAL-1", "acme", "PAT-CONTRATTI", "contratti")
+        self.svc.set_git_credential("SEAL-1", "acme", "PAT-CODICE", "codice")
+        self.assertEqual(self.svc.git_credential("SEAL-1", "acme", "contratti")[0],
+                         "PAT-CONTRATTI")
+        self.assertEqual(self.svc.git_credential("SEAL-1", "acme", "codice")[0],
+                         "PAT-CODICE")
+
+    def test_a_mount_without_one_falls_back_to_the_scope(self):
+        """La credenziale già depositata sui topic esistenti non è del mount:
+        se smettesse di valere, i remote git in esercizio ricadrebbero sul PAT
+        di piattaforma — che raggiunge più repo, non meno. Il ripiego va nella
+        direzione giusta solo se passa prima da qui."""
+        self.svc.set_git_credential("SEAL-1", "acme", "PAT-STORICO")
+        tok, fonte = self.svc.git_credential("SEAL-1", "acme", "drive")
+        self.assertEqual(tok, "PAT-STORICO")
+        self.assertEqual(fonte, "scope")
+
+    def test_the_narrowest_wins(self):
+        """Ordine: mount → scope → piattaforma. L'ordine inverso userebbe il
+        token che raggiunge più repository anche avendone uno più stretto."""
+        self.svc.set_git_credential("SEAL-1", "acme", "PAT-STORICO")
+        self.svc.set_git_credential("SEAL-1", "acme", "PAT-DEL-MOUNT", "codice")
+        self.assertEqual(self.svc.git_credential("SEAL-1", "acme", "codice")[0],
+                         "PAT-DEL-MOUNT")
+
+    def test_removing_a_mount_credential_says_what_is_underneath(self):
+        """Togliere non lascia scoperto: sotto c'è ancora lo scope, e sotto
+        ancora la piattaforma. Chi toglie deve leggere su cosa è ricaduto —
+        dedurlo è il modo in cui si crede di aver revocato un accesso."""
+        self.svc.set_git_credential("SEAL-1", "acme", "PAT-STORICO")
+        self.svc.set_git_credential("SEAL-1", "acme", "PAT-DEL-MOUNT", "codice")
+        out = self.svc.set_git_credential("SEAL-1", "acme", None, "codice")
+        self.assertEqual(out["source"], "scope")
+        self.assertEqual(self.svc.git_credential("SEAL-1", "acme", "codice")[0],
+                         "PAT-STORICO")
+
+    def test_the_vault_name_is_derived_not_chosen(self):
+        """Se il nome fosse libero, due mount potrebbero puntare alla stessa
+        credenziale senza che nessuno lo veda."""
+        a = TopicService.scope_credential_name("SEAL-1", "acme", "git", "codice")
+        b = TopicService.scope_credential_name("SEAL-1", "acme", "git", "contratti")
+        self.assertNotEqual(a, b)
+        self.assertEqual(
+            TopicService.scope_credential_name("SEAL-1", "acme", "git"),
+            "scope_git__seal1__acme")
+
+    def test_a_mount_name_cannot_forge_another_topics_credential(self):
+        """Il nome del mount entra in una chiave del vault: se non fosse
+        normalizzato, un mount chiamato `x__seal1__beta` sceglierebbe il nome
+        della credenziale di un altro topic."""
+        cred = TopicService.scope_credential_name("SEAL-1", "acme", "git",
+                                                  "../../seal1__beta")
+        self.assertTrue(cred.startswith("scope_git__seal1__acme__"))
+        self.assertNotIn("/", cred)

@@ -319,7 +319,7 @@ async def remote(request: Request):
     action = body.get("action")
     try:
         if action == "status":
-            return JSONResponse(svc.remote_status(tier, name))
+            return JSONResponse(svc.remote_status(tier, name, body.get("mount")))
         if action == "enable":
             return JSONResponse(svc.remote_enable(
                 tier, name, body.get("type"), body.get("config"),
@@ -332,19 +332,19 @@ async def remote(request: Request):
             # questo disegno. Senza una via per ruotare, una credenziale per
             # topic si trasforma in N credenziali che nessuno rinnova più.
             return JSONResponse(svc.set_git_credential(
-                tier, name, body.get("credential")))
+                tier, name, body.get("credential"), body.get("mount")))
         if action == "disable":
             return JSONResponse(svc.remote_disable(tier, name, body.get("mount")))
         if action == "add":
-            return JSONResponse(svc.remote_add(tier, name, body.get("path")))
+            return JSONResponse(svc.remote_add(tier, name, body.get("path"), body.get("mount")))
         if action == "unstage":
-            return JSONResponse(svc.remote_unstage(tier, name, body.get("path") or ""))
+            return JSONResponse(svc.remote_unstage(tier, name, body.get("path") or "", body.get("mount")))
         if action == "commit":
-            return JSONResponse(svc.remote_commit(tier, name, body.get("message", "")))
+            return JSONResponse(svc.remote_commit(tier, name, body.get("message", ""), body.get("mount")))
         if action == "push":
-            return JSONResponse(svc.remote_push(tier, name))
+            return JSONResponse(svc.remote_push(tier, name, body.get("mount")))
         if action == "pull":
-            return JSONResponse(svc.remote_pull(tier, name))
+            return JSONResponse(svc.remote_pull(tier, name, body.get("mount")))
         return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
     except TopicError as e:
         return JSONResponse({"error": str(e)[:200]}, status_code=400)

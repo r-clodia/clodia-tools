@@ -458,8 +458,8 @@ class TopicService:
                     LOG.warning("drive-seed: salto '%s' (%s)", child, ex)
 
     @staticmethod
-    def _drive_remote_config(meta: dict) -> dict | None:
-        remote = mount_by_name(meta)
+    def _drive_remote_config(meta: dict, mount_name: str | None = None) -> dict | None:
+        remote = mount_by_name(meta, mount_name)
         if remote.get("type") == "drive":
             return remote.get("config") or {}
         return None
@@ -991,34 +991,51 @@ class TopicService:
             cache[key] = ds
         return ds
 
-    def _remote_for(self, tier: str, name: str, meta: dict):
+    def _remote_for(self, tier: str, name: str, meta: dict,
+                    mount_name: str | None = None):
         from .remote import make_remote
-        r = mount_by_name(meta)
+        r = mount_by_name(meta, mount_name)
         if not r.get("type"):
             return None
         # Solo per i remote git su github.com iniettiamo il PAT del vault (scoping:
         # il token non deve raggiungere altri host).
         gh_token = None
         if r["type"] == "git" and "github.com" in ((r.get("config") or {}).get("url") or ""):
-            gh_token, _fonte = self.git_credential(tier, name)
+            gh_token, _fonte = self.git_credential(tier, name, r.get("name"))
         return make_remote(r["type"], self._abs(tier, name, "files"),
                            self._abs(tier, name, ".remote-drive.json"),
                            drive_factory=self._remote_drive_factory,
                            github_token=gh_token)
 
     @staticmethod
-    def scope_credential_name(tier: str, name: str, kind: str = "git") -> str:
+    def scope_credential_name(tier: str, name: str, kind: str = "git",
+                              mount: str | None = None) -> str:
         """Nome nel vault della credenziale legata a UNO scope.
 
         Derivato dallo scope e non scelto da chi la deposita: se il nome fosse
         libero, due topic potrebbero puntare alla stessa credenziale senza che
         nessuno lo veda, e il confinamento sarebbe una convenzione invece di una
         proprietà.
+
+        La credenziale è del MOUNT, non dello scope: due mount dello stesso
+        topic possono appartenere a owner diversi, e una credenziale sola li
+        renderebbe di nuovo lo stesso perimetro — cioè annullerebbe la ragione
+        per cui esistono due mount (voce 33).
+
+        Senza `mount` il nome resta quello storico: è la credenziale già
+        depositata sui topic esistenti, e cambiarne il nome la farebbe sparire
+        senza dirlo, con ripiego silenzioso sul token di piattaforma.
         """
         t = _normalize_tier(tier).replace("-", "").lower()
-        return f"scope_{kind}__{t}__{name}"
+        base = f"scope_{kind}__{t}__{name}"
+        if not mount:
+            return base
+        import re as _re
+        m = _re.sub(r"[^a-z0-9-]+", "-", str(mount).strip().lower()).strip("-")
+        return f"{base}__{m}" if m else base
 
-    def git_credential(self, tier: str, name: str) -> tuple[str | None, str]:
+    def git_credential(self, tier: str, name: str,
+                       mount: str | None = None) -> tuple[str | None, str]:
         """`(token, provenienza)` per il remote git di questo topic.
 
         Provenienza è `scope` o `platform`, e viene restituita perché DEVE essere
@@ -1032,17 +1049,26 @@ class TopicService:
         scope, da qualunque stanza. Una credenziale di scope ne raggiunge uno.
         """
         from .. import vault
-        cred = self.scope_credential_name(tier, name, "git")
-        try:
-            bundle = vault.read_internal(cred) or {}
-            tok = bundle.get("value")
-            if tok:
-                return tok, "scope"
-        except Exception:  # noqa: BLE001 — assente o illeggibile → ripiego
-            pass
+        # Prima quella del mount, poi quella storica dello scope, infine la
+        # piattaforma. L'ordine è dal perimetro più stretto al più largo: il
+        # contrario farebbe usare il token che raggiunge più repo anche quando
+        # ne esiste uno che ne raggiunge uno solo.
+        candidati = []
+        if mount:
+            candidati.append((self.scope_credential_name(tier, name, "git", mount), "mount"))
+        candidati.append((self.scope_credential_name(tier, name, "git"), "scope"))
+        for cred, fonte in candidati:
+            try:
+                bundle = vault.read_internal(cred) or {}
+                tok = bundle.get("value")
+                if tok:
+                    return tok, fonte
+            except Exception:  # noqa: BLE001 — assente o illeggibile → ripiego
+                pass
         return self._platform_github_token(), "platform"
 
-    def set_git_credential(self, tier: str, name: str, token: str | None) -> dict:
+    def set_git_credential(self, tier: str, name: str, token: str | None,
+                           mount: str | None = None) -> dict:
         """Deposita (o rimuove) la credenziale git di questo scope.
 
         `grant_agents=[]`: nessun agente la legge. La usa il GATEWAY quando
@@ -1050,16 +1076,20 @@ class TopicService:
         agente, ed è la prima credenziale del sistema a esserlo.
         """
         from .. import vault
-        cred = self.scope_credential_name(tier, name, "git")
+        cred = self.scope_credential_name(tier, name, "git", mount)
         if not (token or "").strip():
             try:
                 vault.remove(cred)
             except Exception:  # noqa: BLE001 — già assente
                 pass
-            return {"credential": None, "source": "platform"}
+            # Togliere la credenziale di un mount NON lo lascia scoperto: sotto
+            # c'è ancora quella dello scope, e sotto ancora la piattaforma. Chi
+            # la toglie deve leggere su cosa è ricaduto, non dedurlo.
+            _, fonte = self.git_credential(tier, name, mount)
+            return {"credential": None, "source": fonte}
         vault.deposit(cred, {"value": token.strip()},
                       cred_type="git-token", grant_agents=[], actions=[])
-        return {"credential": cred, "source": "scope"}
+        return {"credential": cred, "source": "mount" if mount else "scope"}
 
     def _platform_github_token(self) -> str | None:
         """PAT GitHub dal vault (deposto da tools_api.github_connect come
@@ -1070,10 +1100,17 @@ class TopicService:
         except Exception:  # noqa: BLE001
             return None
 
-    def _remote_or_err(self, tier: str, name: str):
+    def _remote_or_err(self, tier: str, name: str, mount_name: str | None = None):
         meta, _ = self._read_meta(tier, name)
-        rem = self._remote_for(tier, name, meta)
+        rem = self._remote_for(tier, name, meta, mount_name)
         if rem is None:
+            noti = [m.get("name") for m in mounts(meta)]
+            if mount_name and noti:
+                # Nominare i mount esistenti: con più mount, «non configurato»
+                # su un nome sbagliato si legge come «il topic non ha remote»,
+                # che è una diagnosi diversa e manda a rifare il collegamento.
+                raise TopicError(
+                    f"il topic non ha un mount '{mount_name}' (ci sono: {', '.join(noti)})")
             raise TopicError("il topic non ha un remote configurato (topic.remote_enable)")
         return rem
 
@@ -1094,12 +1131,13 @@ class TopicService:
             return None
         return None
 
-    def remote_status(self, tier: str, name: str) -> dict:
+    def remote_status(self, tier: str, name: str,
+                      mount_name: str | None = None) -> dict:
         meta, ver = self._read_meta(tier, name)
-        rem = self._remote_for(tier, name, meta)
+        rem = self._remote_for(tier, name, meta, mount_name)
         # Backfill lazy del nome remoto sui topic pre-esistenti (config senza
         # `name`): risolto qui una volta e persistito. Best-effort.
-        r = mount_by_name(meta)
+        r = mount_by_name(meta, mount_name)
         if rem is not None and r and "name" not in (r.get("config") or {}):
             display = self._remote_display_name(r["type"], r.get("config") or {})
             try:
@@ -1108,13 +1146,21 @@ class TopicService:
             except Exception:  # noqa: BLE001 — race sul meta: riproverà al prossimo status
                 pass
         st = rem.status() if rem else {"enabled": False}
+        # L'ELENCO dei mount, sempre, anche quando se ne interroga uno. Uno
+        # stato che descrive solo il mount interrogato lascia la sidebar a
+        # mostrare il primo e a tacere degli altri — cioè lo stesso difetto
+        # dell'oggetto singolo, spostato dal meta alla UI.
+        st["mounts"] = [{"name": m.get("name"), "type": m.get("type"),
+                         "label": (m.get("config") or {}).get("name")}
+                        for m in mounts(meta)]
+        st["mount"] = r.get("name")
         # QUALE credenziale usa questo remote, sempre. Un topic senza credenziale
         # propria ricade su quella della piattaforma, e il ripiego silenzioso è il
         # modo in cui ci si convince di essere isolati quando non lo si è: chi
         # guarda lo stato deve poter distinguere «ha la sua» da «usa quella di
         # tutti». Il VALORE non compare mai — solo la provenienza.
-        if mount_by_name(meta).get("type") == "git":
-            tok, fonte = self.git_credential(tier, name)
+        if r.get("type") == "git":
+            tok, fonte = self.git_credential(tier, name, r.get("name"))
             st["credential_source"] = fonte if tok else "none"
         return st
 
@@ -1228,7 +1274,7 @@ class TopicService:
         if credential is not None and rtype == "git":
             # Prima di abilitare: se l'abilitazione fallisce non deve restare in
             # giro una credenziale per un remote che non esiste.
-            self.set_git_credential(tier, name, credential)
+            self.set_git_credential(tier, name, credential, mount_id)
         # Guard SEAL sul VERO punto di attivazione di Drive (non solo in
         # migrate_storage): dati confidenziali di tier > cap non devono finire su
         # Google come filesystem live (#45 review, Prima Legge/GDPR). Copre anche
@@ -1295,8 +1341,8 @@ class TopicService:
     def remote_disable(self, tier: str, name: str,
                        mount_name: str | None = None) -> dict:
         meta, ver = self._read_meta(tier, name)
-        rem = self._remote_for(tier, name, meta)
-        cfg = self._drive_remote_config(meta)
+        rem = self._remote_for(tier, name, meta, mount_name)
+        cfg = self._drive_remote_config(meta, mount_name)
         if cfg is not None:
             ds = self._drive_backend_for(tier, name, cfg)
             if ds is None:
@@ -1317,24 +1363,29 @@ class TopicService:
         self._drive_cache_clear()
         return {"ok": True}
 
-    def remote_add(self, tier: str, name: str, path: str) -> dict:
-        self._remote_or_err(tier, name).add(path)
+    def remote_add(self, tier: str, name: str, path: str,
+                   mount_name: str | None = None) -> dict:
+        self._remote_or_err(tier, name, mount_name).add(path)
         return {"ok": True}
 
-    def remote_unstage(self, tier: str, name: str, path: str = "") -> dict:
+    def remote_unstage(self, tier: str, name: str, path: str = "",
+                       mount_name: str | None = None) -> dict:
         """Toglie dallo staging (path vuoto = tutto)."""
-        self._remote_or_err(tier, name).unstage(path or "")
+        self._remote_or_err(tier, name, mount_name).unstage(path or "")
         return {"ok": True}
 
-    def remote_commit(self, tier: str, name: str, msg: str = "") -> dict:
-        res = self._remote_or_err(tier, name).commit(msg) or {}
+    def remote_commit(self, tier: str, name: str, msg: str = "",
+                      mount_name: str | None = None) -> dict:
+        res = self._remote_or_err(tier, name, mount_name).commit(msg) or {}
         return {"ok": True, **res}
 
-    def remote_push(self, tier: str, name: str) -> dict:
-        return self._remote_or_err(tier, name).push()
+    def remote_push(self, tier: str, name: str,
+                    mount_name: str | None = None) -> dict:
+        return self._remote_or_err(tier, name, mount_name).push()
 
-    def remote_pull(self, tier: str, name: str) -> dict:
-        return self._remote_or_err(tier, name).pull()
+    def remote_pull(self, tier: str, name: str,
+                    mount_name: str | None = None) -> dict:
+        return self._remote_or_err(tier, name, mount_name).pull()
 
     def _migrate_legacy_drive(self, tier: str, name: str) -> None:
         """One-shot: legacy storage=google-drive → remote Drive live."""
