@@ -232,6 +232,11 @@ def normalize_meta_v2(meta: dict, tier: str) -> dict:
     out["tier"] = _normalize_tier(out.get("tier") or tier)
     out["status"] = _norm_status(out.get("status") or "active")
     out["deadline"] = _coerce_deadline(out.get("deadline"), ctx=out.get("name", ""))
+    # PORTABILE: i partecipanti lo raggiungono da qualunque altro scope
+    # (specification §2.4). Coercizione a bool perché un valore strano non deve
+    # rendere un topic non-apribile — ma nemmeno portabile per errore: qualunque
+    # cosa non sia vero esplicito vale falso.
+    out["portable"] = out.get("portable") is True
     return out
 
 
@@ -819,6 +824,21 @@ class TopicService:
                     "remote drive alla creazione di %s/%s fallito (topic resta "
                     "local): %s", tier, name, e)
         return meta
+
+    def set_portable(self, tier: str, name: str, portable: bool) -> dict:
+        """Dichiara (o revoca) la portabilità di un topic.
+
+        È un atto sui MURI dello scope, non una preferenza: rende i contenuti
+        raggiungibili dai propri partecipanti in ogni altra stanza. Quindi è
+        dell'owner (classe `walls`, voce 24) e non di un partecipante qualunque.
+
+        Revocarla è immediato e non lascia strascichi: la portabilità è valutata
+        a ogni accesso, non concessa una volta.
+        """
+        meta, ver = self._read_meta(tier, name)
+        meta["portable"] = bool(portable)
+        self._write_meta(tier, name, meta, base_version=ver)
+        return {"ok": True, "portable": bool(portable)}
 
     def set_channel(self, tier: str, name: str, channel: dict | None) -> dict:
         """Configura/rimuove il channel dei messaggi di un topic esistente.

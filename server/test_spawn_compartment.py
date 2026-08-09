@@ -15,9 +15,13 @@ per spawn: per seed è un permesso globale vestito da compartimento.
 La regola nuova, con `qui` preso dal claim FIRMATO:
 
     T == qui                → consentito
-    T ∈ carries             → consentito
+    T portabile e sono suo  → consentito   (dichiarato dal TOPIC, §2.4)
     agent ∈ participants(T) → GATE      ← il cambiamento
     altrimenti              → GATE
+
+*Aggiornato l'8 ago 2026*: la seconda riga era «T ∈ carries», dichiarato dal
+SEED. Rovesciata sul topic, perché un agente che si aggiunge un topic alla
+propria lista si dà da solo un canale fra le stanze.
 """
 from __future__ import annotations
 
@@ -46,13 +50,18 @@ class _Chat:
         return False
 
 
-def _env(modo="on", carries=None, meta=None):
+def _env(modo="on", portable=False, meta=None):
+    """`portable` è ora una proprietà del TOPIC bersaglio, non del seed che
+    chiede: è il ribaltamento dell'8 ago 2026."""
+    base = meta if meta is not None else META_A
+    if portable:
+        base = dict(base, portable=True)
+
     class _Svc:
         def open(self, tier, name):
-            return {"meta": meta if meta is not None else META_A}
+            return {"meta": base}
     return (patch.dict("os.environ", {"CLODIA_SPAWN_COMPARTMENT": modo}),
-            patch.object(M, "_topics", lambda: _Svc()),
-            patch.object(M, "_carries", lambda a: set(carries or [])))
+            patch.object(M, "_topics", lambda: _Svc()))
 
 
 class Base(unittest.TestCase):
@@ -88,7 +97,7 @@ class EnforcedTests(Base):
         def go():
             with _Chat("chan:SEAL-1:topic-b:clodia"):
                 self.assertIsNone(self.key())
-        self.run_with(_env(carries=["SEAL-1/topic-a"]), go)
+        self.run_with(_env(portable=True), go)
 
     def test_a_non_member_still_gates(self):
         def go():
@@ -108,7 +117,7 @@ class EnforcedTests(Base):
         def go():
             with _Chat("job:42"):
                 self.assertIsNone(self.key())
-        self.run_with(_env(carries=["SEAL-1/topic-a"]), go)
+        self.run_with(_env(portable=True), go)
 
 
 class TierAliasTests(Base):
@@ -121,11 +130,11 @@ class TierAliasTests(Base):
                 self.assertIsNone(self.key())
         self.run_with(_env(), go)
 
-    def test_carries_accepts_the_legacy_form_too(self):
+    def test_a_portable_topic_is_reachable_whatever_the_tier_alias(self):
         def go():
             with _Chat("chan:SEAL-1:topic-b:clodia"):
                 self.assertIsNone(self.key())
-        self.run_with(_env(carries=["P1/topic-a"]), go)
+        self.run_with(_env(portable=True), go)
 
 
 class ReportModeTests(Base):

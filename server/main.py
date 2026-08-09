@@ -2447,13 +2447,26 @@ def _spawn_compartment_mode() -> str:
     return m if m in ("off", "report", "on") else "report"
 
 
-def _carries(agent: str | None) -> set:
-    """Topic che il SEED dichiara di portare con sé, in forma `tier/nome`."""
-    try:
-        raw = agent_config(agent).get("carries") or []
-    except Exception:  # noqa: BLE001
-        return set()
-    return {str(x).strip().strip("/") for x in raw if str(x).strip()}
+def _is_portable(meta: dict, agent: str | None) -> bool:
+    """Il TOPIC si dichiara portabile, e chi lo porta ne è partecipante.
+
+    Rovesciato l'8 ago 2026. Prima la portabilità era `carries` sul SEED — «i
+    topic che questo agente si porta dietro» — ed era il lato sbagliato: un
+    agente che si aggiunge un topic alla propria lista **si dà da solo un
+    canale** fra le stanze. Dichiarata dal topic, la portabilità è una decisione
+    di chi possiede i contenuti (specification §2.4).
+
+    Restano due condizioni, non una: il topic è portabile **e** chi chiede ne è
+    partecipante. La prima da sola aprirebbe un topic portabile a chiunque; la
+    seconda da sola è la membership normale, che di per sé non attraversa i muri
+    (voce 29).
+
+    Nessuno usava `carries` — misurato su venere prima di toglierlo — quindi lo
+    spostamento non migra nulla e non rompe niente.
+    """
+    if not bool(meta.get("portable")):
+        return False
+    return _topic_is_member(meta, agent or "")
 
 
 def _require_room_carries(meta: dict, tier: str, tname: str, qui: str | None) -> None:
@@ -2520,7 +2533,7 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
     argomento, che sarebbe la parola dell'agente su dove si trova.
 
         T == qui               → consentito   (agisci nel tuo scope)
-        T ∈ carries            → consentito   (dichiarato, verificabile)
+        T portabile e sono suo → consentito   (dichiarato dal TOPIC)
         agent ∈ participants(T) → GATE        ← il cambiamento
         altrimenti             → GATE         (invariato)
 
@@ -2555,7 +2568,7 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
     qui = current_channel()
     if qui and _norm_scope(qui) == _norm_scope(target):
         return None                      # la propria stanza
-    if _norm_scope(target) in {_norm_scope(c) for c in _carries(agent)}:
+    if _is_portable(meta, agent):
         _require_room_carries(meta, tier, tname, qui)
         return None                      # portabile, e la stanza lo regge
     if _spawn_compartment_mode() == "report":
@@ -3422,7 +3435,8 @@ def _safe_scratch_path(p: str) -> str:
 # caller sia participant/owner (compartimento, need-to-know). `new`/`list`/`search`
 # sono gestiti a parte (creazione / risultati filtrati per membership).
 _TOPIC_SCOPED_VERBS = {
-    "open", "save_summary", "save_agents_md", "add_minute", "archive", "files", "read_file",
+    "open", "save_summary", "save_agents_md", "add_minute", "archive", "set_portable",
+    "files", "read_file",
     "read_document", "write_file", "fetch", "put", "delete_file", "migrate_storage",
     "post_message",
     "remote_enable", "remote_disable", "remote_add", "remote_commit",
@@ -3453,7 +3467,7 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
 #: stretto del ruolo. L'ha colto un test scritto apposta — «una classificazione
 #: su un verbo che non esiste è una regola che non si applica mai».
 _TOPIC_MUTATING_VERBS = frozenset({
-    "save_summary", "save_agents_md", "add_minute", "archive",
+    "save_summary", "save_agents_md", "add_minute", "archive", "set_portable",
     "write_file", "put", "delete_file", "migrate_storage",
     "remote_enable", "remote_disable", "remote_add", "remote_commit",
     "remote_push", "remote_pull",

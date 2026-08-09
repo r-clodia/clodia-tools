@@ -69,7 +69,8 @@ _GATE_CLASS = {
     "packs.install_pip": GATE_SYSTEM, "packs.install_npm": GATE_SYSTEM,
     "providers.pause": GATE_SYSTEM, "providers.resume": GATE_SYSTEM,
     # WALLS — chi sta nello scope, o quanto è largo
-    "topic.add_participant": GATE_WALLS, "topic.remove_participant": GATE_WALLS,
+    "topic.add_participant": GATE_WALLS,
+    "topic.set_portable": GATE_WALLS, "topic.remove_participant": GATE_WALLS,
     "topic.remote_add": GATE_WALLS, "topic.remote_enable": GATE_WALLS,
     "topic.remote_disable": GATE_WALLS,
     # OUTWARD — verso fuori
@@ -118,7 +119,7 @@ _DEFAULT_GATED_EXACT = frozenset({
     # workflows: lifecycle distruttivo (il verbo reale del delete è delete_run)
     "workflows.start", "workflows.cancel", "workflows.delete_run",
     # gestione partecipanti di un topic (auto-invito / confused-deputy)
-    "topic.add_participant", "topic.remove_participant",
+    "topic.add_participant", "topic.set_portable", "topic.remove_participant",
     # Il remote Drive di un topic È il suo perimetro di accesso (la cartella del
     # remote è la radice del confine per le chiamate dentro quel canale). Quindi
     # impostarlo, cambiarlo o TOGLIERLO non è una preferenza: è una dichiarazione
