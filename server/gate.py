@@ -81,6 +81,13 @@ _GATE_CLASS = {
     "workflows.start": GATE_SYSTEM, "workflows.cancel": GATE_SYSTEM,
     "workflows.delete_run": GATE_SYSTEM,
     "web.post": GATE_OUTWARD,
+    # `github.push` e `github.pull_request` portano FUORI il lavoro fatto nella
+    # scratch: il codice esce dallo scope e, sulla pull request, titolo e corpo
+    # diventano leggibili sul repository. `github.clone` e `github.pull` portano
+    # DENTRO, e non sono gated per la stessa ragione per cui non lo è
+    # `remote_pull`: tirare dentro non sposta il confine — è già la lista dei
+    # repository approvati a dire da dove si può tirare.
+    "github.push": GATE_OUTWARD, "github.pull_request": GATE_OUTWARD,
     "egress.allow": GATE_OUTWARD, "ingress.allow": GATE_OUTWARD,
     "topic.save_agents_md": GATE_WALLS,
 }
@@ -141,6 +148,10 @@ _DEFAULT_GATED_EXACT = frozenset({
     "topic.save_agents_md",
     # HTTP egress mutante: consenso umano obbligatorio per ogni singola POST.
     "web.post",
+    # Uscita di codice dallo scope. Il perimetro (la lista dei repository) dice
+    # DOVE si può spingere; il gate dice che spingere è un atto, non un dettaglio
+    # del lavoro. Sono due controlli diversi: il primo non sostituisce il secondo.
+    "github.push", "github.pull_request",
     # Allargamento delle whitelist: `allow` rende silenziosa una destinazione o
     # una fonte da lì in avanti, quindi è più privilegiato di qualunque singola
     # invocazione che consentirebbe. `revoke` e `list` NON sono gated: togliere
