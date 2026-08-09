@@ -115,10 +115,15 @@ class MutationTests(Base):
 class OwnerTests(Base):
     def test_the_owner_is_not_duplicated_among_participants(self):
         """Tenerlo in due posti significa poterli far divergere."""
-        self.svc.set_owner("SEAL-1", "acme", "clodia")
+        # L'owner è una PERSONA: dall'8 ago 2026 assegnarne uno che sia un
+        # agente viene rifiutato, perché l'owner sblocca i gate del proprio
+        # scope (invariante 1). Questo test parlava d'altro — che l'owner non si
+        # duplichi fra i partecipanti — e usava `clodia` solo perché comodo.
+        self.svc.add_participant("SEAL-1", "acme", "giovanni")
+        self.svc.set_owner("SEAL-1", "acme", "giovanni")
         parts = self.meta().get("participants")
-        self.assertNotIn("clodia", parts if isinstance(parts, (list, dict)) else [])
-        self.assertEqual(TopicService.participant_role(self.meta(), "clodia"), "owner")
+        self.assertNotIn("giovanni", parts if isinstance(parts, (list, dict)) else [])
+        self.assertEqual(TopicService.participant_role(self.meta(), "giovanni"), "owner")
 
     def test_the_owner_cannot_be_removed_as_a_participant(self):
         """Rimuovere l'owner dai partecipanti lascerebbe uno scope senza chi
