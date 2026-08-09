@@ -79,7 +79,8 @@ class Base(unittest.TestCase):
         self.svc._write_meta("SEAL-1", "acme", meta, base_version=ver)
         fake = FakeRemote()
         return (patch.object(self.svc, "_drive_remote_config", lambda m: {"folder": "FID"}),
-                patch.object(self.svc, "_drive_backend_for", lambda t, n, c: fake)), fake
+                patch.object(self.svc, "_drive_backend_for",
+                             lambda t, n, c, m=None: fake)), fake
 
     def run_with(self, ctx, fn):
         for c in ctx:

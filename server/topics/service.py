@@ -268,6 +268,20 @@ def _mount_id(voluto: str, meta: dict) -> str:
     return f"{base}-{i}"
 
 
+def _mount_of_cfg(meta: dict, cfg: dict) -> str | None:
+    """Il nome del mount che porta QUESTA config.
+
+    I chiamanti storici passano la config, non il mount: la config l'hanno
+    risolta prima. Risalire qui evita di cambiare dieci firme per un dato che
+    nel meta c'è già — e evita che nove le cambino e la decima no.
+    """
+    voluta = (cfg or {}).get("folder")
+    for m in mounts(meta):
+        if (m.get("config") or {}).get("folder") == voluta:
+            return m.get("name")
+    return None
+
+
 def mount_by_name(meta: dict, name: str | None = None) -> dict:
     """Il mount indicato, o il PRIMO se non se ne indica uno.
 
@@ -347,14 +361,21 @@ class TopicService:
         self._drive_local = threading.local()
 
     # ── routing storage dei FILE (control-plane resta su self.s) ─────────────
-    def _drive_service(self, account: str | None):
-        """Costruisce (e cache) il client Drive dalle credenziali gworkspace nel
-        vault. Lato gateway → principal di sistema 'clodia'. Il segreto non
-        raggiunge il modello."""
+    def _drive_service(self, account: str | None, bundle: dict | None = None):
+        """Client Drive. Con `bundle` usa QUELLA credenziale, altrimenti l'account
+        di piattaforma.
+
+        Il bundle è la credenziale che l'owner ha fornito al mount (§2.7): la
+        piattaforma non presta più la propria dove l'owner ne ha messa una. Il
+        segreto non raggiunge il modello in nessuno dei due casi — è il gateway
+        a costruire il client.
+        """
         from .. import vault
         from google.oauth2.credentials import Credentials
         from google.auth.transport.requests import Request as GReq
         from googleapiclient.discovery import build
+        if bundle:
+            return self._drive_build(bundle)
         names = vault.store_names()
         accts = sorted(
             {n[len("google_"):] for n in names if n.startswith("google_")}
@@ -366,7 +387,23 @@ class TopicService:
             raise TopicError("storage drive: nessun account Google Workspace nel vault")
         credential = (f"google_{acct}" if f"google_{acct}" in names
                       else f"gworkspace_{acct}")
-        b = vault.get_secret("clodia", credential)
+        return self._drive_build(vault.get_secret("clodia", credential))
+
+    @staticmethod
+    def _drive_build(b: dict):
+        """Da bundle OAuth a client Drive. Un punto solo: due costruzioni
+        divergono, e la seconda è quella che si dimentica il timeout."""
+        # Il controllo PRIMA degli import: una credenziale incompleta è un dato
+        # sbagliato, non un problema di libreria, e deve dirlo anche dove le
+        # librerie Google non ci sono.
+        mancanti = [k for k in ("refresh_token", "client_id", "client_secret")
+                    if not (b or {}).get(k)]
+        if mancanti:
+            raise TopicError(
+                f"credenziale Drive incompleta: mancano {', '.join(mancanti)}")
+        from google.auth.transport.requests import Request as GReq
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
         creds = Credentials(token=None, refresh_token=b["refresh_token"],
                             client_id=b["client_id"], client_secret=b["client_secret"],
                             token_uri="https://oauth2.googleapis.com/token",
@@ -398,17 +435,28 @@ class TopicService:
             folder = created["id"]
         return {"folder": folder, "account": account}
 
-    def _drive_backend_for(self, tier: str, name: str, cfg: dict):
-        """DriveStorage live per la cartella autoritativa del topic."""
+    def _drive_backend_for(self, tier: str, name: str, cfg: dict,
+                           mount: str | None = None):
+        """DriveStorage live per la cartella autoritativa del topic.
+
+        La chiave di cache porta la PROVENIENZA della credenziale. Senza, il
+        primo client costruito per questa cartella resterebbe in cache anche
+        dopo che l'owner ha collegato la propria: lo scope continuerebbe a
+        lavorare con l'account di piattaforma credendo di non farlo — un
+        privilegio che sopravvive alla sua revoca è peggio che non averlo mai
+        tolto, perché la schermata dice il contrario.
+        """
         folder = (cfg or {}).get("folder")
         if not folder:
             return None
         from .drive_fs import DriveStorage
-        key = f"{tier}/{name}:{folder}"
+        bundle, fonte = self.drive_credential(tier, name, mount)
+        key = f"{tier}/{name}:{folder}:{fonte}:{mount or '-'}"
         cache = self._drive_thread_cache()
         ds = cache.get(key)
         if ds is None:
-            ds = DriveStorage(self._drive_service((cfg or {}).get("account")), folder)
+            ds = DriveStorage(
+                self._drive_service((cfg or {}).get("account"), bundle=bundle), folder)
             cache[key] = ds
         return ds
 
@@ -485,7 +533,7 @@ class TopicService:
         if cfg is not None:
             # Drive è la fonte: si naviga direttamente il remoto, i file locali
             # non sono consultati né caricati.
-            ds = self._drive_backend_for(tier, name, cfg)
+            ds = self._drive_backend_for(tier, name, cfg, _mount_of_cfg(meta, cfg))
             if ds is None:
                 raise TopicError("remote drive: nessuna cartella configurata")
             return ds, ""
@@ -552,7 +600,7 @@ class TopicService:
         cfg = self._drive_remote_config(meta)
         if cfg is None:
             return None
-        ds = self._drive_backend_for(tier, name, cfg)
+        ds = self._drive_backend_for(tier, name, cfg, _mount_of_cfg(meta, cfg))
         if ds is None:
             raise TopicError("remote drive: nessuna cartella configurata")
         return ds, ""
@@ -1067,6 +1115,57 @@ class TopicService:
                 pass
         return self._platform_github_token(), "platform"
 
+    def drive_credential(self, tier: str, name: str,
+                         mount: str | None = None) -> tuple[dict | None, str]:
+        """`(bundle, provenienza)` per il mount Drive di questo topic.
+
+        Stesso ordine della git — mount → scope → piattaforma — e per la stessa
+        ragione: dal perimetro più stretto al più largo. Qui però il salto è più
+        grande. La credenziale di piattaforma è un ACCOUNT Google intero: usarla
+        dove l'owner ne ha fornita una significherebbe dare a quello scope
+        l'intero Drive dell'account condiviso.
+
+        `None` = nessuna credenziale di scope, e chi chiama ricade sull'account
+        di piattaforma. Non è un errore: è il comportamento storico, e la
+        provenienza restituita lo rende leggibile invece che silenzioso.
+        """
+        from .. import vault
+        candidati = []
+        if mount:
+            candidati.append((self.scope_credential_name(tier, name, "drive", mount), "mount"))
+        candidati.append((self.scope_credential_name(tier, name, "drive"), "scope"))
+        for cred, fonte in candidati:
+            try:
+                b = vault.read_internal(cred) or {}
+                if b.get("refresh_token"):
+                    return b, fonte
+            except Exception:  # noqa: BLE001 — assente o illeggibile → ripiego
+                pass
+        return None, "platform"
+
+    def set_drive_credential(self, tier: str, name: str, bundle: dict | None,
+                             mount: str | None = None) -> dict:
+        """Deposita (o toglie) la credenziale Drive di un mount.
+
+        Il bundle è un consenso OAuth dell'owner: `refresh_token`, `client_id`,
+        `client_secret`, `scope`. Non lo si valida contro Google qui — una
+        credenziale che il gateway non riesce a usare deve fallire quando la si
+        usa, con l'errore di Google, non con un nostro giudizio anticipato.
+        """
+        from .. import vault
+        cred = self.scope_credential_name(tier, name, "drive", mount)
+        if not (bundle or {}).get("refresh_token"):
+            try:
+                vault.remove(cred)
+            except Exception:  # noqa: BLE001 — già assente
+                pass
+            _, fonte = self.drive_credential(tier, name, mount)
+            return {"credential": None, "source": fonte}
+        tenuti = ("refresh_token", "client_id", "client_secret", "scope", "account")
+        vault.deposit(cred, {k: bundle[k] for k in tenuti if k in bundle},
+                      cred_type="google-oauth", grant_agents=[], actions=[])
+        return {"credential": cred, "source": "mount" if mount else "scope"}
+
     def set_git_credential(self, tier: str, name: str, token: str | None,
                            mount: str | None = None) -> dict:
         """Deposita (o rimuove) la credenziale git di questo scope.
@@ -1162,6 +1261,12 @@ class TopicService:
         if r.get("type") == "git":
             tok, fonte = self.git_credential(tier, name, r.get("name"))
             st["credential_source"] = fonte if tok else "none"
+        elif r.get("type") == "drive":
+            # Anche per Drive la provenienza si vede sempre. Qui il salto fra
+            # «la sua» e «quella di tutti» è più grande che su git: la
+            # credenziale di piattaforma è un ACCOUNT Google intero.
+            _b, fonte = self.drive_credential(tier, name, r.get("name"))
+            st["credential_source"] = fonte
         return st
 
     #: Marcatore nel messaggio d'errore: dice alla UI che questo rifiuto è
@@ -1346,7 +1451,7 @@ class TopicService:
         rem = self._remote_for(tier, name, meta, mount_name)
         cfg = self._drive_remote_config(meta, mount_name)
         if cfg is not None:
-            ds = self._drive_backend_for(tier, name, cfg)
+            ds = self._drive_backend_for(tier, name, cfg, mount_name)
             if ds is None:
                 raise TopicError("remote drive: nessuna cartella configurata")
             local_base = f"{self._dir(tier, name)}/files"

@@ -331,6 +331,12 @@ async def remote(request: Request):
             # il remote: serve per la ROTAZIONE, che è il costo ricorrente di
             # questo disegno. Senza una via per ruotare, una credenziale per
             # topic si trasforma in N credenziali che nessuno rinnova più.
+            # `kind` distingue le due credenziali di un mount. Il default resta
+            # git: era l'unica quando questa azione è nata, e cambiarlo
+            # silenziosamente rimuoverebbe token git credendo di toccare Drive.
+            if (body.get("kind") or "git") == "drive":
+                return JSONResponse(svc.set_drive_credential(
+                    tier, name, body.get("credential") or None, body.get("mount")))
             return JSONResponse(svc.set_git_credential(
                 tier, name, body.get("credential"), body.get("mount")))
         if action == "disable":
