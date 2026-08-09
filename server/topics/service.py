@@ -1611,7 +1611,46 @@ class TopicService:
         si aspettano ancora una lista."""
         return list(TopicService.participants_map(meta).keys())
 
+    @staticmethod
+    def _require_human_owner(owner: str, tier: str, name: str) -> None:
+        """**Un owner di scope è sempre umano** (specification §2.9, invariante 1).
+
+        Non è una preferenza di disegno: dal 7 ago l'owner **sblocca i gate del
+        proprio scope** (voce 24). Uno scope di proprietà di un agente
+        sbloccherebbe quindi i propri gate — il confused deputy nella sua forma
+        più pulita, e per giunta legittimato dal disegno invece che sfuggito.
+
+        L'invariante era scritta nella specifica e non asserita da nulla. È stata
+        imposta il 7 ago per il solo topic di configurazione, dove l'owner
+        sarebbe altrimenti stato `clodia`; qui vale per ogni scope.
+
+        **Un principal sconosciuto non è rifiutato.** Non tutti gli owner
+        legittimi sono nel registro degli umani — un'istanza appena reclamata, un
+        principal creato fuori banda — e rifiutare l'ignoto trasformerebbe una
+        lacuna del registro in un topic senza owner. Si rifiuta ciò che si sa
+        essere un agente, non ciò che non si riconosce: è la direzione in cui un
+        errore costa meno.
+        """
+        chi = str(owner or "").strip()
+        if not chi:
+            return
+        try:
+            from .. import human as _h
+            if _h.is_human(chi):
+                return
+            from ..whitelist import CONFIG
+            e_agente = chi in ((CONFIG or {}).get("agents") or {})
+        except Exception:  # noqa: BLE001 — registro illeggibile: non si decide
+            return
+        if e_agente:
+            raise TopicError(
+                f"'{chi}' è un agente e non può essere owner di {tier}/{name}: "
+                f"l'owner sblocca i gate del proprio scope, quindi un agente "
+                f"owner sbloccherebbe i propri. L'owner di uno scope è una "
+                f"persona.")
+
     def set_owner(self, tier: str, name: str, owner: str) -> dict:
+        self._require_human_owner(owner, tier, name)
         meta, v = self._read_meta(tier, name)
         meta["owner"] = owner
         # L'owner NON si duplica fra i partecipanti: `participants_map` lo
