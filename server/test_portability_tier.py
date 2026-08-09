@@ -64,7 +64,41 @@ class PortabilityTests(unittest.TestCase):
 
 
 class OutsideARoomTests(unittest.TestCase):
-    def test_in_a_job_a_declared_carry_still_travels(self):
+    def test_a_job_that_declares_its_tier_is_treated_as_a_room(self):
+        """Dall'8 ago 2026 il tier del job viaggia nel claim firmato, e questa
+        era l'ultima riga del modello scritta e non applicata."""
+        from . import whitelist as w
+        t = w.set_current_scope_tier("SEAL-1")
+        try:
+            with self.assertRaises(PermissionError) as cm:
+                M._require_room_carries(TP, "SEAL-3", "tp", None)
+            self.assertIn("job", str(cm.exception))
+        finally:
+            w.reset_current_scope_tier(t)
+
+    def test_a_job_at_or_above_the_tier_carries(self):
+        from . import whitelist as w
+        t = w.set_current_scope_tier("SEAL-3")
+        try:
+            M._require_room_carries(TP, "SEAL-3", "tp", None)
+        finally:
+            w.reset_current_scope_tier(t)
+
+    def test_the_refusal_points_at_the_job_not_at_an_admin(self):
+        """Il rimedio qui è alzare il tier del job, e nessun admin può
+        concedere ciò che il livello dichiarato nega."""
+        from . import whitelist as w
+        t = w.set_current_scope_tier("SEAL-0")
+        try:
+            with self.assertRaises(PermissionError) as cm:
+                M._require_room_carries(TP, "SEAL-3", "tp", None)
+            testo = str(cm.exception)
+            self.assertIn("Alza il tier del job", testo)
+            self.assertIn("non è un permesso che manca", testo.lower())
+        finally:
+            w.reset_current_scope_tier(t)
+
+    def test_a_job_with_no_declared_tier_still_carries(self):
         """Deviazione deliberata dalla direzione tenuta altrove, e vale la pena
         saperla. Un job ha un tier (voce 33) che però non arriva al gateway.
         Chiudere qui romperebbe un `carries` scritto apposta da qualcuno, per
@@ -72,8 +106,9 @@ class OutsideARoomTests(unittest.TestCase):
         così che un controllo viene spento. Si consente e si logga; il pezzo
         mancante (il tier del job nel claim firmato) è un punto aperto.
 
-        La prima versione rifiutava, e il test del compartimento spawn — scritto
-        stamattina per un altro motivo — l'ha preso subito."""
+        Assente significa «nessun requisito», che è lo stato di ogni job
+        esistente: trasformare un'assenza in un divieto spegnerebbe lavoro che
+        gira."""
         M._require_room_carries(TP, "SEAL-3", "tp", None)
 
     def test_a_public_topic_travels_anywhere(self):

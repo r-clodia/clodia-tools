@@ -452,6 +452,29 @@ def current_spawn() -> str | None:
     return str(v) if v else None
 
 
+_CURRENT_SCOPE_TIER: ContextVar = ContextVar("clodia_current_scope_tier", default=None)
+
+
+def set_current_scope_tier(v):
+    return _CURRENT_SCOPE_TIER.set(v)
+
+
+def reset_current_scope_tier(token: object) -> None:
+    _CURRENT_SCOPE_TIER.reset(token)  # type: ignore[arg-type]
+
+
+def current_scope_tier() -> str | None:
+    """Tier dello scope corrente quando NON è una stanza — cioè un job.
+
+    In un canale il tier si legge dal topic; in un job non c'era modo di
+    saperlo, e la regola della portabilità restava scritta e non applicata
+    proprio lì. Arriva dal claim FIRMATO `scope_tier`: dedurlo da un argomento
+    sarebbe la parola dell'agente su quanto è riservato ciò che tratta.
+    """
+    v = _CURRENT_SCOPE_TIER.get()
+    return str(v) if v else None
+
+
 def agent_name() -> str:
     """Agente chiamante: prima il contextvar (HTTP per-richiesta), poi l'env
     MCP_AGENT_NAME (stdio legacy)."""

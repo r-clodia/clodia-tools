@@ -72,6 +72,8 @@ class _Ctx:
         # (nome, setter, resetter): è la struttura nata dal difetto opposto.
         ("spawn", "set_current_spawn", "reset_current_spawn",
          lambda p, t: p.get("execution_id") or None),
+        ("scope_tier", "set_current_scope_tier", "reset_current_scope_tier",
+         lambda p, t: p.get("scope_tier") or None),
         ("principal", "set_current_principal", "reset_current_principal",
          lambda p, t: p.get("principal") or None),
         ("token", "set_current_token", "reset_current_token",
