@@ -250,3 +250,40 @@ class PerMountTests(Base):
                                                   "../../seal1__beta")
         self.assertTrue(cred.startswith("scope_git__seal1__acme__"))
         self.assertNotIn("/", cred)
+
+
+class EnableWithCredentialTests(Base):
+    """Collegare un mount git E dargli la credenziale, in un colpo solo.
+
+    È il percorso della UI — il momento del collegamento è l'unico in cui chi
+    fornisce la credenziale sa a quale repository serve — ed era l'unico non
+    coperto: i test qui sopra chiamano `set_git_credential` da soli, e quindi
+    passavano anche mentre `remote_enable` sollevava `NameError` alla prima
+    riga che nominava il mount. Un difetto in produzione con la suite verde.
+    """
+
+    def _approva(self, url):
+        from unittest.mock import patch
+        return patch.object(TopicService, "_require_approved_repo",
+                            staticmethod(lambda u, t, n: None))
+
+    def test_connecting_with_a_credential_stores_it_under_the_mount(self):
+        url = "https://github.com/acme/contratti"
+        with self._approva(url):
+            out = self.svc.remote_enable("SEAL-1", "acme", "git", {"url": url},
+                                         credential="PAT-CONTRATTI",
+                                         mount_name="contratti")
+        self.assertEqual(out["mount"]["name"], "contratti")
+        self.assertEqual(self.svc.git_credential("SEAL-1", "acme", "contratti"),
+                         ("PAT-CONTRATTI", "mount"))
+
+    def test_the_default_mount_also_gets_its_credential(self):
+        """Senza nome il mount si chiama come il tipo: la credenziale deve
+        finire sotto QUEL nome, non sotto nessuno."""
+        url = "https://github.com/acme/codice"
+        with self._approva(url):
+            out = self.svc.remote_enable("SEAL-1", "acme", "git", {"url": url},
+                                         credential="PAT-CODICE")
+        self.assertEqual(out["mount"]["name"], "git")
+        self.assertEqual(self.svc.git_credential("SEAL-1", "acme", "git")[0],
+                         "PAT-CODICE")
