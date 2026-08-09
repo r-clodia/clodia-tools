@@ -1271,10 +1271,6 @@ class TopicService:
             raise TopicError(f"remote type non supportato: {rtype}")
         if rtype == "git":
             self._require_approved_repo((config or {}).get("url"), tier, name)
-        if credential is not None and rtype == "git":
-            # Prima di abilitare: se l'abilitazione fallisce non deve restare in
-            # giro una credenziale per un remote che non esiste.
-            self.set_git_credential(tier, name, credential, mount_id)
         # Guard SEAL sul VERO punto di attivazione di Drive (non solo in
         # migrate_storage): dati confidenziali di tier > cap non devono finire su
         # Google come filesystem live (#45 review, Prima Legge/GDPR). Copre anche
@@ -1331,7 +1327,13 @@ class TopicService:
         meta["storage"] = self.s.capability().name   # storage torna esplicitamente local
         meta.pop("storage_config", None)
         self._write_meta(tier, name, meta, base_version=ver)
-        rem = self._remote_for(tier, name, meta)
+        if credential is not None and rtype == "git":
+            # Dopo che il mount esiste, non prima: la credenziale è depositata
+            # sotto il NOME del mount, e un deposito anticipato lascerebbe in
+            # giro una credenziale per un mount che l'abilitazione non ha
+            # creato. È anche ciò che il commento qui prometteva da sempre.
+            self.set_git_credential(tier, name, credential, mount_id)
+        rem = self._remote_for(tier, name, meta, mount_id)
         rem.enable(voce["config"])
         # Nessun upload: Drive è già la fonte (cartella appena provisionata o
         # pre-popolata). Da qui i verbi file proxano direttamente a Drive.
