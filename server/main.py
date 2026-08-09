@@ -762,6 +762,7 @@ _TOPIC_TOOLS: list[Tool] = [
             "name": {"type": "string"},
             "type": {"type": "string", "enum": ["git", "drive"]},
             "config": {"type": "object", "description": "git: {url,branch} · drive: {folder,account}"},
+            "mount": {"type": "string", "description": "nome del mount (default: il tipo). Uno scope può averne più d'uno."},
         }, "required": ["tier", "name", "type"]},
     ),
     Tool(
@@ -770,7 +771,9 @@ _TOPIC_TOOLS: list[Tool] = [
                      "prima la cartella remota nel filesystem locale."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"}}, "required": ["tier", "name"]},
+            "name": {"type": "string"},
+            "mount": {"type": "string", "description": "quale mount staccare (default: l'unico)"}},
+            "required": ["tier", "name"]},
     ),
     Tool(
         name="topic.remote_add",
@@ -3928,9 +3931,10 @@ def _dispatch_topic(name: str, a: dict):
     if verb == "remote_status":
         return svc.remote_status(a["tier"], a["name"])
     if verb == "remote_enable":
-        return svc.remote_enable(a["tier"], a["name"], a["type"], a.get("config"))
+        return svc.remote_enable(a["tier"], a["name"], a["type"], a.get("config"),
+                                 mount_name=a.get("mount"))
     if verb == "remote_disable":
-        return svc.remote_disable(a["tier"], a["name"])
+        return svc.remote_disable(a["tier"], a["name"], a.get("mount"))
     if verb == "remote_add":
         return svc.remote_add(a["tier"], a["name"], a["path"])
     if verb == "remote_commit":

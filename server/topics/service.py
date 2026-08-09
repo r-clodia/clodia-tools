@@ -219,6 +219,74 @@ def _coerce_deadline(value, ctx: str = "") -> str | None:
     return None
 
 
+#: Nome del mount quando il metadata legacy non ne ha uno. Il tipo va bene finché
+#: i mount sono uno: con due mount dello stesso tipo servirebbe distinguerli, ed è
+#: per questo che il nome nuovo si sceglie al collegamento invece di derivarlo.
+def _legacy_mount_name(rem: dict) -> str:
+    return str(rem.get("type") or "remote").strip().lower() or "remote"
+
+
+def mounts(meta: dict) -> list:
+    """I mount di uno scope, SEMPRE come lista (specification §2.6).
+
+    Uno scope può avere più mount remoti, ognuno di un tipo e con la propria
+    credenziale. Il metadata legacy ne aveva uno solo, sotto `remote`: qui viene
+    letto e convertito, come si fa per `participants` da lista a mappa — una
+    forma sola in memoria, il legacy tradotto al confine.
+
+    Un accessore solo, e questa è la ragione: `meta["remote"]` era letto in
+    **dodici** punti. Convertirne undici avrebbe lasciato il dodicesimo a vedere
+    una forma che non esiste più, e a fallire per un motivo che non somiglia alla
+    causa.
+    """
+    raw = meta.get("mounts")
+    if isinstance(raw, list):
+        return [m for m in raw if isinstance(m, dict) and m.get("type")]
+    rem = meta.get("remote")
+    if isinstance(rem, dict) and rem.get("type"):
+        return [dict(rem, name=str(rem.get("name") or _legacy_mount_name(rem)))]
+    return []
+
+
+def _mount_id(voluto: str, meta: dict) -> str:
+    """Identificatore del mount: validato, unico nel topic, stabile.
+
+    Il default è il TIPO finché è libero — così `/remote/drive/` resta il caso
+    comune — e diventa `drive-2` solo quando serve davvero. Un identificatore
+    generato di nascosto sarebbe illeggibile; uno che collide silenziosamente
+    sovrascriverebbe un mount che qualcuno ha collegato.
+    """
+    import re as _re
+    base = _re.sub(r"[^a-z0-9-]+", "-", str(voluto or "remote").strip().lower()).strip("-")
+    base = base or "remote"
+    presi = {str(m.get("name") or "") for m in mounts(meta)}
+    if base not in presi:
+        return base
+    i = 2
+    while f"{base}-{i}" in presi:
+        i += 1
+    return f"{base}-{i}"
+
+
+def mount_by_name(meta: dict, name: str | None = None) -> dict:
+    """Il mount indicato, o il PRIMO se non se ne indica uno.
+
+    Il ripiego sul primo tiene in piedi i verbi che parlano di «il remote» da
+    quando ce n'era uno solo. Non è una scelta definitiva: un verbo che agisce
+    sul primo mount di tre agisce su uno che chi chiama non ha nominato, e questa
+    è la metà del lavoro che resta.
+    """
+    ms = mounts(meta)
+    if not ms:
+        return {}
+    if not name:
+        return ms[0]
+    for m in ms:
+        if str(m.get("name") or "") == str(name):
+            return m
+    return {}
+
+
 def normalize_meta_v2(meta: dict, tier: str) -> dict:
     """Normalizza un meta al formato v2 in modo TOLLERANTE: usato sul read-path
     (open/list/_read_meta) e in migrazione → non deve MAI sollevare per valori
@@ -391,7 +459,7 @@ class TopicService:
 
     @staticmethod
     def _drive_remote_config(meta: dict) -> dict | None:
-        remote = meta.get("remote") or {}
+        remote = mount_by_name(meta)
         if remote.get("type") == "drive":
             return remote.get("config") or {}
         return None
@@ -410,7 +478,7 @@ class TopicService:
             meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
         except Exception:  # noqa: BLE001 — topic legacy/assente → local
             meta = {}
-        if meta.get("storage") == "google-drive" and not meta.get("remote"):
+        if meta.get("storage") == "google-drive" and not mounts(meta):
             self._migrate_legacy_drive(tier, name)
             meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
         cfg = self._drive_remote_config(meta)
@@ -451,7 +519,7 @@ class TopicService:
         può contenere spazi e slash, e cambia se qualcuno rinomina la cartella —
         portandosi dietro ogni path memorizzato che lo citava.
         """
-        r = meta.get("remote") or {}
+        r = mount_by_name(meta)
         if not r:
             return None
         # SOLO i remote che sono davvero un altro FILESYSTEM si montano.
@@ -817,7 +885,12 @@ class TopicService:
             # vista live. Best-effort: un problema Drive non
             # deve impedire la creazione del topic (resta local pulito).
             try:
-                meta = self.remote_enable(tier, name, "drive", dict(sc))
+                # Si rilegge il meta invece di restituire l'esito dell'enable:
+                # `create` promette il meta del topic, e l'esito di un mount è
+                # un'altra cosa. Finché la forma era `{"ok":…,"remote":…}` la
+                # differenza passava inosservata; con più mount smetterebbe.
+                self.remote_enable(tier, name, "drive", dict(sc))
+                meta, _ = self._read_meta(tier, name)
             except Exception as e:  # noqa: BLE001
                 import logging
                 logging.getLogger("clodia-tools.topics").warning(
@@ -920,7 +993,7 @@ class TopicService:
 
     def _remote_for(self, tier: str, name: str, meta: dict):
         from .remote import make_remote
-        r = meta.get("remote") or {}
+        r = mount_by_name(meta)
         if not r.get("type"):
             return None
         # Solo per i remote git su github.com iniettiamo il PAT del vault (scoping:
@@ -1026,7 +1099,7 @@ class TopicService:
         rem = self._remote_for(tier, name, meta)
         # Backfill lazy del nome remoto sui topic pre-esistenti (config senza
         # `name`): risolto qui una volta e persistito. Best-effort.
-        r = meta.get("remote") or {}
+        r = mount_by_name(meta)
         if rem is not None and r and "name" not in (r.get("config") or {}):
             display = self._remote_display_name(r["type"], r.get("config") or {})
             try:
@@ -1040,7 +1113,7 @@ class TopicService:
         # modo in cui ci si convince di essere isolati quando non lo si è: chi
         # guarda lo stato deve poter distinguere «ha la sua» da «usa quella di
         # tutti». Il VALORE non compare mai — solo la provenienza.
-        if (meta.get("remote") or {}).get("type") == "git":
+        if mount_by_name(meta).get("type") == "git":
             tok, fonte = self.git_credential(tier, name)
             st["credential_source"] = fonte if tok else "none"
         return st
@@ -1138,7 +1211,8 @@ class TopicService:
 
     def remote_enable(self, tier: str, name: str, rtype: str, config: dict | None = None,
                       confirm_hides_local: bool = False,
-                      credential: str | None = None) -> dict:
+                      credential: str | None = None,
+                      mount_name: str | None = None) -> dict:
         """`credential`: PAT valido SOLO per questo scope. Opzionale — senza, il
         topic ricade sulla credenziale di piattaforma, e `remote_status` lo dice.
 
@@ -1198,17 +1272,28 @@ class TopicService:
             self._require_approved_folder(config.get("folder"), tier, name)
         config["name"] = self._remote_display_name(rtype, config)
         keep = ("url", "branch", "folder", "account", "user_name", "user_email", "message", "name")
-        meta["remote"] = {"type": rtype, "config": {k: v for k, v in config.items() if k in keep}}
+        # Il mount ha un NOME che lo identifica nell'albero (`/remote/<nome>/`).
+        # È un identificatore, non il nome visualizzato: quello può mancare,
+        # contenere uno slash, e cambiare quando la cartella viene rinominata —
+        # e ogni path memorizzato che lo citasse si romperebbe (§2.6).
+        mount_id = _mount_id(mount_name or rtype, meta)
+        voce = {"name": mount_id, "type": rtype,
+                "config": {k: v for k, v in config.items() if k in keep}}
+        altri = [m for m in mounts(meta) if m.get("name") != mount_id]
+        meta["mounts"] = altri + [voce]
+        meta.pop("remote", None)          # una forma sola: il legacy è convertito
         meta["storage"] = self.s.capability().name   # storage torna esplicitamente local
         meta.pop("storage_config", None)
         self._write_meta(tier, name, meta, base_version=ver)
         rem = self._remote_for(tier, name, meta)
-        rem.enable(meta["remote"]["config"])
+        rem.enable(voce["config"])
         # Nessun upload: Drive è già la fonte (cartella appena provisionata o
         # pre-popolata). Da qui i verbi file proxano direttamente a Drive.
-        return {"ok": True, "remote": meta["remote"], "status": rem.status()}
+        return {"ok": True, "mount": voce, "mounts": meta["mounts"],
+                "status": rem.status()}
 
-    def remote_disable(self, tier: str, name: str) -> dict:
+    def remote_disable(self, tier: str, name: str,
+                       mount_name: str | None = None) -> dict:
         meta, ver = self._read_meta(tier, name)
         rem = self._remote_for(tier, name, meta)
         cfg = self._drive_remote_config(meta)
@@ -1223,6 +1308,10 @@ class TopicService:
             self._drive_pull_tree(ds, "", local_base)
         if rem is not None:
             rem.disable()
+        # Si stacca il mount indicato, non «il remote»: con più mount, togliere
+        # tutto sarebbe scollegare cose che nessuno ha nominato.
+        via = mount_by_name(meta, mount_name).get("name")
+        meta["mounts"] = [m for m in mounts(meta) if m.get("name") != via]
         meta.pop("remote", None)
         self._write_meta(tier, name, meta, base_version=ver)
         self._drive_cache_clear()
@@ -1250,16 +1339,17 @@ class TopicService:
     def _migrate_legacy_drive(self, tier: str, name: str) -> None:
         """One-shot: legacy storage=google-drive → remote Drive live."""
         meta, ver = self._read_meta(tier, name)
-        if meta.get("storage") != "google-drive" or meta.get("remote"):
+        if meta.get("storage") != "google-drive" or mounts(meta):
             return
         sc = meta.get("storage_config") or {}
-        meta["remote"] = {"type": "drive",
-                          "config": {"folder": sc.get("folder"), "account": sc.get("account")}}
+        meta["mounts"] = [{"name": "drive", "type": "drive",
+                           "config": {"folder": sc.get("folder"),
+                                      "account": sc.get("account")}}]
         meta["storage"] = self.s.capability().name
         meta.pop("storage_config", None)
         rem = self._remote_for(tier, name, meta)
         try:
-            rem.enable(meta["remote"]["config"])
+            rem.enable(meta["mounts"][0]["config"])
             self._write_meta(tier, name, meta, base_version=ver)
             # storage=google-drive significa che i file vivevano GIÀ su Drive: la
             # conversione a remote:drive è solo metadata. Nessun upload/clear.
