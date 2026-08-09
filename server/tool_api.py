@@ -12,7 +12,7 @@ Due endpoint:
   mcp.*, agents.*, settings.*) è il path unico (esecuzione qui).
 - `POST /internal/authorize {tool}` → SOLO decisione (dry-run), nessuna esecuzione.
   Per le azioni che restano implementate nell'agent-server (create_agent,
-  workflows…): l'agent-server chiede QUI se è consentito, poi esegue localmente.
+  jobs…): l'agent-server chiede QUI se è consentito, poi esegue localmente.
 
 Auth: token ckt1 come `/mcp`. I claim `on_behalf`/`human_role`/`principal` sono
 firmati dall'agent-server (trusted) → non forgiabili dal modello.

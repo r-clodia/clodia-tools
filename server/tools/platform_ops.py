@@ -79,29 +79,6 @@ def packs_setup_done(name: str):
     return _req("POST", f"/clodia/packs/{name}/setup-done", {})
 
 
-# ── Workflows ───────────────────────────────────────────────────────────────
-
-def workflows_list():
-    return _get("/clodia/workflows")
-
-
-def workflows_status(run_id: str):
-    return _get(f"/clodia/workflows/runs/{run_id}")
-
-
-def workflows_start(plugin: str, name: str, title: str = "", params: str = ""):
-    return _req("POST", f"/clodia/workflows/{plugin}/{name}/start",
-                {"title": title, "params": params})
-
-
-def workflows_cancel(run_id: str, note: str = ""):
-    """Ferma/termina una run in esecuzione."""
-    return _req("POST", f"/clodia/workflows/runs/{run_id}/cancel", {"note": note})
-
-
-def workflows_delete_run(run_id: str):
-    return _req("DELETE", f"/clodia/workflows/runs/{run_id}")
-
 
 # ── Providers ───────────────────────────────────────────────────────────────
 

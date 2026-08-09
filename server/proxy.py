@@ -12,7 +12,7 @@ backend (list_tools è chiamato a ogni init di sessione agente: non vogliamo
 spawnare tutti i backend ogni volta). Un restart del gateway rinfresca la cache.
 
 Vincolo: i nomi dei backend NON devono collidere coi prefissi nativi
-(``trello``/``fs``/``email``/``agent``).
+(``fs``/``email``/``agent``).
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ from . import vault
 from .whitelist import CONFIG
 
 NS_SEP = "."
-_NATIVE_PREFIXES = {"trello", "fs", "email", "agent", "web"}
+_NATIVE_PREFIXES = {"fs", "email", "agent", "web"}
 
 # Placeholder per i secret dei backend: ${VAULT:<credential>} risolto a runtime
 # dalla vault (read_internal) → il valore reale NON sta mai nel config.yaml.

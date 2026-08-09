@@ -45,7 +45,7 @@ class TaintingVerbTests(unittest.TestCase):
     def test_verbs_that_return_third_party_content_taint(self):
         for verb in ("web.fetch", "email.read", "github.get_file_contents",
                      "github.list_issues", "topic.read_file", "gdrive.download",
-                     "normattiva.search", "trello.cards"):
+                     "normattiva.search"):
             with self.subTest(verb=verb):
                 self.assertTrue(taint.taints(verb))
 
@@ -234,7 +234,6 @@ class SourceResolutionTests(unittest.TestCase):
         # fare. Se un giorno uno di questi diventa a fonte singola, va spostato.
         mixed = {"email.list", "email.search", "email.get_attachment",
                  "telegram.inbox", "telegram.receive", "telegram.pull",
-                 "trello.cards", "trello.comments", "trello.show_card",
                  "gcalendar.list_events"}
         unaccounted = {v for v in taint._TAINTING_EXACT
                        if v not in resolved and v not in mixed}

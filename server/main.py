@@ -896,36 +896,6 @@ _TOPIC_TOOLS: list[Tool] = [
 ]
 
 
-_TRELLO_TOOLS: list[Tool] = [
-    Tool(name="trello.boards",
-         description="Le board Trello dell'account connesso (id, name, url).",
-         inputSchema={"type": "object", "properties": {}}),
-    Tool(name="trello.lists",
-         description="Le liste (colonne) aperte di una board.",
-         inputSchema={"type": "object", "properties": {
-             "board_id": {"type": "string"}}, "required": ["board_id"]}),
-    Tool(name="trello.cards",
-         description="Le card di una lista (name, desc, due, url).",
-         inputSchema={"type": "object", "properties": {
-             "list_id": {"type": "string"}}, "required": ["list_id"]}),
-    Tool(name="trello.create_card",
-         description="Crea una card in una lista.",
-         inputSchema={"type": "object", "properties": {
-             "list_id": {"type": "string"}, "name": {"type": "string"},
-             "desc": {"type": "string"}}, "required": ["list_id", "name"]}),
-    Tool(name="trello.move_card",
-         description="Sposta una card in un'altra lista (nome o id lista).",
-         inputSchema={"type": "object", "properties": {
-             "card_id": {"type": "string"}, "to": {"type": "string"}},
-             "required": ["card_id", "to"]}),
-    Tool(name="trello.comment",
-         description="Aggiunge un commento a una card.",
-         inputSchema={"type": "object", "properties": {
-             "card_id": {"type": "string"}, "text": {"type": "string"}},
-             "required": ["card_id", "text"]}),
-]
-
-
 _PROFILE_TOOLS: list[Tool] = [
     Tool(name="profile.get",
          description=("Dati personali (PII) di un agent/umano: email, iban, domicilio, ecc. "
@@ -1075,33 +1045,6 @@ _PACKS_TOOLS: list[Tool] = [
              "command": {"type": "string"}}, "required": ["command"]}),
 ]
 
-# workflows.* — controllo delle run dei workflow (start/stop/terminate). Sysadmin.
-_WORKFLOWS_TOOLS: list[Tool] = [
-    Tool(name="workflows.list",
-         description="Elenca i workflow disponibili (per plugin) e le run recenti.",
-         inputSchema={"type": "object", "properties": {}}),
-    Tool(name="workflows.status",
-         description="Stato di una run di workflow per run_id.",
-         inputSchema={"type": "object", "properties": {
-             "run_id": {"type": "string"}}, "required": ["run_id"]}),
-    Tool(name="workflows.start",
-         description="Avvia una run di un workflow (plugin/name). params è una stringa opzionale.",
-         inputSchema={"type": "object", "properties": {
-             "plugin": {"type": "string"}, "name": {"type": "string"},
-             "title": {"type": "string"}, "params": {"type": "string"}},
-             "required": ["plugin", "name"]}),
-    Tool(name="workflows.cancel",
-         description="Ferma/termina una run in esecuzione per run_id (con nota opzionale).",
-         inputSchema={"type": "object", "properties": {
-             "run_id": {"type": "string"}, "note": {"type": "string"}},
-             "required": ["run_id"]}),
-    Tool(name="workflows.delete_run",
-         description="Elimina il record di una run di workflow per run_id.",
-         inputSchema={"type": "object", "properties": {
-             "run_id": {"type": "string"}}, "required": ["run_id"]}),
-]
-
-# providers.* — pausa/riattiva i provider di inferenza. MAI segreti/chiavi. Sysadmin.
 _PROVIDERS_TOOLS: list[Tool] = [
     Tool(name="providers.list",
          description="Elenca i provider di inferenza e il loro stato (id/nome/meccanismo/connesso/pausa). MAI segreti.",
@@ -1551,24 +1494,6 @@ _MEMORY_TOOLS: list[Tool] = [
 ]
 
 
-def _dispatch_trello(name: str, a: dict):
-    from .tools import trello as tr
-    verb = name.split(NS_SEP_DOT, 1)[1]
-    if verb == "boards":
-        return tr.boards()
-    if verb == "lists":
-        return tr.lists(a["board_id"])
-    if verb == "cards":
-        return tr.cards(a["list_id"])
-    if verb == "create_card":
-        return tr.create_card(a["list_id"], a["name"], a.get("desc"))
-    if verb == "move_card":
-        return tr.move_card(a["card_id"], a["to"])
-    if verb == "comment":
-        return tr.comment(a["card_id"], a["text"])
-    raise ValueError(f"unknown trello verb: {name}")
-
-
 def _dispatch_profile(name: str, a: dict, caller: str | None):
     from . import profile as prof
     sub = name.split(NS_SEP_DOT, 1)[1]
@@ -1911,11 +1836,11 @@ def _native_tool_namespaces() -> list[str]:
     quindi l'omissione può essere deliberata. Va deciso, non uniformato di
     soppiatto: clodia-platform#140.
     """
-    tools = (_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _GITHUB_TOOLS + _IMAGE_TOOLS
+    tools = (_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TOPIC_TOOLS + _GITHUB_TOOLS + _IMAGE_TOOLS
              + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS
              + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
              + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS
-             + _PACKS_TOOLS + _WORKFLOWS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
+             + _PACKS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
     ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in tools})
@@ -2065,23 +1990,6 @@ def _dispatch_packs(name: str, a: dict):
     if sub == "check_command":
         return pack_runtime.check_command(a["command"])
     raise ValueError(f"unknown packs tool: {name}")
-
-
-def _dispatch_workflows(name: str, a: dict):
-    from .tools import platform_ops as ops
-    sub = name.split(NS_SEP_DOT, 1)[1]
-    if sub == "list":
-        return ops.workflows_list()
-    if sub == "status":
-        return ops.workflows_status(a["run_id"])
-    if sub == "start":
-        return ops.workflows_start(a["plugin"], a["name"],
-                                   title=a.get("title", ""), params=a.get("params", ""))
-    if sub == "cancel":
-        return ops.workflows_cancel(a["run_id"], note=a.get("note", ""))
-    if sub == "delete_run":
-        return ops.workflows_delete_run(a["run_id"])
-    raise ValueError(f"unknown workflows tool: {name}")
 
 
 def _dispatch_providers(name: str, a: dict):
@@ -2271,8 +2179,6 @@ def _grant_covers(name: str, grants: set) -> bool:
             c.startswith("google_") or c.startswith("gmail_") or c.startswith("mailbox_")
             for c in grants):
         return True
-    if name.startswith("trello.") and "trello" in grants:
-        return True
     if name.startswith("telegram.") and "telegram_bot_token" in grants:
         return True
     _gws_grant = any(c.startswith("google_") or c.startswith("gworkspace_") for c in grants)
@@ -2377,11 +2283,11 @@ def _all_native_tools() -> list:
     Resta fuori `_native_tool_namespaces`, che omette `settings` — una divergenza
     preesistente che non si sana con un refactor (vedi la nota là).
     """
-    native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS
+    native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS
                   + _TOPIC_TOOLS + _GITHUB_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS
                   + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS
                   + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
-                  + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS + _PACKS_TOOLS + _WORKFLOWS_TOOLS
+                  + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS + _PACKS_TOOLS
                   + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
     if instance_profile.rag_enabled():
         native += list(_EU_CORPUS_TOOLS + _RAG_TOOLS)
@@ -2766,7 +2672,7 @@ def _source_vetted(verb: str, a: dict, result: object = None) -> bool | None:
       un'informazione che abbiamo in mano.
 
     Regola generale: si valuta solo una chiamata con UNA fonte identificabile.
-    `email.list`, `telegram.inbox`, `trello.cards`, `gcalendar.list_events`
+    `email.list`, `telegram.inbox`, `gcalendar.list_events`
     mescolano più mittenti/autori in una risposta: non c'è una fonte da vagliare,
     e dichiararne una sarebbe peggio che ammettere di non poterlo fare.
     """
@@ -3012,7 +2918,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # Enforcement whitelist per-richiesta: in HTTP multi-agente non basta
         # il filtro di list_tools (un client può invocare un tool non elencato).
         # I super-agent (clodia/ophelia) bypassano: accesso a tutti i tool. I
-        # tool dei connettori (email.*, trello.*) sono concessi anche a chi ha il
+        # tool dei connettori (email.*, telegram.*) sono concessi anche a chi ha il
         # relativo grant nel vault (delega per-agent, persistente).
         _ag = agent_name()
         if is_on_behalf():
@@ -3332,8 +3238,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 cc=arguments.get("cc"),
                 attachments=arguments.get("attachments"),
             )
-        elif name.startswith("trello."):
-            result = _dispatch_trello(name, arguments)
         elif name.startswith("topic."):
             # offload su thread: _dispatch_topic tocca lo storage e (suggest_team/
             # participants) fa httpx SINCRONO all'agent-server. Se girasse
@@ -3372,8 +3276,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = await asyncio.to_thread(_dispatch_jobs, name, arguments, _ag)
         elif name.startswith("packs."):
             result = await asyncio.to_thread(_dispatch_packs, name, arguments)
-        elif name.startswith("workflows."):
-            result = await asyncio.to_thread(_dispatch_workflows, name, arguments)
         elif name.startswith("providers."):
             result = await asyncio.to_thread(_dispatch_providers, name, arguments)
         elif name.startswith("integrations."):

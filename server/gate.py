@@ -74,12 +74,6 @@ _GATE_CLASS = {
     "topic.remote_add": GATE_WALLS, "topic.remote_enable": GATE_WALLS,
     "topic.remote_disable": GATE_WALLS,
     # OUTWARD — verso fuori
-    # In attesa di rimozione (Davide, 6 ago: «rimuoviamo completamente trello e
-    # workflow»). Classificati lo stesso, perché finché sono gated devono avere
-    # una ragione leggibile — e perché il test di completezza li ha trovati, che
-    # è il modo in cui una rimozione lasciata a metà si fa notare.
-    "workflows.start": GATE_SYSTEM, "workflows.cancel": GATE_SYSTEM,
-    "workflows.delete_run": GATE_SYSTEM,
     "web.post": GATE_OUTWARD,
     # `github.push` e `github.pull_request` portano FUORI il lavoro fatto nella
     # scratch: il codice esce dallo scope e, sulla pull request, titolo e corpo
@@ -123,8 +117,6 @@ _DEFAULT_GATED_EXACT = frozenset({
     "packs.install_pip", "packs.install_npm",
     # providers: pausa/ripresa (egress dati); providers.list NON gated
     "providers.pause", "providers.resume",
-    # workflows: lifecycle distruttivo (il verbo reale del delete è delete_run)
-    "workflows.start", "workflows.cancel", "workflows.delete_run",
     # gestione partecipanti di un topic (auto-invito / confused-deputy)
     "topic.add_participant", "topic.set_portable", "topic.remove_participant",
     # Il remote Drive di un topic È il suo perimetro di accesso (la cartella del

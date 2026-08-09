@@ -66,7 +66,6 @@ _TAINTING_EXACT = frozenset({
     "gdrive.download", "gdocs.read", "gsheets.read", "gsheets.list_tabs",
     "gcalendar.list_events",
     # corpora e board di terzi
-    "trello.cards", "trello.comments", "trello.show_card",
 })
 
 #: Prefissi: il web aperto e GitHub in lettura sono interamente contenuto di
