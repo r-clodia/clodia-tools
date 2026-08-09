@@ -9,6 +9,23 @@ Required fields:
 - `status`: `active` | `on-hold` | `done` | `archived`
 - `deadline`: ISO date `YYYY-MM-DD` or `null`
 
+Optional fields worth naming, because each carries authority:
+
+- `owner` — one human. A scope's owner decides who joins, what crosses its
+  boundary, and what its mounts are. It is never an agent.
+- `participants` — a map `name → role` (`reader` | `contributor` | `owner`).
+  A **list** is the legacy form and reads as all-contributor, so both shapes
+  circulate and a reader must tell them apart.
+- `mounts` — a **collection**. Each entry is `{name, type, config}`; the name is
+  an identifier, not a label: it is the segment in `remote/<name>/`, so it is
+  normalised and unique within the topic. The legacy singular `remote` object is
+  converted **on read**, never left beside the new form: two shapes diverge the
+  same way two readers do.
+- `portable` — declared by the **topic**, not by an agent. Its participants may
+  read its contents from other rooms, capped by the tier of the room they are
+  in; a lower-tier room does not carry the content along. Declared by an agent
+  it would let anyone able to write their own list grant themselves a channel.
+
 Removed fields:
 
 - `minutes`

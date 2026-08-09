@@ -1,74 +1,92 @@
 # clodia-tools
 
-Gateway **MCP HTTP** della colonia Clodia: espone agli agenti un insieme
-**controllato** di tool, sostituendo l'accesso diretto a filesystem/shell/credenziali.
+The **MCP HTTP gateway** of a Clodia colony: it offers agents a **controlled**
+set of verbs in place of direct access to the filesystem, the shell and
+credentials.
 
-È il **reference monitor** della colonia: i veti e le regole vivono qui, in un
-processo (e container, e repo) **separato dal runtime degli agenti**. Un agente
-non possiede credenziali né CLI: l'unico modo di agire sul mondo è chiedere al
-gateway, che **autentica (PKI ckt1) → applica la whitelist per-agente → esegue o nega**.
+It is the colony's **reference monitor**. The vetoes live here, in a process — a
+container, a repository — **separate from the runtime the agents run in**. An
+agent holds no credential and no CLI: the only way it acts on the world is to
+ask the gateway, which **authenticates (PKI `ckt1`) → resolves what that spawn
+may do → executes or refuses**.
 
-> ### 📍 Non è il repo di ingresso
+> ### 📍 This is not the entry repository
 >
-> Questo repository è un **componente** di Clodia Platform, non un prodotto
-> installabile per conto proprio. Il repo di ingresso — installazione, quickstart,
-> architettura d'insieme, licenza e **avvertenze di rischio** — è:
+> This repository is a **component** of Clodia Platform, not something you
+> install on its own. Installation, quickstart, architecture, licence and the
+> **risk warnings** live in:
 >
 > ### 👉 **[r-clodia/clodia-platform](https://github.com/r-clodia/clodia-platform)**
 >
-> Non partire da qui per deployare: `clodia-platform` clona i repo componenti,
-> builda le immagini e orchestra lo stack. Prima di installare, leggi il
-> disclaimer as-is e i **difetti noti** nel tracker della platform —
-> [issue `security` aperte](https://github.com/r-clodia/clodia-platform/issues?q=is%3Aissue+is%3Aopen+label%3Asecurity)
-> e [`SECURITY.md`](https://github.com/r-clodia/clodia-platform/blob/main/SECURITY.md).
-> Il software è distribuito **COSÌ COM'È, senza garanzie**: lo esegui a tuo
-> rischio e pericolo.
+> Do not deploy from here: `clodia-platform` clones the component repositories,
+> builds the images and orchestrates the stack. Before installing, read the
+> as-is disclaimer and the **known defects** in the platform tracker —
+> [open `security` issues](https://github.com/r-clodia/clodia-platform/issues?q=is%3Aissue+is%3Aopen+label%3Asecurity)
+> and [`SECURITY.md`](https://github.com/r-clodia/clodia-platform/blob/main/SECURITY.md).
+> The software is distributed **AS IS, without warranty**: you run it at your
+> own risk.
 
-## Architettura
+## How a call is decided
 
 ```
-agent (clodia-logic / clodia-web)  ──  Authorization: Bearer ckt1.<token firmato>  ──▶  clodia-tools :7849
-                                                                                        │ verify_session_token (cert PUBBLICI)
-                                                                                        │ whitelist[agent].allowed_tools
-                                                                                        └ exec adapter (trello/email/fs/agent)
+agent (clodia-logic / clodia-web)  ──  Authorization: Bearer ckt1.<signed token>  ──▶  clodia-tools :7849
+                                                                                       │ verify_session_token (PUBLIC certs)
+                                                                                       │ seed matrix ∩ scope role ∩ profile
+                                                                                       │ gate, if the action crosses a boundary
+                                                                                       └ adapter (topic / email / drive / github / …)
 ```
 
-- **Auth**: token di sessione `ckt1` firmato dalla chiave privata dell'agente
-  (coniato lato clodia-logic, mai su disco). Qui si verifica **solo** coi
-  certificati **pubblici** (`pki_verify.py`): firma del token → cert validato
-  contro la CA → revoca → audience → scadenza. L'identità dell'agente viene dal
-  token verificato (`payload.agent`), non da header spoofabili.
-- **Whitelist**: `config.yaml`, per identità PKI. `call_tool` nega ciò che non è
-  in `allowed_tools`.
+- **Authentication.** A `ckt1` session token signed by the agent's private key,
+  minted in clodia-logic and never written to disk. Here it is verified with
+  **public** certificates only: signature → certificate against the CA →
+  revocation → audience → expiry. The identity comes from the verified token,
+  never from a spoofable header.
+- **Authority** is the *intersection* of three terms — what the seed declares,
+  what the caller's role in the scope allows, and what the instance profile
+  enables. A refusal says which term blocked it, because the three have
+  different remedies.
+- **Which spawn**, not merely which seed: the token carries an `execution_id`,
+  so one spawn cannot reach another's scratch directory.
+- **Gates.** An action that crosses a boundary is held for a human. The class of
+  the crossing (`system`, `walls`, `outward`) travels with the request, because
+  whoever approves must not have to re-derive it — a duplicated rule diverges.
 
-## Tool esposti
+The rules themselves are not restated here. They are specified in
+**[`docs/specification.md`](https://github.com/r-clodia/clodia-platform/blob/main/docs/specification.md)**,
+and what this component currently enforces — with the gaps named — is measured in
+**[`docs/gap-analysis.md`](https://github.com/r-clodia/clodia-platform/blob/main/docs/gap-analysis.md)**.
 
-`fs.list_dir`, `trello.*` (16), `email.send`, `agent.spawn`.
+## Verb families
 
-Gli adapter `trello`/`email` sono **vendorizzati** in `vendor/` (`trello_client.py`,
-`email_client.py` — quest'ultimo è puro stdlib): il repo è autosufficiente, nessuna
-dipendenza dal tree di clodia-logic.
+`topic.*` (scopes, their files, their messages) · `email.*` · `gdrive.*`,
+`gdocs.*`, `gsheets.*`, `gcalendar.*` · `github.*` (clone, pull, push, pull
+request — the credential never enters the agent's process) · `fs.*` · `memory.*`
+· `agents.*`, `jobs.*`, `packs.*`, `providers.*`, `runtime.*` (control plane,
+admin-held).
 
-## Avvio
+`cli.py --help` lists what a build actually exposes. That listing is the
+authority: a README enumerating verbs goes stale the week it is written.
+
+## Running it
 
 ```bash
 pip install -r requirements.txt
-python3 cli.py --http --port 7849      # gateway HTTP
+python3 cli.py --http --port 7849      # HTTP gateway
 python3 cli.py --version
 ```
 
-Env runtime: `CLODIA_CA_CRT`, `CLODIA_PKI_CERTS`, `CLODIA_PKI_REVOKED`,
-`CLODIA_WORKSPACE_ROOT`. I secret sono **montati**, mai dentro l'immagine.
+Runtime environment: `CLODIA_CA_CRT`, `CLODIA_PKI_CERTS`, `CLODIA_PKI_REVOKED`,
+`CLODIA_WORKSPACE_ROOT`. Secrets are **mounted**, never baked into the image.
 
-## Genesi
+## Origin
 
-Scorporato da `r-clodia/clodia-logic` (`tools/system/mcp-tools-server`) il 2026-06-14
-con storia preservata, per separare il piano di enforcement dal runtime degli
-agenti (vedi roadmap migrazione tool nel topic `clodia-agency`).
+Split out of `r-clodia/clodia-logic` (`tools/system/mcp-tools-server`) on
+2026-06-14 with history preserved, to separate the enforcement plane from the
+runtime the agents live in.
 
-## Licenza
+## Licence
 
 Copyright (C) 2026 Davide Carboni.
 
-GNU AGPL v3 — con opzione di licenza commerciale: vedi [LICENSING.md](LICENSING.md).
-Le versioni fino al tag `apache2-final` restano Apache 2.0.
+GNU AGPL v3, with a commercial option: see [LICENSING.md](LICENSING.md).
+Releases up to the `apache2-final` tag remain Apache 2.0.
