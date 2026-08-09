@@ -509,6 +509,46 @@ _RAG_TOOLS: list[Tool] = [
 ]
 
 
+_GITHUB_TOOLS: list[Tool] = [
+    # github.*: le azioni git che ESCONO dallo scope (§5.2). `add`, `diff` e
+    # `commit` restano nel container dell'agente e non passano di qui.
+    Tool(
+        name="github.clone",
+        description=("Clona un repository APPROVATO per questo topic nella tua "
+                     "scratch. La credenziale la fornisce l'owner al mount e non "
+                     "entra mai nel tuo processo."),
+        inputSchema={"type": "object", "properties": {
+            "repo": {"type": "string", "description": "https://github.com/<owner>/<repo>"},
+            "dest": {"type": "string", "description": "cartella di destinazione nella tua scratch"},
+            "branch": {"type": "string"},
+        }, "required": ["repo", "dest"]},
+    ),
+    Tool(
+        name="github.pull",
+        description="Aggiorna (fast-forward) un working tree clonato con github.clone.",
+        inputSchema={"type": "object", "properties": {
+            "dir": {"type": "string"}}, "required": ["dir"]},
+    ),
+    Tool(
+        name="github.push",
+        description=("Manda al repository i commit già fatti. NON committa: "
+                     "`git add`/`git commit` li fai tu nella scratch."),
+        inputSchema={"type": "object", "properties": {
+            "dir": {"type": "string"}, "branch": {"type": "string"}},
+            "required": ["dir"]},
+    ),
+    Tool(
+        name="github.pull_request",
+        description="Apre una pull request sul repository approvato.",
+        inputSchema={"type": "object", "properties": {
+            "repo": {"type": "string"}, "head": {"type": "string"},
+            "base": {"type": "string", "description": "default: main"},
+            "title": {"type": "string"}, "body": {"type": "string"}},
+            "required": ["repo", "head", "title"]},
+    ),
+]
+
+
 _TOPIC_TOOLS: list[Tool] = [
     Tool(
         name="topic.new",
@@ -1570,6 +1610,85 @@ def _dispatch_settings(name: str, arguments: dict, agent: str | None):
     raise ValueError(f"unknown settings tool: {name}")
 
 
+def _dispatch_github(name: str, a: dict):
+    """`github.*` — le azioni git che escono dallo scope (§5.2).
+
+    Tre cose si decidono QUI e non nel modulo: in quale stanza siamo, se il
+    repository è nella lista di quella stanza, e con quale credenziale. Sono le
+    tre che l'agente non deve poter dire di sé — la stanza arriva dal claim
+    firmato, il perimetro dal meta del topic, la credenziale dal vault.
+    """
+    from .tools import github_repo as gh
+    verb = name.split(NS_SEP_DOT, 1)[1]
+    tier, tname = _current_topic()
+    if not tier:
+        # Fuori da una stanza non c'è un perimetro cui appartenere: rifiutare è
+        # l'unica risposta che non inventa uno scope.
+        raise ValueError("i verbi github.* agiscono dentro un topic: "
+                         "questa chiamata non ha un canale")
+    svc = _topics()
+    repo = a.get("repo") or ""
+    if verb in ("clone", "pull_request"):
+        canonico = gh.normalize_repo(repo)
+        svc._require_approved_repo(canonico, tier, tname)
+        token = _repo_credential(svc, tier, tname, canonico)
+    if verb == "clone":
+        dest = _safe_scratch_path(a["dest"])
+        return gh.clone(canonico, dest, token=token, branch=a.get("branch"))
+    if verb in ("pull", "push"):
+        workdir = _safe_scratch_path(a["dir"])
+        # Il repository di questo working tree non lo dice il chiamante: lo dice
+        # l'origin che il gateway stesso ha scritto al clone. Prenderlo dal
+        # parametro permetterebbe di far passare un repo approvato per
+        # autorizzare un push verso un altro.
+        canonico = gh.normalize_repo(_origin_of(workdir))
+        svc._require_approved_repo(canonico, tier, tname)
+        token = _repo_credential(svc, tier, tname, canonico)
+        if verb == "pull":
+            return gh.pull(workdir, token=token)
+        return gh.push(workdir, token=token, branch=a.get("branch"))
+    if verb == "pull_request":
+        return gh.pull_request(canonico, a["head"], a.get("base") or "main",
+                               a["title"], a.get("body") or "", token=token)
+    raise ValueError(f"unknown github verb: {name}")
+
+
+def _origin_of(workdir: str) -> str:
+    import subprocess as _sp
+    r = _sp.run(["git", "-C", workdir, "remote", "get-url", "origin"],
+                capture_output=True, text=True, timeout=30)
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        raise ValueError(f"nessun origin in {workdir}: clona con github.clone")
+    return r.stdout.strip()
+
+
+def _repo_credential(svc, tier: str, tname: str, repo_canonico: str):
+    """La credenziale del MOUNT che porta QUESTO repository nello scope.
+
+    Cercata per repository e non per nome del mount: chi chiama `github.push`
+    non sa (e non deve sapere) come l'owner ha battezzato il mount, e chiedergli
+    il nome significherebbe lasciargli scegliere quale credenziale usare.
+    """
+    from .tools import github_repo as gh
+    from .topics.service import mounts as _mounts
+    try:
+        meta, _ = svc._read_meta(tier, tname)
+    except Exception:  # noqa: BLE001 — meta illeggibile → nessuna credenziale di mount
+        meta = {}
+    for m in _mounts(meta):
+        if m.get("type") != "git":
+            continue
+        try:
+            if gh.normalize_repo((m.get("config") or {}).get("url") or "") == repo_canonico:
+                return svc.git_credential(tier, tname, m.get("name"))[0]
+        except Exception:  # noqa: BLE001 — URL anomalo nel meta: non è questo
+            continue
+    # Nessun mount per questo repo: resta il ripiego dello scope/piattaforma,
+    # che `git_credential` rende esplicito. Rifiutare qui romperebbe i repo
+    # approvati per lista ma non montati — che la voce 31 prevede.
+    return svc.git_credential(tier, tname)[0]
+
+
 def _dispatch_gdrive(name: str, a: dict):
     from .tools import gdrive as gd
     verb = name.split(NS_SEP_DOT, 1)[1]
@@ -1792,7 +1911,7 @@ def _native_tool_namespaces() -> list[str]:
     quindi l'omissione può essere deliberata. Va deciso, non uniformato di
     soppiatto: clodia-platform#140.
     """
-    tools = (_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
+    tools = (_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS + _TOPIC_TOOLS + _GITHUB_TOOLS + _IMAGE_TOOLS
              + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS
              + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
              + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS
@@ -2259,7 +2378,7 @@ def _all_native_tools() -> list:
     preesistente che non si sana con un refactor (vedi la nota là).
     """
     native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TRELLO_TOOLS
-                  + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS
+                  + _TOPIC_TOOLS + _GITHUB_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS
                   + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS
                   + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
                   + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS + _PACKS_TOOLS + _WORKFLOWS_TOOLS
@@ -3234,6 +3353,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_telegram(name, arguments)
         elif name.startswith("memory."):
             result = _dispatch_memory(name, arguments)
+        elif name.startswith("github."):
+            result = await asyncio.to_thread(_dispatch_github, name, arguments)
         elif name.startswith("gdrive."):
             result = _dispatch_gdrive(name, arguments)
         elif name.startswith("gcalendar."):
