@@ -172,7 +172,8 @@ def _topic_drive_folder(tier: str, name: str) -> Optional[str]:
     try:
         from .. import main as _m
         meta = (_m._topics().open(tier, name) or {}).get("meta") or {}
-        rem = meta.get("remote") or {}
+        from ..topics.service import mount_by_name
+        rem = mount_by_name(meta)
         if str(rem.get("type") or "").lower() == "drive":
             folder = ((rem.get("config") or {}).get("folder") or "").strip() or None
     except Exception as e:                       # noqa: BLE001
