@@ -284,3 +284,46 @@ class ApiContractTests(Base):
         detto = str(ctx.exception)
         self.assertIn("chat not found", detto)
         self.assertNotIn("RuntimeError", detto)
+
+
+class OnlyAPersonCallsAPersonTests(Base):
+    """Il nome che compare non è sempre una chiamata.
+
+    Misurato in coda su venere il 10 ago 2026, con la funzione appena
+    consegnata: Giovanni sarebbe stato avvisato **otto** volte per una
+    conversazione sola — cinque da Davide, e tre da agenti che quella menzione
+    l'avevano soltanto ripetuta. Il segretario che verbalizza cita il messaggio;
+    il guardiano che indaga un turno fallito lo discute. Nessuno dei due sta
+    chiamando Giovanni: Giovanni era già stato chiamato.
+
+    Moltiplicato per gli agenti di una stanza, è il modo più rapido per far
+    silenziare il gruppo — cioè per rendere inutile la funzione.
+    """
+
+    def test_a_person_calling_a_person_notifies(self):
+        n = tn.enqueue_for_message("SEAL-1", "acme", {},
+                                   {**_msg("@matteo ci sei?", ["matteo"]), "kind": "human"},
+                                   [MOUNT])
+        self.assertEqual(n, 1)
+
+    def test_an_agent_repeating_the_mention_does_not(self):
+        n = tn.enqueue_for_message(
+            "SEAL-1", "acme", {},
+            {**_msg("Riporto: «@matteo ci sei?»", ["matteo"], mid="M2"), "kind": "ai"},
+            [MOUNT])
+        self.assertEqual(n, 0)
+
+    def test_a_system_message_does_not_either(self):
+        n = tn.enqueue_for_message(
+            "SEAL-1", "acme", {},
+            {**_msg("@matteo è stato aggiunto", ["matteo"], mid="M3"), "kind": "system"},
+            [MOUNT])
+        self.assertEqual(n, 0)
+
+    def test_a_message_without_a_kind_is_treated_as_human(self):
+        """La direzione della retrocompatibilità: un messaggio senza `kind` è
+        della forma vecchia, e la forma vecchia erano i messaggi delle persone.
+        Trattarlo come agente perderebbe notifiche in silenzio."""
+        n = tn.enqueue_for_message("SEAL-1", "acme", {},
+                                   _msg("@matteo ci sei?", ["matteo"], mid="M4"), [MOUNT])
+        self.assertEqual(n, 1)

@@ -97,7 +97,21 @@ def enqueue_for_message(tier: str, name: str, meta: dict, msg: dict,
 
     Una menzione che non corrisponde a nessuna persona mappata NON produce
     nulla: avvisare la persona sbagliata è l'unico esito peggiore del silenzio.
+
+    **Solo le menzioni scritte da una PERSONA.** Misurato in coda su venere il
+    10 ago 2026: Giovanni sarebbe stato avvisato **otto** volte per una
+    conversazione sola — cinque da Davide, e tre da agenti che quella menzione
+    l'avevano soltanto citata o discussa (il segretario che verbalizza, il
+    guardiano che indaga un turno fallito).
+
+    Un agente che ripete `@giovanni` non sta chiamando Giovanni: Giovanni era
+    già stato chiamato. La notifica dice «qualcuno ti cerca», non «il tuo nome è
+    comparso» — e la seconda, moltiplicata per gli agenti di una stanza, è il
+    modo più rapido per far silenziare il gruppo, cioè per rendere inutile la
+    funzione.
     """
+    if (msg.get("kind") or "human") != "human":
+        return 0
     menzionati = [str(m).lower() for m in (msg.get("mentions") or [])]
     if not menzionati or not mounts_tg:
         return 0
