@@ -629,6 +629,52 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name"]},
     ),
     Tool(
+        name="topic.telegram_bind",
+        description=("Collega un GRUPPO Telegram a questo topic: le menzioni "
+                     "delle persone mappate vengono riportate lì, col link alla "
+                     "conversazione. `people` = {uid_telegram: nome_utente_clodia}. "
+                     "Atto sui muri dello scope: lo decide l'owner."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "chat_id": {"type": "string", "description": "id del gruppo (negativo per i supergruppi)"},
+            "mode": {"type": "string", "enum": ["notify", "excerpt"],
+                     "description": "notify = solo il fatto · excerpt = anche la riga della menzione"},
+            "people": {"type": "object", "description": "{uid telegram: nome utente su Clodia}"},
+            "mount": {"type": "string", "description": "nome del mount (default: telegram)"},
+        }, "required": ["tier", "name", "chat_id", "people"]},
+    ),
+    Tool(
+        name="topic.telegram_unbind",
+        description="Scollega il gruppo Telegram. La voce di egress resta: toglierla è una decisione a parte.",
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "mount": {"type": "string"}}, "required": ["tier", "name"]},
+    ),
+    Tool(
+        name="telegram.roster",
+        description=("Amministratori e membri noti di un gruppo, con uid e "
+                     "username: serve a mappare le persone senza digitare numeri."),
+        inputSchema={"type": "object", "properties": {
+            "chat_id": {"type": "string"}}, "required": ["chat_id"]},
+    ),
+    Tool(
+        name="telegram.notify_pending",
+        description="Le notifiche di menzione da recapitare (testo già composto).",
+        inputSchema={"type": "object", "properties": {
+            "limit": {"type": "integer"}}},
+    ),
+    Tool(
+        name="telegram.notify_ack",
+        description="Segna una notifica come recapitata, o come fallita con il motivo.",
+        inputSchema={"type": "object", "properties": {
+            "message_id": {"type": "string"}, "chat_id": {"type": "string"},
+            "principal": {"type": "string"}, "ok": {"type": "boolean"},
+            "error": {"type": "string"}},
+            "required": ["message_id", "chat_id", "principal"]},
+    ),
+    Tool(
         name="topic.set_portable",
         description=("Dichiara (o revoca) la PORTABILITÀ di un topic: i suoi "
                      "partecipanti possono leggerne i contenuti anche da altre "
@@ -1733,6 +1779,37 @@ def _dispatch_gsheets(name: str, a: dict):
 
 
 def _dispatch_telegram(name: str, a: dict):
+    sub0 = name.split(NS_SEP_DOT, 1)[1]
+    if sub0 == "roster":
+        from .tools import telegram as _tg
+        tok = _tg._token_internal()
+        got = _tg.api_call(tok, "getChatAdministrators", {"chat_id": a["chat_id"]}) or {}
+        out = []
+        for m in (got.get("result") or []):
+            u = m.get("user") or {}
+            if u.get("is_bot"):
+                continue
+            out.append({"uid": str(u.get("id")), "username": u.get("username"),
+                        "name": " ".join(x for x in (u.get("first_name"),
+                                                     u.get("last_name")) if x),
+                        "status": m.get("status")})
+        # Telegram non espone l'elenco COMPLETO dei membri di un gruppo a un
+        # bot: si ottengono gli amministratori. Lo si dice invece di far
+        # credere che la lista sia tutta — chi mappa deve sapere che i membri
+        # non amministratori vanno aggiunti a mano dal loro uid.
+        return {"members": out, "complete": False,
+                "note": ("Telegram espone a un bot i soli amministratori. Gli "
+                         "altri membri vanno mappati col loro uid, che compare "
+                         "quando scrivono nel gruppo.")}
+    if sub0 == "notify_pending":
+        from .topics import telegram_notify as _tn
+        items = _tn.pending(int(a.get("limit") or 20))
+        return {"pending": [{**i, "text": _tn.render(i)} for i in items]}
+    if sub0 == "notify_ack":
+        from .topics import telegram_notify as _tn
+        return _tn.ack(a["message_id"], a["chat_id"], a["principal"],
+                       ok=bool(a.get("ok", True)), error=a.get("error", ""))
+
     from .tools import telegram as tg
     verb = name.split(NS_SEP_DOT, 1)[1]
     if verb == "inbox":
@@ -3474,6 +3551,7 @@ def _safe_scratch_path(p: str) -> str:
 # sono gestiti a parte (creazione / risultati filtrati per membership).
 _TOPIC_SCOPED_VERBS = {
     "open", "save_summary", "save_agents_md", "add_minute", "archive", "set_portable",
+    "telegram_bind", "telegram_unbind",
     "files", "read_file",
     "read_document", "write_file", "fetch", "put", "delete_file", "migrate_storage",
     "post_message",
@@ -3506,6 +3584,7 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
 #: su un verbo che non esiste è una regola che non si applica mai».
 _TOPIC_MUTATING_VERBS = frozenset({
     "save_summary", "save_agents_md", "add_minute", "archive", "set_portable",
+    "telegram_bind", "telegram_unbind",
     "write_file", "put", "delete_file", "migrate_storage",
     "remote_enable", "remote_disable", "remote_add", "remote_commit",
     "remote_push", "remote_pull",
@@ -3876,6 +3955,13 @@ def _dispatch_topic(name: str, a: dict):
         return svc.add_minute(a["tier"], a["name"], a["text"])
     if verb == "archive":
         return svc.archive(a["tier"], a["name"])
+    if verb == "telegram_bind":
+        return svc.telegram_bind(a["tier"], a["name"], a["chat_id"],
+                                 mode=a.get("mode") or "excerpt",
+                                 people=a.get("people"),
+                                 mount_name=a.get("mount"))
+    if verb == "telegram_unbind":
+        return svc.telegram_unbind(a["tier"], a["name"], a.get("mount"))
     if verb == "set_portable":
         return svc.set_portable(a["tier"], a["name"], bool(a["portable"]))
     if verb == "list":
