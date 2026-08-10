@@ -62,6 +62,22 @@ class VaultDenied(PermissionError):
     """L'agente non ha il grant richiesto sulla credenziale."""
 
 
+def _caller_hint() -> str:
+    """CHI sta cambiando l'autorità, per quanto il gateway riesce a saperlo.
+
+    Il principal umano se la chiamata arriva dalla webui, l'agente altrimenti, e
+    `shell` quando non c'è nessuna identità nel contesto — cioè un `docker exec`
+    a mano. Quest'ultimo caso è quello che serviva di più e mancava: distingue
+    «l'ha tolto la UI» da «l'ha tolto qualcuno dal guscio», che portano in due
+    direzioni opposte.
+    """
+    try:
+        from . import whitelist as _w
+        return (_w.current_principal() or _w.agent_name_safe() or "shell")
+    except Exception:  # noqa: BLE001 — l'audit non deve dipendere dal contesto
+        return "shell"
+
+
 def _audit(agent: str, action: str, credential: str, result: str, **extra) -> None:
     rec = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -300,23 +316,48 @@ def deposit(credential: str, bundle: dict, *, cred_type: str = "opaque",
     _policy_file().write_text(yaml.safe_dump(policy, sort_keys=False, allow_unicode=True),
                               encoding="utf-8")
     os.chmod(_policy_file(), 0o600)
+    # Anche qui si registra CHI ha scritto, e con quali grant risulta la
+    # credenziale DOPO. `deposit` è additivo per contratto, e questa riga è ciò
+    # che permette di verificarlo sui fatti invece che sulla docstring: se un
+    # giorno un grant sparisse dopo un deposit, la riga precedente lo direbbe.
+    _audit(_caller_hint(), "deposit", credential, "OK",
+           grants_after=sorted(x for x in (
+               (g or {}).get("agent") for g in grants) if x))
 
 
 def set_grant(credential: str, agent: str, granted: bool,
               actions: Optional[list[str]] = None) -> None:
     """Aggiunge/rimuove il grant di `agent` su `credential` in vault-policy.yaml.
-    Idempotente. Usato per delegare un connettore (es. gmail_studio) a un agent."""
+    Idempotente. Usato per delegare un connettore (es. gmail_studio) a un agent.
+
+    **Scrive nell'audit**, e non è un dettaglio di completezza. L'11 ago 2026 un
+    grant su `mailbox_team` è sparito fra una sera e la mattina dopo: concesso e
+    verificato due volte, assente il giorno seguente. L'audit registrava letture
+    e rifiuti — quindi la domanda «chi l'ha tolto» non aveva risposta, e ci si
+    poteva solo fare un'ipotesi.
+
+    Un permesso che scompare senza traccia è peggio di un permesso mancante: il
+    secondo si vede, il primo si scopre quando qualcosa smette di funzionare e
+    manda a cercare la causa in un posto qualunque. Registrare CHI cambia
+    l'autorità è la sola cosa che rende quella domanda rispondibile la prossima
+    volta.
+    """
     actions = actions or ["fetch"]
     policy = _load_policy()
     creds = policy.setdefault("credentials", {})
     spec = creds.setdefault(credential, {})
     grants = spec.setdefault("grants", [])
+    prima = {(g or {}).get("agent") for g in grants}
     grants[:] = [g for g in grants if (g or {}).get("agent") != agent]
     if granted:
         grants.append({"agent": agent, "actions": list(actions)})
     _policy_file().write_text(yaml.safe_dump(policy, sort_keys=False, allow_unicode=True),
                               encoding="utf-8")
     os.chmod(_policy_file(), 0o600)
+    # Anche il no-op si registra: «era già così» è un'informazione, e distingue
+    # «nessuno l'ha toccato» da «nessuno lo sa».
+    _audit(agent, "grant" if granted else "revoke", credential,
+           "OK", by=_caller_hint(), was_granted=agent in prima)
 
 
 def agents_with_grant(credential: str) -> list[str]:
