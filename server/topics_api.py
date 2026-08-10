@@ -611,6 +611,10 @@ async def topic_logo(request: Request):
     tier = request.path_params["tier"]; name = request.path_params["name"]
     svc = _service()
     try:
+        if request.method == "GET":
+            from starlette.responses import Response
+            data, ct = svc.read_logo(tier, name)
+            return Response(content=data, media_type=ct)
         if request.method == "DELETE":
             return JSONResponse(svc.clear_logo(tier, name))
         body = await request.json()
@@ -689,6 +693,6 @@ routes = [
     Route("/internal/topics/{tier}/{name}/mcp-clients", mcp_clients,
           methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/logo", topic_logo,
-          methods=["POST", "DELETE"]),
+          methods=["GET", "POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/files", files, methods=["GET", "POST"]),
 ]

@@ -72,13 +72,68 @@ class WhatIsAcceptedTests(Base):
         self.assertIn("KB", str(e.exception))
 
 
+class ItReadsFromWhereItWroteTests(Base):
+    """Il difetto vero, trovato da Davide caricando un'immagine.
+
+    Il logo stava sotto `files/`, e sembrava naturale: un'immagine è un file. Non
+    lo era. `files/` è il **data plane**: su un topic con un remote Drive quei
+    path risolvono su Drive. `set_logo` invece scriveva con `self.s`, il
+    **control plane**, che è sempre locale.
+
+    Risultato: il file c'era, il meta lo dichiarava, e la lettura non lo trovava.
+    Su un topic senza remote funzionava benissimo — e i primi test erano tutti
+    così. È il difetto peggiore da cercare, perché dipende da una **proprietà del
+    topic** e non dal codice: la stessa riga funziona o no a seconda di come è
+    configurata la stanza.
+
+    Ora il logo è metadata: sta col control plane, e si legge con `read_logo`,
+    che usa la stessa radice di `set_logo`. Una funzione per scrivere e una per
+    leggere sulla stessa radice è ciò che rende la coppia verificabile — due
+    strade diverse per lo stesso file si separano appena una delle due cambia.
+    """
+
+    def _con_remote_drive(self):
+        """Aggancia un remote Drive FINTO: basta che il meta lo dichiari perché
+        la risoluzione dei path sotto `files/` cambi bersaglio."""
+        meta, ver = self.svc._read_meta("SEAL-1", "acme")
+        meta["mounts"] = [{"name": "drive", "type": "drive",
+                           "config": {"folder": "FID"}}]
+        self.svc._write_meta("SEAL-1", "acme", meta, base_version=ver)
+
+    def test_the_logo_is_readable_on_a_topic_with_a_drive_remote(self):
+        self._con_remote_drive()
+        self.svc.set_logo("SEAL-1", "acme", PNG)
+        data, tipo = self.svc.read_logo("SEAL-1", "acme")
+        self.assertEqual(data, PNG)
+        self.assertEqual(tipo, "image/png")
+
+    def test_and_on_a_plain_local_topic_too(self):
+        self.svc.set_logo("SEAL-1", "acme", JPEG)
+        data, tipo = self.svc.read_logo("SEAL-1", "acme")
+        self.assertEqual(data, JPEG)
+        self.assertEqual(tipo, "image/jpeg")
+
+    def test_it_does_not_live_under_files(self):
+        """`files/` significa «documento». Il logo non lo è: comparirebbe
+        nell'albero dei file come un file che nessuno ha messo lì, e seguirebbe
+        i documenti su Drive."""
+        self.assertFalse(TopicService.LOGO_PATH.startswith("files/"))
+        self.svc.set_logo("SEAL-1", "acme", PNG)
+        nomi = [e["name"] for e in self.svc.list_files("SEAL-1", "acme", "files")]
+        self.assertNotIn(".brand", nomi)
+
+    def test_no_logo_is_a_clear_refusal(self):
+        with self.assertRaises(TopicError) as e:
+            self.svc.read_logo("SEAL-1", "acme")
+        self.assertIn("non ha un logo", str(e.exception))
+
+
 class WhereItLivesTests(Base):
     def test_the_meta_points_at_a_file_inside_the_topic(self):
         r = self.svc.set_logo("SEAL-1", "acme", PNG)
         meta = self.svc.open("SEAL-1", "acme")["meta"]
         self.assertEqual(meta["logo"], r["logo"])
-        self.assertTrue(meta["logo"].startswith("files/"))
-        self.assertEqual(self.svc.read_file("SEAL-1", "acme", meta["logo"]), PNG)
+        self.assertEqual(self.svc.read_logo("SEAL-1", "acme")[0], PNG)
 
     def test_a_second_upload_replaces_the_first(self):
         """Un topic ha un'immagine, non una galleria: il nome è riservato e uno

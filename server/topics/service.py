@@ -2638,12 +2638,23 @@ class TopicService:
         self._write_meta(tier, name, meta, base_version=ver)
         return {"deadline": dl}
 
-    #: Il logo di un topic vive DENTRO il topic, non in una cartella di asset
-    #: della piattaforma: così segue lo scope quando viene esportato, archiviato
-    #: o migrato di storage, e non resta un file orfano che nessuno sa a chi
-    #: appartenesse. Nome riservato, uno solo: un topic ha un'immagine, non una
-    #: galleria.
-    LOGO_PATH = "files/.brand/logo"
+    #: Il logo vive dentro il topic ma **fuori da `files/`**, perché è metadata e
+    #: non un documento.
+    #:
+    #: Stava sotto `files/`, e sembrava naturale: un'immagine è un file. Non lo
+    #: era, per una ragione che si vede solo in esercizio. `files/` è il **data
+    #: plane**: su un topic con un remote Drive quei path risolvono su Drive.
+    #: `set_logo` invece scriveva con `self.s`, che è il **control plane**, cioè
+    #: sempre locale. Scrittura e lettura finivano in due radici diverse: il file
+    #: c'era, il meta lo dichiarava, e la lettura non lo trovava — su un topic
+    #: senza remote funzionava, su uno con Drive no. Il difetto peggiore da
+    #: cercare, perché dipende da una proprietà del topic e non dal codice.
+    #:
+    #: Qui è metadata a tutti gli effetti: come il topic si presenta, alla pari
+    #: di titolo e tier. Sta col control plane, resta locale anche se i documenti
+    #: vanno su Drive, e non compare nell'albero dei file — dove sarebbe un file
+    #: che nessuno ha messo lì.
+    LOGO_PATH = ".brand/logo"
 
     #: Formati accettati, per **firma dei byte** e non per estensione: il nome
     #: del file lo sceglie chi carica.
@@ -2688,6 +2699,24 @@ class TopicService:
         meta["logo_kind"] = f"image/{tipo}"
         self._write_meta(tier, name, meta, base_version=ver)
         return {"logo": self.LOGO_PATH, "kind": tipo, "size": len(data)}
+
+    def read_logo(self, tier: str, name: str) -> tuple[bytes, str]:
+        """I byte del logo e il suo tipo. Legge dal **control plane**, la stessa
+        radice in cui `set_logo` scrive.
+
+        Esiste come metodo proprio invece di passare da `read_file`: quello
+        risolve i path del data plane, quindi su un topic con remote Drive
+        cercherebbe il logo su Drive mentre è locale. Una funzione sola per
+        scrivere e una per leggere, sulla stessa radice, è ciò che rende la
+        coppia verificabile — due strade diverse per lo stesso file si separano
+        appena una delle due cambia.
+        """
+        meta, _ = self._read_meta(tier, name)
+        rel = (meta.get("logo") or "").strip()
+        if not rel:
+            raise TopicError("questo topic non ha un logo")
+        data = self.s.read(f"{self._dir(tier, name)}/{rel}").data
+        return data, meta.get("logo_kind") or "image/png"
 
     def clear_logo(self, tier: str, name: str) -> dict:
         """Toglie l'immagine. Il file va via col riferimento: lasciarlo sarebbe
