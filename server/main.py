@@ -666,6 +666,14 @@ _TOPIC_TOOLS: list[Tool] = [
             "limit": {"type": "integer"}}},
     ),
     Tool(
+        name="telegram.notify_flush",
+        description=("Recapita le notifiche di menzione pendenti sul gruppo "
+                     "collegato. Meccanico: il testo è già composto, non c'è "
+                     "nulla da decidere. Pensato per un job logico."),
+        inputSchema={"type": "object", "properties": {
+            "limit": {"type": "integer"}}},
+    ),
+    Tool(
         name="telegram.notify_ack",
         description="Segna una notifica come recapitata, o come fallita con il motivo.",
         inputSchema={"type": "object", "properties": {
@@ -1806,6 +1814,9 @@ def _dispatch_telegram(name: str, a: dict):
         from .topics import telegram_notify as _tn
         items = _tn.pending(int(a.get("limit") or 20))
         return {"pending": [{**i, "text": _tn.render(i)} for i in items]}
+    if sub0 == "notify_flush":
+        from .topics import telegram_notify as _tn
+        return _tn.flush(int(a.get("limit") or 20))
     if sub0 == "notify_ack":
         from .topics import telegram_notify as _tn
         return _tn.ack(a["message_id"], a["chat_id"], a["principal"],

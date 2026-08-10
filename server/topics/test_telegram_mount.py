@@ -327,3 +327,71 @@ class OnlyAPersonCallsAPersonTests(Base):
         n = tn.enqueue_for_message("SEAL-1", "acme", {},
                                    _msg("@matteo ci sei?", ["matteo"], mid="M4"), [MOUNT])
         self.assertEqual(n, 1)
+
+
+class FlushTests(Base):
+    """Il drenaggio meccanico, per un job logico.
+
+    Il piano di un job logico è una lista STATICA di verbi: non può iterare su
+    una coda di lunghezza variabile. L'alternativa era un turno LLM ogni cinque
+    minuti per sempre, per un lavoro che non richiede alcun giudizio — il testo
+    è già composto dal gateway, e la skill dice all'agente di inviarlo verbatim
+    proprio perché quel giudizio non deve esserci.
+    """
+
+    def _accoda(self, n=3):
+        for i in range(n):
+            tn.enqueue_for_message("SEAL-1", "acme", {},
+                                   _msg("@matteo ci sei?", ["matteo"], mid=f"M{i}"),
+                                   [MOUNT])
+
+    def test_it_delivers_and_acknowledges(self):
+        inviati = []
+        from ..tools import telegram as tg
+        self._accoda(3)
+        with patch.object(tg, "send_internal",
+                          lambda chat, text: inviati.append((chat, text))):
+            out = tn.flush()
+        self.assertEqual(out["delivered"], 3)
+        self.assertEqual(len(inviati), 3)
+        self.assertEqual(tn.pending(), [], "recapitate = non più proposte")
+
+    def test_one_bad_chat_does_not_stop_the_others(self):
+        """Una chat irraggiungibile non deve impedire a un'altra persona di
+        essere avvisata."""
+        from ..tools import telegram as tg
+        self._accoda(3)
+        chiamate = {"n": 0}
+
+        def a_volte(chat, text):
+            chiamate["n"] += 1
+            if chiamate["n"] == 2:
+                raise RuntimeError("telegram sendMessage HTTP 400: chat not found")
+
+        with patch.object(tg, "send_internal", a_volte):
+            out = tn.flush()
+        self.assertEqual(out["delivered"], 2)
+        self.assertEqual(out["failed"], 1)
+        self.assertEqual(len(tn.pending()), 1, "la fallita resta, con un tentativo")
+        self.assertEqual(tn.pending()[0]["attempts"], 1)
+
+    def test_the_reason_of_a_failure_is_reported(self):
+        from ..tools import telegram as tg
+        self._accoda(1)
+
+        def rotto(chat, text):
+            raise RuntimeError("chat not found")
+
+        with patch.object(tg, "send_internal", rotto):
+            out = tn.flush()
+        self.assertIn("chat not found", " ".join(out["errors"]))
+
+    def test_an_empty_queue_is_a_quiet_no_op(self):
+        """Il job gira ogni pochi minuti: a coda vuota non deve fare rumore né
+        lavoro."""
+        inviati = []
+        from ..tools import telegram as tg
+        with patch.object(tg, "send_internal", lambda c, t: inviati.append(c)):
+            out = tn.flush()
+        self.assertEqual((out["delivered"], out["failed"]), (0, 0))
+        self.assertEqual(inviati, [])
