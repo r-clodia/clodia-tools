@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -198,9 +199,11 @@ class BindTests(Base):
         self.assertIn("CLODIA_WEBUI_URL", str(ctx.exception))
 
     def test_a_half_written_person_is_dropped_not_guessed(self):
+        """La forma normalizzata è `{uid: {principal, username?}}` dal 10 ago
+        2026; quella piatta in ingresso resta accettata e viene convertita."""
         self.assertEqual(
             TopicService._clean_people({"12345": "matteo", "": "anna", "999": ""}),
-            {"12345": "matteo"})
+            {"12345": {"principal": "matteo"}})
 
     def test_unbinding_removes_only_the_telegram_mount(self):
         self.svc.telegram_bind("SEAL-1", "acme", "-100999", people={"1": "matteo"})
@@ -395,3 +398,141 @@ class FlushTests(Base):
             out = tn.flush()
         self.assertEqual((out["delivered"], out["failed"]), (0, 0))
         self.assertEqual(inviati, [])
+
+
+class HandleTranslationTests(Base):
+    """`@giovanni` nel canale, `@giocasu75` nel gruppo.
+
+    La menzione va **tradotta**. Scrivere il nome della piattaforma dentro
+    Telegram non notifica nessuno — il push arriva solo se il testo contiene
+    l'handle vero — e non è nemmeno il nome con cui quelle persone si chiamano
+    fra loro là. La prima versione lo copiava verbatim: il messaggio arrivava
+    nel gruppo e la persona non se ne accorgeva, che è la stessa cosa di non
+    averlo mandato, con in più il rumore.
+    """
+
+    MOUNT_HANDLE = {"name": "telegram", "type": "telegram", "config": {
+        "chat_id": "-100999", "mode": "excerpt",
+        "people": {"12345": {"principal": "giovanni", "username": "giocasu75"}}}}
+
+    def test_the_mention_becomes_the_telegram_handle(self):
+        tn.enqueue_for_message("SEAL-1", "acme", {},
+                               _msg("@giovanni ci sei?", ["giovanni"]), [self.MOUNT_HANDLE])
+        fuori = tn.render(tn.pending()[0])
+        self.assertIn("@giocasu75", fuori)
+        self.assertNotIn("@giovanni —", fuori, "il nome di piattaforma non apre la riga")
+
+    def test_without_a_handle_it_degrades_instead_of_breaking(self):
+        """Senza handle mappato resta il nome della piattaforma: si perde la
+        notifica push, non il messaggio. Tacere sarebbe peggio."""
+        piatta = {**self.MOUNT_HANDLE, "config": {
+            **self.MOUNT_HANDLE["config"], "people": {"12345": "giovanni"}}}
+        tn.enqueue_for_message("SEAL-1", "acme", {},
+                               _msg("@giovanni ci sei?", ["giovanni"]), [piatta])
+        self.assertIn("@giovanni", tn.render(tn.pending()[0]))
+
+    def test_the_flat_form_is_still_read(self):
+        """È la forma scritta prima del 10 ago 2026: un collegamento già fatto
+        non deve smettere di funzionare perché è cambiata la forma."""
+        piatta = {**self.MOUNT_HANDLE, "config": {
+            **self.MOUNT_HANDLE["config"], "people": {"12345": "giovanni"}}}
+        self.assertEqual(
+            tn.enqueue_for_message("SEAL-1", "acme", {},
+                                   _msg("@giovanni", ["giovanni"]), [piatta]), 1)
+
+    def test_an_at_in_the_username_is_not_doubled(self):
+        from .service import TopicService
+        out = TopicService._clean_people({"1": {"principal": "g", "username": "@tizio"}})
+        self.assertEqual(out["1"]["username"], "tizio")
+
+
+class PresenceTests(Base):
+    """Non si avvisa chi era davanti allo schermo.
+
+    Davide, 10 ago 2026: «la menzione dal canale a telegram non dovrebbe
+    avvenire se la persona è in quel momento attiva sul canale».
+
+    Non è servito un protocollo nuovo: la webui, con una conversazione aperta,
+    chiama `/messages` **ogni cinque secondi**, e quella chiamata è autenticata
+    — dice chi è e quale stanza guarda. Era già un battito, mancava chi lo
+    ascoltasse. Inventarne uno dedicato avrebbe creato una seconda fonte di
+    verità sulla stessa cosa, e due fonti divergono quando una rete cade a metà.
+
+    Il confronto è con il momento del MESSAGGIO, non con adesso: la domanda è
+    «l'ha visto?». Chi apre la conversazione dieci minuti dopo va avvisato lo
+    stesso — quella notifica gli è già dovuta.
+    """
+
+    def _presenza(self, quando_iso: str, principal="matteo", topic="SEAL-1/acme"):
+        import json
+        (self.dati / "presence.json").write_text(
+            json.dumps({f"{principal}|{topic}": quando_iso}), encoding="utf-8")
+
+    def _in_coda(self, quando: float):
+        tn.enqueue_for_message("SEAL-1", "acme", {}, _msg("@matteo ci sei?", ["matteo"]),
+                               [MOUNT])
+        i = tn._load()[-1]
+        i["at"] = quando
+        tn._save(tn._load()[:-1] + [i])
+        return i
+
+    def test_someone_watching_the_room_is_not_notified(self):
+        from datetime import datetime, timezone
+        ora = time.time()
+        self._in_coda(ora)
+        self._presenza(datetime.now(timezone.utc).isoformat())
+        from ..tools import telegram as tg
+        inviati = []
+        with patch.object(tg, "send_internal", lambda c, t: inviati.append(c)):
+            out = tn.flush()
+        self.assertEqual(out["skipped_present"], 1)
+        self.assertEqual(inviati, [], "non è partito niente")
+        self.assertEqual(tn.pending(), [], "e non resta in coda a ripresentarsi")
+
+    def test_someone_absent_is_notified(self):
+        from datetime import datetime, timedelta, timezone
+        self._in_coda(time.time())
+        # ultimo battito di mezz'ora fa: non c'era
+        self._presenza((datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat())
+        from ..tools import telegram as tg
+        inviati = []
+        with patch.object(tg, "send_internal", lambda c, t: inviati.append(c)):
+            out = tn.flush()
+        self.assertEqual(out["delivered"], 1)
+        self.assertEqual(len(inviati), 1)
+
+    def test_presence_in_another_room_does_not_count(self):
+        """Guardare un altro topic non è aver visto questa menzione."""
+        from datetime import datetime, timezone
+        self._in_coda(time.time())
+        self._presenza(datetime.now(timezone.utc).isoformat(), topic="SEAL-1/altro")
+        from ..tools import telegram as tg
+        inviati = []
+        with patch.object(tg, "send_internal", lambda c, t: inviati.append(c)):
+            tn.flush()
+        self.assertEqual(len(inviati), 1)
+
+    def test_no_presence_file_means_notify(self):
+        """Assente o illeggibile = nessuno è presente, quindi si avvisa. Il
+        costo di un avviso di troppo è un messaggio in più; quello di uno
+        mancato è una persona che non sa di essere stata chiamata."""
+        self._in_coda(time.time())
+        from ..tools import telegram as tg
+        inviati = []
+        with patch.object(tg, "send_internal", lambda c, t: inviati.append(c)):
+            tn.flush()
+        self.assertEqual(len(inviati), 1)
+
+    def test_a_stale_heartbeat_is_a_trace_not_a_presence(self):
+        """Battito vecchio ma successivo al messaggio: la persona ha chiuso il
+        portatile dopo. Non l'ha necessariamente vista, e comunque adesso non
+        c'è: si avvisa."""
+        from datetime import datetime, timedelta, timezone
+        ora = time.time()
+        self._in_coda(ora - 3600)
+        self._presenza((datetime.now(timezone.utc) - timedelta(minutes=50)).isoformat())
+        from ..tools import telegram as tg
+        inviati = []
+        with patch.object(tg, "send_internal", lambda c, t: inviati.append(c)):
+            tn.flush()
+        self.assertEqual(len(inviati), 1)

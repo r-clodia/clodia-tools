@@ -1082,17 +1082,38 @@ class TopicService:
 
     @staticmethod
     def _clean_people(people: dict | None) -> dict:
-        """`{uid: principal}` normalizzato. Voci incomplete SCARTATE.
+        """`{uid: {principal, username}}` normalizzato. Voci incomplete SCARTATE.
 
         Scartare e non correggere: una mappa mezza scritta è una notifica verso
         la persona sbagliata, che è l'unico esito peggiore del silenzio.
+
+        Tre cose, non due. Il `principal` è il nome nella piattaforma — è quello
+        che compare come `@giovanni` nel canale. Lo `username` è il suo handle
+        Telegram, `giocasu75`, ed è quello che deve comparire nel gruppo:
+        scriverci `@giovanni` non notifica nessuno su Telegram e non è nemmeno
+        il nome con cui quelle persone si chiamano fra loro là.
+
+        La forma piatta `{uid: "principal"}` resta accettata: è quella scritta
+        prima del 10 ago 2026, e rifiutarla farebbe smettere di funzionare i
+        collegamenti già fatti. Senza username la menzione resta il nome della
+        piattaforma — degradata, non rotta.
         """
         out: dict = {}
-        for uid, chi in (people or {}).items():
+        for uid, v in (people or {}).items():
             u = str(uid).strip()
-            n = str(chi or "").strip().lower()
-            if u and n:
-                out[u] = n
+            if not u:
+                continue
+            if isinstance(v, dict):
+                chi = str(v.get("principal") or "").strip().lower()
+                handle = str(v.get("username") or "").strip().lstrip("@")
+            else:
+                chi, handle = str(v or "").strip().lower(), ""
+            if not chi:
+                continue
+            voce = {"principal": chi}
+            if handle:
+                voce["username"] = handle
+            out[u] = voce
         return out
 
     @staticmethod
