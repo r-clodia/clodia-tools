@@ -148,3 +148,34 @@ class ClassTravelsWithTheRequestTests(unittest.TestCase):
     def test_the_room_comes_from_the_request_not_from_the_approver(self):
         gate.request("clodia", "-", "web.post", chat="chan:SEAL-2:proof:clodia")
         self.assertEqual(gate.list_requests()[0]["chat"], "chan:SEAL-2:proof:clodia")
+
+
+class EgressKeysAreOutwardTests(unittest.TestCase):
+    """Una destinazione nuova è un'uscita, e va detto.
+
+    `egress.gate_key(tipo, destinazione)` produce chiavi come
+    `egress:github:https://github.com/…`: un gate per DESTINAZIONE, non per
+    verbo. Non erano classificate, e il 10 ago 2026 la card della webui l'ha
+    detto in faccia — «attraversa un confine che il gateway non ha
+    classificato». Il messaggio era giusto e la lacuna vera: chiedere a
+    qualcuno di approvare un'uscita senza dirgli che **è** un'uscita è
+    precisamente ciò che la classificazione serve a evitare.
+    """
+
+    def test_every_egress_key_is_outward(self):
+        from . import egress, gate
+        for dtype, dest in (("github", "https://github.com/acme/tool"),
+                            ("email", "mario@example.org"),
+                            ("tg", "-1001234567890"),
+                            ("web", "https://example.org/hook")):
+            with self.subTest(dtype):
+                self.assertEqual(gate.gate_class(egress.gate_key(dtype, dest)),
+                                 gate.GATE_OUTWARD)
+
+    def test_a_destination_containing_a_verb_like_string_is_still_outward(self):
+        """Le destinazioni contengono URL, che contengono punti: la
+        classificazione non deve dipendere da come è fatta la destinazione."""
+        from . import gate
+        self.assertEqual(
+            gate.gate_class("egress:web:https://x.org/settings.php"),
+            gate.GATE_OUTWARD)

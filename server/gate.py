@@ -91,7 +91,19 @@ _GATE_CLASS = {
     "topic.save_agents_md": GATE_WALLS,
 }
 
-_PREFIX_CLASS = {"settings.": GATE_SYSTEM, "pki.": GATE_SYSTEM, "ca.": GATE_SYSTEM}
+_PREFIX_CLASS = {
+    "settings.": GATE_SYSTEM, "pki.": GATE_SYSTEM, "ca.": GATE_SYSTEM,
+    # `egress:<tipo>:<destinazione>` — la chiave di un gate per DESTINAZIONE, non
+    # per verbo (`egress.gate_key`). Non era classificata, e il 10 ago 2026 la
+    # card l'ha detto: «attraversa un confine che il gateway non ha
+    # classificato». Il messaggio era corretto e la lacuna vera — chiedere a
+    # qualcuno di approvare un'uscita senza dirgli che È un'uscita è la cosa che
+    # la classificazione esiste per evitare.
+    #
+    # È `outward` per definizione: una destinazione nuova è esattamente il
+    # momento in cui qualcosa lascia la stanza.
+    "egress:": GATE_OUTWARD,
+}
 
 
 def gate_class(verb: str) -> str | None:
