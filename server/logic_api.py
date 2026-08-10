@@ -42,11 +42,31 @@ def _verb_backup_restore_test(_args: dict) -> dict:
     return backup.restore_test()
 
 
+def _verb_telegram_notify_flush(args: dict) -> dict:
+    from .topics import telegram_notify
+    return telegram_notify.flush(int(args.get("limit") or 20))
+
+
 # ALLOWLIST verbo → callable(args)->dict. Solo verbi sicuri per esecuzione
 # non presidiata dentro un job logico pre-autorizzato.
+#
+# Perché `telegram.notify_flush` può stare qui. Il criterio non è «è utile»,
+# è «cosa può fare di diverso se nessuno guarda»:
+#
+#   - il TESTO non arriva dal chiamante: lo compone il gateway dalla menzione;
+#   - la DESTINAZIONE non arriva dal chiamante: viene dal mount che l'owner ha
+#     collegato dietro un gate `walls`, ed è nella lista egress dello scope;
+#   - gli ARGOMENTI sono un solo intero, `limit`. Non c'è una superficie da
+#     manipolare: chi controllasse il chiamante potrebbe far partire prima le
+#     notifiche già in coda, e nient'altro.
+#
+# È meno di quello che i due verbi di backup già ammessi possono fare, ed è
+# esattamente la ragione per cui questa lista esiste come lista e non come
+# regola: si valuta un verbo per volta.
 _ALLOWED = {
     "settings.backup_run": _verb_backup_run,
     "settings.backup_restore_test": _verb_backup_restore_test,
+    "telegram.notify_flush": _verb_telegram_notify_flush,
 }
 
 
