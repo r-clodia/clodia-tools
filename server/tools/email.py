@@ -117,6 +117,28 @@ def available_accounts(agent: str) -> list[str]:
     return sorted(accounts)
 
 
+def accounts_not_granted(agent: str) -> list[str]:
+    """Account che ESISTONO e funzionano, ma che questo agente non può usare.
+
+    Sembra un dettaglio ed è il difetto: un account aggiunto dalla UI risultava
+    **invisibile** all'agente, che concludeva «non esiste» e si fermava. La UI
+    diceva il vero — la credenziale c'era ed era operativa — ma mancava il
+    passo che nessuno compie: concedere quella credenziale all'agente.
+
+    Nominarlo esplicitamente produce già un rifiuto ottimo, che dice cosa manca
+    e a chi chiederlo. Il buco era l'ELENCO: chi non sa che una cosa esiste non
+    può chiederla. Assenza e divieto sono due stati diversi, e confonderli manda
+    a cercare il problema dalla parte sbagliata — nel nome dell'account invece
+    che nei permessi.
+    """
+    granted = set(vault.grants_for(agent))
+    return sorted({
+        row["account"]
+        for row in credential_diagnostics()
+        if row["operational"] and row["credential"] not in granted
+    } - set(available_accounts(agent)))
+
+
 @contextlib.contextmanager
 def _secrets_env(account: str):
     """Ambiente per eseguire il CLI per `account`, con credenziali materializzate
@@ -200,11 +222,24 @@ def _attachment_args(attachments: Optional[Sequence[str]]) -> list[str]:
 def folders(account: str = "demo") -> dict:
     """Elenca le cartelle IMAP dell'account."""
     tool_allowed("email.folders")
-    return {
+    ag = agent_name()
+    out = {
         "account": account,
-        "available_accounts": available_accounts(agent_name()),
+        "available_accounts": available_accounts(ag),
         "folders": _run_json(account, ["folders"]),
     }
+    # Se esistono caselle che questo agente non può usare, lo si DICE. Senza,
+    # l'unica cosa che l'agente osserva è un'assenza, e un'assenza si spiega col
+    # nome sbagliato molto prima che con un permesso mancante.
+    negati = accounts_not_granted(ag)
+    if negati:
+        out["accounts_not_granted"] = negati
+        out["note"] = (
+            f"esistono e funzionano anche: {', '.join(negati)} — ma non ti sono "
+            "concesse. Non è un errore di nome: chiedi all'owner di concederti "
+            "l'account da Integrazioni → Email."
+        )
+    return out
 
 
 def list_messages(account: str = "demo", folder: str = "INBOX", limit: int = 10) -> dict:
