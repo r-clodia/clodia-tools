@@ -1034,6 +1034,65 @@ async def backup_restore_test(request: Request):
         return JSONResponse({"error": str(e)[:400]}, status_code=500)
 
 
+def _test_mailboxes() -> dict:
+    """Prova un login IMAP VERO per ogni casella configurata.
+
+    Fino a ieri le mailbox cadevano nel ramo «test non disponibile», e l'unico
+    segnale su una casella era la parola «operativa» — che vuol dire *i campi ci
+    sono*, non *il login funziona*. Una parola che promette più di quanto
+    verifica manda a cercare il guasto dalla parte sbagliata: è successo con
+    `team` (clodia-platform#176), dichiarata operativa e con la password
+    rifiutata dal server IMAP, e il difetto è stato cercato nella visibilità
+    dell'account per mezz'ora.
+
+    Le altre integrazioni (GitHub, Telegram, OpenAI) avevano già una prova reale.
+    Questa colma l'unica che ne era priva — e quindi l'unica che poteva mentire.
+
+    Il segreto non esce: si ritorna l'esito per account, mai il bundle.
+    """
+    import imaplib
+
+    esiti, ok_tutti = [], True
+    for nome in sorted(vault.store_names()):
+        if not nome.startswith("mailbox_"):
+            continue
+        account = nome[len("mailbox_"):]
+        try:
+            b = vault.read_internal(nome)
+        except Exception:  # noqa: BLE001
+            esiti.append(f"{account}: credenziale illeggibile")
+            ok_tutti = False
+            continue
+        server = (b.get("imap_server") or "").strip()
+        pwd = b.get("password") or b.get("app_password") or ""
+        if not server or not pwd:
+            esiti.append(f"{account}: configurazione incompleta")
+            ok_tutti = False
+            continue
+        try:
+            imap = imaplib.IMAP4_SSL(server, int(b.get("imap_port") or 993), timeout=15)
+            try:
+                imap.login(b.get("email") or account, pwd)
+                esiti.append(f"{account}: ok")
+            finally:
+                try:
+                    imap.logout()
+                except Exception:  # noqa: BLE001
+                    pass
+        except imaplib.IMAP4.error:
+            # Il messaggio del server IMAP non si riporta: su alcuni provider
+            # contiene l'utenza. Il rimedio è lo stesso in ogni caso.
+            esiti.append(f"{account}: autenticazione rifiutata "
+                         "(password o app-password sbagliata)")
+            ok_tutti = False
+        except Exception as e:  # noqa: BLE001 — host irraggiungibile, TLS, timeout
+            esiti.append(f"{account}: {type(e).__name__}")
+            ok_tutti = False
+    if not esiti:
+        return {"ok": None, "detail": "nessuna casella configurata"}
+    return {"ok": ok_tutti, "detail": " · ".join(esiti)}
+
+
 def _test_connector(cid: str) -> dict:
     """Verifica REALE della connessione di un'integrazione (chiamata al provider).
     Ritorna {ok: bool|None, detail}. ok=None → non testabile. Mai il segreto."""
@@ -1075,6 +1134,9 @@ def _test_connector(cid: str) -> dict:
                         headers={"Authorization": f"Bearer {key}"}, timeout=15)
             return ({"ok": True, "detail": "API key valida"} if r.status_code == 200
                     else {"ok": False, "detail": f"OpenAI {r.status_code}"})
+
+        if cid == "mailboxes":
+            return _test_mailboxes()
 
         if cid == "topic-storage":
             return {"ok": True, "detail": "storage locale sempre disponibile"}
