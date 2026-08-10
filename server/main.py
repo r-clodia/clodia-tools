@@ -1783,9 +1783,10 @@ def _dispatch_telegram(name: str, a: dict):
     if sub0 == "roster":
         from .tools import telegram as _tg
         tok = _tg._token_internal()
-        got = _tg.api_call(tok, "getChatAdministrators", {"chat_id": a["chat_id"]}) or {}
+        # `api_call` ritorna già il `result`: qui è direttamente la lista.
+        got = _tg.api_call(tok, "getChatAdministrators", {"chat_id": a["chat_id"]}) or []
         out = []
-        for m in (got.get("result") or []):
+        for m in got:
             u = m.get("user") or {}
             if u.get("is_bot"):
                 continue

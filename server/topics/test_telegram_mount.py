@@ -230,3 +230,57 @@ class ItIsNotAFilesystemTests(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ApiContractTests(Base):
+    """Il contratto di `api_call`, che avevo dato per scontato.
+
+    `tools/telegram.api_call` **spacchetta già `result`** e solleva sugli
+    errori. Il primo tentativo qui leggeva `.get("result")` sulla sua risposta:
+    dà `None` sempre, anche quando la chiamata è andata benissimo. Risultato
+    misurato il 10 ago 2026 su un gruppo che esiste, con il bot dentro e
+    leggibile: collegamento rifiutato con «RuntimeError».
+
+    Due test, per i due difetti che quel giorno hanno lavorato insieme: la
+    forma sbagliata, e un messaggio d'errore che diceva il TIPO dell'eccezione
+    invece del motivo — «RuntimeError» non distingue un gruppo inesistente da
+    un bot fuori o da un token di un altro bot, e sono tre rimedi diversi.
+    """
+
+    #: Esattamente ciò che ritorna `api_call`: il contenuto di `result`.
+    RISPOSTE = {
+        "getMe": {"id": 8713470720, "is_bot": True, "username": "clodia_topics_bot"},
+        "getChatMember": {"status": "member",
+                          "user": {"id": 8713470720, "is_bot": True}},
+    }
+
+    def test_the_check_passes_against_the_shape_api_call_really_returns(self):
+        from ..tools import telegram as tg
+        with patch.object(tg, "_token_internal", lambda: "T"), \
+             patch.object(tg, "api_call", lambda tok, m, p=None: self.RISPOSTE[m]):
+            TopicService._require_bot_in_group("-5279916551")   # non solleva
+
+    def test_a_bot_outside_the_group_is_named_as_such(self):
+        from ..tools import telegram as tg
+        fuori = {**self.RISPOSTE, "getChatMember": {"status": "left"}}
+        with patch.object(tg, "_token_internal", lambda: "T"), \
+             patch.object(tg, "api_call", lambda tok, m, p=None: fuori[m]):
+            with self.assertRaises(TopicError) as ctx:
+                TopicService._require_bot_in_group("-5279916551")
+        self.assertIn("non è membro", str(ctx.exception))
+
+    def test_the_failure_carries_the_reason_not_the_exception_class(self):
+        """Ciò che ha reso il difetto difficile: l'errore diceva
+        «RuntimeError» e nascondeva la frase di Telegram."""
+        from ..tools import telegram as tg
+
+        def rotto(tok, m, p=None):
+            raise RuntimeError("telegram getChatMember: chat not found")
+
+        with patch.object(tg, "_token_internal", lambda: "T"), \
+             patch.object(tg, "api_call", rotto):
+            with self.assertRaises(TopicError) as ctx:
+                TopicService._require_bot_in_group("-1")
+        detto = str(ctx.exception)
+        self.assertIn("chat not found", detto)
+        self.assertNotIn("RuntimeError", detto)

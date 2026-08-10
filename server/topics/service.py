@@ -1113,18 +1113,31 @@ class TopicService:
 
     @staticmethod
     def _require_bot_in_group(chat_id: str) -> None:
+        """Il bot dev'essere già nel gruppo. Verificato, non supposto.
+
+        `api_call` restituisce **il campo `result` già spacchettato** e solleva
+        sugli errori: leggere `.get("result")` sulla sua risposta dà `None`
+        sempre, anche quando è andata benissimo. È il contratto di un aiutante
+        che avevo dato per scontato invece di leggerlo, ed è costato un
+        collegamento rifiutato su un gruppo che esiste (10 ago 2026).
+        """
         from ..tools import telegram as tg
         try:
-            me = tg.api_call(tg._token_internal(), "getMe") or {}
-            uid = (me.get("result") or {}).get("id")
-            got = tg.api_call(tg._token_internal(), "getChatMember",
-                              {"chat_id": chat_id, "user_id": uid}) or {}
-            stato = ((got.get("result") or {}).get("status") or "").lower()
+            tok = tg._token_internal()
+            uid = (tg.api_call(tok, "getMe") or {}).get("id")
+            if not uid:
+                raise RuntimeError("getMe non ha restituito l'id del bot")
+            stato = ((tg.api_call(tok, "getChatMember",
+                                  {"chat_id": chat_id, "user_id": uid}) or {})
+                     .get("status") or "").lower()
         except Exception as e:  # noqa: BLE001
+            # Il MOTIVO, non il tipo dell'eccezione. «RuntimeError» non dice se
+            # il gruppo non esiste, se il bot è fuori o se il token è di un
+            # altro bot — e sono tre rimedi diversi.
             raise TopicError(
                 f"non riesco a verificare che il bot sia nel gruppo {chat_id}: "
-                f"{type(e).__name__}. Il collegamento si ferma qui invece di "
-                f"riuscire e non funzionare") from e
+                f"{e}. Il collegamento si ferma qui invece di riuscire e non "
+                f"funzionare") from e
         if stato in ("left", "kicked", ""):
             raise TopicError(
                 f"il bot non è membro del gruppo {chat_id} (stato: "
