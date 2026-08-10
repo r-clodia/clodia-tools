@@ -1,6 +1,7 @@
 """MCP stdio server entry point — Clodia tools gateway."""
 import asyncio
 import json
+import logging
 import sys
 
 from mcp.server.lowlevel import Server
@@ -16,6 +17,16 @@ from . import telemetry as _tlm
 from . import transfer_channel
 from .tools import email, fs, logs, runtime
 from .tools import web_post
+
+#: `LOG` era usato in cinque punti di questo modulo e **definito in nessuno**.
+#: Ognuno di quei punti sta in un `except` — cioè si scopre solo quando qualcosa
+#: è già andato storto, e allora il `NameError` sostituisce l'errore vero con uno
+#: che non c'entra. Trovato usando davvero un token MCP umano: due verbi nuovi non
+#: erano nella tabella della provenienza, il ramo di ripiego ha provato a
+#: scriverlo nel log, e il verbo ha risposto «NameError» a chi chiedeva le proprie
+#: menzioni. Nessun test lo vedeva: tutti e cinque i rami sono percorsi solo in
+#: presenza di un altro guasto.
+LOG = logging.getLogger("clodia-tools.main")
 from .tools import eu_corpus
 from .whitelist import (agent_config, agent_denies, agent_gates, agent_name,
                         outside_profile,
@@ -3689,6 +3700,12 @@ def _chat_binds_this_topic(tier_t: str, name: str) -> bool:
     return len(p) >= 2 and p[0] == str(tier_t) and p[1] == str(name)
 
 
+def _token_is_bound_to_a_room() -> bool:
+    """True se questo token dichiara UNA stanza — cioè è il token di un client
+    umano, non una sessione della webui."""
+    return is_on_behalf() and (current_chat() or "").startswith("chan:")
+
+
 def _require_person_of_this_room(meta, tier, name, tier_t, mutating: bool) -> None:
     """Gli stessi tre assi di un agente, letti sulla PERSONA: compartimento
     (partecipa?), ruolo (reader non muta), livello (clearance ≥ tier)."""
@@ -3735,7 +3752,20 @@ def _require_topic_member(svc, tier, name, mutating: bool = False) -> None:
     # per QUESTO topic e per nessun altro, e chi lo porta non può cambiarlo
     # perché è firmato. Un token del genere non apre altre stanze: le apre di
     # meno, non di più.
-    if is_on_behalf() and _chat_binds_this_topic(tier_t, name):
+    if _token_is_bound_to_a_room():
+        # E se la stanza NON è quella, si finisce qui: **rifiuto**, non ripiego
+        # sul ramo dell'agente. Il primo disegno cadeva sul ramo del carrier, e
+        # in esercizio il carrier è `clodia`, che partecipa a tutto: il token
+        # «legato a una stanza» apriva ogni altra stanza, e lo faceva
+        # rispondendo `200`. Il confinamento sembrava esserci perché il caso
+        # felice funzionava — trovato usando il token per davvero, non nei test,
+        # che chiedevano al ramo giusto se faceva la cosa giusta e mai all'altro
+        # se stava zitto.
+        if not _chat_binds_this_topic(tier_t, name):
+            raise PermissionError(
+                f"questo token vale per {current_chat() or '—'} e non per "
+                f"{tier}/{name}. Un client MCP è collegato a UNA stanza: per "
+                "un altro topic si conia un altro collegamento.")
         _require_person_of_this_room(meta, tier, name, tier_t, mutating)
         return
     agent_ok = _topic_is_member(meta, caller)
@@ -4126,10 +4156,26 @@ def _dispatch_topic(name: str, a: dict):
         return svc.telegram_unbind(a["tier"], a["name"], a.get("mount"))
     if verb == "set_portable":
         return svc.set_portable(a["tier"], a["name"], bool(a["portable"]))
-    if verb == "list":
-        return _filter_member_rows(svc.list(a.get("tier"), a.get("include_archived", False)),
-                                   agent_name())
-    if verb == "search":
+    if verb in ("list", "search"):
+        # `list` e `search` non passano da `_require_topic_member`: filtrano da
+        # sé, per membership del chiamante. E il chiamante lo leggevano da
+        # `agent_name()` — il CARRIER — anche quando il token era di una persona
+        # legata a una stanza. In esercizio il carrier è `clodia`, che partecipa
+        # a tutto: dal client di Giovanni una ricerca rispondeva con i titoli dei
+        # topic di clodia. Non un accesso ai contenuti, ma una mappa di stanze
+        # che non lo riguardano — e una perdita che non somiglia a un errore,
+        # perché una lista di titoli sembra sempre plausibile.
+        if _token_is_bound_to_a_room():
+            solo = current_chat()[len("chan:"):].split(":")[:2]
+            righe = (svc.list(a.get("tier"), a.get("include_archived", False))
+                     if verb == "list" else svc.search(a["query"], a.get("mode", "lexical")))
+            if not isinstance(righe, list):
+                return righe
+            return [r for r in righe
+                    if str(r.get("tier")) == solo[0] and str(r.get("name")) == solo[1]]
+        if verb == "list":
+            return _filter_member_rows(
+                svc.list(a.get("tier"), a.get("include_archived", False)), agent_name())
         res = svc.search(a["query"], a.get("mode", "lexical"))
         return _filter_member_rows(res, agent_name()) if isinstance(res, list) else res
     if verb == "files":

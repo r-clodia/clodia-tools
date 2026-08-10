@@ -176,6 +176,72 @@ class WhoMayBeThereTests(unittest.TestCase):
                 f(t)
 
 
+class OneRoomMeansOneRoomTests(unittest.TestCase):
+    """Il difetto che i primi test non hanno visto.
+
+    Chiedevano al ramo giusto se faceva la cosa giusta, e mai all'altro se stava
+    zitto. Un token legato a `proof-of-flex-2` chiamato su un ALTRO topic non
+    entrava in questo ramo — `_chat_binds_this_topic` diceva False — e cadeva
+    tranquillamente su quello del carrier-agent. In esercizio il carrier è
+    `clodia`, che partecipa a tutto: il token «legato a una stanza» le apriva
+    tutte, rispondendo `200`.
+
+    Il confinamento sembrava esserci perché il caso felice funzionava. È il
+    difetto più difficile da vedere leggendo: nessuna riga è sbagliata, manca un
+    ramo — e un permesso mancante non fallisce, riesce.
+
+    Trovato usando il token per davvero contro il gateway in esercizio.
+    """
+
+    def _prova(self, tier_tok, topic_tok, tier_chiesto, topic_chiesto,
+               carrier="clodia"):
+        svc = _Svc({**META, "tier": tier_chiesto})
+        with _Persona(chi="giovanni",
+                      chat=f"chan:{tier_tok}:{topic_tok}:giovanni"):
+            tok = whitelist.set_current_agent(carrier)
+            try:
+                M._require_topic_member(svc, tier_chiesto, topic_chiesto)
+            finally:
+                whitelist.reset_current_agent(tok)
+
+    def test_the_bound_room_works(self):
+        self._prova("SEAL-1", "acme", "SEAL-1", "acme")
+
+    def test_another_room_is_refused_even_if_the_carrier_belongs(self):
+        """`clodia` è participant di quasi tutto: se il rifiuto non è esplicito,
+        il ripiego sul carrier concede."""
+        with self.assertRaises(PermissionError) as e:
+            self._prova("SEAL-1", "acme", "SEAL-1", "un-altro-topic")
+        self.assertIn("vale per", str(e.exception))
+
+    def test_another_tier_is_refused_too(self):
+        with self.assertRaises(PermissionError):
+            self._prova("SEAL-1", "acme", "SEAL-2", "acme")
+
+    def test_listing_from_a_bound_token_shows_only_that_room(self):
+        """`list`/`search` non passano da `_require_topic_member`: filtrano da sé,
+        e lo facevano sul CARRIER. Dal client di Giovanni una ricerca rispondeva
+        con i titoli dei topic di clodia — non i contenuti, ma la mappa delle
+        stanze che non lo riguardano. Una lista di titoli sembra sempre
+        plausibile, che è ciò che rende la perdita difficile da notare."""
+        class _L:
+            def list(self, tier=None, include_archived=False):
+                return [{"tier": "SEAL-1", "name": "acme"},
+                        {"tier": "SEAL-1", "name": "segreto-di-clodia"},
+                        {"tier": "SEAL-2", "name": "acme"}]
+
+            def search(self, q, mode="lexical"):
+                return self.list()
+
+        with _Persona(chi="giovanni", chat="chan:SEAL-1:acme:giovanni"), \
+             patch.object(M, "_topics", lambda: _L()):
+            for verbo, args in (("topic.list", {}),
+                                ("topic.search", {"query": "x"})):
+                righe = M._dispatch_topic(verbo, args)
+                self.assertEqual(righe, [{"tier": "SEAL-1", "name": "acme"}],
+                                 f"{verbo} ha mostrato più di una stanza")
+
+
 class MentionsAreAlwaysAboutTheCallerTests(unittest.TestCase):
     def test_no_argument_can_name_someone_else(self):
         """Un parametro `principal` renderebbe `my_mentions` un modo per leggere
