@@ -1064,7 +1064,17 @@ def _prova_smtp(b: dict, account: str) -> str:
             except Exception:  # noqa: BLE001
                 pass
     except smtplib.SMTPAuthenticationError:
-        return "autenticazione SMTP rifiutata (password o app-password sbagliata)"
+        # Il rimedio dipende da COSA si è usato come utente, e i due casi
+        # portano da parti opposte: rigenerare una password, o scoprire che
+        # l'utenza non è l'indirizzo. I relay (SMTP2GO, Mailgun, SendGrid, Brevo)
+        # autenticano con un utente dedicato; dirlo qui evita di far reimpostare
+        # una password che era giusta.
+        if not (b.get("smtp_user") or "").strip():
+            return ("autenticazione SMTP rifiutata usando l'indirizzo come utente. "
+                    "Se il server è un relay (smtp2go, mailgun, sendgrid, brevo…) "
+                    "l'utenza NON è l'indirizzo: compila «utente SMTP» con quella "
+                    "del relay")
+        return "autenticazione SMTP rifiutata (password sbagliata per l'utente indicato)"
     except Exception as e:  # noqa: BLE001
         return type(e).__name__
 
