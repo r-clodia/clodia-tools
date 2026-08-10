@@ -2608,9 +2608,28 @@ async def _require_gate_consent(
             try:
                 _parts = _ch.split(":")
                 _tier, _name = _parts[1], _parts[2]
+                # Il messaggio PORTA la richiesta, non solo un puntatore a essa.
+                #
+                # Conteneva il solo marcatore, e tutto ciò che si leggeva — chi
+                # chiede, cosa, perché — veniva reso in diretta dalla coda dei
+                # pending. Alla decisione la richiesta esce dalla coda e in chat
+                # restava un riquadro vuoto: il motivo per cui qualcuno aveva
+                # chiesto quella cosa spariva nel momento esatto in cui diventava
+                # una decisione da ricordare. Ed era peggio dopo un ricarico:
+                # senza la coda, un gate già deciso tornava a somigliare a uno
+                # aperto.
+                #
+                # Il testo è la traccia durevole; il marcatore resta per i
+                # bottoni finché la richiesta è viva.
+                _perche = f" — {reason}" if reason else ""
+                _cosa = (f"di accedere al topic {gate_key.split(':', 1)[1]}"
+                         if gate_key.startswith("topic-access:")
+                         else f"di usare `{gate_key}`")
                 # kind=ai (non system): i system sono filtrati dal render del webui.
-                _topics().post_message(_tier, _name, author="gate",
-                                       text=f"<!-- gate={req.get('id')} -->", kind="ai")
+                _topics().post_message(
+                    _tier, _name, author="gate",
+                    text=(f"🛡️ **{agent}** chiede {_cosa}{_perche}\n"
+                          f"<!-- gate={req.get('id')} -->"), kind="ai")
             except Exception:  # noqa: BLE001 — il gate resta valido anche senza marker
                 pass
         # Gate NON presidiato (nessun contesto-canale, es. turno di un job agentico):
