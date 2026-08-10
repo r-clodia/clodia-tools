@@ -863,6 +863,40 @@ def allow(direction: str, uri: str) -> dict:
     return {"direction": direction, "uri": u, "added": added, "total": len(cur)}
 
 
+def scope_allow(direction: str, scope: str, uri: str) -> dict:
+    """Aggiunge `uri` alla lista di UNO scope. Idempotente.
+
+    Mancava: le liste per scope si leggevano (`scope_uris`) e si scrivevano solo
+    a mano in `config.yaml`. Una lista che il codice sa leggere e non sa scrivere
+    è una lista che resta vuota — cioè un asse dichiarato e mai usato, che è il
+    difetto ricorrente di questa settimana.
+
+    Stessa validazione della lista globale: gli schemi della direzione sbagliata
+    e le voci degeneri sono rifiutati qui, non al caricamento, così l'errore si
+    vede subito invece di sparire in un warning.
+    """
+    key = _SCOPE_KEYS[direction]
+    u = check_grantable(direction, uri)
+    chiave = _norm_scope_key(scope)
+    from . import whitelist as _wl
+    per_scope = dict(_wl.CONFIG.get(key) or {})
+    # Si scrive sotto la chiave NORMALIZZATA e si assorbe un eventuale alias
+    # (`P1/acme` contro `SEAL-1/acme`): due elenchi per una stanza sola sono il
+    # modo in cui uno dei due smette di essere letto.
+    cur: list = []
+    for k in [k for k in per_scope if _norm_scope_key(str(k)) == chiave]:
+        cur.extend(per_scope.pop(k) or [])
+    added = u not in cur
+    if added:
+        cur.append(u)
+    per_scope[chiave] = cur
+    _wl.CONFIG[key] = per_scope
+    _wl.save_config()
+    LOG.warning("%s[%s] · %s %s", key, chiave, "+=" if added else "già presente:", u)
+    return {"direction": direction, "scope": chiave, "uri": u,
+            "added": added, "total": len(cur)}
+
+
 def revoke(direction: str, uri: str) -> dict:
     """Rimuove `uri`. NON gated: togliere autorità non richiede un consenso —
     chiederlo insegnerebbe che anche restringere è un'operazione da negoziare."""

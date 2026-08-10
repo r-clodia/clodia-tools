@@ -70,6 +70,11 @@ _GATE_CLASS = {
     "providers.pause": GATE_SYSTEM, "providers.resume": GATE_SYSTEM,
     # WALLS — chi sta nello scope, o quanto è largo
     "topic.add_participant": GATE_WALLS,
+    # Collegare un gruppo Telegram porta la stanza FUORI: le menzioni, e con
+    # `excerpt` anche una riga di testo, arrivano a persone che nel topic non
+    # entrano. È un atto sui muri, come aggiungere un partecipante — e infatti
+    # è la stessa cosa vista dall'altro lato.
+    "topic.telegram_bind": GATE_WALLS, "topic.telegram_unbind": GATE_WALLS,
     "topic.set_portable": GATE_WALLS, "topic.remove_participant": GATE_WALLS,
     "topic.remote_add": GATE_WALLS, "topic.remote_enable": GATE_WALLS,
     "topic.remote_disable": GATE_WALLS,
@@ -119,6 +124,7 @@ _DEFAULT_GATED_EXACT = frozenset({
     "providers.pause", "providers.resume",
     # gestione partecipanti di un topic (auto-invito / confused-deputy)
     "topic.add_participant", "topic.set_portable", "topic.remove_participant",
+    "topic.telegram_bind", "topic.telegram_unbind",
     # Il remote Drive di un topic È il suo perimetro di accesso (la cartella del
     # remote è la radice del confine per le chiamate dentro quel canale). Quindi
     # impostarlo, cambiarlo o TOGLIERLO non è una preferenza: è una dichiarazione
