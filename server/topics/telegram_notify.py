@@ -125,21 +125,30 @@ def enqueue_for_message(tier: str, name: str, meta: dict, msg: dict,
         if not chat_id:
             continue
         modo = cfg.get("mode") or "excerpt"
-        # `people` è uid → principal; qui serve il verso opposto.
+        # `people` è uid → {principal, username}; qui serve il verso opposto.
+        # La forma piatta (uid → "principal") è quella di prima del 10 ago 2026
+        # e resta letta: un collegamento già fatto non deve smettere di
+        # funzionare perché è cambiata la forma.
         per_nome: dict = {}
-        for uid, chi in (cfg.get("people") or {}).items():
-            per_nome.setdefault(str(chi).lower(), str(uid))
+        for uid, v in (cfg.get("people") or {}).items():
+            if isinstance(v, dict):
+                chi, handle = str(v.get("principal") or "").lower(), v.get("username") or ""
+            else:
+                chi, handle = str(v or "").lower(), ""
+            if chi:
+                per_nome.setdefault(chi, (str(uid), str(handle)))
         for chi in menzionati:
-            uid = per_nome.get(chi)
-            if not uid:
+            trovato = per_nome.get(chi)
+            if not trovato:
                 continue
+            uid, handle = trovato
             chiave = (msg.get("id"), chat_id, chi)
             if chiave in visti:
                 continue      # una menzione avvisa UNA volta
             visti.add(chiave)
             coda.append({
                 "tier": tier, "name": name, "chat_id": chat_id,
-                "principal": chi, "uid": uid,
+                "principal": chi, "uid": uid, "handle": handle,
                 "message_id": msg.get("id"), "author": msg.get("author"),
                 "title": (meta or {}).get("title") or name,
                 "excerpt": (_excerpt(msg.get("text") or "", chi, 280)
@@ -153,14 +162,67 @@ def enqueue_for_message(tier: str, name: str, meta: dict, msg: dict,
     return nuovi
 
 
+#: Quanto una presenza resta valida. La webui batte ogni 5s; 90 secondi
+#: assorbono una rete lenta e una scheda in background senza far passare per
+#: presente chi ha chiuso il portatile dieci minuti fa.
+PRESENCE_TTL = 90.0
+
+
+def _presence() -> dict:
+    """`{"<principal>|<tier>/<name>": "<iso>"}` — scritto dall'agent-server.
+
+    Illeggibile o assente = nessuno è presente, quindi si notifica. È la
+    direzione giusta: il costo di un avviso di troppo è un messaggio in più sul
+    telefono; il costo di uno mancato è una persona che non sa di essere stata
+    chiamata.
+    """
+    base = os.environ.get("CLODIA_DATA", "/datadir")
+    try:
+        d = json.loads((Path(base) / "presence.json").read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _era_presente(item: dict, ora: float | None = None) -> bool:
+    """Vero se la persona stava guardando QUELLA stanza quando è stata chiamata.
+
+    Il confronto è con il momento del MESSAGGIO, non con adesso: la domanda è
+    «l'ha visto?», e chi era davanti allo schermo quando la menzione è arrivata
+    l'ha vista. Chi apre la conversazione dieci minuti dopo, invece, va
+    avvisato lo stesso — la notifica gli è già dovuta.
+    """
+    from datetime import datetime, timezone
+    chiave = f"{item.get('principal')}|{item.get('tier')}/{item.get('name')}"
+    visto = _presence().get(chiave)
+    if not visto:
+        return False
+    try:
+        t = datetime.fromisoformat(visto).timestamp()
+    except (TypeError, ValueError):
+        return False
+    quando = float(item.get("at") or 0)
+    adesso = ora if ora is not None else time.time()
+    # Presente al momento del messaggio (entro il TTL), e ancora fresco adesso:
+    # un battito vecchio non è una presenza, è una traccia.
+    return (t >= quando - PRESENCE_TTL) and (adesso - t <= PRESENCE_TTL)
+
+
 def pending(limit: int = 20) -> list:
     """Le notifiche da recapitare, più vecchie prima."""
     return [i for i in _load() if int(i.get("attempts", 0)) < MAX_ATTEMPTS][:limit]
 
 
 def render(item: dict) -> str:
-    """Il testo che arriva sul gruppo."""
-    chi = item.get("principal") or "?"
+    """Il testo che arriva sul gruppo.
+
+    La menzione è tradotta: `@giovanni` nel canale diventa `@giocasu75` nel
+    gruppo. Scrivere il nome della piattaforma non notificherebbe nessuno su
+    Telegram — e non è nemmeno il nome con cui quelle persone si chiamano fra
+    loro là. Senza handle mappato resta il nome della piattaforma: si perde la
+    notifica push, non il messaggio.
+    """
+    chi = item.get("handle") or item.get("principal") or "?"
     autore = item.get("author") or "qualcuno"
     titolo = item.get("title") or item.get("name")
     righe = [f"🔔 @{chi} — {autore} ti ha menzionato in «{titolo}»"]
@@ -190,9 +252,18 @@ def flush(limit: int = 20) -> dict:
     impedire a un'altra persona di essere avvisata.
     """
     from ..tools import telegram as tg
-    fatte = falliti = 0
+    fatte = falliti = presenti = 0
     motivi: list[str] = []
     for item in pending(limit):
+        if _era_presente(item):
+            # Era davanti allo schermo quando l'hanno chiamata: l'ha vista. La
+            # notifica è per chi non c'era, e mandarla lo stesso insegna a
+            # silenziare il gruppo.
+            presenti += 1
+            LOG.info("notifica a %s saltata: era sul canale %s/%s",
+                     item.get("principal"), item.get("tier"), item.get("name"))
+            ack(item["message_id"], item["chat_id"], item["principal"], ok=True)
+            continue
         try:
             tg.send_internal(str(item["chat_id"]), render(item))
         except Exception as e:  # noqa: BLE001
@@ -207,6 +278,7 @@ def flush(limit: int = 20) -> dict:
     if fatte or falliti:
         LOG.info("telegram notify flush: %d recapitate, %d fallite", fatte, falliti)
     return {"ok": True, "delivered": fatte, "failed": falliti,
+            "skipped_present": presenti,
             "errors": motivi[:5], "still_pending": len(pending(limit))}
 
 
