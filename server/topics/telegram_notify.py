@@ -170,6 +170,46 @@ def render(item: dict) -> str:
     return "\n".join(r for r in righe if r)
 
 
+def flush(limit: int = 20) -> dict:
+    """Recapita le notifiche pendenti. Ritorna il conto di ciò che è successo.
+
+    Perché un verbo e non un turno di agente. Il piano di un job LOGICO è una
+    lista STATICA di verbi: non può iterare su una coda di lunghezza variabile.
+    L'alternativa era un turno LLM ogni cinque minuti per sempre, per un lavoro
+    che non richiede alcun giudizio — il testo è già composto qui, e la skill
+    dice all'agente di inviarlo verbatim proprio perché quel giudizio non deve
+    esserci.
+
+    Cosa cambia sull'attribuzione, e va detto: l'invio non è più «un turno di
+    messaggero» ma «questo job, creato dal suo owner». Non è un invio senza
+    padrone — è un attore con un nome, pre-autorizzato alla creazione e
+    registrato a ogni esecuzione — ma è un padrone diverso, e chi legge i log
+    deve saperlo.
+
+    Un fallimento non ferma gli altri: una chat irraggiungibile non deve
+    impedire a un'altra persona di essere avvisata.
+    """
+    from ..tools import telegram as tg
+    fatte = falliti = 0
+    motivi: list[str] = []
+    for item in pending(limit):
+        try:
+            tg.send_internal(str(item["chat_id"]), render(item))
+        except Exception as e:  # noqa: BLE001
+            falliti += 1
+            motivo = f"{type(e).__name__}: {e}"
+            motivi.append(motivo[:160])
+            ack(item["message_id"], item["chat_id"], item["principal"],
+                ok=False, error=motivo)
+            continue
+        fatte += 1
+        ack(item["message_id"], item["chat_id"], item["principal"], ok=True)
+    if fatte or falliti:
+        LOG.info("telegram notify flush: %d recapitate, %d fallite", fatte, falliti)
+    return {"ok": True, "delivered": fatte, "failed": falliti,
+            "errors": motivi[:5], "still_pending": len(pending(limit))}
+
+
 def ack(message_id: str, chat_id: str, principal: str, ok: bool = True,
         error: str = "") -> dict:
     """Segna una notifica come recapitata (`ok`) o come fallita.
