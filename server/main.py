@@ -4115,7 +4115,25 @@ def _dispatch_topic(name: str, a: dict):
                                author=umano or ag or "agente",
                                text=text, kind="human" if umano else "ai")
         import re as _re
-        if _re.search(r"@[a-z0-9][a-z0-9_-]{0,30}", text):
+        # CHI FA PARTIRE UN TURNO. La condizione «solo se c'è una @menzione» era
+        # giusta finché a postare c'erano solo agenti: un agente che deposita una
+        # bolla (una mail in arrivo, un handoff) non deve svegliare nessuno, e
+        # senza quel filtro due agenti che si parlano si rispondono all'infinito.
+        #
+        # Per una PERSONA è sbagliata, e in un modo che avevo dichiarato di voler
+        # evitare. Dalla webui un messaggio umano senza menzione instrada
+        # comunque, per rilevanza; da un client MCP restava senza risposta e
+        # bisognava riscriverlo a mano nella webui. Cioè il client era diventato
+        # **una seconda porta sulla stessa stanza con regole diverse** — la cosa
+        # per cui avevo rifiutato di aggiungere un `topic.ask`, ricomparsa dove
+        # non la stavo guardando.
+        #
+        # Chi decide resta uno solo: `channel_trigger` porta il messaggio al
+        # router di clodia-logic, che applica le regole di ieri — menzione a un
+        # umano → nessuna AI, tag → quell'agente, altrimenti rilevanza con il
+        # tetto di una risposta sola. Qui non si sceglie il destinatario: si
+        # smette di decidere al posto suo.
+        if (umano and text.strip()) or _re.search(r"@[a-z0-9][a-z0-9_-]{0,30}", text):
             try:
                 runtime.channel_trigger(a["tier"], a["name"], text,
                                         by=umano or ag or "")

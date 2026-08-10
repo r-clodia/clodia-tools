@@ -99,6 +99,75 @@ class WhoSpokeTests(unittest.TestCase):
         self.assertEqual(svc.posted["kind"], "ai")
 
 
+class ATurnStartsLikeInTheWebuiTests(unittest.TestCase):
+    """Un messaggio umano instrada anche senza menzione.
+
+    Trovato da Davide usando la funzione: ha postato «ciao canale» dal client e
+    nessuno ha risposto — ha dovuto riscriverlo a mano nella webui. Il turno
+    partiva **solo** in presenza di una `@menzione`.
+
+    La condizione era giusta per gli agenti — un agente che deposita una bolla
+    non deve svegliare nessuno, e senza quel filtro due agenti che si parlano si
+    rispondono all'infinito — e sbagliata per una persona: dalla webui lo stesso
+    messaggio instrada per rilevanza. Il client era diventato **una seconda porta
+    sulla stessa stanza con regole diverse**, che è esattamente ciò per cui avevo
+    rifiutato di aggiungere un `topic.ask`. Il difetto è ricomparso dove non lo
+    stavo guardando: non nell'API che ho scelto di non fare, ma in una condizione
+    scritta per un altro chiamante.
+    """
+
+    def _innesca(self, testo, umano=True, agente="ophelia"):
+        svc = _Svc(META)
+        rt = unittest.mock.MagicMock()
+        ctx = _Persona() if umano else None
+        tok = None if umano else whitelist.set_current_agent(agente)
+        if ctx:
+            ctx.__enter__()
+        try:
+            with patch.object(M, "_topics", lambda: svc), \
+                 patch.object(M, "runtime", rt), \
+                 patch.object(M, "_require_topic_member", lambda *a, **k: None):
+                M._dispatch_topic("topic.post_message",
+                                  {"tier": "SEAL-1", "name": "acme", "text": testo})
+        finally:
+            if ctx:
+                ctx.__exit__(None, None, None)
+            else:
+                whitelist.reset_current_agent(tok)
+        return rt.channel_trigger.called
+
+    def test_a_person_without_a_mention_still_gets_an_answer(self):
+        self.assertTrue(self._innesca("ciao canale"))
+
+    def test_a_person_with_a_mention_too(self):
+        self.assertTrue(self._innesca("@segretario verbalizza"))
+
+    def test_an_empty_message_starts_nothing(self):
+        """Uno spazio non è una domanda: un turno per niente costa un giro di
+        inferenza e occupa la chat."""
+        self.assertFalse(self._innesca("   "))
+
+    def test_an_agent_bubble_without_a_mention_still_starts_nothing(self):
+        """La metà della regola che resta. Toglierla farebbe rispondere un agente
+        a ogni bolla depositata da un altro — due agenti che si parlano non si
+        fermano più."""
+        self.assertFalse(self._innesca("mail in arrivo da Tizio", umano=False))
+
+    def test_an_agent_with_a_mention_does(self):
+        self.assertTrue(self._innesca("@clodia guarda questa", umano=False))
+
+    def test_the_trigger_is_attributed_to_the_person(self):
+        """`by` è chi ha parlato: il router decide anche in base a quello."""
+        svc = _Svc(META)
+        rt = unittest.mock.MagicMock()
+        with _Persona(), patch.object(M, "_topics", lambda: svc), \
+             patch.object(M, "runtime", rt), \
+             patch.object(M, "_require_topic_member", lambda *a, **k: None):
+            M._dispatch_topic("topic.post_message",
+                              {"tier": "SEAL-1", "name": "acme", "text": "ciao"})
+        self.assertEqual(rt.channel_trigger.call_args.kwargs.get("by"), "giovanni")
+
+
 class WhichRoomTests(unittest.TestCase):
     def test_the_claim_binds_exactly_one_room(self):
         with _Persona():
