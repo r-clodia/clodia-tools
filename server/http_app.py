@@ -54,6 +54,19 @@ class _AuthMiddleware:
             LOG.warning("auth fallita: %s", e)
             await _send_401(send, str(e))
             return
+        # REVOCA di un client MCP umano. Il token è firmato e valido fino alla
+        # scadenza: senza questa lettura «revoca» sarebbe un campo scritto in un
+        # file che nessuno guarda, con la schermata che dice il contrario di
+        # quello che succede. Costa una lettura di un file piccolo, e solo per i
+        # token che portano un `execution_id` `mcp_*`.
+        try:
+            from . import human_mcp
+            if human_mcp.is_revoked(payload.get("execution_id")):
+                LOG.warning("token MCP umano revocato: %s", payload.get("execution_id"))
+                await _send_401(send, "revocato")
+                return
+        except Exception as e:  # noqa: BLE001 — un difetto qui non deve chiudere il gateway
+            LOG.error("verifica revoca fallita: %s", e)
         tok = whitelist.set_current_agent(str(payload.get("agent") or ""))
         # claim `principal` (utente umano della chat) → contextvar per runtime.current_user
         ptok = whitelist.set_current_principal(payload.get("principal") or None)

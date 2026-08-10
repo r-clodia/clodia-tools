@@ -818,7 +818,7 @@ _TOPIC_TOOLS: list[Tool] = [
         description=("Posta un MESSAGGIO nella chat del topic (una bolla nella "
                      "conversazione), come te. Serve a far comparire nel topic ciò che "
                      "arriva da fuori (es. una mail in arrivo) o un handoff a fine job. "
-                     "Prerogativa di MESSAGGERO e dei super-agent. Se includi una "
+                     "Se includi una "
                      "@menzione (es. `@messaggero …`), innesca l'agente taggato che "
                      "prende in carico il messaggio; senza menzione è solo una bolla. "
                      "Puoi postare solo in un topic di cui sei participant (cross-topic → gate)."),
@@ -827,6 +827,43 @@ _TOPIC_TOOLS: list[Tool] = [
             "name": {"type": "string"},
             "text": {"type": "string", "description": "testo del messaggio"},
         }, "required": ["tier", "name", "text"]},
+    ),
+    Tool(
+        name="topic.messages",
+        description=("Legge la CONVERSAZIONE del topic (le bolle della chat), dalla più "
+                     "vecchia alla più recente. Un agente in turno la riceve già nel "
+                     "contesto: questo verbo serve a chi guarda la stanza da fuori — un "
+                     "client MCP di una persona, o un agente che riprende il filo."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "limit": {"type": "integer", "description": "quanti messaggi finali (default 200)"},
+        }, "required": ["tier", "name"]},
+    ),
+    Tool(
+        name="topic.my_mentions",
+        description=("Le menzioni rivolte A TE in questo topic che non hai ancora "
+                     "marcato come viste. La domanda è sempre su chi chiama: non si "
+                     "può leggere la casella di un altro. Da MCP non arriva nessun "
+                     "push — questo è il verbo con cui si CHIEDE se qualcuno ti ha "
+                     "chiamato."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "limit": {"type": "integer"},
+            "only_unseen": {"type": "boolean", "description": "default true"},
+        }, "required": ["tier", "name"]},
+    ),
+    Tool(
+        name="topic.mark_seen",
+        description=("Sposta il tuo segnaposto delle menzioni. Passa il `seen_through` "
+                     "ritornato da topic.my_mentions, non l'istante corrente: fra le due "
+                     "chiamate può essere arrivata una menzione che non hai visto."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "seen_through": {"type": "string", "description": "ts da topic.my_mentions"},
+        }, "required": ["tier", "name"]},
     ),
     Tool(
         name="topic.delete_file",
@@ -2203,6 +2240,35 @@ def _human_tool_allowed(name: str) -> bool:
     return True
 
 
+def _scoped_ceiling_ok(name: str) -> bool:
+    """Per una chiamata ON-BEHALF, `scoped_tools` è un **tetto**, non un'aggiunta.
+
+    Sul ramo degli agenti il claim SOMMA: un agente riceve una delega e con essa
+    dei verbi in più (`allowed_tools | scoped_tools`). Ha senso lì, dove il token
+    *concede*.
+
+    Sul ramo umano non sommava e non limitava: `_human_tool_allowed` guarda solo
+    il ruolo, quindi un token coniato per far parlare una persona in **una**
+    stanza le apriva ogni verbo non-gated del gateway — leggere qualunque topic,
+    scrivere file ovunque. Il claim c'era, era firmato, e non lo leggeva nessuno:
+    è il difetto «qualcosa di dichiarato che nessuno porta», nella variante
+    peggiore, perché la dichiarazione *sembra* già una restrizione.
+
+    Un tetto assente non è un tetto vuoto: senza il claim vale la RBAC del ruolo
+    come prima, altrimenti ogni sessione umana della webui si spegnerebbe.
+    """
+    tetto = set(current_scoped_tools())
+    if not tetto:
+        return True
+    if name in tetto:
+        return True
+    # `<ns>.*` resta ammesso — è così che si concede un backend MCP montato per
+    # intero. Il `*` nudo no, e non serve chiuderlo solo qui: `mint_session_token`
+    # lo rifiuta già alla coniazione. Due controlli sulla stessa cosa divergono;
+    # questo si fida di quello, e il test lo verifica sul minter.
+    return "." in name and f"{name.split('.', 1)[0]}.*" in tetto
+
+
 def _vault_grants(agent: str | None) -> set:
     if not agent:
         return set()
@@ -2426,7 +2492,8 @@ async def list_tools() -> list[Tool]:
     if is_on_behalf():
         # Umano: vede i tool consentiti dal suo RUOLO (admin = tutti; user = solo
         # non super-only). Stesso PDP del dispatch.
-        return [t for t in (native + proxied) if _human_tool_allowed(t.name)]
+        return [t for t in (native + proxied)
+                if _human_tool_allowed(t.name) and _scoped_ceiling_ok(t.name)]
     if _is_super(me):
         return native + proxied  # super-agent: accesso a tutto
     return [t for t in (native + proxied)
@@ -3030,6 +3097,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 raise PermissionError(
                     f"tool '{name}' riservato agli admin (umano '{current_principal()}' "
                     f"ruolo '{current_human_role() or 'user'}')")
+            if not _scoped_ceiling_ok(name):
+                raise PermissionError(
+                    f"tool '{name}' fuori dal token di '{current_principal()}': "
+                    f"questo token concede {sorted(current_scoped_tools())}. "
+                    f"Il ruolo non c'entra — è il token a essere ristretto.")
         elif not _is_super(_ag) and not _tool_allowed(
                 name, set(agent_config().get("allowed_tools", [])) | set(current_scoped_tools())) \
                 and not _connector_allows(name, _ag):
@@ -3566,7 +3638,7 @@ _TOPIC_SCOPED_VERBS = {
     "telegram_bind", "telegram_unbind",
     "files", "read_file",
     "read_document", "write_file", "fetch", "put", "delete_file", "migrate_storage",
-    "post_message",
+    "post_message", "messages", "my_mentions", "mark_seen",
     "remote_enable", "remote_disable", "remote_add", "remote_commit",
     "remote_push", "remote_pull", "remote_status",
 }
@@ -3603,6 +3675,41 @@ _TOPIC_MUTATING_VERBS = frozenset({
 })
 
 
+def _chat_binds_this_topic(tier_t: str, name: str) -> bool:
+    """True se il claim `chat` del token lega la sessione a QUESTO topic.
+
+    Il claim vale `chan:<tier>:<topic>:<chi>` ed è firmato: chi lo porta non può
+    riscriverlo per affacciarsi su un'altra stanza. È questa proprietà — non il
+    nome della persona — a rendere sicuro il ramo umano di `_require_topic_member`.
+    """
+    c = current_chat() or ""
+    if not c.startswith("chan:"):
+        return False
+    p = c[len("chan:"):].split(":")
+    return len(p) >= 2 and p[0] == str(tier_t) and p[1] == str(name)
+
+
+def _require_person_of_this_room(meta, tier, name, tier_t, mutating: bool) -> None:
+    """Gli stessi tre assi di un agente, letti sulla PERSONA: compartimento
+    (partecipa?), ruolo (reader non muta), livello (clearance ≥ tier)."""
+    chi = current_principal() or ""
+    if not _topic_is_member(meta, chi):
+        raise PermissionError(
+            f"accesso negato al topic {tier}/{name}: '{chi or 'ignoto'}' non è "
+            "partecipante. Il token resta valido: è la stanza che non è sua. "
+            "Chi ti ha invitato può aggiungerti dai partecipanti del topic.")
+    if mutating:
+        from .topics.service import TopicService as _T
+        if _T.participant_role(meta, chi) == _T.ROLE_READER:
+            raise PermissionError(
+                f"'{chi}' è reader in {tier_t}/{name}: può leggere e parlare, "
+                "non modificare.")
+    if _rank(current_clearance()) < _rank(tier_t):
+        raise PermissionError(
+            f"'{chi}': clearance insufficiente per il tier {tier_t} di "
+            f"{tier}/{name} (accesso negato: livello)")
+
+
 def _require_topic_member(svc, tier, name, mutating: bool = False) -> None:
     """ACL compartimento (need-to-know).
 
@@ -3616,8 +3723,22 @@ def _require_topic_member(svc, tier, name, mutating: bool = False) -> None:
         meta = svc.open(tier, name).get("meta", {})
     except Exception:  # noqa: BLE001 — topic inesistente/illeggibile → nega
         raise PermissionError(f"topic {tier}/{name}: accesso negato")
-    agent_ok = _topic_is_member(meta, caller)
     tier_t = meta.get("tier", tier)
+    # CLIENT MCP DI UNA PERSONA. Un token legato a UNA stanza (`chat` firmato) e
+    # coniato on-behalf non porta un agente che lavora per conto di qualcuno:
+    # porta la persona. Chiedere la membership del carrier chiuderebbe l'accesso
+    # a Giovanni perché l'agente che gli firma il token non partecipa — un
+    # rifiuto che non riguarda nessuno dei due.
+    #
+    # Non contraddice la regola sopra, che resta: il principal NON è un bypass
+    # generale. Qui il perimetro non lo dà il principal, lo dà il `chat` — vale
+    # per QUESTO topic e per nessun altro, e chi lo porta non può cambiarlo
+    # perché è firmato. Un token del genere non apre altre stanze: le apre di
+    # meno, non di più.
+    if is_on_behalf() and _chat_binds_this_topic(tier_t, name):
+        _require_person_of_this_room(meta, tier, name, tier_t, mutating)
+        return
+    agent_ok = _topic_is_member(meta, caller)
     # cross-topic: consentito con un CONSENSO GATE attivo per questo topic
     # (topic-access:<tier>/<name>), concesso via popup (M-gate). Sostituisce sudo.
     from . import gate as _gate
@@ -3949,16 +4070,45 @@ def _dispatch_topic(name: str, a: dict):
         # un secondo punto — il «doppio gate incoerente» di cui avverte
         # `whitelist.tool_allowed` — e due copie della stessa regola divergono.
         text = a.get("text") or ""
-        res = svc.post_message(a["tier"], a["name"], author=ag or "agente",
-                               text=text, kind="ai")
+        # CHI HA PARLATO. Firmare sempre col carrier-agent era corretto finché a
+        # chiamare c'erano solo agenti. Da un client MCP di una persona la stessa
+        # riga farebbe dire alla chat una cosa falsa: il messaggio di Giovanni
+        # comparirebbe a nome dell'agente che porta il suo token.
+        #
+        # `kind` non è un dettaglio cosmetico che segue l'autore: è il campo su
+        # cui poggiano due regole già scritte — «una menzione a una persona non
+        # instrada un'AI» e «solo i messaggi umani accodano una notifica
+        # Telegram». Sbagliarlo qui le disattiverebbe entrambe in silenzio, che è
+        # il modo in cui una regola smette di valere senza che nessuno la tocchi.
+        umano = current_principal() if is_on_behalf() else None
+        res = svc.post_message(a["tier"], a["name"],
+                               author=umano or ag or "agente",
+                               text=text, kind="human" if umano else "ai")
         import re as _re
         if _re.search(r"@[a-z0-9][a-z0-9_-]{0,30}", text):
             try:
-                runtime.channel_trigger(a["tier"], a["name"], text, by=ag or "")
+                runtime.channel_trigger(a["tier"], a["name"], text,
+                                        by=umano or ag or "")
                 res["triggered"] = True
             except Exception as e:  # noqa: BLE001 — il post resta valido anche se il trigger fallisce
                 res["trigger_error"] = str(e)[:120]
         return res
+    if verb == "messages":
+        return {"messages": svc.list_messages(a["tier"], a["name"],
+                                              limit=int(a.get("limit") or 200))}
+    if verb in ("my_mentions", "mark_seen"):
+        # «Chi mi ha chiamato?» — la domanda è sempre su CHI CHIEDE, mai su un
+        # nome passato come argomento: un parametro renderebbe il verbo un modo
+        # per leggere la casella di un altro. Per un agente l'identità è il suo
+        # nome, per una persona il principal firmato.
+        chi = (current_principal() if is_on_behalf() else agent_name()) or ""
+        if not chi:
+            raise PermissionError("menzioni: chiamante non identificato")
+        if verb == "my_mentions":
+            return svc.my_mentions(a["tier"], a["name"], chi,
+                                   limit=int(a.get("limit") or 50),
+                                   only_unseen=bool(a.get("only_unseen", True)))
+        return svc.mark_seen(a["tier"], a["name"], chi, a.get("seen_through") or "")
     if verb == "save_summary":
         return svc.save_summary(a["tier"], a["name"], a["text"], a.get("base_version"))
     if verb == "save_agents_md":
