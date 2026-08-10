@@ -56,6 +56,26 @@ The rules themselves are not restated here. They are specified in
 and what this component currently enforces — with the gaps named — is measured in
 **[`docs/gap-analysis.md`](https://github.com/r-clodia/clodia-platform/blob/main/docs/gap-analysis.md)**.
 
+## A person's own MCP client
+
+The same door serves a person's client. From the topic page an owner — or the
+person themselves — mints a token bound to **one** topic, and gets an `mcp.json`
+fragment to paste into Claude Code or any MCP client. From there they read the
+conversation and the files, speak **as themselves**, and ask whether anyone has
+mentioned them.
+
+No second authentication exists for this. The token is an ordinary `ckt1`, minted
+for a person rather than for an agent, with three claims doing the work:
+`principal` (who spoke), `chat` (which room, and it is signed, so it cannot be
+pointed elsewhere) and `scoped_tools` — which for a human token is a **ceiling**,
+not an addition as it is for a delegating agent.
+
+The topic's tier caps this: what the person reads enters **their** inference
+engine, so the client's provider is declared at minting time and the scale stops
+at SEAL-2, with the owner vouching. Above that, the webui — where the content
+does not leave the perimeter. Revocation is a list on the same page: a token
+nobody can see is a token nobody can withdraw.
+
 ## Verb families
 
 `topic.*` (scopes, their files, their messages) · `email.*` · `gdrive.*`,

@@ -598,6 +598,48 @@ async def import_topics(request: Request):
                          "imported_count": len(added), "skipped_count": len(skipped)})
 
 
+async def mcp_clients(request: Request):
+    """GET/POST /internal/topics/{tier}/{name}/mcp-clients → client MCP umani.
+
+    GET elenca (senza token: il valore non si rilegge, si revoca). POST con
+    `action: issue|revoke`. Chi può chiedere è deciso a monte, nella webui, dove
+    si sa chi è l'owner: qui arriva già autorizzato, come per `telegram`.
+    """
+    _, err = _authorize(request)
+    if err:
+        return err
+    tier = request.path_params["tier"]; name = request.path_params["name"]
+    from . import human_mcp
+    if request.method == "GET":
+        return JSONResponse({"grants": human_mcp.list_grants(tier, name)})
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    action = body.get("action") or "issue"
+    try:
+        if action == "revoke":
+            return JSONResponse(human_mcp.revoke(body.get("id") or ""))
+        res = human_mcp.issue(
+            tier, name, body.get("principal") or "",
+            provider=body.get("provider") or "",
+            carrier=body.get("carrier") or "clodia",
+            human_role=body.get("human_role") or "user",
+            clearance=body.get("clearance") or None,
+            ttl_days=int(body.get("ttl_days") or human_mcp.DEFAULT_TTL_DAYS),
+            by=body.get("by") or "",
+            tier_consent=bool(body.get("tier_consent")))
+        base = (body.get("base_url") or "").strip()
+        if base:
+            res["config"] = human_mcp.client_config(base, res["token"], tier, name)
+        return JSONResponse(res)
+    except (PermissionError, ValueError) as e:
+        # Il messaggio arriva intatto: dice QUALE delle condizioni ha fermato la
+        # coniazione (tier troppo alto, provider non dichiarato, consenso
+        # mancante), e ognuna ha un rimedio diverso.
+        return JSONResponse({"error": str(e)[:400]}, status_code=400)
+
+
 routes = [
     Route("/internal/topics/export", export_topics, methods=["GET"]),
     Route("/internal/topics/import", import_topics, methods=["POST"]),
@@ -616,5 +658,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/participants", participants, methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/remote", remote, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/mcp-clients", mcp_clients,
+          methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/files", files, methods=["GET", "POST"]),
 ]

@@ -2219,6 +2219,70 @@ class TopicService:
         out.sort(key=lambda m: m.get("ts", ""))
         return out[-limit:] if limit else out
 
+    # ------------------------------------------------------------------ #
+    # Menzioni consultabili (client MCP di una persona)
+    #
+    # MCP è domanda-risposta: non esiste un push verso il client di Giovanni.
+    # Chi vuole essere svegliato ha Telegram; chi lavora da Claude Code CHIEDE.
+    # I due canali non competono — uno spinge, l'altro si consulta — ed è la
+    # ragione per cui questo non prova a essere una notifica.
+    #
+    # Il segnaposto è per (topic, persona) e tiene il timestamp dell'ultimo
+    # messaggio visto. Non un elenco di id visti: quello cresce senza fine e
+    # rende «già letto» una cosa da mantenere. Un istante basta, perché i
+    # messaggi sono append-only e ordinati.
+    # ------------------------------------------------------------------ #
+
+    def _seen_path(self, tier: str, name: str, chi: str) -> str:
+        safe = "".join(c for c in (chi or "") if c.isalnum() or c in "-_") or "-"
+        # Fuori da `.messages/`, non dentro: `list_messages` prende OGNI `.json`
+        # di quella cartella e un segnaposto vi comparirebbe come un messaggio
+        # senza autore né testo. Sarebbe passato inosservato a lungo — un
+        # messaggio vuoto in fondo alla chat somiglia a un difetto di rendering.
+        return f"{self._dir(tier, name)}/.seen/{safe}.json"
+
+    def last_seen(self, tier: str, name: str, chi: str) -> str:
+        try:
+            data = json.loads(self.s.read(self._seen_path(tier, name, chi)).data.decode())
+            return str(data.get("ts") or "")
+        except Exception:  # noqa: BLE001 — mai visto nulla: tutto è nuovo
+            return ""
+
+    def my_mentions(self, tier: str, name: str, chi: str,
+                    limit: int = 50, only_unseen: bool = True) -> dict:
+        """Messaggi che menzionano `chi`, dal più recente segnaposto in poi.
+
+        Ritorna anche `seen_through`, così il client può marcare esattamente ciò
+        che ha ricevuto invece di marcare «adesso»: fra la lettura e la marcatura
+        può essere arrivato un altro messaggio, e marcare l'istante lo farebbe
+        sparire senza che nessuno l'abbia visto.
+        """
+        chi_l = (chi or "").lower()
+        soglia = self.last_seen(tier, name, chi) if only_unseen else ""
+        out: list[dict] = []
+        for m in self.list_messages(tier, name, limit=0):
+            if chi_l not in [x.lower() for x in (m.get("mentions") or [])]:
+                continue
+            if soglia and str(m.get("ts") or "") <= soglia:
+                continue
+            out.append(m)
+        out = out[-limit:] if limit else out
+        return {"topic": f"{_normalize_tier(tier)}/{name}", "principal": chi,
+                "mentions": out, "count": len(out),
+                "seen_through": out[-1]["ts"] if out else soglia}
+
+    def mark_seen(self, tier: str, name: str, chi: str, ts: str = "") -> dict:
+        """Sposta il segnaposto in AVANTI e mai indietro: riletture e client
+        concorrenti non devono poter far riapparire una menzione già archiviata
+        — né, peggio, farne sparire una mai vista."""
+        corrente = self.last_seen(tier, name, chi)
+        nuovo = str(ts or _now().isoformat(timespec="seconds"))
+        if corrente and nuovo < corrente:
+            nuovo = corrente
+        self.s.write(self._seen_path(tier, name, chi),
+                     json.dumps({"ts": nuovo}, ensure_ascii=False).encode())
+        return {"principal": chi, "seen_through": nuovo}
+
     def list_files(self, tier: str, name: str, subpath: str = "") -> list[dict]:
         """Elenca <subpath> a partire dalla ROOT del topic (non da files/): così
         il navigator mostra la struttura reale — summary.md, meta.json, files/,
