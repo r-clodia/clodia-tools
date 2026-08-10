@@ -116,5 +116,76 @@ class WhatTheToolAnswersTests(unittest.TestCase):
         self.assertNotIn("note", r)
 
 
+class SendOnlyIsAShapeNotAFaultTests(unittest.TestCase):
+    """`team@uncommon-digital.it` è un alias: ha SMTP e nessuna casella dietro.
+
+    Davide ha chiesto se si potesse «ignorare l'errore IMAP e consentire almeno
+    l'invio». Ignorarlo sarebbe stato il rimedio sbagliato per la ragione giusta:
+    assorbendo il fallimento, un guasto VERO del server diventerebbe
+    indistinguibile da una scelta di configurazione, e una lettura risponderebbe
+    «nessun messaggio» — che ha la stessa forma di una verità.
+
+    Quindi il solo-invio è una **forma dichiarata**: si riconosce dall'assenza
+    del server IMAP, si dice nella diagnostica e nell'elenco, e la lettura viene
+    rifiutata nominando la causa. L'invio funziona senza eccezioni da fare.
+    """
+
+    def test_a_mailbox_without_imap_is_operational(self):
+        """Il minimo per esistere è saper spedire. Prima l'IMAP era obbligatorio,
+        e un alias risultava «non operativo»: un giudizio falso su una
+        configurazione legittima, che poi lo nascondeva agli agenti."""
+        with patch.object(email.vault, "store_names", return_value=["mailbox_team"]), \
+             patch.object(email.vault, "read_internal", return_value={
+                 "email": "team@uncommon-digital.it", "password": "x",
+                 "smtp_server": "smtp.ionos.it", "smtp_port": 587}):
+            r = email.credential_diagnostics()[0]
+        self.assertTrue(r["operational"])
+        self.assertTrue(r["send_only"])
+        self.assertEqual(r["missing"], [])
+
+    def test_a_mailbox_with_imap_is_not_send_only(self):
+        with patch.object(email.vault, "store_names", return_value=["mailbox_studio"]), \
+             patch.object(email.vault, "read_internal", return_value={
+                 "email": "s@x.it", "password": "x", "imap_server": "imap.x.it",
+                 "imap_port": 993, "smtp_server": "smtp.x.it", "smtp_port": 587}):
+            r = email.credential_diagnostics()[0]
+        self.assertTrue(r["operational"])
+        self.assertFalse(r["send_only"])
+
+    def test_reading_a_send_only_mailbox_is_refused_with_the_reason(self):
+        """Non una lista vuota, non un errore IMAP grezzo: il motivo. «Alias
+        senza casella» è un fatto sull'indirizzo, non un guasto da riprovare —
+        e chi legge la chat mesi dopo deve poterlo capire."""
+        with patch.object(email.vault, "has_credential", lambda c: c == "mailbox_team"), \
+             patch.object(email.vault, "read_internal", return_value={
+                 "email": "team@x.it", "smtp_server": "smtp.x.it"}):
+            with self.assertRaises(PermissionError) as e:
+                email._assert_readable("team")
+        msg = str(e.exception)
+        self.assertIn("SOLO INVIO", msg)
+        self.assertIn("alias", msg)
+        self.assertIn("CC", msg)   # il rimedio pratico per tenere traccia
+
+    def test_a_readable_mailbox_passes(self):
+        with patch.object(email.vault, "has_credential", lambda c: c == "mailbox_studio"), \
+             patch.object(email.vault, "read_internal", return_value={
+                 "email": "s@x.it", "imap_server": "imap.x.it"}):
+            email._assert_readable("studio")   # non solleva
+
+    def test_a_google_account_is_untouched(self):
+        """Nessuna credenziale `mailbox_*` → la guardia non ha opinioni: gli
+        account Google e i legacy si leggono come prima."""
+        with patch.object(email.vault, "has_credential", lambda c: False):
+            email._assert_readable("devnullboxx")
+
+    def test_the_guard_sits_where_every_read_passes(self):
+        """In `_run_json`, non nei sei verbi: sei copie della stessa regola sono
+        cinque occasioni di divergere, e il settimo verbo nascerebbe senza."""
+        import inspect
+        self.assertIn("_assert_readable", inspect.getsource(email._run_json))
+        # `send` NON passa da lì, ed è il punto: spedire resta possibile.
+        self.assertNotIn("_assert_readable", inspect.getsource(email.send))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -163,12 +163,14 @@ class EmailVaultMaterializationTest(TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertFalse(rows[0]["operational"])
+        # L'IMAP NON è fra i campi mancanti: una casella senza IMAP è di solo
+        # invio, che è una forma legittima (un alias con SMTP e nessuna casella
+        # dietro). Il minimo per esistere è saper spedire.
         self.assertEqual(
-            rows[0]["missing"], [
-                "imap_server", "imap_port", "smtp_server", "smtp_port",
-                "password|app_password",
-            ]
+            rows[0]["missing"],
+            ["smtp_server", "smtp_port", "password|app_password"],
         )
+        self.assertTrue(rows[0]["send_only"])
 
 
 class RuntimeConfigurationDiagnosticsTest(TestCase):

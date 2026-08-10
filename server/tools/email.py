@@ -28,8 +28,25 @@ _VAULT_PREFIXES = ("google_", "gmail_", "mailbox_")
 _REQUIRED_FIELDS = {
     "google": ("client_id", "client_secret", "refresh_token", "email"),
     "gmail": ("client_id", "client_secret", "refresh_token", "email"),
-    "mailbox": ("email", "imap_server", "imap_port", "smtp_server", "smtp_port"),
+    # Il minimo di una casella è **spedire**. L'IMAP è opzionale, e non per
+    # tolleranza: esistono indirizzi che sono alias con SMTP e nessuna casella
+    # dietro (team@uncommon-digital.it). Richiedere l'IMAP li dichiarava «non
+    # operativi» — un giudizio falso su una configurazione legittima, che poi
+    # nascondeva l'account agli agenti come se fosse rotto.
+    "mailbox": ("email", "smtp_server", "smtp_port"),
 }
+
+
+def is_send_only(bundle: dict) -> bool:
+    """Casella di solo invio: SMTP dichiarato, nessun IMAP.
+
+    È una **forma dichiarata**, non un errore ingoiato, e la differenza conta.
+    Se si assorbisse il fallimento IMAP, un guasto vero del server diventerebbe
+    indistinguibile da una scelta di configurazione, e una lettura risponderebbe
+    «nessun messaggio» — che non è «non posso leggere», è una bugia con la stessa
+    forma di una verità.
+    """
+    return not (bundle.get("imap_server") or "").strip()
 
 
 def _gmail_cred(account: str) -> str:
@@ -76,13 +93,14 @@ def credential_diagnostics() -> list[dict]:
         account = credential[len(prefix):]
         missing: list[str] = []
         error = None
+        solo_invio = False
         try:
             bundle = vault.read_internal(credential)
             missing = [field for field in _REQUIRED_FIELDS[kind] if not bundle.get(field)]
-            if kind == "mailbox" and not (
-                bundle.get("password") or bundle.get("app_password")
-            ):
-                missing.append("password|app_password")
+            if kind == "mailbox":
+                if not (bundle.get("password") or bundle.get("app_password")):
+                    missing.append("password|app_password")
+                solo_invio = is_send_only(bundle)
         except Exception as exc:  # noqa: BLE001 - diagnostica, mai valori
             error = type(exc).__name__
         rows.append({
@@ -90,6 +108,9 @@ def credential_diagnostics() -> list[dict]:
             "account": account,
             "kind": kind,
             "operational": not missing and error is None,
+            # Dichiarato, non dedotto da un fallimento: chi legge questa riga
+            # deve sapere che l'account NON si legge, prima di provarci.
+            "send_only": solo_invio,
             "missing": missing,
             "error": error,
         })
@@ -204,8 +225,42 @@ def _run_cli(account: str, cli_args: list[str], *, want_json: bool,
 
 
 def _run_json(account: str, cli_args: list[str], *, timeout: int = 60) -> Union[dict, list]:
-    """Compat: esegue un comando di lettura/risposta e ritorna il JSON."""
+    """Compat: esegue un comando di lettura/risposta e ritorna il JSON.
+
+    Un punto solo per la guardia «questa casella si legge?»: qui passano tutti i
+    verbi che leggono, e **solo** `send` non passa da qui. Metterla in ognuno dei
+    sei verbi sarebbe la stessa regola in sei copie, e la settima nascerebbe
+    senza.
+    """
+    _assert_readable(account)
     return _run_cli(account, cli_args, want_json=True, timeout=timeout)
+
+
+def _assert_readable(account: str) -> None:
+    """Rifiuta una LETTURA su una casella di solo invio, dicendo perché.
+
+    L'alternativa sarebbe tentare e restituire il fallimento IMAP, o peggio una
+    lista vuota. Vuota è la risposta peggiore: «nessun messaggio» ha la stessa
+    forma di una verità e manda l'agente a concludere che la casella è deserta,
+    quando invece non è leggibile per costruzione.
+
+    Nominare la causa serve anche a chi legge la chat mesi dopo: «alias senza
+    casella» è un fatto sull'indirizzo, non un guasto da riprovare.
+    """
+    cred = _mailbox_cred(account)
+    if not vault.has_credential(cred):
+        return                      # google/legacy: la lettura è normale
+    try:
+        bundle = vault.read_internal(cred)
+    except Exception:  # noqa: BLE001 — la diagnostica non deve bloccare l'accesso
+        return
+    if is_send_only(bundle):
+        raise PermissionError(
+            f"l'account '{account}' è di SOLO INVIO: è un alias con SMTP e nessuna "
+            "casella IMAP dietro, quindi non c'è niente da leggere — non è un "
+            "guasto e riprovare non cambia nulla. Per avere traccia di ciò che "
+            f"spedisci da '{account}', mettiti in CC un account leggibile."
+        )
 
 
 def _attachment_args(attachments: Optional[Sequence[str]]) -> list[str]:
@@ -228,6 +283,13 @@ def folders(account: str = "demo") -> dict:
         "available_accounts": available_accounts(ag),
         "folders": _run_json(account, ["folders"]),
     }
+    # Quali fra quelle disponibili servono SOLO a spedire. Detto nell'elenco e
+    # non solo al primo rifiuto: un agente che pianifica «leggo la posta di X»
+    # deve poterlo sapere prima, non scoprirlo a metà del lavoro.
+    solo_invio = [r["account"] for r in credential_diagnostics()
+                  if r.get("send_only") and r["account"] in out["available_accounts"]]
+    if solo_invio:
+        out["send_only_accounts"] = solo_invio
     # Se esistono caselle che questo agente non può usare, lo si DICE. Senza,
     # l'unica cosa che l'agente osserva è un'assenza, e un'assenza si spiega col
     # nome sbagliato molto prima che con un permesso mancante.

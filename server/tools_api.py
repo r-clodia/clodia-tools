@@ -820,17 +820,22 @@ async def email_mailbox_add(request: Request):
     account = (b.get("account") or "").strip().lower()
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,40}", account or ""):
         return JSONResponse({"error": "account non valido (a-z0-9_-)"}, status_code=400)
-    required = ("email", "password", "imap_server", "smtp_server")
+    # L'IMAP è OPZIONALE: esistono indirizzi che sono alias con SMTP e nessuna
+    # casella dietro. Richiederlo li rendeva impossibili da configurare, e chi
+    # provava lo stesso otteneva una casella dichiarata «non operativa» —
+    # nascosta agli agenti come se fosse rotta, mentre spedire funzionava.
+    required = ("email", "password", "smtp_server")
     if any(not (b.get(k) or "").strip() for k in required):
         return JSONResponse({"error": f"campi richiesti: {', '.join(required)}"}, status_code=400)
     cfg = {
         "email": b["email"].strip(),
         "password": b["password"],
-        "imap_server": b["imap_server"].strip(),
-        "imap_port": int(b.get("imap_port") or 993),
         "smtp_server": b["smtp_server"].strip(),
         "smtp_port": int(b.get("smtp_port") or 587),
     }
+    if (b.get("imap_server") or "").strip():
+        cfg["imap_server"] = b["imap_server"].strip()
+        cfg["imap_port"] = int(b.get("imap_port") or 993)
     for opt in ("display_name", "sent_folder", "smtp_user"):
         if (b.get(opt) or "").strip():
             cfg[opt] = b[opt].strip()
@@ -1034,6 +1039,36 @@ async def backup_restore_test(request: Request):
         return JSONResponse({"error": str(e)[:400]}, status_code=500)
 
 
+def _prova_smtp(b: dict, account: str) -> str:
+    """Login SMTP, per le caselle che sanno solo spedire. Ritorna l'esito in
+    parole, mai il segreto né il messaggio grezzo del server."""
+    import smtplib
+    porta = int(b.get("smtp_port") or 587)
+    utente = b.get("smtp_user") or b.get("email") or account
+    pwd = b.get("password") or b.get("app_password") or ""
+    try:
+        # 465 è SMTPS implicito, 587 è STARTTLS: distinguerli qui evita un
+        # «connessione rifiutata» che sembra un host sbagliato e invece è una
+        # porta usata col protocollo dell'altra.
+        if porta == 465:
+            s = smtplib.SMTP_SSL(b.get("smtp_server"), porta, timeout=15)
+        else:
+            s = smtplib.SMTP(b.get("smtp_server"), porta, timeout=15)
+            s.starttls()
+        try:
+            s.login(utente, pwd)
+            return "ok"
+        finally:
+            try:
+                s.quit()
+            except Exception:  # noqa: BLE001
+                pass
+    except smtplib.SMTPAuthenticationError:
+        return "autenticazione SMTP rifiutata (password o app-password sbagliata)"
+    except Exception as e:  # noqa: BLE001
+        return type(e).__name__
+
+
 def _test_mailboxes() -> dict:
     """Prova un login IMAP VERO per ogni casella configurata.
 
@@ -1063,11 +1098,20 @@ def _test_mailboxes() -> dict:
             esiti.append(f"{account}: credenziale illeggibile")
             ok_tutti = False
             continue
-        server = (b.get("imap_server") or "").strip()
         pwd = b.get("password") or b.get("app_password") or ""
-        if not server or not pwd:
-            esiti.append(f"{account}: configurazione incompleta")
+        if not pwd:
+            esiti.append(f"{account}: manca la password")
             ok_tutti = False
+            continue
+        # Una casella di SOLO INVIO si prova sull'SMTP. Provarla sull'IMAP la
+        # dichiarerebbe guasta per sempre: è la differenza fra «non funziona» e
+        # «non fa quella cosa», e confonderle manda a cercare una password
+        # sbagliata dove manca invece un servizio.
+        server = (b.get("imap_server") or "").strip()
+        if not server:
+            esiti.append(f"{account}: {_prova_smtp(b, account)} (solo invio)")
+            if "ok" not in esiti[-1]:
+                ok_tutti = False
             continue
         try:
             imap = imaplib.IMAP4_SSL(server, int(b.get("imap_port") or 993), timeout=15)
@@ -1082,8 +1126,9 @@ def _test_mailboxes() -> dict:
         except imaplib.IMAP4.error:
             # Il messaggio del server IMAP non si riporta: su alcuni provider
             # contiene l'utenza. Il rimedio è lo stesso in ogni caso.
-            esiti.append(f"{account}: autenticazione rifiutata "
-                         "(password o app-password sbagliata)")
+            esiti.append(f"{account}: autenticazione IMAP rifiutata (password "
+                         "sbagliata, oppure l'indirizzo è un alias di solo "
+                         "invio: in quel caso togli il server IMAP)")
             ok_tutti = False
         except Exception as e:  # noqa: BLE001 — host irraggiungibile, TLS, timeout
             esiti.append(f"{account}: {type(e).__name__}")
