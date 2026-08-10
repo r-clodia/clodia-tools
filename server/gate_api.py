@@ -87,7 +87,54 @@ async def pending(request: Request):
     return JSONResponse({"requests": gate.list_requests(), "gated": gate.gated_verbs_spec()})
 
 
+async def remember(request: Request):
+    """POST /internal/gate/allow {verb, direction, scope?} — rende PERMANENTE una
+    destinazione approvata, nella lista dello scope o in quella globale.
+
+    Un gate di uscita è la domanda «questa destinazione va bene?». Rispondere
+    solo «per stavolta» significa riproporre la stessa domanda ogni volta, e una
+    domanda che torna identica si finisce per approvarla per riflesso — cioè il
+    gate smette di essere un controllo e diventa un rumore da spegnere.
+    Ricordare la risposta è ciò che tiene il gate significativo: chiede quando
+    c'è qualcosa di nuovo da decidere.
+
+    Chi ha titolo lo decide clodia-logic **prima** di chiamare qui: l'owner
+    della stanza per la lista di quella stanza, un admin per quella globale. La
+    verifica sta là perché là si conosce l'identità umana; qui si scrive.
+    """
+    principal, err = _authorize(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    verb = (body.get("verb") or "").strip()
+    direction = (body.get("direction") or "egress").strip()
+    scope = (body.get("scope") or "").strip()
+    # `egress:<tipo>:<destinazione>` — la destinazione contiene i ':' dell'URL,
+    # quindi si divide al massimo due volte e il resto è l'URI.
+    parti = verb.split(":", 2)
+    if len(parti) != 3 or parti[0] not in ("egress", "ingress"):
+        return JSONResponse(
+            {"error": f"'{verb}' non è un gate di destinazione: solo egress/ingress "
+                      "si possono ricordare, perché solo lì la decisione riguarda "
+                      "un indirizzo e non un'azione"}, status_code=400)
+    uri = parti[2]
+    from . import egress as _eg
+    try:
+        res = (_eg.scope_allow(direction, scope, uri) if scope
+               else _eg.allow(direction, uri))
+    except (ValueError, PermissionError) as e:
+        return JSONResponse({"error": str(e)[:300]}, status_code=400)
+    LOG.info("GATE ricordato %s → %s (%s) da %s", uri,
+             scope or "GLOBALE", direction, principal)
+    return JSONResponse({"remembered": True, "uri": uri,
+                         "scope": scope or None, "direction": direction, **res})
+
+
 routes = [
+    Route("/internal/gate/allow", remember, methods=["POST"]),
     Route("/internal/gate/grant", grant, methods=["POST"]),
     Route("/internal/gate/deny", deny, methods=["POST"]),
     Route("/internal/gate/pending", pending, methods=["GET"]),
