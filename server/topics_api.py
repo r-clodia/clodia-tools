@@ -130,6 +130,36 @@ async def open_file(request: Request):
     return Response(content=data, media_type=ct)
 
 
+async def telegram_binding(request: Request):
+    """Collega/scollega il gruppo Telegram e aggiorna la mappa delle persone.
+
+    Una rotta sola per le tre cose, perché nella UI sono un gesto solo: l'owner
+    incolla l'id del gruppo e dice chi è chi. Separarle farebbe esistere lo
+    stato intermedio «collegato ma senza nessuno mappato», che è il
+    collegamento che sembra funzionare e non avvisa nessuno.
+    """
+    _, err = _authorize(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    tier = request.path_params["tier"]
+    name = request.path_params["name"]
+    svc = _service()
+    try:
+        if body.get("action") == "unbind":
+            return JSONResponse(svc.telegram_unbind(tier, name, body.get("mount")))
+        return JSONResponse(svc.telegram_bind(
+            tier, name, body.get("chat_id") or "",
+            mode=body.get("mode") or "excerpt",
+            people=body.get("people") or {},
+            mount_name=body.get("mount")))
+    except TopicError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
 async def set_portable(request: Request):
     """Dichiara o revoca la portabilità di un topic.
 
@@ -579,6 +609,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/messages", post_message, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/archive", archive_topic, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/portable", set_portable, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/telegram", telegram_binding, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/status", set_status, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/agents-md", set_agents_md, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/deadline", set_deadline, methods=["POST"]),
