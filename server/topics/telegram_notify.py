@@ -135,8 +135,15 @@ def enqueue_for_message(tier: str, name: str, meta: dict, msg: dict,
                 chi, handle = str(v.get("principal") or "").lower(), v.get("username") or ""
             else:
                 chi, handle = str(v or "").lower(), ""
+            # Una chiave non numerica è l'handle: è così che una persona
+            # compila la mappa, perché l'username è quello che conosce. I mount
+            # scritti prima del 10 ago 2026 hanno esattamente questa forma, e
+            # leggerli come uid faceva uscire il nome di piattaforma.
+            u = str(uid)
+            if not handle and not u.lstrip("-").isdigit():
+                handle = u.lstrip("@")
             if chi:
-                per_nome.setdefault(chi, (str(uid), str(handle)))
+                per_nome.setdefault(chi, (u, str(handle)))
         for chi in menzionati:
             trovato = per_nome.get(chi)
             if not trovato:

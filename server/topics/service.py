@@ -1110,6 +1110,18 @@ class TopicService:
                 chi, handle = str(v or "").strip().lower(), ""
             if not chi:
                 continue
+            # La CHIAVE può essere un uid numerico o un handle. Chiedere l'uid
+            # era corretto sul piano tecnico — è l'identificatore stabile, un
+            # username si cambia — e sbagliato sul piano umano: l'handle è
+            # quello che una persona conosce e sa copiare, l'uid no. Davide ha
+            # compilato la mappa con `@giocasu75`, che è la cosa naturale da
+            # fare, e il codice ha reso `@giovanni`.
+            #
+            # Si accettano entrambi: una chiave non numerica È l'handle. Meglio
+            # incontrare chi compila dove si trova che avere ragione su una
+            # mappa vuota.
+            if not u.lstrip("-").isdigit() and not handle:
+                handle = u.lstrip("@")
             voce = {"principal": chi}
             if handle:
                 voce["username"] = handle

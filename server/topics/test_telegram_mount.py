@@ -536,3 +536,40 @@ class PresenceTests(Base):
         with patch.object(tg, "send_internal", lambda c, t: inviati.append(c)):
             tn.flush()
         self.assertEqual(len(inviati), 1)
+
+
+class AHandleIsAFineKeyTests(Base):
+    """La mappa si compila con l'username, perché è quello che si conosce.
+
+    Chiedere l'uid era corretto sul piano tecnico — è l'identificatore stabile,
+    un username si può cambiare — e sbagliato su quello umano: l'handle è ciò
+    che una persona vede, copia e riconosce; l'uid Telegram non lo espone a
+    nessuno se non a un bot.
+
+    Misurato su venere il 10 ago 2026: la mappa compilata dall'owner era
+    `{"@giocasu75": "giovanni"}`. Il codice la leggeva come uid, non trovava
+    handle, e rendeva `@giovanni` — cioè il difetto segnalato. Meglio
+    incontrare chi compila dove si trova che avere ragione su una mappa vuota.
+    """
+
+    MOUNT_UMANO = {"name": "telegram", "type": "telegram", "config": {
+        "chat_id": "-100999", "mode": "excerpt",
+        "people": {"@giocasu75": "giovanni"}}}
+
+    def test_the_map_as_a_person_writes_it_works(self):
+        tn.enqueue_for_message("SEAL-1", "acme", {},
+                               _msg("@giovanni ci sei?", ["giovanni"]), [self.MOUNT_UMANO])
+        self.assertIn("@giocasu75", tn.render(tn.pending()[0]))
+
+    def test_a_numeric_key_is_still_a_uid(self):
+        """Un uid resta un uid: non va scambiato per un handle, o il push
+        andrebbe a un nome che non esiste."""
+        from .service import TopicService
+        out = TopicService._clean_people({"12345": "matteo"})
+        self.assertNotIn("username", out["12345"])
+
+    def test_an_explicit_username_wins_over_the_key(self):
+        from .service import TopicService
+        out = TopicService._clean_people(
+            {"@vecchio": {"principal": "g", "username": "nuovo"}})
+        self.assertEqual(out["@vecchio"]["username"], "nuovo")
