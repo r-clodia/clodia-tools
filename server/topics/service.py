@@ -2610,6 +2610,11 @@ class TopicService:
                     "participants": m.get("participants", []),
                     "action_points": aps,
                     "storage": m.get("storage", self.s.capability().name),
+                    # Solo il PATH, come flag: i byte li chiede la card a un
+                    # endpoint dedicato. Metterli qui significherebbe portarsi
+                    # dietro venti immagini in ogni risposta della lista, anche
+                    # per chi non le guarda.
+                    "logo": m.get("logo"),
                     "channel": m.get("channel"),
                     "updated_at": info["updated_at"],
                     "recent_files": info["recent_files"],
@@ -2632,6 +2637,70 @@ class TopicService:
         meta["deadline"] = dl
         self._write_meta(tier, name, meta, base_version=ver)
         return {"deadline": dl}
+
+    #: Il logo di un topic vive DENTRO il topic, non in una cartella di asset
+    #: della piattaforma: così segue lo scope quando viene esportato, archiviato
+    #: o migrato di storage, e non resta un file orfano che nessuno sa a chi
+    #: appartenesse. Nome riservato, uno solo: un topic ha un'immagine, non una
+    #: galleria.
+    LOGO_PATH = "files/.brand/logo"
+
+    #: Formati accettati, per **firma dei byte** e non per estensione: il nome
+    #: del file lo sceglie chi carica.
+    _FIRME = ((b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpeg"),
+              (b"GIF87a", "gif"), (b"GIF89a", "gif"))
+    LOGO_MAX = 512 * 1024
+
+    def _logo_kind(self, data: bytes) -> str:
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return "webp"
+        for firma, tipo in self._FIRME:
+            if data.startswith(firma):
+                return tipo
+        # SVG è rifiutato di proposito, e non per pigrizia: è un documento che
+        # può contenere script e riferimenti esterni, e finirebbe renderizzato
+        # nella pagina di chiunque apra il topic. Un'immagine che può eseguire
+        # codice non è un'immagine.
+        testa = data[:200].lstrip().lower()
+        if testa.startswith(b"<svg") or b"<svg" in testa:
+            raise TopicError("SVG non accettato come logo: può contenere script "
+                             "e verrebbe eseguito nella pagina di chi apre il "
+                             "topic. Usa PNG, JPEG, GIF o WebP.")
+        raise TopicError("formato non riconosciuto: servono PNG, JPEG, GIF o WebP")
+
+    def set_logo(self, tier: str, name: str, data: bytes) -> dict:
+        """Imposta l'immagine del topic. Il chiamante ha già verificato che sia
+        l'owner: qui si controlla ciò che il ruolo non può controllare — che i
+        byte siano davvero un'immagine, e che non siano troppi."""
+        if not data:
+            raise TopicError("nessun byte da caricare")
+        if len(data) > self.LOGO_MAX:
+            raise TopicError(
+                f"logo di {len(data) // 1024} KB: il tetto è "
+                f"{self.LOGO_MAX // 1024} KB. È un'icona, non un allegato.")
+        tipo = self._logo_kind(data)
+        self.s.write(f"{self._dir(tier, name)}/{self.LOGO_PATH}", data)
+        meta, ver = self._read_meta(tier, name)
+        meta["logo"] = self.LOGO_PATH
+        # Il formato si conosce QUI, dai byte. Il file non ha estensione — il
+        # nome è riservato — quindi chi lo serve dovrebbe indovinarlo, e
+        # indovinare significa dichiarare un tipo che potrebbe essere falso.
+        meta["logo_kind"] = f"image/{tipo}"
+        self._write_meta(tier, name, meta, base_version=ver)
+        return {"logo": self.LOGO_PATH, "kind": tipo, "size": len(data)}
+
+    def clear_logo(self, tier: str, name: str) -> dict:
+        """Toglie l'immagine. Il file va via col riferimento: lasciarlo sarebbe
+        un byte orfano che ricompare al prossimo caricamento parziale."""
+        meta, ver = self._read_meta(tier, name)
+        meta.pop("logo", None)
+        meta.pop("logo_kind", None)
+        self._write_meta(tier, name, meta, base_version=ver)
+        try:
+            self.s.delete(f"{self._dir(tier, name)}/{self.LOGO_PATH}")
+        except Exception:  # noqa: BLE001 — già assente: il riferimento è tolto lo stesso
+            pass
+        return {"logo": ""}
 
     def search(self, query: str, mode: str = "lexical") -> list[dict]:
         """P1: ricerca lessicale (substring) su meta/summary/AGENTS.md. 'semantic' = P2."""

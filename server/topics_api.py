@@ -598,6 +598,34 @@ async def import_topics(request: Request):
                          "imported_count": len(added), "skipped_count": len(skipped)})
 
 
+async def topic_logo(request: Request):
+    """POST/DELETE /internal/topics/{tier}/{name}/logo → immagine del topic.
+
+    I byte arrivano in base64 nel corpo: un logo è piccolo per definizione, e un
+    multipart qui aggiungerebbe un formato in più da mantenere per nulla.
+    L'autorizzazione (solo l'owner) è a monte, nella webui, come per `telegram`.
+    """
+    _, err = _authorize(request)
+    if err:
+        return err
+    tier = request.path_params["tier"]; name = request.path_params["name"]
+    svc = _service()
+    try:
+        if request.method == "DELETE":
+            return JSONResponse(svc.clear_logo(tier, name))
+        body = await request.json()
+        import base64
+        try:
+            data = base64.b64decode(body.get("data") or "", validate=True)
+        except Exception:  # noqa: BLE001
+            return JSONResponse({"error": "base64 non valido"}, status_code=400)
+        return JSONResponse(svc.set_logo(tier, name, data))
+    except TopicError as e:
+        # Intatto: dice QUALE controllo ha fermato il caricamento (formato, SVG,
+        # dimensione), e ognuno ha un rimedio diverso.
+        return JSONResponse({"error": str(e)[:300]}, status_code=400)
+
+
 async def mcp_clients(request: Request):
     """GET/POST /internal/topics/{tier}/{name}/mcp-clients → client MCP umani.
 
@@ -660,5 +688,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/remote", remote, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/mcp-clients", mcp_clients,
           methods=["GET", "POST"]),
+    Route("/internal/topics/{tier}/{name}/logo", topic_logo,
+          methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/files", files, methods=["GET", "POST"]),
 ]
