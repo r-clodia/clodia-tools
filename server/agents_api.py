@@ -53,15 +53,23 @@ async def register(request: Request):
     # agente capace di riscriverlo cancellerebbe i propri gate. Assente nel corpo
     # → non si tocca ciò che è già registrato: un chiamante vecchio non deve
     # poter azzerare i gate per omissione.
+    # `gated_in_channel` NON si inoltra più: è stato ritirato dal dispatch il
+    # 7 ago 2026 (vedi la nota in main.py) e `upsert_agent` non lo accetta più.
+    # Questa riga era rimasta, e il kwarg orfano faceva sollevare un TypeError:
+    # ogni registrazione rispondeva 500, quindi ogni agente NUOVO restava fuori
+    # dalla config del gateway — e un agente non registrato non ottiene zero
+    # verbi «per prudenza», li ottiene perché `agent_config()` solleva e la lista
+    # dei tool torna vuota. Un ritiro fatto a metà spegne la funzione che il
+    # campo doveva solo smettere di condizionare.
+    # Il corpo può ancora contenerlo (i chiamanti vecchi lo mandano): si ignora
+    # in silenzio, invece di rifiutare una registrazione per un campo morto.
     spec = whitelist.upsert_agent(name, allowed_tools=body.get("allowed_tools"),
                                   gated_tools=body.get("gated_tools"),
-                                  gated_in_channel=body.get("gated_in_channel"),
                                   profile_tools=body.get("profile_tools"))
     whitelist.reload_config()
     return JSONResponse({"ok": True, "agent": name,
                          "allowed_tools": spec.get("allowed_tools"),
                          "gated_tools": spec.get("gated_tools") or [],
-                         "gated_in_channel": spec.get("gated_in_channel") or [],
                          "profile_tools": spec.get("profile_tools") or []})
 
 
