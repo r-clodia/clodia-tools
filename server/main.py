@@ -559,6 +559,18 @@ _GITHUB_TOOLS: list[Tool] = [
     ),
 ]
 
+# I verbi `github.*` che il gateway implementa DA SÉ. Serve perché il namespace
+# `github.` è conteso: il backend MCP ufficiale di GitHub è montato con lo stesso
+# nome, quindi i suoi tool si chiamano anch'essi `github.<qualcosa>` (issue_write,
+# list_issues, …). Il dispatch sceglieva per PREFISSO e mandava tutto al ramo
+# nativo, che rispondeva «unknown github verb» a un verbo che il backend esponeva
+# davvero e che la whitelist dell'agente permetteva: il tool compariva nella lista
+# e falliva alla chiamata.
+# Derivata dai Tool dichiarati e non riscritta a mano: due elenchi dello stesso
+# insieme divergono al primo verbo aggiunto, e questo qui deciderebbe in silenzio
+# quale dei due namespace vince.
+_GITHUB_NATIVE_NAMES: frozenset[str] = frozenset(t.name for t in _GITHUB_TOOLS)
+
 
 _TOPIC_TOOLS: list[Tool] = [
     Tool(
@@ -3460,7 +3472,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_telegram(name, arguments)
         elif name.startswith("memory."):
             result = _dispatch_memory(name, arguments)
-        elif name.startswith("github."):
+        elif name in _GITHUB_NATIVE_NAMES:
+            # NON `startswith("github.")`: il namespace è condiviso col backend
+            # MCP montato con lo stesso nome (vedi `_GITHUB_NATIVE_NAMES`). Solo i
+            # verbi che il gateway implementa passano di qui; gli altri `github.*`
+            # scendono fino al ramo `proxy.is_proxied`, che è il loro.
             result = await asyncio.to_thread(_dispatch_github, name, arguments)
         elif name.startswith("gdrive."):
             result = _dispatch_gdrive(name, arguments)
