@@ -105,7 +105,22 @@ class WhatLeavesTheRoomTests(Base):
     def test_a_long_line_is_truncated(self):
         lungo = "@matteo " + ("dettaglio riservato " * 60)
         tn.enqueue_for_message("SEAL-1", "acme", {}, _msg(lungo, ["matteo"]), [MOUNT])
-        self.assertLessEqual(len(tn.pending()[0]["excerpt"]), 280)
+        estratto = tn.pending()[0]["excerpt"]
+        self.assertLessEqual(len(estratto), tn.EXCERPT_MAX)
+        # E si VEDE che è troncato: un estratto tagliato senza dirlo si legge
+        # come un messaggio finito, e chi legge non apre la conversazione.
+        self.assertTrue(estratto.endswith("…"))
+
+    def test_the_limit_is_the_one_that_fits_a_notification(self):
+        """120, non 280. La notifica si legge su un telefono e serve a far
+        DECIDERE se aprire la stanza, non a sostituirla — e più testo esce, più
+        della conversazione vive fuori dal suo scope."""
+        self.assertEqual(tn.EXCERPT_MAX, 120)
+
+    def test_a_short_line_is_not_touched(self):
+        tn.enqueue_for_message("SEAL-1", "acme", {},
+                               _msg("@matteo dai un occhio quando puoi", ["matteo"]), [MOUNT])
+        self.assertEqual(tn.pending()[0]["excerpt"], "@matteo dai un occhio quando puoi")
 
     def test_the_link_is_absolute_and_points_at_the_message(self):
         tn.enqueue_for_message("SEAL-1", "acme", {}, _msg("@matteo", ["matteo"], mid="M1"), [MOUNT])
