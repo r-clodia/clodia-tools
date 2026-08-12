@@ -33,6 +33,14 @@ LOG = logging.getLogger("clodia-tools.topics.telegram-notify")
 _MAX_PENDING = 500
 #: Tentativi prima di rinunciare a una singola notifica.
 MAX_ATTEMPTS = 5
+#: Lunghezza massima dell'estratto, troncato con `…`.
+#:
+#: Era 280. La notifica si legge su un telefono, in mezzo ad altre notifiche, e
+#: il suo compito è far decidere se aprire la conversazione — non sostituirla.
+#: Oltre un paio di righe smette di essere un'anteprima e diventa una copia
+#: parziale del messaggio fuori dalla stanza, che è la cosa che l'estratto esiste
+#: per evitare.
+EXCERPT_MAX = 120
 
 
 def _queue_path() -> Path:
@@ -158,7 +166,7 @@ def enqueue_for_message(tier: str, name: str, meta: dict, msg: dict,
                 "principal": chi, "uid": uid, "handle": handle,
                 "message_id": msg.get("id"), "author": msg.get("author"),
                 "title": (meta or {}).get("title") or name,
-                "excerpt": (_excerpt(msg.get("text") or "", chi, 280)
+                "excerpt": (_excerpt(msg.get("text") or "", chi, EXCERPT_MAX)
                             if modo == "excerpt" else ""),
                 "link": message_link(tier, name, str(msg.get("id"))),
                 "attempts": 0, "at": time.time(),
