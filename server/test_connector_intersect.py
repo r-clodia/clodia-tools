@@ -23,6 +23,7 @@ that ignored either would pass a suite that only checked one.
 """
 from __future__ import annotations
 
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -148,13 +149,19 @@ class SuperAgentTests(Base):
         fissa il fatto, così se un domani il corto-circuito venisse rimosso si
         scoprirebbe qui e non in produzione.
         """
-        import inspect
-        src = inspect.getsource(m.call_tool)
-        i_super = src.find("_is_super(_ag)")
-        i_conn = src.find("_connector_allows(name, _ag)")
-        self.assertGreater(i_super, 0)
-        self.assertGreater(i_conn, i_super,
-                           "il corto-circuito dei super deve precedere il connettore")
+        with patch.object(m, "agent_name", lambda: "clodia"), \
+             patch.object(m, "is_on_behalf", lambda: False), \
+             patch.object(m, "_is_super", lambda _n: True), \
+             patch.object(m, "_agent_tool_reachable",
+                          side_effect=AssertionError("matrix consulted for super")), \
+             patch.object(m, "_unattended_denial", lambda _n: None), \
+             patch.object(m.origin, "evaluate", return_value={"action": "allow"}), \
+             patch.object(m, "_dispatch_memory", return_value={"files": []}), \
+             patch.object(m._taint, "note_verb"), \
+             patch.object(m._tlm, "record"):
+            result = asyncio.run(m.call_tool("memory.list", {}))
+
+        self.assertIn('"files": []', result[0].text)
 
 
 if __name__ == "__main__":

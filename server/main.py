@@ -2303,8 +2303,7 @@ def _vault_grants(agent: str | None) -> set:
 
 
 def _declared_tools(agent: str | None) -> set:
-    """Verbi DICHIARATI da un principal: la config del gateway, e in mancanza il
-    suo seed.
+    """Verbi EFFETTIVI di un principal: propri, antenati e floor dell'archseed.
 
     Il fallback sul seed serve agli agenti non registrati — un clone per-topic,
     un responder appena materializzato — per i quali `agent_config` solleva
@@ -2312,12 +2311,30 @@ def _declared_tools(agent: str | None) -> set:
     connettore, cioè romperebbe proprio il caso che `_connector_allows` esisteva
     per servire.
 
+    ``effective_tools`` è l'unico risolutore della matrice. La lista grezza in
+    config resta la dichiarazione propria dell'agente, non una copia derivata
+    dell'ereditarietà che diventerebbe stale quando cambia un antenato.
+
     Il seed è la fonte autorevole della dichiarazione (il repo lo è del seed), e
     vive dove uno spawn non può riscriverlo: `/datadir/agents/` è `drwx------
     root` e gli spawn girano come uid 60000.
     """
     from .whitelist import effective_tools
     return effective_tools(agent)
+
+
+def _agent_tool_reachable(name: str, agent: str | None,
+                          resolved: set | None = None) -> bool:
+    """One allow-matrix decision for agent discovery and dispatch.
+
+    ``effective_tools`` is authoritative: it resolves the seed, its ancestry and
+    the archseed floor. Scoped grants are request-local additions. Explicit
+    denies remain a separate subtraction because dispatch reports their more
+    useful denial reason after this reachability check.
+    """
+    allowed = (resolved if resolved is not None
+               else _declared_tools(agent) | set(current_scoped_tools()))
+    return _tool_allowed(name, allowed) or _connector_allows(name, agent)
 
 
 def _connector_intersect_on() -> bool:
@@ -2499,7 +2516,7 @@ def all_native_verb_names() -> list[str]:
 async def list_tools() -> list[Tool]:
     """Return only the tools allowed for the calling agent (native + proxied)."""
     try:
-        allowed = set(agent_config().get("allowed_tools", [])) | set(current_scoped_tools())
+        me = agent_name()
     except PermissionError:
         return []
     # Stessa sorgente della scheda del seed: due concatenazioni identiche
@@ -2511,16 +2528,19 @@ async def list_tools() -> list[Tool]:
         proxied = await proxy.list_proxied_tools()
     except Exception:
         proxied = []
-    me = agent_name()
     if is_on_behalf():
         # Umano: vede i tool consentiti dal suo RUOLO (admin = tutti; user = solo
         # non super-only). Stesso PDP del dispatch.
         return [t for t in (native + proxied)
                 if _human_tool_allowed(t.name) and _scoped_ceiling_ok(t.name)]
     if _is_super(me):
-        return native + proxied  # super-agent: accesso a tutto
+        return [t for t in (native + proxied) if not agent_denies(t.name, me)]
+    # Risolvi l'albero una volta per discovery: l'archseed viene dal filesystem
+    # e rifarlo per ciascun verbo renderebbe la fonte unica inutilmente costosa.
+    resolved = _declared_tools(me) | set(current_scoped_tools())
     return [t for t in (native + proxied)
-            if _tool_allowed(t.name, allowed) or _connector_allows(t.name, me)]
+            if _agent_tool_reachable(t.name, me, resolved)
+            and not agent_denies(t.name, me)]
 
 
 def _gate_notify_principal(agent: str, gate_key: str, principal: str | None) -> bool:
@@ -3144,9 +3164,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     f"tool '{name}' fuori dal token di '{current_principal()}': "
                     f"questo token concede {sorted(current_scoped_tools())}. "
                     f"Il ruolo non c'entra — è il token a essere ristretto.")
-        elif not _is_super(_ag) and not _tool_allowed(
-                name, set(agent_config().get("allowed_tools", [])) | set(current_scoped_tools())) \
-                and not _connector_allows(name, _ag):
+        elif not _is_super(_ag) and not _agent_tool_reachable(name, _ag):
             raise PermissionError(
                 f"tool '{name}' non in whitelist per agent '{_ag}'")
         # DENY PER-AGENTE (#104 §8). Prima di tutto il resto: è una sottrazione

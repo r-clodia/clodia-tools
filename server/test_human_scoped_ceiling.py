@@ -98,10 +98,12 @@ class TheAgentBranchIsUnchangedTests(unittest.TestCase):
     """
 
     def test_scoped_tools_still_widen_for_an_agent(self):
-        import inspect
-        src = inspect.getsource(M.call_tool)
-        ramo_agente = src.split("elif not _is_super(_ag)")[-1][:400]
-        self.assertIn("|", ramo_agente, "il ramo agente deve restare un'unione")
+        with patch.object(M, "_declared_tools", return_value={"topic.open"}), \
+             patch.object(M, "current_scoped_tools", return_value=("email.send",)), \
+             patch.object(M, "_connector_allows", return_value=False):
+            self.assertTrue(M._agent_tool_reachable("topic.open", "messaggero"))
+            self.assertTrue(M._agent_tool_reachable("email.send", "messaggero"))
+            self.assertFalse(M._agent_tool_reachable("settings.set", "messaggero"))
 
     def test_the_ceiling_is_only_consulted_on_behalf(self):
         import inspect
