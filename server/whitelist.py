@@ -229,7 +229,8 @@ def agent_has_tool(agent: str, tool: str) -> bool:
 def upsert_agent(agent: str, allowed_tools: list | None = None,
                  allowed_paths: list | None = None,
                  gated_tools: list | None = None,
-                 profile_tools: list | None = None) -> dict:
+                 profile_tools: list | None = None,
+                 denied_tools: list | None = None) -> dict:
     """Registra/aggiorna un agent nella whitelist del gateway e persiste. Serve
     all'auto-provisioning dei responder confinati (clone per-topic): senza una
     entry in config.yaml la sessione MCP dell'agent non può aprirsi (agent_name).
@@ -259,6 +260,11 @@ def upsert_agent(agent: str, allowed_tools: list | None = None,
     # la direzione d'errore silenziosa.
     if gated_tools is not None:
         spec["gated_tools"] = list(gated_tools)
+    # Sottrazione ereditaria dichiarata dal seed. Come per i gate, omissione e
+    # lista vuota sono diverse: un client vecchio non deve cancellare deny già
+    # custoditi; un seed che dichiara [] deve poterli rimuovere deliberatamente.
+    if denied_tools is not None:
+        spec["denied_tools"] = list(denied_tools)
     # `profile_tools`: il MESTIERE dichiarato. Non aveva nessuna catena — non era
     # nel modello del seed, non lo trasportava la registrazione, non lo custodiva
     # questa funzione: viveva solo nella config live, quindi un rebuild o una

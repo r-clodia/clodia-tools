@@ -31,6 +31,7 @@ class NoClobberTests(unittest.TestCase):
         self.addCleanup(lambda: setattr(wl, "CONFIG_PATH", self._orig))
         self._write({"agents": {"clodia": {"allowed_tools": ["*"],
                                            "gated_tools": ["topic.remote_push"],
+                                           "denied_tools": ["topic.read_file"],
                                            "profile_tools": ["topic.open"]}},
                      "workspace_root": "/tmp"})
 
@@ -68,6 +69,12 @@ class NoClobberTests(unittest.TestCase):
     def test_absent_does_not_clear(self):
         wl.upsert_agent("clodia", allowed_tools=["*"], gated_tools=None)
         self.assertEqual(self._read()["gated_tools"], ["topic.remote_push"])
+
+    def test_denies_distinguish_absent_from_declared_empty(self):
+        wl.upsert_agent("clodia", allowed_tools=["*"], denied_tools=None)
+        self.assertEqual(self._read()["denied_tools"], ["topic.read_file"])
+        wl.upsert_agent("clodia", allowed_tools=["*"], denied_tools=[])
+        self.assertEqual(self._read()["denied_tools"], [])
 
     def test_a_new_agent_is_still_created(self):
         wl.upsert_agent("nuovo", allowed_tools=["topic.open"])
