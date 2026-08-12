@@ -558,6 +558,41 @@ class TopicService:
     MOUNT_LOCAL = "local"
     MOUNT_REMOTE = "remote"
     _MOUNTS = (MOUNT_LOCAL, MOUNT_REMOTE)
+    #: Nomi che un mount non può prendere: sono già cartelle di primo livello,
+    #: o lo sono state. `remote` resta riservato perché è l'alias dello schema
+    #: precedente e deve continuare a significare quello.
+    RESERVED_MOUNTS = frozenset({MOUNT_LOCAL, MOUNT_REMOTE, "files"})
+
+    def _mount_names(self, meta: dict) -> dict:
+        """`{nome: mount}` dei mount che si montano al PRIMO livello.
+
+        Dal 12 ago 2026 una cartella montata col nome `comms` si indirizza
+        `comms/x`, non `remote/drive/x`. Il livello `remote/` raggruppava per
+        *come* la piattaforma raggiunge una cosa — l'unica proprietà a cui non
+        pensa chi scrive un path — e sotto ha sempre avuto un figlio solo.
+
+        Il nome è quello del MOUNT (`meta["mounts"][i]["name"]`), che è un
+        identificatore scelto al montaggio, non `config.name`, che è il titolo
+        della cartella Drive: può essere assente, contenere spazi, e cambia se
+        qualcuno la rinomina portandosi dietro ogni path memorizzato.
+
+        Si montano solo i remote che sono davvero un altro filesystem (Drive);
+        per la ragione vedi `_remote_mount_name`.
+        """
+        fuori: dict = {}
+        for m in mounts(meta):
+            if str(m.get("type") or "").strip().lower() != "drive":
+                continue
+            n = str(m.get("name") or "").strip().lower()
+            if not re.match(r"^[a-z0-9][a-z0-9-]{0,30}$", n):
+                continue
+            if n in self.RESERVED_MOUNTS:
+                # Non si rifiuta qui — leggere non è il momento di scoprirlo — ma
+                # non si monta: il montaggio lo rifiuta, e questo è il ripiego se
+                # un meta scritto prima di quel controllo arriva fin qui.
+                continue
+            fuori[n] = m
+        return fuori
 
     def _remote_mount_name(self, meta: dict) -> Optional[str]:
         """Nome del mount di un remote. Identificatore stabile, default sul tipo.
@@ -632,29 +667,50 @@ class TopicService:
             store, base = self._local_mount(tier, name)
             return store, base, "/".join(parts[1:]), self.MOUNT_LOCAL
 
-        if parts and parts[0] == self.MOUNT_REMOTE:
-            rn = self._remote_mount_name(meta)
-            if rn is None:
-                raise TopicError(
-                    f"il topic {tier}/{name} non ha un remote: `remote/` non è montato")
-            if len(parts) == 1:
-                raise TopicError(
-                    f"`remote/` è un contenitore di mount: usa `remote/{rn}/…`")
-            if parts[1] != rn:
-                raise TopicError(
-                    f"remote '{parts[1]}' non montato su {tier}/{name} "
-                    f"(disponibile: '{rn}')")
+        # Un mount montato al PRIMO livello, col proprio nome: `comms/x`.
+        if parts and parts[0] in self._mount_names(meta):
             rm = self._remote_mount(tier, name, meta)
             if rm is None:
                 raise TopicError("remote non raggiungibile")
             store, base = rm
-            return store, base, "/".join(parts[2:]), f"{self.MOUNT_REMOTE}/{rn}"
+            return store, base, "/".join(parts[1:]), parts[0]
+
+        # ALIAS `remote/<n>/…` — lo schema fino al 12 ago 2026. Si accetta e non
+        # si emette: i path già scritti nei messaggi, nei summary e nella memoria
+        # degli agenti devono continuare a risolvere. Il figlio si accetta sia col
+        # nome del mount sia col vecchio identificatore derivato dal tipo.
+        if parts and parts[0] == self.MOUNT_REMOTE:
+            nomi = self._mount_names(meta)
+            rn = self._remote_mount_name(meta)
+            if not nomi and rn is None:
+                raise TopicError(
+                    f"il topic {tier}/{name} non ha un remote: `remote/` non è montato")
+            primo = next(iter(nomi), rn)
+            if len(parts) == 1:
+                raise TopicError(
+                    f"`remote/` è un contenitore di mount: usa `{primo}/…`")
+            if parts[1] not in nomi and parts[1] != rn:
+                disponibili = ", ".join(sorted(nomi)) or str(rn)
+                raise TopicError(
+                    f"remote '{parts[1]}' non montato su {tier}/{name} "
+                    f"(disponibile: {disponibili})")
+            rm = self._remote_mount(tier, name, meta)
+            if rm is None:
+                raise TopicError("remote non raggiungibile")
+            store, base = rm
+            # Il mount RITORNATO è la forma nuova, anche quando l'ingresso era
+            # l'alias: chi riceve il path lo riceve nella forma che vogliamo
+            # veder circolare.
+            etichetta = parts[1] if parts[1] in nomi else primo
+            return store, base, "/".join(parts[2:]), etichetta
 
         # LEGACY: `files/x` o `x` → backend effettivo, comportamento invariato.
         _, sub = self._files_rel(rel)
         store, base = self._files_backend(tier, name)
-        mount = (f"{self.MOUNT_REMOTE}/{self._remote_mount_name(meta)}"
-                 if store is not self.s else self.MOUNT_LOCAL)
+        mount = self.MOUNT_LOCAL
+        if store is not self.s:
+            nomi = self._mount_names(meta)
+            mount = next(iter(nomi), f"{self.MOUNT_REMOTE}/{self._remote_mount_name(meta)}")
         return store, base, sub, mount
 
     def data_mounts(self, tier: str, name: str) -> list[dict]:
@@ -662,10 +718,14 @@ class TopicService:
         meta, _ = self._read_meta(tier, name)
         out = [{"name": self.MOUNT_LOCAL, "path": self.MOUNT_LOCAL, "kind": "dir",
                 "mount": "local"}]
-        rn = self._remote_mount_name(meta)
-        if rn:
-            out.append({"name": self.MOUNT_REMOTE, "path": self.MOUNT_REMOTE,
-                        "kind": "dir", "mount": "remote", "remote_name": rn})
+        # Un mount, una cartella di primo livello col suo nome. Prima erano
+        # tutti dentro `remote/`, che è un livello che non discrimina niente:
+        # sotto c'è sempre stato un figlio solo, e il suo nome era già
+        # l'identificatore.
+        for n, m in self._mount_names(meta).items():
+            out.append({"name": n, "path": n, "kind": "dir",
+                        "mount": n, "remote_name": n,
+                        "type": str(m.get("type") or "")})
         return out
 
     # storage drive: livello SEAL massimo (cap). eu-west-1 → SEAL-2.
@@ -1597,6 +1657,15 @@ class TopicService:
         """
         if rtype not in ("git", "drive"):
             raise TopicError(f"remote type non supportato: {rtype}")
+        # Il nome del mount è una CARTELLA DI PRIMO LIVELLO dell'albero dati
+        # (dal 12 ago 2026). Rifiutare qui e non alla lettura: un nome che
+        # collide si scopre altrimenti quando qualcuno apre un path e trova il
+        # mount al posto dei file, cioè lontano da chi l'ha scelto.
+        if mount_name and str(mount_name).strip().lower() in self.RESERVED_MOUNTS:
+            raise TopicError(
+                f"nome di mount riservato: '{mount_name}'. "
+                f"È una cartella di primo livello dell'albero dati "
+                f"({', '.join(sorted(self.RESERVED_MOUNTS))}) — scegline un altro.")
         if rtype == "git":
             self._require_approved_repo((config or {}).get("url"), tier, name)
         # Guard SEAL sul VERO punto di attivazione di Drive (non solo in
@@ -2307,11 +2376,15 @@ class TopicService:
         # delega a un backend. Senza questo ramo, navigare in `remote/` darebbe un
         # errore là dove l'utente si aspetta di vedere cosa c'è montato.
         if rel == self.MOUNT_REMOTE:
-            rn = self._remote_mount_name(_meta)
-            return ([{"name": rn, "path": f"{self.MOUNT_REMOTE}/{rn}", "kind": "dir",
-                      "mount": "remote"}] if rn else [])
+            # `remote/` resta navigabile come ALIAS dello schema precedente, e
+            # mostra i mount ai loro path NUOVI: chi ci entra da un link vecchio
+            # vede dove sono adesso invece di un vicolo cieco.
+            return [{"name": n, "path": n, "kind": "dir", "mount": n}
+                    for n in self._mount_names(_meta)]
         first = rel.split("/", 1)[0] if rel else ""
-        is_files = bool(rel) and (first in self._MOUNTS or self._files_rel(rel)[0])
+        is_files = bool(rel) and (first in self._MOUNTS
+                                  or first in self._mount_names(_meta)
+                                  or self._files_rel(rel)[0])
         sub = ""
         prov_map = {}
         if is_files:
@@ -2504,10 +2577,17 @@ class TopicService:
             mount_prefix = self.MOUNT_LOCAL
             rel = rel[len(self.MOUNT_LOCAL):].strip("/")
         elif rel == self.MOUNT_REMOTE or rel.startswith(self.MOUNT_REMOTE + "/"):
+            # Alias dello schema precedente: si accetta in scrittura, e il
+            # prefisso conservato è quello NUOVO — chi rilegge il path lo rilegge
+            # nella forma che vogliamo veder circolare.
             resto = rel[len(self.MOUNT_REMOTE):].strip("/")
             rn, _, resto = resto.partition("/")
-            mount_prefix = f"{self.MOUNT_REMOTE}/{rn}"
+            nomi = self._mount_names(meta)
+            mount_prefix = rn if rn in nomi else f"{self.MOUNT_REMOTE}/{rn}"
             rel = resto.strip("/")
+        elif rel.split("/", 1)[0] in self._mount_names(meta):
+            mount_prefix, _, rel = rel.partition("/")
+            rel = rel.strip("/")
         if not rel or "\\" in rel:
             raise TopicError(f"nome file non valido: {filename}")
         parts = rel.split("/")

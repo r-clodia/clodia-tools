@@ -132,13 +132,67 @@ class RootTests(Base):
         self.assertTrue(self.svc.read_file("SEAL-1", "acme", "meta.json"))
 
     def test_the_root_shows_both_mounts_with_a_remote(self):
+        """Un mount è una cartella di primo livello COL SUO NOME.
+
+        Era `remote/`, con dentro un figlio solo. Quel livello raggruppava per
+        *come* la piattaforma raggiunge una cosa — l'unica proprietà a cui non
+        pensa chi scrive un path — e il nome del figlio era già
+        l'identificatore. Dal 12 ago 2026 si monta al primo livello.
+        """
         ctx, _ = self._with_remote()
 
         def go():
             nomi = [e["name"] for e in self.svc.list_files("SEAL-1", "acme")]
             self.assertIn("local", nomi)
-            self.assertIn("remote", nomi)
+            self.assertIn("drive", nomi)
+            self.assertNotIn("remote", nomi)
         self.run_with(ctx, go)
+
+    def test_the_old_prefix_still_resolves(self):
+        """`remote/drive/x` è ciò che c'è scritto nei messaggi già inviati, nei
+        summary e nella memoria degli agenti. Smettere di accettarlo romperebbe
+        riferimenti veri per un cambio di nome."""
+        ctx, _ = self._with_remote()
+
+        def go():
+            _, _, sub, mount = self.svc._resolve_data_path(
+                "SEAL-1", "acme", "remote/drive/deck.md")
+            self.assertEqual(sub, "deck.md")
+            # …e l'etichetta che torna è la forma NUOVA: l'alias si accetta, non
+            # si propaga.
+            self.assertEqual(mount, "drive")
+        self.run_with(ctx, go)
+
+    def test_the_new_prefix_resolves_to_the_same_place(self):
+        ctx, _ = self._with_remote()
+
+        def go():
+            a = self.svc._resolve_data_path("SEAL-1", "acme", "drive/deck.md")
+            b = self.svc._resolve_data_path("SEAL-1", "acme", "remote/drive/deck.md")
+            self.assertEqual(a[2], b[2])
+            self.assertEqual(a[3], b[3])
+        self.run_with(ctx, go)
+
+    def test_remote_alone_lists_the_mounts_at_their_new_paths(self):
+        """Chi entra da un link vecchio deve vedere dove sono ADESSO, non un
+        vicolo cieco."""
+        ctx, _ = self._with_remote()
+
+        def go():
+            voci = self.svc.list_files("SEAL-1", "acme", "remote")
+            self.assertEqual([(v["name"], v["path"]) for v in voci], [("drive", "drive")])
+        self.run_with(ctx, go)
+
+    def test_a_reserved_name_is_not_mounted_at_the_root(self):
+        """Un mount chiamato `local` o `files` renderebbe ambiguo un path di
+        primo livello. Il montaggio lo rifiuta; questo è il ripiego in lettura
+        per un meta scritto prima di quel controllo."""
+        meta, ver = self.svc._read_meta("SEAL-1", "acme")
+        meta["mounts"] = [{"name": "local", "type": "drive",
+                           "config": {"folder": "FID"}}]
+        self.svc._write_meta("SEAL-1", "acme", meta, base_version=ver)
+        self.assertEqual(self.svc._mount_names(
+            self.svc._read_meta("SEAL-1", "acme")[0]), {})
 
 
 class BothPlanesVisibleTests(Base):
