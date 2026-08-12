@@ -23,8 +23,11 @@ attraversa qualcosa, e attraversare è mestiere.
 """
 from __future__ import annotations
 
+import asyncio
 import unittest
 from unittest.mock import patch
+
+from mcp.types import Tool
 
 from . import main as M
 from . import origin
@@ -248,8 +251,7 @@ class OneAnswerTests(unittest.TestCase):
         test costruito su un pezzo interno indica un difetto dove non c'è. La
         regola: confrontare decisioni, non aiutanti.
         """
-        da_main = ((M._tool_allowed(verbo, M._declared_tools(agente))
-                    or M._connector_allows(verbo, agente))
+        da_main = (M._agent_tool_reachable(verbo, agente)
                    and not w.agent_denies(verbo, agente))
         da_origin = origin._agent_may(agente, verbo)
         try:
@@ -282,6 +284,43 @@ class OneAnswerTests(unittest.TestCase):
              patch.object(M, "_connector_allows", lambda v, a: False):
             m, o, e = self._tre_esiti("segretario", "topic.post_message")
             self.assertEqual((m, o, e), (False, False, False))
+
+    def test_list_tools_serves_the_archseed_floor(self):
+        """The MCP discovery response must expose inherited verbs, not raw config."""
+        native = [
+            Tool(name="memory.list", description="memory", inputSchema={}),
+            Tool(name="topic.save_summary", description="summary", inputSchema={}),
+            Tool(name="settings.set", description="settings", inputSchema={}),
+        ]
+        with _cfg(), _seed(), \
+             patch.object(M, "agent_name", lambda: "segretario"), \
+             patch.object(M, "is_on_behalf", lambda: False), \
+             patch.object(M, "_is_super", lambda _n: False), \
+             patch.object(M, "current_scoped_tools", lambda: ()), \
+             patch.object(M, "_connector_allows", lambda _v, _a: False), \
+             patch.object(M, "_all_native_tools", lambda: native), \
+             patch.object(M.proxy, "list_proxied_tools", return_value=[]):
+            names = {tool.name for tool in asyncio.run(M.list_tools())}
+
+        self.assertEqual(names, {"memory.list", "topic.save_summary"})
+
+    def test_dispatch_executes_a_verb_inherited_from_archseed(self):
+        """Regression: sysadmin/segretario saw no memory.* at the decision point."""
+        with _cfg(), _seed(), \
+             patch.object(M, "agent_name", lambda: "segretario"), \
+             patch.object(M, "is_on_behalf", lambda: False), \
+             patch.object(M, "_is_super", lambda _n: False), \
+             patch.object(M, "current_scoped_tools", lambda: ()), \
+             patch.object(M, "_connector_allows", lambda _v, _a: False), \
+             patch.object(M, "_unattended_denial", lambda _n: None), \
+             patch.object(M.origin, "evaluate", return_value={"action": "allow"}), \
+             patch.object(M, "_dispatch_memory", return_value={"files": []}) as dispatch, \
+             patch.object(M._taint, "note_verb"), \
+             patch.object(M._tlm, "record"):
+            result = asyncio.run(M.call_tool("memory.list", {}))
+
+        dispatch.assert_called_once_with("memory.list", {})
+        self.assertIn('"files": []', result[0].text)
 
 
 if __name__ == "__main__":
