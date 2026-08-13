@@ -82,6 +82,45 @@ class QueueTests(Base):
         self.assertEqual(tn.enqueue_for_message("SEAL-1", "acme", {},
                                                 _msg("@matteo", ["matteo"]), []), 0)
 
+    def test_personal_telegram_gets_the_mention_without_a_mount(self):
+        with patch.object(tn, "_personal_contacts", return_value={"matteo": "766"}):
+            n = tn.enqueue_for_message("SEAL-1", "acme", {"title": "Acme"},
+                                       _msg("@matteo guardi il D2.3?", ["matteo"]), [])
+        self.assertEqual(n, 1)
+        item = tn.pending()[0]
+        self.assertEqual(item["chat_id"], "766")
+        self.assertTrue(item["personal"])
+        self.assertIn("#m-", item["link"])
+
+    def test_personal_telegram_wins_over_the_topic_group(self):
+        with patch.object(tn, "_personal_contacts", return_value={"matteo": "766"}):
+            n = tn.enqueue_for_message("SEAL-1", "acme", {"title": "Acme"},
+                                       _msg("@matteo guardi?", ["matteo"]), [MOUNT])
+        self.assertEqual(n, 1)
+        self.assertEqual(tn.pending()[0]["chat_id"], "766")
+
+    def test_ten_minute_window_dedupes_distinct_mentions(self):
+        with patch.object(tn, "_personal_contacts", return_value={"matteo": "766"}):
+            primo = tn.enqueue_for_message("SEAL-1", "acme", {},
+                                           _msg("@matteo primo", ["matteo"], mid="M1"), [])
+            secondo = tn.enqueue_for_message("SEAL-1", "acme", {},
+                                             _msg("@matteo secondo", ["matteo"], mid="M2"), [])
+        self.assertEqual(primo, 1)
+        self.assertEqual(secondo, 0)
+        self.assertEqual(len(tn.pending()), 1)
+
+    def test_after_ten_minutes_a_new_mention_can_notify_again(self):
+        with patch.object(tn, "_personal_contacts", return_value={"matteo": "766"}), \
+             patch.object(tn.time, "time", return_value=1_000.0):
+            tn.enqueue_for_message("SEAL-1", "acme", {},
+                                   _msg("@matteo primo", ["matteo"], mid="M1"), [])
+        with patch.object(tn, "_personal_contacts", return_value={"matteo": "766"}), \
+             patch.object(tn.time, "time", return_value=1_000.0 + tn.MENTION_WINDOW_SECONDS + 1):
+            secondo = tn.enqueue_for_message("SEAL-1", "acme", {},
+                                             _msg("@matteo secondo", ["matteo"], mid="M2"), [])
+        self.assertEqual(secondo, 1)
+        self.assertEqual(len(tn.pending()), 2)
+
 
 class WhatLeavesTheRoomTests(Base):
     def test_excerpt_carries_the_line_not_the_message(self):
@@ -359,9 +398,11 @@ class FlushTests(Base):
 
     def _accoda(self, n=3):
         for i in range(n):
-            tn.enqueue_for_message("SEAL-1", "acme", {},
-                                   _msg("@matteo ci sei?", ["matteo"], mid=f"M{i}"),
-                                   [MOUNT])
+            with patch.object(tn.time, "time",
+                              return_value=1_000.0 + i * (tn.MENTION_WINDOW_SECONDS + 1)):
+                tn.enqueue_for_message("SEAL-1", "acme", {},
+                                       _msg("@matteo ci sei?", ["matteo"], mid=f"M{i}"),
+                                       [MOUNT])
 
     def test_it_delivers_and_acknowledges(self):
         inviati = []

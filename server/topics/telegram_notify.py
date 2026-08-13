@@ -33,6 +33,9 @@ LOG = logging.getLogger("clodia-tools.topics.telegram-notify")
 _MAX_PENDING = 500
 #: Tentativi prima di rinunciare a una singola notifica.
 MAX_ATTEMPTS = 5
+#: Finestra anti-rumore per persona/topic: cinque menzioni in cinque minuti non
+#: devono diventare cinque push. La dedup per messaggio resta sotto.
+MENTION_WINDOW_SECONDS = 10 * 60
 #: Lunghezza massima dell'estratto, troncato con `…`.
 #:
 #: Era 280. La notifica si legge su un telefono, in mezzo ad altre notifiche, e
@@ -63,6 +66,35 @@ def message_link(tier: str, name: str, message_id: str) -> str:
     base = webui_url()
     path = f"/topics/{tier}/{name}#m-{message_id}"
     return f"{base}{path}" if base else path
+
+
+def _personal_contacts() -> dict[str, str]:
+    """Mappa principal umano -> chat/handle Telegram personale.
+
+    La fonte autorevole dei contatti è l'agent-server: gli human principal
+    vengono creati lì e possono avere `telegram` o `contact_channels.telegram`.
+    Se l'agent-server non è raggiungibile si degrada in silenzio: la mention
+    resta comunque nella webui.
+    """
+    try:
+        import httpx
+        from ..tools.runtime import AGENT_SERVER_URL
+        with httpx.Client(timeout=4.0) as c:
+            data = c.get(f"{AGENT_SERVER_URL}/api/agents").json()
+        rows = data.get("agents", data) if isinstance(data, dict) else data
+    except Exception as e:  # noqa: BLE001
+        LOG.debug("contatti telegram personali non disponibili: %s", str(e)[:120])
+        return {}
+    out: dict[str, str] = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or row.get("type") != "human":
+            continue
+        name = str(row.get("name") or "").strip().lower()
+        channels = row.get("contact_channels") or {}
+        tg = str(channels.get("telegram") or row.get("telegram") or "").strip()
+        if name and tg:
+            out[name] = tg
+    return out
 
 
 def _load() -> list:
@@ -99,6 +131,16 @@ def _excerpt(text: str, chi: str, limite: int) -> str:
     return scelta if len(scelta) <= limite else scelta[: limite - 1].rstrip() + "…"
 
 
+def _window_open(coda: list, tier: str, name: str, principal: str,
+                 now: float) -> bool:
+    for item in coda:
+        if (item.get("tier") == tier and item.get("name") == name
+                and item.get("principal") == principal
+                and now - float(item.get("at") or 0) < MENTION_WINDOW_SECONDS):
+            return True
+    return False
+
+
 def enqueue_for_message(tier: str, name: str, meta: dict, msg: dict,
                         mounts_tg: list) -> int:
     """Accoda una notifica per ogni menzione riconosciuta. Ritorna quante.
@@ -121,12 +163,32 @@ def enqueue_for_message(tier: str, name: str, meta: dict, msg: dict,
     if (msg.get("kind") or "human") != "human":
         return 0
     menzionati = [str(m).lower() for m in (msg.get("mentions") or [])]
-    if not menzionati or not mounts_tg:
+    if not menzionati:
         return 0
     coda = _load()
     visti = {(i.get("message_id"), i.get("chat_id"), i.get("principal"))
              for i in coda}
+    now = time.time()
     nuovi = 0
+    personal = _personal_contacts()
+    for chi in menzionati:
+        chat_id = personal.get(chi)
+        if not chat_id:
+            continue
+        chiave = (msg.get("id"), chat_id, chi)
+        if chiave in visti or _window_open(coda, tier, name, chi, now):
+            continue
+        visti.add(chiave)
+        coda.append({
+            "tier": tier, "name": name, "chat_id": chat_id,
+            "principal": chi, "uid": "", "handle": str(chat_id).lstrip("@"),
+            "message_id": msg.get("id"), "author": msg.get("author"),
+            "title": (meta or {}).get("title") or name,
+            "excerpt": _excerpt(msg.get("text") or "", chi, EXCERPT_MAX),
+            "link": message_link(tier, name, str(msg.get("id"))),
+            "attempts": 0, "at": now, "personal": True,
+        })
+        nuovi += 1
     for mount in mounts_tg:
         cfg = mount.get("config") or {}
         chat_id = str(cfg.get("chat_id") or "")
@@ -158,7 +220,7 @@ def enqueue_for_message(tier: str, name: str, meta: dict, msg: dict,
                 continue
             uid, handle = trovato
             chiave = (msg.get("id"), chat_id, chi)
-            if chiave in visti:
+            if chiave in visti or _window_open(coda, tier, name, chi, now):
                 continue      # una menzione avvisa UNA volta
             visti.add(chiave)
             coda.append({
@@ -169,7 +231,7 @@ def enqueue_for_message(tier: str, name: str, meta: dict, msg: dict,
                 "excerpt": (_excerpt(msg.get("text") or "", chi, EXCERPT_MAX)
                             if modo == "excerpt" else ""),
                 "link": message_link(tier, name, str(msg.get("id"))),
-                "attempts": 0, "at": time.time(),
+                "attempts": 0, "at": now,
             })
             nuovi += 1
     if nuovi:
