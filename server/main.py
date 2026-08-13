@@ -2664,16 +2664,17 @@ async def _require_gate_consent(
                           f"<!-- gate={req.get('id')} -->"), kind="ai")
             except Exception:  # noqa: BLE001 — il gate resta valido anche senza marker
                 pass
-        # Gate NON presidiato (nessun contesto-canale, es. turno di un job agentico):
-        # oggi resterebbe silenzioso e scadrebbe → notifica best-effort al PRINCIPAL
-        # (Davide) sui suoi CANALI DI CONTATTO (telegram/email dalla scheda agent),
-        # così può approvarlo dalla webui. Finestra d'attesa più lunga per l'async.
-        # (Additivo: try/except non tocca la decisione del gate.)
+        # Un gate in canale ha una card nella stanza, ma questo non prova che
+        # l'umano stia guardando quella stanza. Un gate fuori canale non ha
+        # nemmeno la card. In entrambi i casi si notifica best-effort il
+        # principal sui suoi canali di contatto; l'approvazione resta sempre la
+        # stessa capability di gate.
         import os as _os
-        loops = int(_os.environ.get("GATE_WAIT_LOOPS", "90"))  # 90 = ~180s
-        if not _ch.startswith("chan:"):
+        is_channel_gate = _ch.startswith("chan:")
+        loops = int(_os.environ.get("GATE_WAIT_LOOPS", "30"))  # 30 = ~60s
+        _gate_notify_principal(agent, gate_key, current_principal())
+        if not is_channel_gate:
             loops = int(_os.environ.get("GATE_WAIT_LOOPS_ASYNC", "3600"))  # ~2 ore (loop 2s)
-            _gate_notify_principal(agent, gate_key, current_principal())
         import asyncio as _aio
         approved = False
         for _ in range(loops):
