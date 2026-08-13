@@ -112,6 +112,22 @@ class TheEndpointRegistersTests(unittest.TestCase):
         r, _ = self._register({"agent": "x", "allowed_tools": []})
         self.assertNotIn("gated_in_channel", json.loads(r.body))
 
+    def test_denied_tools_land_in_the_authoritative_config(self):
+        r, config = self._register({
+            "agent": "messaggero",
+            "allowed_tools": ["email.*"],
+            "denied_tools": ["topic.files", "topic.read_file"],
+        })
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(
+            config["agents"]["messaggero"]["denied_tools"],
+            ["topic.files", "topic.read_file"],
+        )
+        self.assertEqual(
+            json.loads(r.body)["denied_tools"],
+            ["topic.files", "topic.read_file"],
+        )
+
 
 class AnUnregisteredAgentGetsNothingTests(unittest.TestCase):
     """Perché il 500 era grave: la config mancante non degrada, spegne.

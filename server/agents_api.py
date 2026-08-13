@@ -65,11 +65,13 @@ async def register(request: Request):
     # in silenzio, invece di rifiutare una registrazione per un campo morto.
     spec = whitelist.upsert_agent(name, allowed_tools=body.get("allowed_tools"),
                                   gated_tools=body.get("gated_tools"),
-                                  profile_tools=body.get("profile_tools"))
+                                  profile_tools=body.get("profile_tools"),
+                                  denied_tools=body.get("denied_tools"))
     whitelist.reload_config()
     return JSONResponse({"ok": True, "agent": name,
                          "allowed_tools": spec.get("allowed_tools"),
                          "gated_tools": spec.get("gated_tools") or [],
+                         "denied_tools": spec.get("denied_tools") or [],
                          "profile_tools": spec.get("profile_tools") or []})
 
 
