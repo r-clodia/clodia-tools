@@ -660,7 +660,12 @@ async def mcp_clients(request: Request):
             clearance=body.get("clearance") or None,
             ttl_days=int(body.get("ttl_days") or human_mcp.DEFAULT_TTL_DAYS),
             by=body.get("by") or "",
-            tier_consent=bool(body.get("tier_consent")))
+            tier_consent=bool(body.get("tier_consent")),
+            # Persona o proxy: lo sa la registry, che sta a monte. Decide quali
+            # verbi entrano nel token, quindi arriva dichiarato come già arriva
+            # dichiarato il ruolo. In assenza vale `human`, che è ciò che questo
+            # endpoint ha coniato finché i proxy non esistevano.
+            principal_kind=body.get("principal_kind") or "human")
         base = (body.get("base_url") or "").strip()
         if base:
             res["config"] = human_mcp.client_config(base, res["token"], tier, name)

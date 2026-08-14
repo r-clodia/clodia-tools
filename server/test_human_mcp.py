@@ -97,6 +97,49 @@ class IssueTests(unittest.TestCase):
                   "topic.save_summary", "topic.archive", "email.send"):
             self.assertNotIn(v, human_mcp.VERBS)
 
+    def test_a_proxy_gets_the_four_verbs_of_a_participant_who_talks(self):
+        """Un proxy non è una persona con meno permessi: è un'altra natura.
+        Fino al 14 ago 2026 riceveva il token di una persona — dieci verbi
+        contro l'unico che il suo seed dichiarava."""
+        with _Datadir(), patch.object(human_mcp.pki_mint, "mint_session_token", _mint):
+            res = human_mcp.issue("SEAL-1", "proof-of-flex", "crm-esterno",
+                                  provider="sistema-crm", carrier="clodia",
+                                  principal_kind="proxy")
+        claims = json.loads(res["token"].split(".", 2)[2])
+        self.assertEqual(set(claims["scoped_tools"]), set(human_mcp.PROXY_VERBS))
+        self.assertEqual(set(res["verbs"]), set(human_mcp.PROXY_VERBS))
+
+    def test_a_proxy_reads_the_room_but_not_the_files(self):
+        """Il confine scelto: dialoga (legge il canale e le proprie menzioni) e
+        non tocca nient'altro. Senza `topic.messages` non sarebbe un
+        partecipante ma un webhook; con `topic.read_file` sarebbe una persona."""
+        self.assertIn("topic.messages", human_mcp.PROXY_VERBS)
+        self.assertIn("topic.post_message", human_mcp.PROXY_VERBS)
+        for v in ("topic.read_file", "topic.files", "topic.search",
+                  "topic.put", "topic.read_document", "topic.open"):
+            self.assertNotIn(v, human_mcp.PROXY_VERBS)
+
+    def test_the_proxy_surface_is_a_subset_of_the_human_one(self):
+        """Se un verbo esistesse per un proxy e non per una persona, il proxy
+        sarebbe il modo per fare ciò che a una persona è negato."""
+        self.assertTrue(set(human_mcp.PROXY_VERBS) <= set(human_mcp.VERBS))
+
+    def test_an_unknown_kind_gets_the_smaller_surface(self):
+        """Una terza natura deve nascere piccola e farsi allargare apposta."""
+        self.assertEqual(human_mcp.verbs_for("qualcosa-di-nuovo"),
+                         human_mcp.PROXY_VERBS)
+        self.assertEqual(human_mcp.verbs_for("human"), human_mcp.VERBS)
+        self.assertEqual(human_mcp.verbs_for(None), human_mcp.VERBS)
+
+    def test_the_registry_records_which_nature_the_token_was_for(self):
+        """Chi guarda i collegamenti di una stanza deve distinguere una persona
+        da un sistema terzo senza andare a leggere il seed."""
+        with _Datadir(), patch.object(human_mcp.pki_mint, "mint_session_token", _mint):
+            human_mcp.issue("SEAL-1", "pof", "crm-esterno", provider="crm",
+                            carrier="clodia", principal_kind="proxy")
+            grants = human_mcp.list_grants("SEAL-1", "pof")
+        self.assertEqual(grants[0]["principal_kind"], "proxy")
+
     def test_a_token_without_a_person_is_refused(self):
         with _Datadir(), patch.object(human_mcp.pki_mint, "mint_session_token", _mint):
             with self.assertRaises(ValueError):
