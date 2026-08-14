@@ -668,7 +668,15 @@ async def mcp_clients(request: Request):
             principal_kind=body.get("principal_kind") or "human")
         base = (body.get("base_url") or "").strip()
         if base:
-            res["config"] = human_mcp.client_config(base, res["token"], tier, name)
+            if res.get("auth") == "assertion":
+                # Un proxy non riceve una configurazione da incollare — riceve
+                # il contratto: dove chiedere il token, cosa firmare, dove
+                # parlare. Vedi proxy_auth.client_instructions.
+                from . import proxy_auth
+                res["instructions"] = proxy_auth.client_instructions(
+                    base, tier, name, res["principal"])
+            else:
+                res["config"] = human_mcp.client_config(base, res["token"], tier, name)
         return JSONResponse(res)
     except (PermissionError, ValueError) as e:
         # Il messaggio arriva intatto: dice QUALE delle condizioni ha fermato la

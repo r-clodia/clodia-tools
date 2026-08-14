@@ -187,10 +187,16 @@ def issue(tier: str, name: str, principal: str, *, provider: str,
     if not principal:
         raise ValueError("principal mancante: un token umano è di qualcuno")
     verbi = verbs_for(principal_kind)
+    proxy = (principal_kind or "human").strip().lower() == "proxy"
     _check_tier(tier, provider, tier_consent, principal_kind)
     giorni = max(1, min(int(ttl_days or DEFAULT_TTL_DAYS), MAX_TTL_DAYS))
     gid = "mcp_" + secrets.token_hex(6)
-    token = pki_mint.mint_session_token(
+    # Un PROXY non riceve un segreto: riceve un'autorizzazione. Il grant dice
+    # CHE può ottenere token per questa stanza fino a questa data; il token se
+    # lo conia lui firmando un'asserzione con la propria chiave (`proxy_auth`).
+    # Finché qui usciva un bearer a novanta giorni, l'identità del proxy era
+    # una stringa copiabile e la firma era di Clodia, non sua.
+    token = None if proxy else pki_mint.mint_session_token(
         carrier,
         execution_id=gid,
         ttl_seconds=giorni * 24 * 3600,
@@ -218,6 +224,7 @@ def issue(tier: str, name: str, principal: str, *, provider: str,
     _save(grants)
     return {"id": gid, "token": token, "expires": grants[-1]["expires"],
             "tier": tier, "topic": name, "principal": principal,
+            "auth": "assertion" if proxy else "bearer",
             "verbs": list(verbi)}
 
 
@@ -266,8 +273,15 @@ def is_revoked(gid: str | None) -> bool:
     return True
 
 
-def client_config(base_url: str, token: str, tier: str, name: str) -> dict:
-    """Il frammento da incollare nel client. Un URL, un header, nient'altro."""
+def client_config(base_url: str, token: str | None, tier: str, name: str) -> dict:
+    """Il frammento da incollare nel client. Un URL, un header, nient'altro.
+
+    `token=None` (un proxy) non ha un frammento: non esiste un segreto statico
+    da incollare, e restituire una configurazione con un header vuoto sarebbe
+    la cosa peggiore — sembrerebbe funzionare fino alla prima chiamata.
+    """
+    if token is None:
+        return {}
     return {
         "mcpServers": {
             f"clodia-{name}": {

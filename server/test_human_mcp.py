@@ -97,16 +97,17 @@ class IssueTests(unittest.TestCase):
                   "topic.save_summary", "topic.archive", "email.send"):
             self.assertNotIn(v, human_mcp.VERBS)
 
-    def test_a_proxy_gets_the_four_verbs_of_a_participant_who_talks(self):
-        """Un proxy non è una persona con meno permessi: è un'altra natura.
-        Fino al 14 ago 2026 riceveva il token di una persona — dieci verbi
-        contro l'unico che il suo seed dichiarava."""
-        with _Datadir(), patch.object(human_mcp.pki_mint, "mint_session_token", _mint):
+    def test_a_proxy_is_authorised_here_but_not_handed_a_secret(self):
+        """Il grant di un proxy dice CHE può ottenere token per questa stanza;
+        il token se lo conia lui firmando (vedi `proxy_auth`). Fino al 14 ago
+        2026 usciva di qui un bearer a novanta giorni firmato da Clodia: chi lo
+        copiava ERA quel proxy."""
+        with _Datadir():
             res = human_mcp.issue("SEAL-1", "proof-of-flex", "crm-esterno",
                                   provider="sistema-crm", carrier="clodia",
                                   principal_kind="proxy")
-        claims = json.loads(res["token"].split(".", 2)[2])
-        self.assertEqual(set(claims["scoped_tools"]), set(human_mcp.PROXY_VERBS))
+        self.assertIsNone(res["token"])
+        self.assertEqual(res["auth"], "assertion")
         self.assertEqual(set(res["verbs"]), set(human_mcp.PROXY_VERBS))
 
     def test_a_proxy_reads_the_room_but_not_the_files(self):
