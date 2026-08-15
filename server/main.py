@@ -16,7 +16,7 @@ from . import taint as _taint
 from . import telemetry as _tlm
 from . import transfer_channel
 from .tools import email, fs, logs, runtime
-from .tools import web_post
+from .tools import web_fetch, web_post
 
 #: `LOG` era usato in cinque punti di questo modulo e **definito in nessuno**.
 #: Ognuno di quei punti sta in un `except` — cioè si scopre solo quando qualcosa
@@ -333,6 +333,36 @@ _FS_TOOLS: list[Tool] = [
 ]
 
 _WEB_TOOLS: list[Tool] = [
+    Tool(
+        name="web.fetch",
+        description=(
+            "Legge una pagina, un feed o una risposta JSON dal web via HTTP GET. "
+            "Non richiede approvazione (leggere non è un'uscita), ma la FONTE conta: "
+            "un URL dichiarato fidato in `ingress` non contamina il canale, uno "
+            "sconosciuto sì — e da un canale contaminato ogni uscita (email, "
+            "Telegram, POST) chiederà conferma umana. Non segue i redirect: li "
+            "riporta, perché la destinazione va vagliata per conto suo. Solo "
+            "destinazioni pubbliche (niente rete interna), solo contenuto testuale, "
+            "risposta troncata a 512 KB."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL http/https da leggere"},
+                "headers": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": ("header opzionali; Host, Cookie, Authorization e "
+                                    "hop-by-hop sono vietati"),
+                },
+                "timeout_seconds": {
+                    "type": "number", "minimum": 0.1, "maximum": 30,
+                    "description": "timeout, massimo 30 secondi",
+                },
+            },
+            "required": ["url"],
+        },
+    ),
     Tool(
         name="web.post",
         description=(
@@ -3363,6 +3393,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 _taint.clear(current_chat(), by=current_principal() or "human")
         if name == "fs.list_dir":
             result = fs.list_dir(arguments["path"])
+        elif name == "web.fetch":
+            result = await asyncio.to_thread(web_fetch.fetch, arguments, agent=_ag or "")
         elif name == "web.post":
             result = await asyncio.to_thread(web_post.post, arguments, agent=_ag or "")
         elif name == "logs.tail":

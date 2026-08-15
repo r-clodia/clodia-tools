@@ -80,9 +80,17 @@ nobody can see is a token nobody can withdraw.
 
 `topic.*` (scopes, their files, their messages) · `email.*` · `gdrive.*`,
 `gdocs.*`, `gsheets.*`, `gcalendar.*` · `github.*` (clone, pull, push, pull
-request — the credential never enters the agent's process) · `fs.*` · `memory.*`
+request — the credential never enters the agent's process) · `web.*` (`fetch`
+reads, `post` writes and is gated per invocation) · `fs.*` · `memory.*`
 · `agents.*`, `jobs.*`, `packs.*`, `providers.*`, `runtime.*` (control plane,
 admin-held).
+
+`web.fetch` exists so that reading the open web goes **through** the gateway:
+the runtime's own `WebFetch`/`WebSearch` are executed by the provider inside the
+API conversation, where no rule of ours is consulted and no taint is lit. Here
+the URL is an argument, so it is weighed against the `ingress` source list — a
+vetted source does not contaminate the channel, an unknown one does, and the
+human gate then falls on whatever tries to leave.
 
 `cli.py --help` lists what a build actually exposes. That listing is the
 authority: a README enumerating verbs goes stale the week it is written.
