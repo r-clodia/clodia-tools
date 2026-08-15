@@ -57,6 +57,36 @@ VERBS: tuple[str, ...] = (
     "topic.put",
 )
 
+#: I verbi di un PROXY: un sistema terzo ammesso in una stanza. Parla e legge
+#: quella stanza, e nient'altro — niente file, niente ricerca, niente scrittura.
+#:
+#: La differenza con una persona non è di grado ma di natura: Giovanni è un
+#: partecipante che porta con sé un'autorità (la sua clearance, il suo ruolo);
+#: un proxy è una presenza senza autorità, che esiste per dialogare. Legge il
+#: canale perché un partecipante che non può leggere le risposte non dialoga —
+#: è un webhook — ma la sua superficie di lettura finisce dove finisce la chat.
+#:
+#: Deve restare allineato a `_PROXY_ALLOWED_TOOLS` nel modello del seed
+#: (clodia-logic): quello dichiara, questo conia, e se divergono si riapre il
+#: buco per cui il seed prometteva un verbo e il token ne consegnava dieci.
+PROXY_VERBS: tuple[str, ...] = (
+    "topic.post_message",
+    "topic.messages",
+    "topic.my_mentions",
+    "topic.mark_seen",
+)
+
+
+def verbs_for(principal_kind: str | None) -> tuple[str, ...]:
+    """I verbi che spettano a questo tipo di principal.
+
+    Un tipo sconosciuto prende quelli del proxy, non quelli della persona: se un
+    giorno arriva una terza natura, deve nascere con la superficie più piccola e
+    farsi allargare apposta.
+    """
+    return VERBS if (principal_kind or "human").strip().lower() == "human" else PROXY_VERBS
+
+
 #: Tier oltre il quale un client MCP umano non si conia in nessun caso.
 TIER_MAX = 2
 #: Tier oltre il quale serve la concessione esplicita di chi lo emette.
@@ -97,7 +127,8 @@ def _save(grants: list[dict]) -> None:
         pass
 
 
-def _check_tier(tier: str, provider: str, consenso: bool) -> None:
+def _check_tier(tier: str, provider: str, consenso: bool,
+                principal_kind: str = "human") -> None:
     """Il tier della stanza è un tetto sul MOTORE DI INFERENZA del client.
 
     È il punto che rende questa funzione diversa da Telegram, dove esce una
@@ -116,11 +147,17 @@ def _check_tier(tier: str, provider: str, consenso: bool) -> None:
     provider in modo verificabile, questa funzione cambia — e il commento sopra
     dice perché era com'era.
     """
+    # Per un proxy la sostanza della regola non cambia — il contenuto esce
+    # verso un sistema che non controlliamo e che si dichiara da sé — ma il
+    # nome di quel sistema sì: un proxy non ha un motore di inferenza, e dirgli
+    # che ce l'ha manda a cercare la cosa sbagliata.
+    dove = ("il motore di inferenza del client" if (principal_kind or "human") == "human"
+            else "il sistema esterno che porta il proxy")
     r = _rank(tier)
     if r > TIER_MAX:
         raise PermissionError(
-            f"topic {tier}: nessun client MCP umano sopra SEAL-{TIER_MAX}. Il "
-            "contenuto finirebbe nel motore di inferenza del client, che noi non "
+            f"topic {tier}: nessun client MCP sopra SEAL-{TIER_MAX}. Il "
+            f"contenuto finirebbe in {dove}, che noi non "
             "controlliamo e che oggi si dichiara da sé. Resta la webui, dove il "
             "dato non esce dal perimetro.")
     if r > TIER_LIBERO and not consenso:
@@ -130,24 +167,36 @@ def _check_tier(tier: str, provider: str, consenso: bool) -> None:
             "chi emette il token si assume quella dichiarazione.")
     if not (provider or "").strip():
         raise PermissionError(
-            "dichiara su quale motore di inferenza gira il client (es. "
-            "'anthropic-api'): resta scritto nel token, e serve a sapere dove è "
-            "finito ciò che è stato letto.")
+            f"dichiara qual è {dove} (es. 'anthropic-api', oppure il nome del "
+            "sistema): resta scritto nel token, e serve a sapere dove è finito "
+            "ciò che è stato letto.")
 
 
 def issue(tier: str, name: str, principal: str, *, provider: str,
           carrier: str, human_role: str = "user", clearance: str | None = None,
           ttl_days: int = DEFAULT_TTL_DAYS, by: str = "",
-          tier_consent: bool = False) -> dict:
-    """Conia il token di un client MCP per (persona, topic). Ritorna il token IN
-    CHIARO una sola volta: nel registro resta solo il suo id."""
+          tier_consent: bool = False, principal_kind: str = "human") -> dict:
+    """Conia il token di un client MCP per (principal, topic). Ritorna il token
+    IN CHIARO una sola volta: nel registro resta solo il suo id.
+
+    `principal_kind` decide la superficie: una PERSONA porta `VERBS`, un PROXY
+    porta `PROXY_VERBS`. Chi sia il principal lo sa la registry, che sta a monte
+    — qui arriva già stabilito, come già arriva già autorizzato.
+    """
     principal = (principal or "").strip()
     if not principal:
         raise ValueError("principal mancante: un token umano è di qualcuno")
-    _check_tier(tier, provider, tier_consent)
+    verbi = verbs_for(principal_kind)
+    proxy = (principal_kind or "human").strip().lower() == "proxy"
+    _check_tier(tier, provider, tier_consent, principal_kind)
     giorni = max(1, min(int(ttl_days or DEFAULT_TTL_DAYS), MAX_TTL_DAYS))
     gid = "mcp_" + secrets.token_hex(6)
-    token = pki_mint.mint_session_token(
+    # Un PROXY non riceve un segreto: riceve un'autorizzazione. Il grant dice
+    # CHE può ottenere token per questa stanza fino a questa data; il token se
+    # lo conia lui firmando un'asserzione con la propria chiave (`proxy_auth`).
+    # Finché qui usciva un bearer a novanta giorni, l'identità del proxy era
+    # una stringa copiabile e la firma era di Clodia, non sua.
+    token = None if proxy else pki_mint.mint_session_token(
         carrier,
         execution_id=gid,
         ttl_seconds=giorni * 24 * 3600,
@@ -159,11 +208,15 @@ def issue(tier: str, name: str, principal: str, *, provider: str,
         # per affacciarsi su un'altra. È questa proprietà — non il nome della
         # persona — a rendere sicuro il ramo umano di `_require_topic_member`.
         chat=f"chan:{tier}:{name}:{principal}",
-        scoped_tools=list(VERBS),
+        scoped_tools=list(verbi),
     )
     grants = _load()
     grants.append({
         "id": gid, "principal": principal, "tier": tier, "topic": name,
+        # La natura del principal resta scritta nel registro: chi guarda i
+        # collegamenti di una stanza deve poter distinguere una persona da un
+        # sistema terzo senza andare a leggere il seed.
+        "principal_kind": (principal_kind or "human").strip().lower(),
         "provider": (provider or "").strip(), "carrier": carrier,
         "created": int(time.time()), "expires": int(time.time()) + giorni * 24 * 3600,
         "created_by": by or "", "revoked": False,
@@ -171,7 +224,8 @@ def issue(tier: str, name: str, principal: str, *, provider: str,
     _save(grants)
     return {"id": gid, "token": token, "expires": grants[-1]["expires"],
             "tier": tier, "topic": name, "principal": principal,
-            "verbs": list(VERBS)}
+            "auth": "assertion" if proxy else "bearer",
+            "verbs": list(verbi)}
 
 
 def list_grants(tier: str | None = None, name: str | None = None,
@@ -219,8 +273,15 @@ def is_revoked(gid: str | None) -> bool:
     return True
 
 
-def client_config(base_url: str, token: str, tier: str, name: str) -> dict:
-    """Il frammento da incollare nel client. Un URL, un header, nient'altro."""
+def client_config(base_url: str, token: str | None, tier: str, name: str) -> dict:
+    """Il frammento da incollare nel client. Un URL, un header, nient'altro.
+
+    `token=None` (un proxy) non ha un frammento: non esiste un segreto statico
+    da incollare, e restituire una configurazione con un header vuoto sarebbe
+    la cosa peggiore — sembrerebbe funzionare fino alla prima chiamata.
+    """
+    if token is None:
+        return {}
     return {
         "mcpServers": {
             f"clodia-{name}": {

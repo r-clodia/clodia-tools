@@ -168,12 +168,15 @@ def build_app() -> Starlette:
     # Confinamento in uscita: vista read-only per il punteggio trifecta, che si
     # calcola nell'agent-server ma non può leggere il volume del gateway (#80).
     from .egress_api import routes as egress_routes
+    # Identità dei proxy: l'unica rotta pubblica per costruzione — un sistema
+    # terzo scambia un'asserzione firmata con un token breve. Vedi proxy_auth.
+    from .proxy_auth_api import routes as proxy_auth_routes
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
                 *imagegen_routes, *topics_routes, *connectors_routes, *profile_routes,
                 *telegram_routes, *agents_routes, *vault_routes,
                 *tool_routes, *mint_routes, *gate_routes, *logic_routes,
-                *egress_routes],
+                *egress_routes, *proxy_auth_routes],
         lifespan=_lifespan)
 
 
