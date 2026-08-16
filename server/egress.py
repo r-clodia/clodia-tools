@@ -180,11 +180,43 @@ _GITHUB_WRITE = (
 )
 
 
+def _repo_url(a: dict) -> list[str]:
+    """Repository dai verbi NATIVI del gateway, che lo passano come URL intero.
+
+    Il backend MCP di GitHub manda `owner` + `repo`; `github.pull_request` manda
+    `repo` già in forma di URL, e `github.push` non lo manda affatto — sa solo la
+    directory. Chi chiama risolve il remote e lo aggiunge come `repo`: qui si
+    legge, non si tocca il filesystem.
+    """
+    u = str(a.get("repo") or "").strip()
+    if not u or "/" not in u:
+        return []
+    if not u.lower().startswith(("http://", "https://", "git@", "ssh://")):
+        return []
+    try:
+        from .tools.github_repo import normalize_repo
+        return [normalize_repo(u).lower()]
+    except Exception:  # noqa: BLE001 — URL che non è un repository
+        return []
+
+
+#: Verbi nativi del gateway che ESCONO. `clone`/`pull` portano dentro e non
+#: hanno una destinazione da approvare: il perimetro di ciò che si può tirare è
+#: già la lista dei repository approvati.
+_GITHUB_NATIVE_OUT = ("push", "pull_request")
+
+
 def spec_for(verb: str) -> Optional[tuple[str, Callable[[dict], list[str]]]]:
     if verb in _SPECS:
         return _SPECS[verb]
     if verb.startswith("github."):
         tail = verb.split(".", 1)[1]
+        # I nativi PRIMA: `push_files` del backend inizia per `push_`, ma `push`
+        # nudo non combaciava con nessun prefisso e restava fuori dal PDP —
+        # cioè il verbo che pubblica davvero non era governato dal perimetro,
+        # solo dal gate. Misurato il 16 ago 2026.
+        if tail in _GITHUB_NATIVE_OUT:
+            return ("github", _repo_url)
         if any(tail.startswith(p) or tail == p for p in _GITHUB_WRITE):
             return ("github", _repo)
     return None
@@ -652,6 +684,34 @@ def gate_reason(agent: str, verb: str, dtype: str, dests: list[str]) -> str:
             f"non solo per {agent}: è la destinazione che stai giudicando, non "
             f"chi spedisce. I prossimi invii verso di lì non chiederanno più."
             f"{warn}")
+
+
+def destinations_already_allowed(verb: str, arguments: dict,
+                                 scope: str | None = None) -> bool:
+    """Le destinazioni di questa chiamata sono TUTTE già nel perimetro?
+
+    Risponde alla domanda «questa cosa è già stata approvata», e serve a chi
+    decide se chiedere ancora. Non concede nulla e non registra nulla: è una
+    lettura della whitelist in vigore (globale + scope).
+
+    `False` quando il verbo non ha destinazioni note o non se ne estrae nessuna:
+    in dubbio si continua a chiedere, che è il verso giusto per una funzione il
+    cui `True` toglie un gate.
+    """
+    spec = spec_for(verb)
+    if not spec:
+        return False
+    _kind, estrai = spec
+    try:
+        dests = [d for d in (estrai(arguments) or []) if str(d).strip()]
+    except Exception:  # noqa: BLE001 — argomenti anomali: non è un'approvazione
+        return False
+    if not dests:
+        return False
+    regole = effective_uris("egress", scope)
+    if not regole:
+        return False
+    return all(any(_matches(d, r) for r in regole) for d in dests)
 
 
 def check(agent: str, agent_cfg: dict, verb: str, arguments: dict,

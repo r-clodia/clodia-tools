@@ -142,6 +142,21 @@ def _assert_no_secret_on_disk(workdir: str, token: str | None) -> None:
 
 # ── I verbi ─────────────────────────────────────────────────────────────────
 
+def remote_url(workdir: str) -> str:
+    """URL del remote `origin` di un working tree, o stringa vuota.
+
+    Serve a chi deve giudicare la DESTINAZIONE di un push: il verbo riceve una
+    directory, e il repository sta nel remote. Non solleva — chi chiama sta
+    decidendo se chiedere un permesso, e un errore qui deve valere «non lo so»,
+    che porta a chiedere.
+    """
+    try:
+        out = _run(["remote", "get-url", "origin"], cwd=workdir, token=None)
+        return normalize_repo(out.stdout.strip())
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def clone(repo: str, dest: str, token: str | None = None,
           branch: str | None = None) -> dict:
     """Clona un repository APPROVATO nella scratch dello spawn chiamante.
