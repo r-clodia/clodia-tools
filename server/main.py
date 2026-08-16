@@ -3282,7 +3282,42 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # stanza. Un surrogato che sopravvive alla cosa che surrogava diventa
             # un secondo controllo che dice altro — e due controlli sulla stessa
             # domanda divergono, come oggi hanno fatto tre volte.
-            if _gate.is_gated(name) or agent_gates(name, _ag) or _off_profile:
+            # UNA destinazione già ammessa non si fa approvare due volte.
+            # `github.push` verso un repository che sta nella whitelist egress è
+            # la stessa decisione presa due volte: il perimetro l'ha già detto sì
+            # — quella è la porta — e il gate qui chiede di nuovo la stessa cosa
+            # a ogni singola pubblicazione. Misurato su questo topic: 17 gate per
+            # fullstack-dev, di cui otto per `create_branch`. Un agente che
+            # pubblica di mestiere accumula conferme finché non si approva senza
+            # leggere, e allora il gate non protegge più niente: resta l'attrito.
+            #
+            # Vale SOLO per i verbi che hanno una destinazione dichiarata e
+            # confrontabile (`egress.spec_for`), e solo se TUTTE le destinazioni
+            # combaciano. Fuori dal perimetro il gate resta — ed è lì che serve,
+            # perché è lì che il confine si sposta. Non tocca `agent_gates` né
+            # `outside_profile`: quelli rispondono a domande diverse (un verbo
+            # sotto supervisione, un verbo fuori mestiere), e silenziarli qui
+            # sarebbe di nuovo un controllo che ne spegne un altro.
+            _perimetro_ok = False
+            if _gate.is_gated(name) and not (agent_gates(name, _ag) or _off_profile):
+                try:
+                    from . import egress as _eg
+                    _args_dest = arguments
+                    if name == "github.push" and not arguments.get("repo"):
+                        # `github.push` sa la directory, non il repository: la
+                        # destinazione è il remote di quel working tree, e senza
+                        # risolverlo il perimetro non avrebbe nulla da giudicare.
+                        # Si legge, non si scrive.
+                        from .tools import github_repo as _gh
+                        _args_dest = dict(arguments)
+                        _args_dest["repo"] = _gh.remote_url(str(arguments.get("dir") or ""))
+                    _perimetro_ok = _eg.destinations_already_allowed(name, _args_dest)
+                except Exception:  # noqa: BLE001 — in dubbio si chiede
+                    _perimetro_ok = False
+                if _perimetro_ok:
+                    LOG.info("gate saltato per '%s' (@%s): destinazione già nel "
+                             "perimetro autorizzato", name, _ag)
+            if (_gate.is_gated(name) and not _perimetro_ok) or agent_gates(name, _ag) or _off_profile:
                 if name == "web.post":
                     reason = web_post.gate_summary(arguments)
                 elif name in ("egress.allow", "ingress.allow"):
