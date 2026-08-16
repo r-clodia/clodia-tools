@@ -200,17 +200,17 @@ class TheSignatureIsNotThePermissionTests(unittest.TestCase):
     che permette di revocare senza toccare la chiave, e di ruotare la chiave
     senza chiedere di nuovo il permesso."""
 
-    def test_without_a_live_grant_there_is_no_token(self):
+    def test_without_a_grant_and_without_a_seat_there_is_no_token(self):
         with _Scena(con_grant=False) as p:
             with self.assertRaises(PermissionError) as e:
                 proxy_auth.token_for(p.assertion())
-        self.assertIn("nessun collegamento vivo", str(e.exception))
+        self.assertIn("non partecipa", str(e.exception))
 
     def test_a_valid_signature_for_another_room_gets_nothing(self):
         with _Scena() as p:
             with self.assertRaises(PermissionError) as e:
                 proxy_auth.token_for(p.assertion(topic="stanza-altrui"))
-        self.assertIn("nessun collegamento vivo", str(e.exception))
+        self.assertIn("non partecipa", str(e.exception))
 
     def test_a_revoked_grant_stops_the_key_from_working(self):
         with _Scena() as p:
@@ -218,7 +218,7 @@ class TheSignatureIsNotThePermissionTests(unittest.TestCase):
             human_mcp.revoke(gid)
             with self.assertRaises(PermissionError) as e:
                 proxy_auth.token_for(p.assertion())
-        self.assertIn("nessun collegamento vivo", str(e.exception))
+        self.assertIn("non partecipa", str(e.exception))
 
     def test_an_assertion_without_a_room_is_refused(self):
         """Un token di proxy vale per UNA stanza, e va detto quale: senza, il
@@ -227,6 +227,61 @@ class TheSignatureIsNotThePermissionTests(unittest.TestCase):
             with self.assertRaises(PermissionError) as e:
                 proxy_auth.token_for(p.assertion(topic=""))
         self.assertIn("UNA stanza", str(e.exception))
+
+
+class TheSeatIsTheAdmissionTests(unittest.TestCase):
+    """Sedere fra i partecipanti È l'ammissione: l'owner l'ha già data.
+
+    Prima servivano due atti per la stessa cosa — invitare il proxy nel topic e
+    poi coniargli un grant dal pannello MCP — e un proxy invitato, visibile fra
+    i partecipanti, restava fuori con un errore che parlava di un «collegamento»
+    che nella UI non si capiva dove creare.
+    """
+
+    def test_a_participant_proxy_gets_a_token_without_any_grant(self):
+        with _Scena(con_grant=False) as p:
+            with patch.object(proxy_auth, "_is_participant", lambda *a: True):
+                res = proxy_auth.token_for(p.assertion())
+        self.assertEqual(res["principal"], p.name)
+        claims = json.loads(res["token"].split(".", 2)[2])
+        self.assertEqual(set(claims["scoped_tools"]), set(human_mcp.PROXY_VERBS),
+                         "la sedia non allarga i verbi: restano quelli del proxy")
+
+    def test_the_tier_ceiling_still_applies_without_a_grant(self):
+        """La strada nuova non deve essere anche la più larga: sopra SEAL-2 il
+        contenuto uscirebbe verso un sistema che non controlliamo."""
+        with _Scena(con_grant=False) as p:
+            with patch.object(proxy_auth, "_is_participant", lambda *a: True):
+                with self.assertRaises(PermissionError) as e:
+                    proxy_auth.token_for(p.assertion(tier="SEAL-3"))
+        self.assertIn("SEAL-2", str(e.exception))
+
+    def test_being_removed_from_the_room_removes_the_access(self):
+        with _Scena(con_grant=False) as p:
+            with patch.object(proxy_auth, "_is_participant", lambda *a: False):
+                with self.assertRaises(PermissionError) as e:
+                    proxy_auth.token_for(p.assertion())
+        self.assertIn("partecipanti", str(e.exception))
+
+    def test_participant_is_read_from_the_room_meta(self):
+        """La funzione vera, non il suo doppio: owner o participants del meta."""
+        class _Svc:
+            def open(self, tier, name):
+                return {"meta": {"owner": "davide",
+                                 "participants": ["clodia", "crm-esterno"]}}
+
+        with patch("server.topics_api._service", lambda: _Svc()):
+            self.assertTrue(proxy_auth._is_participant("crm-esterno", "SEAL-1", "acme"))
+            self.assertTrue(proxy_auth._is_participant("davide", "SEAL-1", "acme"))
+            self.assertFalse(proxy_auth._is_participant("estraneo", "SEAL-1", "acme"))
+
+    def test_an_unreadable_room_is_not_an_admission(self):
+        class _Svc:
+            def open(self, tier, name):
+                raise RuntimeError("storage giù")
+
+        with patch("server.topics_api._service", lambda: _Svc()):
+            self.assertFalse(proxy_auth._is_participant("crm-esterno", "SEAL-1", "acme"))
 
 
 class TheGrantNoLongerCarriesASecretTests(unittest.TestCase):

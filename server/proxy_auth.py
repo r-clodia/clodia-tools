@@ -126,6 +126,32 @@ def _live_grant(principal: str, tier: str, topic: str) -> dict | None:
     return None
 
 
+def _is_participant(principal: str, tier: str, topic: str) -> bool:
+    """Il proxy siede fra i partecipanti della stanza?
+
+    **È questa l'ammissione.** Aggiungere un proxy ai partecipanti manda la
+    conversazione di quella stanza a un sistema terzo: è già l'atto sulle mura
+    che il notebook attribuisce all'owner (A11), ed è già solo l'owner a poterlo
+    fare. Chiedere in più un grant dal pannello MCP era una seconda porta per la
+    stessa ammissione — con l'effetto che un proxy invitato in un topic, e
+    visibile fra i partecipanti, non riusciva a entrare e l'errore parlava di un
+    «collegamento» che nella UI non era chiaro dove si creasse.
+
+    Non allarga niente: i verbi restano `PROXY_VERBS` (parla e legge il canale,
+    nient'altro) e il tetto di tier resta quello di `human_mcp`. Toglie una
+    porta, non un controllo — e la revoca diventa quella che chiunque cercherebbe
+    per prima: togliere il proxy dai partecipanti.
+    """
+    from .topics_api import _service
+
+    try:
+        meta = _service().open(tier, topic).get("meta") or {}
+    except Exception:  # noqa: BLE001 — topic illeggibile → nessuna ammissione
+        return False
+    return (principal == meta.get("owner")
+            or principal in (meta.get("participants") or []))
+
+
 def verify_assertion(assertion: str) -> dict:
     """Verifica l'asserzione e ritorna il suo payload. Solleva `PermissionError`.
 
@@ -197,10 +223,23 @@ def token_for(assertion: str) -> dict:
                               "vale per UNA stanza, e va detto quale")
     grant = _live_grant(principal, tier, topic)
     if grant is None:
-        raise PermissionError(
-            f"nessun collegamento vivo per '{principal}' su {tier}/{topic}: "
-            "la firma prova chi sei, non che tu possa entrare — l'owner deve "
-            "collegare il proxy alla stanza (o l'ha revocato)")
+        # Nessun grant esplicito: vale la sedia. Se il proxy è fra i
+        # partecipanti l'owner l'ha già ammesso, e chiedergli di ripetersi da un
+        # secondo pannello è la porta in più che teneva fuori un proxy invitato.
+        if not _is_participant(principal, tier, topic):
+            raise PermissionError(
+                f"'{principal}' non partecipa a {tier}/{topic}: la firma prova "
+                "chi sei, non che tu possa entrare — l'owner deve aggiungere il "
+                "proxy ai partecipanti della stanza (o te ne ha tolto)")
+        # Il tetto di tier è quello dei client MCP e vale qui come là: il
+        # contenuto esce verso un sistema che non controlliamo. Il grant lo
+        # applicava al momento della coniazione; senza grant va applicato ora,
+        # altrimenti la strada nuova sarebbe anche la più larga.
+        human_mcp._check_tier(tier, provider=f"proxy:{principal}", consenso=True,
+                              principal_kind="proxy")
+        grant = {"id": f"participant:{tier}/{topic}", "carrier": "clodia"}
+        LOG.info("proxy %s: ammesso su %s/%s dalla lista partecipanti "
+                 "(nessun grant esplicito)", principal, tier, topic)
 
     verbi = human_mcp.verbs_for("proxy")
     token = pki_mint.mint_session_token(
