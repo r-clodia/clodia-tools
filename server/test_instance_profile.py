@@ -84,7 +84,9 @@ class InstanceProfileGatewayTest(unittest.TestCase):
 
     def test_topic_default_participants(self) -> None:
         ip.load(force=True)
-        self.assertEqual(ip.topic_default_participants(), ["clodia"])
+        # Il segretario è partecipante di default dal pack 6.4.0 (verbalizza lo
+        # stato del topic): l'atteso era rimasto a prima di quella decisione.
+        self.assertEqual(ip.topic_default_participants(), ["clodia", "segretario"])
         self._write("topics_defaults: {participants: [clodia, commercialista]}\n")
         self.assertEqual(ip.topic_default_participants(), ["clodia", "commercialista"])
 
