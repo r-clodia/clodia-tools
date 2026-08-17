@@ -685,6 +685,39 @@ async def mcp_clients(request: Request):
         return JSONResponse({"error": str(e)[:400]}, status_code=400)
 
 
+async def clear_taint(request):
+    """Azzera il primo bit di un canale: l'owner approva lo stato corrente.
+
+    Il taint è un EVENTO, e questo è il suo unico interruttore legittimo — fino a
+    oggi esisteva solo dentro l'approvazione di un gate di contesto, quindi
+    l'owner poteva declassificare un canale soltanto approvando un'uscita. Il
+    «reset trifecta» ha bisogno della stessa cosa senza un'uscita da approvare:
+
+        «il reset approva lo stato corrente come sicuro e da lì si riparte a
+         misurare le contaminazioni ed i rischi» (Davide, 17 ago 2026)
+
+    Le sorgenti non si perdono: `clear()` le ARCHIVIA, così l'audit può ancora
+    dire cosa era entrato prima dell'approvazione. Un azzeramento che cancella le
+    prove non è un'approvazione, è una gomma.
+
+    Rotta INTERNA: la chiama l'agent-server dopo aver verificato che chi chiede è
+    l'owner del canale. Il gateway non conosce i ruoli umani di uno scope, quindi
+    non può decidere qui — e fingere di deciderlo sarebbe un controllo che non
+    controlla niente.
+    """
+    tier = request.path_params["tier"]
+    name = request.path_params["name"]
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — corpo assente: chi ha chiesto resta ignoto
+        body = {}
+    by = str((body or {}).get("by") or "").strip()
+    from . import taint as _t
+    st = _t.clear(f"{tier}/{name}", by=by)
+    LOG.info("taint azzerato su %s/%s da %s", tier, name, by or "(ignoto)")
+    return JSONResponse({"ok": True, "taint": st})
+
+
 routes = [
     Route("/internal/topics/export", export_topics, methods=["GET"]),
     Route("/internal/topics/import", import_topics, methods=["POST"]),
@@ -693,6 +726,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}", open_topic, methods=["GET"]),
     Route("/internal/topics/{tier}/{name}/file", open_file, methods=["GET"]),
     Route("/internal/topics/{tier}/{name}/messages", list_messages, methods=["GET"]),
+    Route("/internal/topics/{tier}/{name}/taint/clear", clear_taint, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/messages", post_message, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/archive", archive_topic, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/portable", set_portable, methods=["POST"]),
