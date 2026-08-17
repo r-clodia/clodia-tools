@@ -941,10 +941,29 @@ async def github_connect(request: Request):
         "headers": {"Authorization": "Bearer ${VAULT:github_pat}"},
     })
     whitelist.CONFIG["mcp_backends"] = backends
+    # I verbi che il collegamento concede a clodia, per NOME. Prima qui c'era
+    # `github.*`, e una wildcard sul namespace di un backend esterno concede
+    # anche ciò che quel backend aggiungerà domani: misurato il 17 ago 2026,
+    # `delete_repository`, `force_push` e `delete_branch` risultavano concessi a
+    # chi aveva la wildcard. Ciò che è irreversibile non si gata, non si concede
+    # (decision-record 35) — e una lista esplicita fa nascere negato ogni verbo
+    # nuovo, che è la direzione giusta in cui sbagliare.
+    _GH_CONCESSI = [
+        "github.clone", "github.pull", "github.push", "github.pull_request",
+        "github.add_issue_comment", "github.get_commit", "github.get_file_contents",
+        "github.get_pull_request", "github.issue_read", "github.issue_write",
+        "github.list_branches", "github.list_commits", "github.list_issues",
+        "github.list_pull_requests", "github.list_releases", "github.list_tags",
+        "github.search_code", "github.search_commits", "github.search_issues",
+    ]
     agents = whitelist.CONFIG.setdefault("agents", {})
     ct = agents.setdefault("clodia", {}).setdefault("allowed_tools", [])
-    if "github.*" not in ct:
-        ct.append("github.*")
+    # Toglie una wildcard lasciata da un collegamento precedente: senza questo,
+    # chi si era collegato prima del fix se la porterebbe dietro per sempre.
+    ct[:] = [v for v in ct if v != "github.*"]
+    for v in _GH_CONCESSI:
+        if v not in ct:
+            ct.append(v)
     whitelist.save_config(); whitelist.reload_config(); proxy.clear_cache()
     LOG.info("github_connect: PAT depositato + backend github registrato (len=%d)", len(pat))
     return JSONResponse({"connected": True})
