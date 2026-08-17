@@ -129,6 +129,52 @@ async def whitelist_view(request: Request):
     return JSONResponse(egress.summary())
 
 
+async def whitelist_edit(request):
+    """Aggiunge o rimuove una voce dalle liste globali, per conto dell'OWNER.
+
+    Richiesta dell'owner, 17 ago 2026: «devo poter inserire un egress o ingress
+    anche a mano». Fino a oggi le liste si riempivano solo attraverso il dialog
+    del gate — che è il posto giusto quando la destinazione arriva da un agente
+    che la chiede, e nessun posto quando l'owner sa già cosa vuole censire (le
+    cento fonti di un digest non passano da cento dialog).
+
+    La validazione NON è qui: la fa `egress.allow`, che rifiuta gli schemi della
+    direzione sbagliata (`mailfrom:` in uscita) e le voci degeneri
+    (`gdrive:folder/`, che aprirebbe l'intero Drive). Duplicarla qui vorrebbe dire
+    due regole che divergono al primo cambiamento.
+
+    Rotta INTERNA: chi verifica che il richiedente sia admin è l'agent-server. Il
+    gateway non conosce i ruoli umani, e un controllo che non può fare sarebbe un
+    controllo per finta.
+    """
+    direzione = request.path_params["direction"]
+    if direzione not in ("egress", "ingress"):
+        return JSONResponse({"error": "direction_invalid"}, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    uri = str((body or {}).get("uri") or "").strip()
+    if not uri:
+        return JSONResponse({"error": "uri_required"}, status_code=400)
+    azione = request.path_params["action"]
+    from . import egress as eg
+    try:
+        if azione == "allow":
+            out = eg.allow(direzione, uri)
+        elif azione == "revoke":
+            out = eg.revoke(direzione, uri)
+        else:
+            return JSONResponse({"error": "action_invalid"}, status_code=400)
+    except ValueError as e:
+        # Un URI rifiutato è un errore dell'utente, non del server: torna 400 col
+        # MOTIVO, perché «non valido» non dice come correggerlo.
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"ok": True, **out})
+
+
 routes = [Route("/internal/egress", profile, methods=["GET"]),
           Route("/internal/egress/whitelist", whitelist_view, methods=["GET"]),
+          Route("/internal/egress/whitelist/{direction}/{action}", whitelist_edit,
+                methods=["POST"]),
           Route("/internal/observations", observations, methods=["GET"])]
