@@ -45,6 +45,20 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 
+#: Quanto entra nel CONTESTO per default. Non è «quanto è grande una pagina» —
+#: quello era il criterio con cui l'avevo scelto, ed era sbagliato. Un risultato
+#: di tool entra nella conversazione della sessione e ci RESTA: costa una volta
+#: per essere prodotto e N volte per essere riletto, una per ogni round trip
+#: successivo del turno. 512 KB sono ~130.000 token riletti a ogni azione: per un
+#: digest che legge venticinque fonti il conto è la ragione per cui un turno
+#: prende minuti (clodia-platform#228).
+#:
+#: 64 KB (~16.000 token) bastano per un feed e per la parte utile di quasi ogni
+#: pagina. Chi ha bisogno del resto lo chiede con `max_bytes`, e allora è una
+#: decisione visibile invece del default.
+DEFAULT_RESPONSE_BYTES = 64 * 1024
+#: Tetto fisico: oltre questo non si va nemmeno chiedendolo. Resta il valore di
+#: prima, così `max_bytes` copre i casi che prima funzionavano.
 MAX_RESPONSE_BYTES = 512 * 1024
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_TIMEOUT_SECONDS = 30.0
@@ -159,10 +173,25 @@ def _audit(agent: str, target: str, result: str, **extra) -> None:
         pass
 
 
+def _limite(arguments: dict) -> int:
+    """Byte da tenere: `max_bytes` se chiesto, entro il tetto fisico."""
+    grezzo = arguments.get("max_bytes")
+    if grezzo in (None, ""):
+        return DEFAULT_RESPONSE_BYTES
+    try:
+        n = int(grezzo)
+    except (TypeError, ValueError):
+        raise ValueError("max_bytes deve essere un intero di byte") from None
+    if n <= 0:
+        raise ValueError("max_bytes deve essere positivo")
+    return min(n, MAX_RESPONSE_BYTES)
+
+
 def fetch(arguments: dict, *, agent: str) -> dict:
     url = str(arguments.get("url") or "").strip()
     display, host, port, _scheme = _safe_url(url)
     headers = _headers(arguments)
+    limite = _limite(arguments)
     timeout = min(
         max(float(arguments.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)), 0.1),
         MAX_TIMEOUT_SECONDS,
@@ -186,7 +215,7 @@ def fetch(arguments: dict, *, agent: str) -> dict:
                 captured = 0
                 truncated = False
                 for chunk in response.iter_bytes():
-                    remaining = MAX_RESPONSE_BYTES - captured
+                    remaining = limite - captured
                     if len(chunk) > remaining:
                         chunks.append(chunk[:remaining])
                         captured += remaining
@@ -211,6 +240,14 @@ def fetch(arguments: dict, *, agent: str) -> dict:
             "truncated": truncated,
             "response_bytes": captured,
         }
+        if truncated:
+            # Un troncamento silenzioso fa concludere all'agente che la pagina
+            # finisce lì. Qui gli si dice che è tagliata E come chiedere il
+            # resto, che è l'unica forma in cui un limite non diventa un errore
+            # di lettura.
+            out["note"] = (
+                f"corpo tagliato a {captured} byte (default {DEFAULT_RESPONSE_BYTES}): "
+                f"rilancia con max_bytes fino a {MAX_RESPONSE_BYTES} se serve il resto")
         if redirected:
             # Il redirect NON è seguito: dirlo esplicitamente, altrimenti un
             # corpo vuoto con status 301 si legge come «la pagina è vuota».
