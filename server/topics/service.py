@@ -2256,7 +2256,20 @@ class TopicService:
         msg = {
             "id": f"{now.strftime('%Y%m%d-%H%M%S')}-{token}",
             "author": author, "kind": kind, "text": text or "",
-            "attachments": attachments or [], "ts": now.isoformat(timespec="seconds"),
+            # MICROSECONDI, non secondi. I messaggi si ordinano per `ts`, e due
+            # post nello stesso secondo — un turno che risponde subito, un agente
+            # che ne scrive due di fila — restavano senza un ordine definito: il
+            # tie-break cadeva sull'`id`, che porta un token CASUALE, quindi la
+            # stessa conversazione poteva essere letta in due ordini diversi. I
+            # millisecondi non bastano: due scritture consecutive ci stanno
+            # dentro comodamente (misurato — il test restava rosso una volta su
+            # due).
+            #
+            # Il confronto ISO resta lessicografico e retro-compatibile: un `ts`
+            # vecchio ("…T10:00:00") precede uno nuovo dello stesso secondo
+            # ("…T10:00:00.000500"), che è l'ordine giusto fra un messaggio
+            # scritto prima e uno scritto dopo.
+            "attachments": attachments or [], "ts": now.isoformat(timespec="microseconds"),
             "mentions": mentions.extract_mentions(text or ""),
         }
         self.s.write(f"{self._dir(tier, name)}/.messages/{msg['id']}.json",
@@ -2285,7 +2298,10 @@ class TopicService:
                 out.append(json.loads(self.s.read(f"{d}/.messages/{e.name}").data.decode()))
             except Exception:  # noqa: BLE001
                 continue
-        out.sort(key=lambda m: m.get("ts", ""))
+        # Chiave secondaria `id`: a parità di istante l'ordine dev'essere
+        # comunque stabile, o la stessa lista arriva in due ordini diversi a due
+        # lettori — ed è così che questo test è stato intermittente per mesi.
+        out.sort(key=lambda m: (m.get("ts", ""), m.get("id", "")))
         return out[-limit:] if limit else out
 
     # ------------------------------------------------------------------ #

@@ -57,7 +57,10 @@ class RuntimeIntrospectionTests(unittest.TestCase):
         out = runtime.current_user()
         self.assertEqual(out["user"]["name"], "owner")
         self.assertEqual(out["user"]["role"], "superadmin")
-        self.assertEqual(sorted(h["name"] for h in out["humans"]), ["owner", "ospite"])
+        # `sorted()` ordina, quindi l'atteso va ordinato: "ospite" < "owner".
+        # Il test confrontava una lista ordinata con una scritta a mano nell'ordine
+        # in cui erano stati creati, ed era rosso da allora.
+        self.assertEqual(sorted(h["name"] for h in out["humans"]), ["ospite", "owner"])
 
     def test_current_user_none_when_no_humans(self) -> None:
         runtime._get = lambda path: {"agents": [{"name": "clodia", "type": "super"}]}
