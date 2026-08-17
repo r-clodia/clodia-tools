@@ -2625,6 +2625,25 @@ def _reply_recipient(arguments: dict) -> str:
     return _eg.address_of(str(src))
 
 
+def _push_destination(arguments: dict) -> dict:
+    """`github.push` con il repository esplicitato, per chi deve giudicarne la
+    destinazione.
+
+    Il verbo riceve una DIRECTORY: il repository sta nel remote di quel working
+    tree. Senza risolverlo il PDP vede «nessuna destinazione» e nega — che è la
+    direzione giusta per un dubbio, ma qui il dubbio è nostro, non del chiamante.
+
+    Stessa forma di `_reply_recipient` e per la stessa ragione: una lettura in
+    più che avviene SOLO per il verbo che ne ha bisogno, al call-site, invece di
+    far indovinare il PDP.
+    """
+    if arguments.get("repo"):
+        return arguments
+    from .tools import github_repo as _gh
+    url = _gh.remote_url(str(arguments.get("dir") or ""))
+    return {**arguments, "repo": url} if url else arguments
+
+
 async def _require_gate_consent(
     agent: str, gate_key: str, *, consume: bool, reason: str = "",
     allow_delegation: bool = True,
@@ -3302,15 +3321,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if _gate.is_gated(name) and not (agent_gates(name, _ag) or _off_profile):
                 try:
                     from . import egress as _eg
-                    _args_dest = arguments
-                    if name == "github.push" and not arguments.get("repo"):
-                        # `github.push` sa la directory, non il repository: la
-                        # destinazione è il remote di quel working tree, e senza
-                        # risolverlo il perimetro non avrebbe nulla da giudicare.
-                        # Si legge, non si scrive.
-                        from .tools import github_repo as _gh
-                        _args_dest = dict(arguments)
-                        _args_dest["repo"] = _gh.remote_url(str(arguments.get("dir") or ""))
+                    # Stessa risoluzione che userà il PDP: due copie della
+                    # stessa domanda divergono, e questa settimana è successo
+                    # tre volte.
+                    _args_dest = (_push_destination(arguments)
+                                  if name == "github.push" else arguments)
                     _perimetro_ok = _eg.destinations_already_allowed(name, _args_dest)
                 except Exception:  # noqa: BLE001 — in dubbio si chiede
                     _perimetro_ok = False
@@ -3378,6 +3393,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             _eargs = arguments
             if name == "email.reply" and not (arguments.get("to") or ""):
                 _eargs = {**arguments, "to": _reply_recipient(arguments)}
+            elif name == "github.push":
+                # Senza questa riga il PDP vede un verbo con destinazione ignota
+                # e nega: è ciò che è successo il 17 ago 2026 appena `push` è
+                # entrato nel perimetro — reso governato e insieme impossibile.
+                _eargs = _push_destination(arguments)
             # In una sessione non presidiata il modo `gate` non ha senso: la
             # richiesta resterebbe appesa fino al timeout. Si nega.
             from . import observe as _obs2
