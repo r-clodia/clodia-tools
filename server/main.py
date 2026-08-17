@@ -3170,10 +3170,26 @@ def _context_gate_needed(verb: str, agent: str, egress_verdict: dict) -> tuple[s
     la conversazione. Chiamare l'agent-server nel percorso caldo per riscoprirlo
     aggiungerebbe una dipendenza di rete a ogni verbo di uscita.
 
-    Condizione 2 di #77 — la deduplicazione si valuta sul gate **effettivamente
-    presidiato**: si omette solo se l'azione si fermerà davvero davanti a un umano
-    in questo turno. Se il gate del verbo è coperto da una delega prefirmata, o se
-    la destinazione è già in whitelist, nessuno guarda → questo gate DEVE scattare.
+    UNA DESTINAZIONE CENSITA È PERIMETRO (regola dell'owner, 17 ago 2026):
+
+        «se la destinazione è censita in whitelist allora va considerata come
+         parte del perimetro e non deve essere un segnale che fa scattare il gate
+         o incrementare il trifecta»
+
+    Questo ROVESCIA la lettura precedente della condizione 2 di #77, che diceva:
+    se la destinazione è già in whitelist nessuno guarda, quindi questo gate DEVE
+    scattare. Conseguenza misurata su `fullstack-dev`: censire `github.com/
+    r-clodia/*` non spegneva niente — lo rendeva obbligatorio. Il ciclo di lavoro
+    di un agente di sviluppo lo ri-armava da sé, perché `github.issue_read` e
+    `topic.read_file` contaminano e `github.push` è l'uscita: leggi la issue →
+    contaminato → push → gate → approvi → declassificato → leggi il file dopo →
+    di nuovo. Un'approvazione per ciclo, per progetto. Un gate che si ripete a
+    ogni giro è la definizione di consent fatigue, e si approva per riflesso.
+
+    Restano presidiati i due casi in cui la destinazione NON è censita e nessuno
+    guarda comunque: `report` (would_deny — fuori lista, non bloccata) e un tipo
+    non controllato (`checked: False`, incluso il modo `off`). Lì non c'è nessuna
+    dichiarazione di perimetro da rispettare: è l'assenza di confinamento.
     """
     from . import egress as _eg
     if not _eg.spec_for(verb):
@@ -3181,6 +3197,13 @@ def _context_gate_needed(verb: str, agent: str, egress_verdict: dict) -> tuple[s
     if egress_verdict.get("action") == "gate":
         # La destinazione è nuova: l'umano vede già questa chiamata. Un secondo
         # dialog sullo stesso invio è consent fatigue, non controllo in più.
+        return None, ""
+    if (egress_verdict.get("checked") and egress_verdict.get("allowed")
+            and not egress_verdict.get("would_deny")):
+        # Destinazione dichiarata: l'uscita è dentro il perimetro. Non è una
+        # deduplicazione — è che non c'è nulla da chiedere. Chi ha censito quella
+        # destinazione ha già deciso che scriverci è ammesso, e il canale
+        # contaminato non cambia dove stanno andando i dati.
         return None, ""
     from . import taint as _t
     from .whitelist import current_chat
