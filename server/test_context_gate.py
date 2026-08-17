@@ -60,13 +60,42 @@ class ContextGateTests(unittest.TestCase):
         key, _ = self._need("email.send", {"action": "gate"})
         self.assertIsNone(key)
 
-    def test_it_DOES_gate_when_the_destination_is_already_whitelisted(self):
-        """This is the risk the whitelist does not cover: egress toward a
-        legitimate destination of data collected under injection. It is also the
-        case #77 condition 2 was written for — the verb passes without stopping,
-        so nobody is watching unless this gate fires."""
+    def test_a_whitelisted_destination_is_perimeter_and_does_not_gate(self):
+        """The owner's rule, 17 Aug 2026:
+
+            «se la destinazione è censita in whitelist allora va considerata come
+             parte del perimetro e non deve essere un segnale che fa scattare il
+             gate o incrementare il trifecta»
+
+        This test asserted the OPPOSITE until today, on the reading that a
+        whitelisted destination means nobody is watching. Measured consequence on
+        `fullstack-dev`: whitelisting `github.com/r-clodia/*` did not silence
+        anything — it made this gate mandatory. The work cycle re-armed it by
+        itself (`github.issue_read` taints, `github.push` exits), so every single
+        cycle cost one approval. A gate that fires every round is approved by
+        reflex, which is the failure #77 condition 1 exists to avoid.
+        """
         taint.mark(self.CHAT, "verb", "email.read")
-        key, _ = self._need("email.send", {"action": "allow", "checked": True})
+        key, _ = self._need("email.send",
+                            {"action": "allow", "checked": True, "allowed": True})
+        self.assertIsNone(key)
+
+    def test_report_mode_still_gates_because_nothing_was_declared(self):
+        """`would_deny`: the destination is NOT in the list — it simply was not
+        blocked. There is no declaration of perimeter to honour here, and nobody
+        is watching: this is the case condition 2 was really written for."""
+        taint.mark(self.CHAT, "verb", "email.read")
+        key, _ = self._need("email.send",
+                            {"action": "allow", "checked": True, "allowed": False,
+                             "would_deny": True})
+        self.assertIsNotNone(key)
+
+    def test_an_unchecked_type_still_gates(self):
+        """`checked: False` — mode `off`, or a type with no rules at all. The
+        absence of confinement is not a perimeter: reading it as one would turn
+        "we control nothing" into "everything is declared safe"."""
+        taint.mark(self.CHAT, "verb", "email.read")
+        key, _ = self._need("email.send", {"action": "allow", "checked": False})
         self.assertIsNotNone(key)
 
     def test_every_egress_type_is_covered_not_just_email(self):
