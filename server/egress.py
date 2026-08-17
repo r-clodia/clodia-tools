@@ -256,6 +256,18 @@ def canonical(uri: str) -> str:
     u = (uri or "").strip()
     if not u:
         return ""
+    # Indirizzi in MINUSCOLO. Non è cosmetica: `_emails()` estrae la destinazione
+    # di una chiamata con `.lower()`, quindi una voce in whitelist con una
+    # maiuscola non combacerebbe MAI — approvata e inefficace. Finché le liste si
+    # riempivano solo dal dialog del gate il caso non si presentava (l'URI lo
+    # costruiva il codice); da quando l'owner le scrive a mano è la prima cosa che
+    # succede, e il sintomo sarebbe «l'ho messa in lista e chiede ancora».
+    #
+    # Il dominio è case-insensitive per standard; la local part in teoria no, ma
+    # nessun provider reale la distingue e soprattutto il confronto a valle è già
+    # in minuscolo: la coerenza fra i due lati vale più della lettera dell'RFC.
+    if u.lower().startswith(("mailto:", "mailfrom:")):
+        return u.lower()
     for rx, to in _CANON:
         m = rx.match(u)
         if m:
