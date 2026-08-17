@@ -130,7 +130,7 @@ class WebFetchTests(unittest.TestCase):
     def test_response_is_bounded_and_audited(self):
         with TemporaryDirectory() as tmp:
             seen: dict = {}
-            grosso = b"x" * (web_fetch.MAX_RESPONSE_BYTES + 5000)
+            grosso = b"x" * (web_fetch.DEFAULT_RESPONSE_BYTES + 5000)
 
             def handler(request: httpx.Request) -> httpx.Response:
                 return httpx.Response(200, headers={"content-type": "text/plain"},
@@ -143,7 +143,9 @@ class WebFetchTests(unittest.TestCase):
                                          agent="clodia")
 
             self.assertTrue(result["truncated"])
-            self.assertEqual(result["response_bytes"], web_fetch.MAX_RESPONSE_BYTES)
+            # il limite di default, non il tetto fisico: quello si raggiunge solo
+            # chiedendolo con `max_bytes` (vedi ContextCostTests)
+            self.assertEqual(result["response_bytes"], web_fetch.DEFAULT_RESPONSE_BYTES)
             righe = [json.loads(x) for x in
                      (Path(tmp) / "web-fetch-audit.log").read_text().splitlines()]
             self.assertEqual(righe[-1]["result"], "OK")
@@ -182,6 +184,64 @@ class WebFetchTests(unittest.TestCase):
             with self.subTest(url=url):
                 with self.assertRaises(ValueError):
                     web_fetch.fetch({"url": url}, agent="clodia")
+
+
+class ContextCostTests(unittest.TestCase):
+    """Quanto di una pagina entra nel CONTESTO, e come si chiede il resto.
+
+    clodia-platform#228. Il primo limite era 512 KB, scelto guardando «quanto è
+    grande una pagina». Criterio sbagliato: un risultato di tool entra nella
+    conversazione della sessione e ci RESTA — costa una volta per essere prodotto
+    e una per ogni round trip successivo del turno. 512 KB sono ~130.000 token
+    riletti a ogni azione, e su un digest da venticinque fonti è la ragione per
+    cui un turno prende minuti.
+    """
+
+    def _fetch(self, contenuto: bytes, **extra):
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, headers={"content-type": "text/plain"},
+                                  content=contenuto)
+
+        with TemporaryDirectory() as tmp, \
+                patch.object(web_fetch.httpx, "Client", _client(handler, seen)), \
+                patch.object(web_fetch, "_public_ips", return_value=["93.184.216.34"]), \
+                patch.dict(os.environ, {"CLODIA_VAULT_DIR": tmp}):
+            return web_fetch.fetch({"url": "https://fidata.example/x", **extra},
+                                   agent="clodia")
+
+    def test_the_default_is_the_small_one(self) -> None:
+        r = self._fetch(b"y" * (web_fetch.MAX_RESPONSE_BYTES + 1000))
+        self.assertEqual(web_fetch.DEFAULT_RESPONSE_BYTES, r["response_bytes"])
+        self.assertTrue(r["truncated"])
+
+    def test_a_truncated_body_says_how_to_ask_for_the_rest(self) -> None:
+        """Un taglio silenzioso fa concludere che la pagina finisce lì: è il modo
+        in cui un limite diventa un errore di lettura."""
+        r = self._fetch(b"y" * (web_fetch.DEFAULT_RESPONSE_BYTES + 10))
+        self.assertIn("max_bytes", r.get("note", ""))
+        self.assertIn(str(web_fetch.MAX_RESPONSE_BYTES), r.get("note", ""))
+
+    def test_max_bytes_raises_the_limit_up_to_the_ceiling(self) -> None:
+        grosso = b"y" * (web_fetch.MAX_RESPONSE_BYTES + 5000)
+        r = self._fetch(grosso, max_bytes=200_000)
+        self.assertEqual(200_000, r["response_bytes"])
+        # oltre il tetto fisico non si va nemmeno chiedendolo
+        r2 = self._fetch(grosso, max_bytes=10_000_000)
+        self.assertEqual(web_fetch.MAX_RESPONSE_BYTES, r2["response_bytes"])
+
+    def test_a_small_page_is_untouched_and_says_nothing(self) -> None:
+        r = self._fetch(b"ciao")
+        self.assertFalse(r["truncated"])
+        self.assertEqual("ciao", r["body"])
+        self.assertNotIn("note", r)
+
+    def test_a_nonsense_max_bytes_is_refused_not_ignored(self) -> None:
+        for cattivo in ("molti", 0, -5):
+            with self.subTest(max_bytes=cattivo):
+                with self.assertRaises(ValueError):
+                    self._fetch(b"x", max_bytes=cattivo)
 
 
 if __name__ == "__main__":

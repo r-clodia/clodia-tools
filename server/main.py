@@ -343,7 +343,7 @@ _WEB_TOOLS: list[Tool] = [
             "Telegram, POST) chiederà conferma umana. Non segue i redirect: li "
             "riporta, perché la destinazione va vagliata per conto suo. Solo "
             "destinazioni pubbliche (niente rete interna), solo contenuto testuale, "
-            "risposta troncata a 512 KB."
+            "corpo tenuto fino a 64 KB (alzabile con `max_bytes`, tetto 512 KB): un risultato grosso resta nel contesto e viene riletto a ogni azione successiva del turno."
         ),
         inputSchema={
             "type": "object",
@@ -358,6 +358,14 @@ _WEB_TOOLS: list[Tool] = [
                 "timeout_seconds": {
                     "type": "number", "minimum": 0.1, "maximum": 30,
                     "description": "timeout, massimo 30 secondi",
+                },
+                "max_bytes": {
+                    "type": "integer", "minimum": 1, "maximum": 524288,
+                    "description": ("byte di corpo da tenere; default 65536. Il "
+                                    "risultato resta nel contesto e viene riletto a "
+                                    "ogni azione successiva del turno, quindi chiedi "
+                                    "di più solo se il default ha tagliato ciò che "
+                                    "serve — la risposta lo dice."),
                 },
             },
             "required": ["url"],
