@@ -1945,6 +1945,21 @@ class TopicService:
         toglierle sarebbe lasciarci un file vuoto che continua a occupare spazio
         nel contesto di ogni turno.
 
+        La rimozione è però **soggetta al lock come la scrittura, e va nel
+        cestino**. Prima era l'unica operazione di questo file a saltare
+        entrambe le protezioni:
+
+        - **senza lock**: `base_version` veniva ignorata sul ramo vuoto, quindi
+          un client con la bozza vuota in mano cancellava anche un testo scritto
+          da qualcun altro un istante prima. È lo scenario concreto della webui,
+          dove un `loadRules()` fallito lascia la bozza a `''` e il pulsante
+          Salva attivo: si apriva il pannello, l'errore compariva, si salvava, e
+          il contenuto era perso;
+        - **senza cestino**: `delete()` è un `unlink`. La copia LEGACY viene
+          cestinata «perché una migrazione non deve poter perdere il lavoro di
+          nessuno» — e quella autorevole, che è la più preziosa delle due, era
+          la sola distrutta in modo definitivo. Ora anche lei passa da `.trash`.
+
         La migrazione lascia dietro di sé la copia legacy in `files/`; qui viene
         cestinata, perché due file con lo stesso nome e autorità diversa sono
         precisamente ciò che questa modifica esiste per eliminare.
@@ -1952,14 +1967,26 @@ class TopicService:
         meta, _ = self._read_meta(tier, name)
         self._assert_content_available(meta)
         p = self._agents_p(tier, name)
-        if (text or "").strip():
+        rimuovi = not (text or "").strip()
+        if not rimuovi:
             new_v = self.s.write(p, (text or "").encode(), if_version=base_version)
         else:
             if self.s.exists(p):
-                self.s.delete(p)
+                # Stesso lock della scrittura: cancellare è una modifica, e una
+                # modifica su una versione che non è più quella corrente va
+                # rifiutata, non applicata.
+                if base_version is not None:
+                    cur = self._read_agents_md(tier, name)[1]
+                    if cur != base_version:
+                        raise VersionConflict(
+                            f"versione cambiata per {p}: attesa {base_version}, "
+                            f"trovata {cur} — rileggi le istruzioni prima di "
+                            "rimuoverle")
+                ts = _now().strftime("%Y%m%d-%H%M%S")
+                self.s.move(p, f"{self._dir(tier, name)}/.trash/{ts}/AGENTS.md")
             new_v = None
         self._retire_legacy_agents_md(tier, name)
-        return {"agents_md_version": new_v, "removed": not (text or "").strip()}
+        return {"agents_md_version": new_v, "removed": rimuovi}
 
     def _retire_legacy_agents_md(self, tier: str, name: str) -> bool:
         """Toglie di mezzo `files/AGENTS.md`, se c'è. Best-effort.

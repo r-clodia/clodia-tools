@@ -87,6 +87,45 @@ class WriteePathTests(Base):
         self.assertIsNone(self.svc.open("SEAL-1", "acme")["agents_md"])
 
 
+    def test_removing_them_puts_the_content_in_the_trash(self):
+        """La rimozione non distrugge: il testo va nel cestino del topic.
+
+        Era l'unica operazione di questo file a cancellare per davvero. La copia
+        LEGACY viene cestinata «perché una migrazione non deve poter perdere il
+        lavoro di nessuno» — e quella AUTOREVOLE, la più preziosa delle due, era
+        la sola distrutta con un `unlink`. Chi la perdeva non aveva dove
+        ripescarla, ed è la ragione per cui un AGENTS.md scomparso non lascia
+        traccia nemmeno a cercarla.
+        """
+        self.svc.save_agents_md("SEAL-1", "acme", "# regole preziose", base_version=None)
+        self.svc.save_agents_md("SEAL-1", "acme", "", base_version=None)
+        self.assertIsNone(self.svc.open("SEAL-1", "acme")["agents_md"])
+        cestinati = list((self.root / "SEAL-1" / "acme" / ".trash").glob("*/AGENTS.md"))
+        self.assertEqual(1, len(cestinati), "il contenuto rimosso non è recuperabile")
+        self.assertEqual("# regole preziose", cestinati[0].read_text(encoding="utf-8"))
+
+    def test_removing_on_a_stale_version_is_refused(self):
+        """IL DIFETTO, in forma di test.
+
+        `base_version` era ignorata sul ramo vuoto: un client con la bozza vuota
+        in mano cancellava anche un testo scritto da qualcun altro un istante
+        prima, senza conflitto e senza cestino. È lo scenario concreto della
+        webui: `loadRules()` fallisce, la bozza resta `''`, il pulsante Salva è
+        attivo — si salva e il contenuto è perso.
+
+        Cancellare è una modifica. Una modifica su una versione che non è più
+        quella corrente si rifiuta, come per la scrittura.
+        """
+        self.svc.save_agents_md("SEAL-1", "acme", "primo", base_version=None)
+        v1 = self.svc.open("SEAL-1", "acme")["agents_md_version"]
+        self.svc.save_agents_md("SEAL-1", "acme", "secondo di un altro", base_version=v1)
+        with self.assertRaises(Exception):
+            self.svc.save_agents_md("SEAL-1", "acme", "", base_version=v1)
+        self.assertEqual("secondo di un altro",
+                         self.svc.open("SEAL-1", "acme")["agents_md"],
+                         "la rimozione stantia ha cancellato il testo di un altro")
+
+
 class OptimisticLockTests(Base):
     def test_a_stale_version_is_refused(self):
         """Stesso contratto del summary: due autori concorrenti non si
