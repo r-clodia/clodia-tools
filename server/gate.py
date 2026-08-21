@@ -160,7 +160,13 @@ _DEFAULT_GATED_EXACT = frozenset({
     "web.post",
     # Uscita di codice dallo scope. Il perimetro (la lista dei repository) dice
     # DOVE si può spingere; il gate dice che spingere è un atto, non un dettaglio
-    # del lavoro. Sono due controlli diversi: il primo non sostituisce il secondo.
+    # del lavoro.
+    #
+    # Erano due controlli indipendenti, e dal 17 ago 2026 non lo sono più: verso
+    # una destinazione CENSITA il gate non chiede (`needs_consent`), perché
+    # sarebbe la stessa decisione presa due volte — otto card per `create_branch`
+    # in un giorno solo. Restano gated i push FUORI dal perimetro, che è dove il
+    # confine si sposta. Chi rimette il gate incondizionato qui riapre #254.
     "github.push", "github.pull_request",
     # Allargamento delle whitelist: `allow` rende silenziosa una destinazione o
     # una fonte da lì in avanti, quindi è più privilegiato di qualunque singola
@@ -192,6 +198,68 @@ def gated_verbs_spec() -> dict:
     """Per la UI/introspezione: l'insieme gated effettivo."""
     prefixes, exact = _configured()
     return {"prefixes": list(prefixes), "exact": sorted(exact)}
+
+
+#: Verbi `outward` a cui il perimetro NON risponde, benché una destinazione ce
+#: l'abbiano. `web.post` è l'unico: `egress._http()` riduce la destinazione a
+#: `schema://host/` e BUTTA il path, quindi «host censito» non promette quello
+#: che promette «repository censito» — e ciò che una POST porta a un host
+#: approvato, su un path che nessuno ha guardato, è un corpo arbitrario.
+#
+# `egress.allow`/`ingress.allow` ci stanno per una ragione DIVERSA e più forte:
+# sono i verbi che ALLARGANO il perimetro, e il perimetro non può assolvere chi
+# lo modifica. Oggi sarebbero salvi comunque, perché `egress.spec_for` non dà
+# loro una destinazione e `perimeter_ok` resta sempre falso — ma quella è una
+# protezione ACCIDENTALE, e questi verbi prendono un `uri` fra gli argomenti:
+# sono i primi candidati a ricevere una spec il giorno che si vuole validarlo.
+# Quel giorno il perimetro comincerebbe ad assolvere il verbo che lo estende.
+# Dichiararlo qui rende la protezione esplicita e indipendente da `spec_for`.
+_PERIMETER_BLIND = frozenset({"web.post", "egress.allow", "ingress.allow"})
+
+
+def perimeter_answers(verb: str) -> bool:
+    """Il perimetro (la whitelist di destinazioni) risponde alla domanda di
+    QUESTO gate?
+
+    Solo per la classe `outward`. Un gate `system` chiede «devono cambiare le
+    regole?» e uno `walls` «chi sta nella stanza?»: sono domande su cui una
+    lista di destinazioni non ha nulla da dire, e farle tacere con essa
+    sarebbe un controllo che spegne un altro controllo.
+    """
+    if (verb or "") in _PERIMETER_BLIND:
+        return False
+    return gate_class(verb) == GATE_OUTWARD
+
+
+def needs_consent(verb: str, *, globally_gated: bool, agent_gated: bool,
+                  off_profile: bool, perimeter_ok: bool) -> bool:
+    """Questa chiamata deve passare da un umano?
+
+    Tre ragioni indipendenti per chiederlo, e restano distinte nel testo della
+    card perché chiedono di valutare cose diverse:
+
+        globally_gated  il verbo è pericoloso per CHIUNQUE (`is_gated`)
+        agent_gated     è pericoloso per QUESTO agente (`gated_tools`, §8)
+        off_profile     lo raggiunge ma non lo dichiara (`profile_tools`)
+
+    Una sola di esse chiede «dove sta andando questa roba», e a quella la
+    whitelist ha già risposto — regola dell'owner del 17 ago 2026: una
+    destinazione censita È perimetro e non è un segnale che fa scattare il gate.
+    Applicarla al solo gate globale la lasciava inefficace proprio dove l'attrito
+    si misura: `clodia` non dichiara `github.push` nel profilo e un dev può avere
+    ancora `github.*` nei propri `gated_tools` nella copia del gateway, quindi la
+    card tornava a ogni pubblicazione verso un repository già approvato
+    (clodia-platform#254). Fuori dal perimetro il gate resta, ed è lì che serve.
+
+    Funzione PURA: i tre booleani li calcola il dispatch, che sa chi chiama;
+    qui sta la regola, in un punto solo, perché due copie della stessa
+    condizione divergono.
+    """
+    if not (globally_gated or agent_gated or off_profile):
+        return False
+    if perimeter_ok and perimeter_answers(verb):
+        return False
+    return True
 
 
 # ── Store dei CONSENSI (capability ccap1 firmate dalla CA) ───────────────────
