@@ -623,7 +623,8 @@ _TOPIC_TOOLS: list[Tool] = [
             "meta": {"type": "object"},
             "hook_enabled": {
                 "type": "boolean",
-                "description": "crea il webhook del topic (default true)"},
+                "description": ("abilita topic.invoke_hook su questo topic "
+                                "(default true). Non crea segreti né webhook.")},
         }, "required": ["name"]},
     ),
     Tool(
@@ -4236,14 +4237,14 @@ def _dispatch_topic(name: str, a: dict):
     if verb == "new":
         # Profilo topics:single → solo il workspace unico (DM sempre permessi).
         instance_profile.topic_creation_check(a["name"])
+        # `hook_enabled` resta la meta che abilita `topic.invoke_hook` su questa
+        # stanza (letta in hooks/api.py), ma NON conia più nulla: creare un topic
+        # non deve lasciare materiale segreto a riposo per una porta che #300 ha
+        # già chiuso (#222 step 1 — dieci righe sull'istanza viva, `uses: 0`).
         hook_enabled = bool(a.get("hook_enabled", True))
-        meta = svc.new(
+        return svc.new(
             a.get("tier"), a["name"],
             {**(a.get("meta") or {}), "hook_enabled": hook_enabled})
-        if hook_enabled:
-            runtime.ensure_topic_hook(
-                meta["tier"], a["name"], by=agent_name() or "platform")
-        return meta
     if verb == "invoke_hook":
         caller = _require_local_hook_caller(svc, a["tier"], a["name"])
         return runtime.invoke_topic_hook(

@@ -89,10 +89,11 @@ def channel_trigger(tier: str, name: str, text: str, by: str) -> dict:
                  {"text": text, "by": by})
 
 
-def ensure_topic_hook(tier: str, name: str, by: str) -> dict:
-    """Assicura l'hook automatico associato allo slug del topic."""
-    return _post("/clodia/hooks/internal/ensure",
-                 {"tier": tier, "name": name, "by": by})
+# `ensure_topic_hook` (proxy verso `/clodia/hooks/internal/ensure`) è stato
+# rimosso con #222 step 1: era l'unico chiamante della creazione automatica, e
+# creare un topic non deve coniare un segreto. La rotta a valle sopravvive una
+# release come 200 inerte, perché un gateway aggiornato prima di agent-server
+# non deve far fallire `topic.new` a topic già creato.
 
 
 def invoke_topic_hook(tier: str, name: str, payload: str, caller: str) -> dict:
