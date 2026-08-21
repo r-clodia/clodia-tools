@@ -24,9 +24,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from . import human_mcp
 from .pki_verify import verify_session_token
 from .topics.local_fs import LocalFsStorage
-from .topics.service import SCHEMA_VERSION, TopicError, TopicService, normalize_meta_v2
+from .topics.service import (MESSAGE_KINDS, SCHEMA_VERSION, TopicError, TopicService,
+                             normalize_meta_v2)
 from .topics.storage import VersionConflict
 
 LOG = logging.getLogger("clodia-tools.topics")
@@ -55,6 +57,20 @@ def _authorize(request: Request):
         LOG.warning("topics auth fallita: %s", e)
         return None, JSONResponse({"error": "unauthorized"}, status_code=401)
     if str(payload.get("agent") or "") not in _PRINCIPALS:
+        return None, JSONResponse({"error": "forbidden"}, status_code=403)
+    # Il nome nel claim `agent` è il CARRIER, non chi sta chiamando. Un token di
+    # proxy lo porta anche lui — `proxy_auth` conia sull'identità del carrier
+    # (di norma `clodia`), che è esattamente il principal privilegiato che questa
+    # API ammette — quindi un sistema terzo passava questa guardia e da qui
+    # scriveva il proprio `kind` nel corpo della richiesta, scavalcando
+    # l'etichetta scelta all'ingresso MCP (clodia-platform#248).
+    #
+    # Questa è la porta del runner di clodia-logic: un proxy non ne ha bisogno
+    # per nulla di ciò che gli spetta (i suoi quattro verbi passano da /mcp), e
+    # il rifiuto vale per l'intera API, non per la sola rotta dei messaggi.
+    if human_mcp.principal_kind_of(payload) != "human":
+        LOG.warning("topics: sessione di proxy rifiutata sull'API interna "
+                    "(principal=%s)", payload.get("principal"))
         return None, JSONResponse({"error": "forbidden"}, status_code=403)
     return payload.get("agent"), None
 
@@ -329,10 +345,20 @@ async def post_message(request: Request):
     author = (body.get("author") or "").strip()
     if not author:
         return JSONResponse({"error": "author_required"}, status_code=400)
+    # `kind` arriva dal corpo perché qui chiama il runner, che è l'unico a sapere
+    # se in webui ha parlato una persona o un agente. La regola su quali valori
+    # esistano sta però in un posto solo (`MESSAGE_KINDS`, verificata dal
+    # service): qui si riusa la costante per rispondere 400 invece del 404 con
+    # cui questa rotta traduce ogni TopicError — un rifiuto di validazione che
+    # sembra «topic inesistente» manda a cercare il problema altrove.
+    kind = str(body.get("kind") or "human").strip().lower()
+    if kind not in MESSAGE_KINDS:
+        return JSONResponse({"error": f"kind non valido: ammessi "
+                                      f"{', '.join(MESSAGE_KINDS)}"}, status_code=400)
     try:
         msg = await asyncio.to_thread(
             _service().post_message, tier, name, author, body.get("text") or "",
-            kind=body.get("kind", "human"),
+            kind=kind,
             attachments=body.get("attachments") or [])
         return JSONResponse(msg)
     except TopicError:

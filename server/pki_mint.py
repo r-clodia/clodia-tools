@@ -80,7 +80,8 @@ def mint_session_token(agent: str, execution_id: str = "",
                        human_role: str | None = None,
                        chat: str | None = None,
                        scoped_tools: list[str] | None = None,
-                       unattended: bool = False) -> str:
+                       unattended: bool = False,
+                       principal_kind: str | None = None) -> str:
     """Conia un token di sessione ckt1 firmato con l'identity key dell'agente.
     Identico a colony.pki.mint_session_token, ma le chiavi stanno QUI (gateway)."""
     scoped_tools = list(dict.fromkeys(scoped_tools or []))
@@ -106,6 +107,15 @@ def mint_session_token(agent: str, execution_id: str = "",
     if on_behalf:
         payload["on_behalf"] = True
         payload["human_role"] = human_role or "user"
+        # CHE NATURA ha il principal. `on_behalf` dice «per conto di qualcuno»,
+        # e un proxy — un sistema terzo ammesso in una stanza — è on-behalf
+        # esattamente come una persona: senza questo claim i due casi sono
+        # indistinguibili a valle, e l'etichetta autorevole del messaggio
+        # (`kind`) veniva scritta `human` anche per un terzo
+        # (clodia-platform#248). FIRMATO, come `unattended`: chi porta il token
+        # non può togliersi la propria natura.
+        payload["principal_kind"] = (
+            str(principal_kind or "human").strip().lower() or "human")
     if unattended:
         # Sessione di un job schedulato: nessun umano davanti al turno. FIRMATO,
         # quindi l'agente non può rimuoverselo (clodia-platform#104).

@@ -77,6 +77,10 @@ class _AuthMiddleware:
         # RBAC umana (PDP unico): claim firmati dall'agent-server per le chiamate
         # ON-BEHALF di un umano → autorizzazione per ruolo, non per carrier-agent.
         obtok = whitelist.set_current_on_behalf(bool(payload.get("on_behalf")))
+        # Natura del principal: una persona o un sistema terzo. Serve a scrivere
+        # `kind` giusto all'ingresso (clodia-platform#248); assente = persona,
+        # perché il claim lo scrive solo chi conia qui.
+        pktok = whitelist.set_current_principal_kind(payload.get("principal_kind"))
         hrtok = whitelist.set_current_human_role(payload.get("human_role") or None)
         chtok = whitelist.set_current_chat(payload.get("chat") or None)
         ogtok = whitelist.set_current_origin(payload.get("origin") or None)
@@ -91,6 +95,7 @@ class _AuthMiddleware:
             whitelist.reset_current_unattended(untok)
             whitelist.reset_current_human_role(hrtok)
             whitelist.reset_current_on_behalf(obtok)
+            whitelist.reset_current_principal_kind(pktok)
             whitelist.reset_current_clearance(ctok)
             whitelist.reset_current_token(ttok)
             whitelist.reset_current_principal(ptok)

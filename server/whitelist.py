@@ -288,6 +288,13 @@ _CURRENT_AGENT: ContextVar[str | None] = ContextVar("mcp_current_agent", default
 # Principal UMANO della richiesta corrente (claim `principal` del token ckt1):
 # l'utente della chat per conto del quale l'agent opera. Letto da runtime.current_user.
 _CURRENT_PRINCIPAL: ContextVar[str | None] = ContextVar("mcp_current_principal", default=None)
+# NATURA del principal (claim firmato `principal_kind`): `human` una persona,
+# `proxy` un sistema terzo ammesso in una stanza. `on_behalf` non li distingue —
+# un proxy parla per conto di un principal ammesso, quindi è on-behalf come una
+# persona — ed è il motivo per cui l'etichetta autorevole di un messaggio finiva
+# `human` anche per un terzo (clodia-platform#248).
+_CURRENT_PRINCIPAL_KIND: ContextVar[str | None] = ContextVar(
+    "mcp_current_principal_kind", default=None)
 
 
 def set_current_agent(name: str | None) -> object:
@@ -310,6 +317,40 @@ def reset_current_principal(token: object) -> None:
 def current_principal() -> str | None:
     """Principal umano della richiesta corrente, o None se anonimo."""
     return _CURRENT_PRINCIPAL.get()
+
+
+def set_current_principal_kind(kind: str | None) -> object:
+    return _CURRENT_PRINCIPAL_KIND.set(
+        (str(kind).strip().lower() or None) if kind else None)
+
+
+def reset_current_principal_kind(token: object) -> None:
+    _CURRENT_PRINCIPAL_KIND.reset(token)  # type: ignore[arg-type]
+
+
+def current_principal_kind() -> str | None:
+    """Natura firmata del principal (`human`|`proxy`), o None se non dichiarata.
+
+    None NON è un sinonimo di `proxy`: i token on-behalf di una persona li conia
+    `clodia-logic`, che non scrive il claim. Chi deve decidere passi da
+    `message_kind`, che tiene in un posto solo la direzione in cui si sbaglia.
+    """
+    return _CURRENT_PRINCIPAL_KIND.get()
+
+
+def message_kind() -> str:
+    """L'etichetta autorevole di un messaggio scritto dalla richiesta corrente.
+
+    Un posto solo, perché `kind` non è un dettaglio che segue l'autore: su di
+    esso poggiano due regole già scritte — «una menzione a una persona non
+    instrada un'AI» e «solo i messaggi umani accodano una notifica Telegram». Un
+    terzo etichettato `human` se le prende entrambe; una persona etichettata
+    `proxy` le perde. Derivarlo qui invece che nel dispatch è ciò che evita la
+    terza copia della stessa regola, e quindi la copia che divergerà.
+    """
+    if not is_on_behalf():
+        return "ai"
+    return "proxy" if current_principal_kind() == "proxy" else "human"
 
 
 # ── RBAC umana (unificazione PDP) ────────────────────────────────────────────

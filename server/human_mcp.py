@@ -209,6 +209,10 @@ def issue(tier: str, name: str, principal: str, *, provider: str,
         # persona — a rendere sicuro il ramo umano di `_require_topic_member`.
         chat=f"chan:{tier}:{name}:{principal}",
         scoped_tools=list(verbi),
+        # Esplicito anche quando è `human`: l'assenza del claim resta il caso
+        # dei token coniati altrove (il runner di clodia-logic), non un valore
+        # da indovinare qui. Vedi `principal_kind_of`.
+        principal_kind=principal_kind,
     )
     grants = _load()
     grants.append({
@@ -271,6 +275,40 @@ def is_revoked(gid: str | None) -> bool:
     # Un id `mcp_` che non sta nel registro è un token il cui grant è sparito:
     # fail-closed. Vale anche dopo un ripristino parziale del datadir.
     return True
+
+
+def principal_kind_of(payload: dict) -> str:
+    """La natura del principal di una sessione VERIFICATA: `human` o `proxy`.
+
+    Tre letture, in ordine di autorevolezza, e nessuna si fida di ciò che il
+    chiamante dichiara nel corpo di una richiesta:
+
+    1. il claim `principal_kind` del token, firmato al minting;
+    2. l'`execution_id` `participant:*`, che scrive **soltanto** `proxy_auth`
+       quando ammette un proxy dalla lista dei partecipanti — quindi è di per sé
+       la prova che la sessione è di un terzo;
+    3. il registro dei grant, per un `execution_id` `mcp_*`.
+
+    I punti 2 e 3 non sono ridondanza decorativa: coprono i token coniati prima
+    che il claim esistesse, e il claim assente è ciò che tiene compatibile il
+    ramo di gran lunga più comune — le sessioni on-behalf di una persona, che
+    conia `clodia-logic` e che non scrivono `principal_kind`. Fra «una persona
+    letta come proxy» e «un proxy letto come persona» il primo errore spegne una
+    funzione a chi ne ha diritto, il secondo apre un varco: per questo il default
+    è `human` solo quando nessuna delle tre letture dice altro.
+    """
+    dichiarato = str(payload.get("principal_kind") or "").strip().lower()
+    if dichiarato:
+        return "proxy" if dichiarato != "human" else "human"
+    gid = str(payload.get("execution_id") or "")
+    if gid.startswith("participant:"):
+        return "proxy"
+    if gid.startswith("mcp_"):
+        for g in _load():
+            if g.get("id") == gid:
+                return ("proxy" if str(g.get("principal_kind") or "human").strip().lower()
+                        != "human" else "human")
+    return "human"
 
 
 def client_config(base_url: str, token: str | None, tier: str, name: str) -> dict:

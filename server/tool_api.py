@@ -82,6 +82,8 @@ class _Ctx:
          lambda p, t: p.get("clearance") or None),
         ("on_behalf", "set_current_on_behalf", "reset_current_on_behalf",
          lambda p, t: bool(p.get("on_behalf"))),
+        ("principal_kind", "set_current_principal_kind",
+         "reset_current_principal_kind", lambda p, t: p.get("principal_kind") or None),
         ("human_role", "set_current_human_role", "reset_current_human_role",
          lambda p, t: p.get("human_role") or None),
         ("chat", "set_current_chat", "reset_current_chat",
