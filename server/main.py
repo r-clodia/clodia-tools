@@ -3344,12 +3344,27 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # Vale SOLO per i verbi che hanno una destinazione dichiarata e
             # confrontabile (`egress.spec_for`), e solo se TUTTE le destinazioni
             # combaciano. Fuori dal perimetro il gate resta — ed è lì che serve,
-            # perché è lì che il confine si sposta. Non tocca `agent_gates` né
-            # `outside_profile`: quelli rispondono a domande diverse (un verbo
-            # sotto supervisione, un verbo fuori mestiere), e silenziarli qui
-            # sarebbe di nuovo un controllo che ne spegne un altro.
+            # perché è lì che il confine si sposta.
+            #
+            # Vale per TUTTE E TRE le ragioni (globale, per-agente, fuori
+            # profilo). Fino al 19 ago 2026 lo sconto si calcolava solo per il
+            # gate globale, e le altre due lo rimettevano con un `or`: la
+            # whitelist restava inefficace proprio dove l'attrito si misura —
+            # `clodia` non dichiara `github.push` nel profilo, e un dev che abbia
+            # ancora `github.*` nei `gated_tools` della copia del gateway (il seed
+            # li ha rimossi il 17 ago) ricadeva nell'altro ramo. Card a ogni
+            # pubblicazione verso un repository già approvato: clodia-platform#254.
+            #
+            # Quello che NON cambia: le tre ragioni restano distinte nel testo
+            # della card, e il perimetro tace su chi non gli fa una domanda di
+            # destinazione (`gate.perimeter_answers`) — `topic.remote_*`,
+            # `agents.grant_*`, `egress.allow`, e `web.post`, la cui whitelist
+            # censisce un host senza il path.
             _perimetro_ok = False
-            if _gate.is_gated(name) and not (agent_gates(name, _ag) or _off_profile):
+            _gated_globale = _gate.is_gated(name)
+            _gated_agente = agent_gates(name, _ag)
+            if ((_gated_globale or _gated_agente or _off_profile)
+                    and _gate.perimeter_answers(name)):
                 try:
                     from . import egress as _eg
                     # Stessa risoluzione che userà il PDP: due copie della
@@ -3363,7 +3378,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 if _perimetro_ok:
                     LOG.info("gate saltato per '%s' (@%s): destinazione già nel "
                              "perimetro autorizzato", name, _ag)
-            if (_gate.is_gated(name) and not _perimetro_ok) or agent_gates(name, _ag) or _off_profile:
+            if _gate.needs_consent(name, globally_gated=_gated_globale,
+                                   agent_gated=_gated_agente,
+                                   off_profile=_off_profile,
+                                   perimeter_ok=_perimetro_ok):
                 if name == "web.post":
                     reason = web_post.gate_summary(arguments)
                 elif name in ("egress.allow", "ingress.allow"):
