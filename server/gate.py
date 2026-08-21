@@ -205,7 +205,16 @@ def gated_verbs_spec() -> dict:
 #: `schema://host/` e BUTTA il path, quindi «host censito» non promette quello
 #: che promette «repository censito» — e ciò che una POST porta a un host
 #: approvato, su un path che nessuno ha guardato, è un corpo arbitrario.
-_PERIMETER_BLIND = frozenset({"web.post"})
+#
+# `egress.allow`/`ingress.allow` ci stanno per una ragione DIVERSA e più forte:
+# sono i verbi che ALLARGANO il perimetro, e il perimetro non può assolvere chi
+# lo modifica. Oggi sarebbero salvi comunque, perché `egress.spec_for` non dà
+# loro una destinazione e `perimeter_ok` resta sempre falso — ma quella è una
+# protezione ACCIDENTALE, e questi verbi prendono un `uri` fra gli argomenti:
+# sono i primi candidati a ricevere una spec il giorno che si vuole validarlo.
+# Quel giorno il perimetro comincerebbe ad assolvere il verbo che lo estende.
+# Dichiararlo qui rende la protezione esplicita e indipendente da `spec_for`.
+_PERIMETER_BLIND = frozenset({"web.post", "egress.allow", "ingress.allow"})
 
 
 def perimeter_answers(verb: str) -> bool:

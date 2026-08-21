@@ -130,9 +130,21 @@ class NeedsConsentTests(unittest.TestCase):
         """`egress.allow` è `outward` e non ha destinazione: il verbo che ALLARGA
         il perimetro non può essere assolto dal perimetro che allarga."""
         self.assertFalse(_perimetro("egress.allow", {"uri": "mailto:x@y.it"}, "*"))
-        self.assertTrue(gate.needs_consent(
-            "egress.allow", globally_gated=True, agent_gated=False,
-            off_profile=False, perimeter_ok=False))
+        # Passare `perimeter_ok=False` non proverebbe NULLA su needs_consent: con
+        # una ragione attiva e il perimetro insoddisfatto chiede in ogni caso, e
+        # il test resterebbe verde anche se la regola cambiasse. La domanda vera è
+        # se resiste a `perimeter_ok=True` — cioè al giorno in cui `spec_for`
+        # darà una destinazione a questi verbi, che un `uri` fra gli argomenti lo
+        # hanno già. Finché la risposta sta solo nell'ASSENZA di una spec, la
+        # protezione è accidentale e non è quella che il docstring promette.
+        for verbo in ("egress.allow", "ingress.allow"):
+            with self.subTest(verbo=verbo):
+                self.assertFalse(gate.perimeter_answers(verbo),
+                                 f"{verbo} allarga il perimetro: non può assolverlo")
+                self.assertTrue(gate.needs_consent(
+                    verbo, globally_gated=True, agent_gated=False,
+                    off_profile=False, perimeter_ok=True),
+                    f"{verbo} deve chiedere ANCHE con il perimetro soddisfatto")
 
     def test_web_post_toward_a_whitelisted_host_still_asks(self):
         args = {"url": "https://hooks.example.it/incoming", "body": "x"}
