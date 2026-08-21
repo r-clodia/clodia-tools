@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from .local_fs import LocalFsStorage
-from .mentions import extract_mentions
+from .mentions import GOLDEN_CASES, extract_mentions, extract_tags
 from .service import TopicService
 
 
@@ -61,6 +61,36 @@ class OrdinalMentionsTests(unittest.TestCase):
 
     def test_ordinal_in_code_block_not_mention(self) -> None:
         self.assertEqual(extract_mentions("`@dev#2` placeholder"), [])
+
+
+class GoldenCasesTests(unittest.TestCase):
+    """La tabella condivisa con `clodia-logic` (issue#255).
+
+    Il parser di questo modulo era già corretto; sbagliato era l'altro — le due
+    regex del router, senza confine sinistro, che leggevano `foo@bar.com` come
+    una menzione di `bar`. Il fix è la convergenza delle due copie, e questa
+    tabella è ciò che rende la convergenza verificabile: viaggia dentro
+    `mentions.py`, quindi la suite di entrambi i repository la esegue sui propri
+    entry point. Se una copia cambia da sola, fa rosso da quel lato.
+    """
+
+    def test_extract_mentions_matches_the_shared_rule_set(self) -> None:
+        for testo, men, _hard, _soft in GOLDEN_CASES:
+            with self.subTest(testo=testo):
+                self.assertEqual(men, extract_mentions(testo))
+
+    def test_extract_tags_separates_the_two_sigils(self) -> None:
+        for testo, _men, hard, soft in GOLDEN_CASES:
+            with self.subTest(testo=testo):
+                self.assertEqual((hard, soft), extract_tags(testo))
+
+    def test_the_mentions_are_the_ordered_union_of_the_two_sigils(self) -> None:
+        """`extract_mentions` non è `hard + soft`: è l'ordine del documento.
+        Un badge elenca i destinatari come sono scritti, non per sigillo."""
+        self.assertEqual(["mario", "davide"],
+                         extract_mentions("$mario avvisa, poi @davide decide"))
+        self.assertEqual((["davide"], ["mario"]),
+                         extract_tags("$mario avvisa, poi @davide decide"))
 
 
 class PostMessageMentionsTests(unittest.TestCase):
