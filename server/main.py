@@ -32,6 +32,7 @@ from .whitelist import (agent_config, agent_denies, agent_gates, agent_name,
                         outside_profile,
                         current_chat, current_clearance, current_human_role,
                         current_principal, current_scoped_tools, is_on_behalf,
+                        message_kind,
                         current_channel,
                         current_origin,
                         is_unattended)
@@ -4300,10 +4301,17 @@ def _dispatch_topic(name: str, a: dict):
         # instrada un'AI» e «solo i messaggi umani accodano una notifica
         # Telegram». Sbagliarlo qui le disattiverebbe entrambe in silenzio, che è
         # il modo in cui una regola smette di valere senza che nessuno la tocchi.
+        #
+        # `on_behalf` NON basta a dire «una persona»: un proxy — un sistema terzo
+        # ammesso nella stanza — parla per conto di un principal ammesso, quindi
+        # è on-behalf come Giovanni, e finché `kind` si derivava da qui il
+        # messaggio di un terzo si persisteva `human` (clodia-platform#248).
+        # `clodia-logic` poteva solo coercirlo in lettura, che è un ponte: ogni
+        # lettore futuro deve ricordarsene. L'etichetta si scrive dove nasce.
         umano = current_principal() if is_on_behalf() else None
         res = svc.post_message(a["tier"], a["name"],
                                author=umano or ag or "agente",
-                               text=text, kind="human" if umano else "ai")
+                               text=text, kind=message_kind())
         import re as _re
         # CHI FA PARTIRE UN TURNO. La condizione «solo se c'è una @menzione» era
         # giusta finché a postare c'erano solo agenti: un agente che deposita una

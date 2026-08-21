@@ -252,6 +252,12 @@ def token_for(assertion: str) -> dict:
         human_role="user",
         chat=f"chan:{tier}:{topic}:{principal}",
         scoped_tools=list(verbi),
+        # La natura del principal viaggia FIRMATA nel token. Questo è l'unico
+        # punto in cui nasce una sessione di proxy: marcarla qui è ciò che
+        # permette all'ingresso di scrivere `kind` giusto senza consultare un
+        # registro, e a `topics_api` di non lasciar passare un terzo dalla porta
+        # interna del runner (clodia-platform#248).
+        principal_kind="proxy",
     )
     # Consumato SOLO ora: se qualcosa fosse fallito dopo la verifica, un `jti`
     # bruciato costringerebbe a rifirmare per un errore non suo.

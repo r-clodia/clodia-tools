@@ -31,6 +31,21 @@ from .storage import NotFound, Storage, StorageError, VersionConflict
 LOG = logging.getLogger("clodia-tools.topics")
 
 SCHEMA_VERSION = 2
+#: I valori ammessi per `kind` di un messaggio. Insieme CHIUSO, e verificato
+#: dove passano tutti i chiamanti (`post_message`) e non a ogni porta: un'
+#: etichetta inventata si persisterebbe in silenzio, e da quel momento le regole
+#: che leggono `kind` — chi instrada, chi notifica — smetterebbero di applicarsi
+#: a quel messaggio senza che nessuno le abbia toccate.
+#:
+#: `proxy` è un sistema terzo ammesso nella stanza: non è un'AI della colonia e
+#: non è una persona (clodia-platform#248).
+#:
+#: `telegram` non è un'ipotesi: lo scrive la relay di clodia-logic
+#: (`api/channel_relay.py`, un blocco di messaggi drenati da un gruppo). L'elenco
+#: nasce da un censimento dei chiamanti reali nei tre repo, non dai valori che
+#: sembrano plausibili: un insieme chiuso indovinato a memoria avrebbe rotto la
+#: relay al primo messaggio.
+MESSAGE_KINDS = ("human", "ai", "system", "telegram", "proxy")
 TOPIC_STATES = ("active", "on-hold", "done", "archived")
 VALID_STATUS = set(TOPIC_STATES)
 # Scala SEAL (EC Cloud Sovereignty Framework v1.2.1). Sostituisce P0–P3.
@@ -2274,8 +2289,14 @@ class TopicService:
     def post_message(self, tier: str, name: str, author: str, text: str,
                      kind: str = "human", attachments: list[str] | None = None) -> dict:
         """Posta un messaggio nel canale (append-only file in `.messages/` →
-        niente contesa). `kind` = human|ai|system. `attachments` = nomi file in files/.
+        niente contesa). `kind` = uno di `MESSAGE_KINDS`. `attachments` = nomi
+        file in files/.
         `mentions` = destinatari strutturati estratti al write-time (issue#83, D1)."""
+        kind = str(kind or "").strip().lower()
+        if kind not in MESSAGE_KINDS:
+            raise TopicError(
+                f"kind non valido: {kind or '(vuoto)'} "
+                f"(ammessi: {', '.join(MESSAGE_KINDS)})")
         meta, _ = self._read_meta(tier, name)
         self._assert_content_available(meta)
         now = _now()
