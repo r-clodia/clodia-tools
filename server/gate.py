@@ -231,6 +231,26 @@ def perimeter_answers(verb: str) -> bool:
     return gate_class(verb) == GATE_OUTWARD
 
 
+#: Verbi con cui un agente RACCONTA qualcosa su di sé, e che quindi non possono
+#: passare da un consenso umano. Insieme chiusissimo, e il criterio è più
+#: importante dell'elenco: un verbo sta qui solo se **non produce alcun effetto
+#: fuori dall'istanza**, non spende nulla, non espone dati, non muove file, e
+#: scrive esclusivamente un campo di stato sul lavoro che l'agente sta già
+#: eseguendo. Se un candidato futuro non soddisfa tutte queste condizioni, la
+#: risposta è dichiararlo nei `profile_tools` dell'agente, non allargare questo
+#: insieme.
+#
+# Perché serve (clodia-platform#206): `jobs.report_status` è il verbo con cui un
+# run schedulato dichiara com'è andata, e i run schedulati girano di notte, senza
+# nessuno davanti. Nessun agente lo elenca nei propri `profile_tools`, quindi
+# `outside_profile` è vero e il gate chiederebbe una conferma che non arriverebbe
+# mai: il rimedio al «job che si dichiara riuscito senza aver fatto nulla»
+# sarebbe inutilizzabile esattamente nei run per cui esiste. Chiedere il permesso
+# di dire «è andata male» è anche una domanda senza senso — la risposta «no» non
+# rende il run riuscito, lo rende soltanto non raccontato.
+SELF_REPORTING = frozenset({"jobs.report_status"})
+
+
 def needs_consent(verb: str, *, globally_gated: bool, agent_gated: bool,
                   off_profile: bool, perimeter_ok: bool) -> bool:
     """Questa chiamata deve passare da un umano?
@@ -255,6 +275,8 @@ def needs_consent(verb: str, *, globally_gated: bool, agent_gated: bool,
     qui sta la regola, in un punto solo, perché due copie della stessa
     condizione divergono.
     """
+    if (verb or "") in SELF_REPORTING:
+        return False
     if not (globally_gated or agent_gated or off_profile):
         return False
     if perimeter_ok and perimeter_answers(verb):

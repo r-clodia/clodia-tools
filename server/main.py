@@ -1159,6 +1159,30 @@ _JOBS_TOOLS: list[Tool] = [
              "agent": {"type": "string", "description": "agent (kind) che esegue il job al fire. Default: l'agente chiamante (te stesso). Indicane un altro solo se il job deve girare per conto di qualcun altro."},
              "enabled": {"type": "boolean", "description": "attivo alla creazione (default true)"},
          }, "required": ["name", "prompt"]}),
+    Tool(name="jobs.report_status",
+         description=(
+             "DICHIARA com'è andato il job schedulato che stai eseguendo. Chiamalo "
+             "come ULTIMA cosa del turno, sempre, anche quando è andato tutto bene.\n\n"
+             "  success — hai fatto il lavoro che il job chiede\n"
+             "  error   — l'hai consegnato, ma qualcosa è andato storto e la QUALITÀ "
+             "può esserne compromessa (una fonte su tre in 403, mezzo risultato, un "
+             "allegato non recuperato)\n"
+             "  fatal   — il lavoro NON è stato fatto: non hai potuto spedire, la "
+             "fonte era irraggiungibile, il verbo che ti serviva è negato\n\n"
+             "In `detail` scrivi cosa è andato storto, in una frase: è il testo che "
+             "chi apre lo storico legge per capire se deve intervenire. Se non "
+             "chiami questo verbo il run viene registrato `error`, perché un esito "
+             "che nessuno dichiara non è un esito riuscito. Vale solo dentro un job "
+             "schedulato: fuori non c'è un run da dichiarare."),
+         inputSchema={"type": "object", "properties": {
+             "status": {"type": "string", "enum": ["success", "error", "fatal"],
+                        "description": "esito del run"},
+             "detail": {"type": "string",
+                        "description": ("cosa è andato storto, in una frase. "
+                                        "Obbligatorio di fatto su error e fatal: "
+                                        "senza, lo storico dice solo che qualcosa "
+                                        "non ha funzionato")},
+         }, "required": ["status"]}),
 ]
 
 # packs.* — import/rimozione dei pack e loro dipendenze. Riservati a sysadmin.
@@ -2166,6 +2190,26 @@ def _dispatch_jobs(name: str, a: dict, caller: str | None):
             # Evita che l'executor "scivoli" a clodia quando l'agent è omesso.
             agent=a.get("agent") or caller or "clodia", enabled=a.get("enabled", True),
             requested_by=caller or "agente")
+    if sub == "report_status":
+        # L'ESITO del run, dichiarato dall'agente (clodia-platform#206). Prima lo
+        # stato era il valore di verità di «il turno ha sollevato?», che misura la
+        # fine del turno e non il lavoro: un job ha girato 652 secondi, ha fallito
+        # tre invii e si è registrato `success`.
+        #
+        # `chat_id` NON è fra gli argomenti, di proposito: viene dal claim `chat`
+        # del token di sessione, firmato dall'agent-server. Se lo passasse
+        # l'agente, dichiarare l'esito del run di qualcun altro sarebbe questione
+        # di cambiare un campo — e nel modello quel campo è testo come tutto il
+        # resto. Stessa ragione per cui `topic.fetch`/`topic.put` lo leggono qui.
+        chat_id = current_chat()
+        if not chat_id:
+            raise ValueError(
+                "jobs.report_status richiede una sessione agent con chat_id: "
+                "si dichiara l'esito di un run schedulato, e fuori da un job "
+                "non c'è alcun run da dichiarare")
+        return runtime.report_run_status(
+            chat_id=chat_id, status=a.get("status"), detail=a.get("detail"),
+            agent=caller or "")
     raise ValueError(f"unknown jobs tool: {name}")
 
 

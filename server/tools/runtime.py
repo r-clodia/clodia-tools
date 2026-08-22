@@ -164,6 +164,36 @@ def rag_grants(agent: str) -> dict[str, set[str]]:
     }
 
 
+#: Esiti che un agente può dichiarare per il proprio run. Copia dell'insieme che
+#: l'agent-server valida in `scheduler/run_status.py`: la validazione autorevole è
+#: là, questa serve a rifiutare senza fare un giro di rete per uno stato che
+#: verrebbe rifiutato comunque — e a poter elencare i valori giusti nell'errore.
+#: `failed` non c'è: lo constata l'infrastruttura quando il turno muore.
+_REPORTABLE = ("success", "error", "fatal")
+
+
+def report_run_status(*, chat_id: str, status: str, detail: str | None = None,
+                      agent: str = "") -> dict:
+    """Proxy: l'agente DICHIARA l'esito del run schedulato che sta eseguendo.
+
+    `chat_id` arriva dal claim firmato della sessione, non dagli argomenti del
+    verbo: vedi il commento nel dispatch. Qui si valida solo la forma.
+    """
+    s = str(status or "").strip().lower()
+    if s not in _REPORTABLE:
+        raise ValueError(
+            f"status '{status}' non valido; ammessi: {', '.join(_REPORTABLE)}. "
+            "'failed' non è dichiarabile: descrive un turno morto, e lo constata "
+            "l'infrastruttura")
+    # `strip()` PRIMA del test di vuoto, non dopo: `"   "` supera un controllo
+    # `not in (None, "")` e diventa `""`, cioè un dettaglio vuoto che lo storico
+    # mostrerebbe come se fosse una spiegazione.
+    d = (str(detail).strip() or None) if detail is not None else None
+    return _post("/clodia/jobs/report-status/internal", {
+        "chat_id": chat_id, "status": s, "detail": d, "agent": agent,
+    })
+
+
 def jobs() -> dict:
     """I job schedulati (cron/intervallo) e il loro stato."""
     data = _get("/clodia/jobs")
