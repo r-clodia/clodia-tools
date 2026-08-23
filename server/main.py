@@ -32,6 +32,7 @@ from .whitelist import (agent_config, agent_denies, agent_gates, agent_name,
                         outside_profile,
                         current_chat, current_clearance, current_human_role,
                         current_principal, current_scoped_tools, is_on_behalf,
+                        scoped_ceiling_allows,
                         message_kind,
                         current_channel,
                         current_origin,
@@ -2318,17 +2319,13 @@ def _scoped_ceiling_ok(name: str) -> bool:
 
     Un tetto assente non è un tetto vuoto: senza il claim vale la RBAC del ruolo
     come prima, altrimenti ogni sessione umana della webui si spegnerebbe.
+
+    La regola sta in `whitelist.scoped_ceiling_allows` perché il secondo lettore
+    esiste: le rotte HTTP interne, che il tetto non lo guardavano affatto
+    (clodia-platform#261). Due copie della stessa regola divergono, e la copia
+    che divergeva era proprio quella che mancava.
     """
-    tetto = set(current_scoped_tools())
-    if not tetto:
-        return True
-    if name in tetto:
-        return True
-    # `<ns>.*` resta ammesso — è così che si concede un backend MCP montato per
-    # intero. Il `*` nudo no, e non serve chiuderlo solo qui: `mint_session_token`
-    # lo rifiuta già alla coniazione. Due controlli sulla stessa cosa divergono;
-    # questo si fida di quello, e il test lo verifica sul minter.
-    return "." in name and f"{name.split('.', 1)[0]}.*" in tetto
+    return scoped_ceiling_allows(name)
 
 
 def _vault_grants(agent: str | None) -> set:

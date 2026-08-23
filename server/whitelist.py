@@ -437,6 +437,31 @@ def current_scoped_tools() -> tuple[str, ...]:
     return _CURRENT_SCOPED_TOOLS.get()
 
 
+def scoped_ceiling_allows(name: str, ceiling=None) -> bool:
+    """La regola del tetto `scoped_tools`, in un posto solo.
+
+    Vive qui, accanto al contextvar, perché ora ha DUE lettori: il percorso MCP
+    (`main._scoped_ceiling_ok`, che legge il tetto della richiesta corrente) e le
+    rotte HTTP interne (`internal_auth.authorize`, che ha il payload del token in
+    mano e passa il tetto esplicito). Una seconda copia della regola divergerebbe
+    dalla prima — è esattamente il difetto che clodia-platform#261 descrive per
+    l'autorizzazione delle rotte interne.
+
+    `ceiling=None` significa «quello della richiesta corrente». Un tetto **vuoto**
+    non è un tetto stretto: è un token senza claim, e vale la regola di prima
+    (altrimenti ogni sessione senza `scoped_tools` si spegnerebbe).
+    """
+    tetto = set(current_scoped_tools() if ceiling is None else ceiling)
+    if not tetto:
+        return True
+    if name in tetto:
+        return True
+    # `<ns>.*` resta ammesso — è così che si concede un backend MCP montato per
+    # intero. Il `*` nudo no, e non serve chiuderlo qui: `mint_session_token` lo
+    # rifiuta già alla coniazione.
+    return "." in name and f"{name.split('.', 1)[0]}.*" in tetto
+
+
 # Token ckt1 grezzo della richiesta corrente. Serve per INOLTRARLO al backend
 # quando il gateway deve compiere, per conto del caller, un'operazione che il
 # backend autorizza per principal-agent (es. agents.* → PATCH /api/agents/*/caps).

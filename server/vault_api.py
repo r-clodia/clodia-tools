@@ -12,22 +12,16 @@ MAI provider di inferenza, backup_config, chiavi dei topic o altro. Il valore
 from __future__ import annotations
 
 import logging
-import os
 import re
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import vault
-from .pki_verify import verify_session_token
+from . import internal_auth, vault
 
 LOG = logging.getLogger("clodia-tools.vault_api")
 
-_PRINCIPALS = {
-    p.strip() for p in (os.environ.get("CLODIA_PROVIDER_PRINCIPALS") or "clodia").split(",")
-    if p.strip()
-}
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,60}$")
 # SOLO i segreti dei tool (PAT git, token MCP). Esclude provider_*, backup_config,
 # chiavi topic, ecc. → superficie minima.
@@ -35,15 +29,12 @@ _ALLOWED_TYPES = {"mcp_secret"}
 
 
 def _authorize(request: Request) -> JSONResponse | None:
-    auth = request.headers.get("authorization", "")
-    token = auth[7:] if auth.lower().startswith("bearer ") else ""
-    try:
-        payload = verify_session_token(token)
-    except PermissionError:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    if str(payload.get("agent") or "") not in _PRINCIPALS:
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-    return None
+    """Regola unica delle rotte interne (`internal_auth`). Nessun verbo del
+    gateway corrisponde a questa rotta e non esiste un ramo umano: il PAT lo
+    legge il runner, quindi né un token scoped né una sessione on-behalf hanno
+    qui qualcosa da fare (clodia-platform#261)."""
+    _payload, err = internal_auth.authorize(request, log=LOG)
+    return err
 
 
 async def get_vault_credential(request: Request):

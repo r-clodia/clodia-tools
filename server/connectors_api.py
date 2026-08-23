@@ -11,33 +11,23 @@ Saim no. I super-agent (clodia/ophelia) bypassano comunque (accesso a tutto).
 from __future__ import annotations
 
 import logging
-import os
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import vault
-from .pki_verify import verify_session_token
+from . import internal_auth, vault
 
 LOG = logging.getLogger("clodia-tools.connectors")
 
-_PRINCIPALS = {
-    p.strip() for p in (os.environ.get("CLODIA_PROVIDER_PRINCIPALS") or "clodia").split(",")
-    if p.strip()
-}
-
 
 def _authorize(request: Request):
-    auth = request.headers.get("authorization", "")
-    token = auth[7:] if auth.lower().startswith("bearer ") else ""
-    try:
-        payload = verify_session_token(token)
-    except PermissionError:
-        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
-    if str(payload.get("agent") or "") not in _PRINCIPALS:
-        return None, JSONResponse({"error": "forbidden"}, status_code=403)
-    return payload.get("agent"), None
+    """Regola unica delle rotte interne: `internal_auth.authorize` applica il
+    principal privilegiato **e** ciò che qui mancava — revoca, tetto
+    `scoped_tools` e rifiuto delle sessioni on-behalf. Questa è la porta di un
+    processo (il runner), non di un flusso umano (clodia-platform#261)."""
+    payload, err = internal_auth.authorize(request, log=LOG)
+    return (payload or {}).get("agent"), err
 
 
 def _mailboxes() -> list[str]:

@@ -25,13 +25,18 @@ def main() -> int:
     importlib.reload(image_tool)
     from . import imagegen_api as iapi
     importlib.reload(iapi)
+    from . import internal_auth
+    importlib.reload(internal_auth)
     from . import tools_api as tapi
     importlib.reload(tapi)
 
     # monkeypatch: niente PKI reale, niente OpenAI reale
-    iapi.verify_session_token = lambda t: ({"agent": "clodia"} if t != "BAD"
-                                           else (_ for _ in ()).throw(PermissionError("bad")))
-    iapi._PRINCIPALS = {"clodia"}
+    # La verifica del bearer e l'insieme dei principal stanno in un posto solo
+    # (`internal_auth`, clodia-platform#261): `CLODIA_PROVIDER_PRINCIPALS` qui
+    # sopra basta, non serve più forzare la costante del modulo.
+    internal_auth.verify_session_token = lambda t: (
+        {"agent": "clodia"} if t != "BAD"
+        else (_ for _ in ()).throw(PermissionError("bad")))
     image_tool.generate = lambda prompt, **kw: b"PNGGEN:" + prompt.encode()
     image_tool.edit = lambda prompt, raw, **kw: b"PNGEDIT:" + raw
 

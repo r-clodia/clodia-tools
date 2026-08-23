@@ -24,8 +24,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from . import human_mcp
-from .pki_verify import verify_session_token
+from . import human_mcp, internal_auth
 from .topics.local_fs import LocalFsStorage
 from .topics.service import (MESSAGE_KINDS, SCHEMA_VERSION, TopicError, TopicService,
                              normalize_meta_v2)
@@ -33,10 +32,6 @@ from .topics.storage import VersionConflict
 
 LOG = logging.getLogger("clodia-tools.topics")
 
-_PRINCIPALS = {
-    p.strip() for p in (os.environ.get("CLODIA_PROVIDER_PRINCIPALS") or "clodia").split(",")
-    if p.strip()
-}
 _ROOT = os.environ.get("CLODIA_TOPICS_ROOT", "/datadir/clodia-vault/topics-store")
 _svc: TopicService | None = None
 
@@ -48,16 +43,47 @@ def _service() -> TopicService:
     return _svc
 
 
+#: Rotta → verbo del gateway, per applicare il tetto `scoped_tools` anche fuori
+#: da `/mcp` (clodia-platform#261). Mappate solo le rotte che HANNO un verbo
+#: equivalente; per tutte le altre il tetto non è soddisfacibile, e un token che
+#: porta il claim non entra. Un verbo indovinato sarebbe peggio del verbo
+#: assente: aprirebbe una rotta di amministrazione a un token di chat.
+_VERBI = {
+    ("GET", ""): "topic.list",
+    ("POST", ""): "topic.new",
+    ("GET", "topic"): "topic.open",
+    ("GET", "messages"): "topic.messages",
+    ("POST", "messages"): "topic.post_message",
+    ("GET", "files"): "topic.files",
+    ("POST", "files"): "topic.write_file",
+    ("GET", "file"): "topic.read_file",
+}
+
+
+def _verbo(request: Request) -> str | None:
+    """Il verbo equivalente alla rotta chiamata, o None se non ne ha uno."""
+    coda = [s for s in request.url.path.split("/internal/topics", 1)[-1].split("/") if s]
+    if not coda:
+        chiave = ""                      # /internal/topics
+    elif len(coda) == 1:
+        chiave = coda[0]                 # /internal/topics/export|import
+    elif len(coda) == 2:
+        chiave = "topic"                 # /internal/topics/{tier}/{name}
+    else:
+        chiave = "/".join(coda[2:])      # …/{name}/<resto>
+    return _VERBI.get((request.method.upper(), chiave))
+
+
 def _authorize(request: Request):
-    auth = request.headers.get("authorization", "")
-    token = auth[7:] if auth.lower().startswith("bearer ") else ""
-    try:
-        payload = verify_session_token(token)
-    except PermissionError as e:
-        LOG.warning("topics auth fallita: %s", e)
-        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
-    if str(payload.get("agent") or "") not in _PRINCIPALS:
-        return None, JSONResponse({"error": "forbidden"}, status_code=403)
+    # Regola unica delle rotte interne: principal privilegiato, revoca e tetto
+    # `scoped_tools` (clodia-platform#261). `allow_on_behalf=True` perché qui, a
+    # differenza di vault/providers/agents, il ramo umano esiste: la webui inoltra
+    # con l'umano come principal. Ciò che non passa è il token *scoped*, e la
+    # guardia sui proxy qui sotto resta dov'era.
+    payload, err = internal_auth.authorize(request, verb=_verbo(request),
+                                           allow_on_behalf=True, log=LOG)
+    if err:
+        return None, err
     # Il nome nel claim `agent` è il CARRIER, non chi sta chiamando. Un token di
     # proxy lo porta anche lui — `proxy_auth` conia sull'identità del carrier
     # (di norma `clodia`), che è esattamente il principal privilegiato che questa
