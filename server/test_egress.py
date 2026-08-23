@@ -55,6 +55,32 @@ class UriExtractionTests(unittest.TestCase):
                         {"owner": "r-clodia", "repo": "clodia-logic"}),
             ["https://github.com/r-clodia/clodia-logic"])
 
+    def test_the_short_form_is_a_readable_destination(self):
+        """`github.pull_request(repo="owner/repo")` è la forma che si scrive a
+        mano, e `normalize_repo` la accetta. Se l'estrattore la scarta prima,
+        `decide()` risponde UNKNOWN e il verbo viene negato «destinazione non
+        leggibile» — cioè si manda a toccare `egress_allow` per una forma che lo
+        schema del verbo dichiara valida. Il PDP gira prima del verbo: la nozione
+        di «forma di un repository» deve essere UNA."""
+        self.assertEqual(egress._repo_url({"repo": "acme/tool"}),
+                         ["https://github.com/acme/tool"])
+        self.assertEqual(egress._repo_url({"repo": "https://github.com/Acme/Tool.git"}),
+                         ["https://github.com/acme/tool"])
+
+    def test_what_is_not_a_repository_stays_unreadable(self):
+        """La proprietà 3 del modulo: una destinazione che non si legge dalla
+        chiamata non passa. Un path del filesystem non deve diventare una
+        destinazione leggibile — e `file://` nemmeno quando il seam dei test lo
+        apre a `normalize_repo`, perché è il filesystem del gateway, non
+        un'uscita."""
+        from .tools import github_repo as gh
+        for brutto in ("", "acme", "../etc/passwd", "/datadir/vault",
+                       "acme/tool/extra"):
+            with self.subTest(brutto):
+                self.assertEqual(egress._repo_url({"repo": brutto}), [])
+        with patch.object(gh, "ALLOW_LOCAL_REPOS", True):
+            self.assertEqual(egress._repo_url({"repo": "file:///datadir/vault"}), [])
+
     def test_drive_share_is_a_person_not_a_folder(self):
         """`gdrive.share` è uscita verso una PERSONA: con l'URI la differenza si
         vede, e non si confonde con una cartella."""
