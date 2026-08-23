@@ -66,14 +66,25 @@ class NoDuplicatedRuleTests(unittest.TestCase):
     def test_the_check_uses_the_shared_set_rather_than_a_literal(self):
         """Guarda il CODICE, non i commenti — il primo tentativo di questo test
         falliva sulla spiegazione della correzione, che cita la forma sbagliata
-        per dire di non usarla."""
+        per dire di non usarla.
+
+        La regola vive in `_human_is_admin` da quando ha due lettori (la RBAC dei
+        verbi gated e l'esenzione dal M-gate, #148): il test la segue là, invece
+        di pretendere che resti copiata dove stava."""
         import inspect
-        righe = inspect.getsource(M._human_tool_allowed).splitlines()
+        righe = inspect.getsource(M._human_is_admin).splitlines()
         codice = "\n".join(r for r in righe
                            if not r.strip().startswith("#") and '"""' not in r)
         self.assertIn("_ADMIN_ROLES", codice)
         self.assertNotIn('== "admin"', codice,
                          "confronto letterale: escluderebbe di nuovo superadmin")
+
+    def test_the_rbac_delegates_instead_of_re_implementing(self):
+        """Una copia in più della regola è il difetto originale, non un dettaglio
+        di stile: quella che divergeva sbagliava sul caso più privilegiato."""
+        import inspect
+        codice = inspect.getsource(M._human_tool_allowed)
+        self.assertIn("_human_is_admin", codice)
 
     def test_the_shared_set_contains_both(self):
         self.assertIn("admin", _ADMIN_ROLES)

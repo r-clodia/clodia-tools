@@ -2329,6 +2329,27 @@ def _origin_chain(verb: str) -> list:
     return out
 
 
+def _human_is_admin() -> bool:
+    """Il ruolo umano FIRMATO del turno risponde ad amministratore?
+
+    Un solo punto per una domanda che ora ha DUE lettori — la RBAC dei verbi
+    gated e l'esenzione dal M-gate (#148) — e che con due copie divergerebbe.
+    È già successo su questa esatta riga.
+
+    Si passa da `_ADMIN_ROLES`, mai da un confronto letterale con la singola
+    stringa: quel confronto escludeva `superadmin`, cioè l'unica persona che
+    possiede l'istanza, e il 7 ago 2026 Davide si è visto rifiutare
+    `packs.import_url` da amministratore. Il difetto
+    stava in piedi perché ovunque altrove — `human.is_admin`,
+    `admin._is_admin_yaml`, `origin.principal_may`, `tools_api` — la verifica
+    passa da `_ADMIN_ROLES = ("superadmin", "admin")`: un solo punto duplicava
+    la regola invece di usarla, e sbagliava verso il rifiuto sul caso più
+    privilegiato.
+    """
+    from .human import _ADMIN_ROLES
+    return (current_human_role() or "user") in _ADMIN_ROLES
+
+
 def _human_tool_allowed(name: str) -> bool:
     """RBAC UMANA (chiamata on-behalf): il gateway è il PDP unico anche per gli
     umani. Un tool `super-only` (packs/providers/mcp/agents/settings/pki/ca…,
@@ -2337,19 +2358,42 @@ def _human_tool_allowed(name: str) -> bool:
     non forgiabile dal modello. Chiude la Broken Access Control del path REST."""
     from . import gate as _gate
     if _gate.is_gated(name):
-        # `in _ADMIN_ROLES` e NON `== "admin"`. Il confronto letterale escludeva
-        # `superadmin`, cioè l'unica persona che possiede l'istanza: il 7 ago 2026
-        # Davide si è visto rifiutare `packs.import_url` da amministratore.
-        #
-        # Il difetto stava in piedi perché ovunque altrove — `human.is_admin`,
-        # `admin._is_admin_yaml`, `origin.principal_may`, `tools_api` — la
-        # verifica passa da `_ADMIN_ROLES = ("superadmin", "admin")`. Un solo
-        # punto duplicava la regola invece di usarla, e le duplicazioni di una
-        # regola divergono: questa divergeva sul caso più privilegiato, quindi
-        # sbagliava verso il rifiuto e nessun test la vedeva.
-        from .human import _ADMIN_ROLES
-        return (current_human_role() or "user") in _ADMIN_ROLES
+        return _human_is_admin()
     return True
+
+
+def _onbehalf_trusted() -> bool:
+    """Interruttore di ritorno alla regola precedente: «l'utente autenticato
+    dall'UI è trusted» (spec §2), cioè esente da M-gate **e** da whitelist di
+    destinazione, qualunque sia il suo ruolo.
+
+    Default OFF: la regola in vigore è quella del decision record 38 —
+    la destinazione è perimetro, non segnale. L'interruttore esiste perché il
+    cambio toglie un'esenzione in un percorso che l'owner usa ogni giorno: se
+    rompesse il suo lavoro, `CLODIA_ONBEHALF_TRUSTED=on` lo rimette senza un
+    deploy e senza una patch al volo. Non è un modo di funzionamento: è la
+    maniglia di rientro, e va tolta quando non serve più.
+    """
+    return (_os.environ.get("CLODIA_ONBEHALF_TRUSTED") or "").strip().lower() \
+        in ("1", "on", "true", "yes")
+
+
+def _mgate_exempt() -> bool:
+    """Chi NON passa dal M-gate (clodia-platform#148, ex riga di #175).
+
+    Era «ogni chiamata on-behalf»: una persona che agisce dall'UI è supervisione
+    di per sé, quindi chiederle conferma della propria azione è consent fatigue.
+    Regge per l'owner, che è admin. Non regge per una persona con ruolo `user`,
+    e lì l'esenzione non stava proteggendo il consenso di nessuno: era il
+    permesso di saltare il controllo (il tetto `scoped_tools` sopra di essa non
+    è un tetto quando il claim manca — e su questo percorso manca sempre, perché
+    `gateway_pdp._token` conia il token on-behalf senza `scoped_tools`).
+
+    Ora l'esenzione segue il RUOLO firmato, non il fatto di essere on-behalf.
+    """
+    if not is_on_behalf():
+        return False
+    return _onbehalf_trusted() or _human_is_admin()
 
 
 def _scoped_ceiling_ok(name: str) -> bool:
@@ -3352,7 +3396,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # Il gate non concede nuovi tool: per il cross-topic apre soltanto il
         # compartimento target, sempre entro clearance e whitelist già verificate.
         gate_approval = None
-        if not is_on_behalf():
+        # L'esenzione dal M-gate segue il RUOLO umano firmato, non il solo fatto
+        # che la chiamata sia on-behalf (#148): vedi `_mgate_exempt`.
+        if not _mgate_exempt():
             from . import gate as _gate
             # Gated GLOBALE (pericoloso per chiunque) oppure PER-AGENTE (§8: le
             # scritture di impiegato-tomato, quelle github di fullstack-dev —
@@ -3449,6 +3495,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                               f"toglie questa domanda; approvarlo qui vale una volta.")
                 else:
                     reason = ""
+                if is_on_behalf():
+                    # La card la legge un umano e dice CHI chiede. Da quando il
+                    # M-gate non è più esente per i non-admin (#148), qui passano
+                    # anche le chiamate di una persona attraverso un carrier: un
+                    # testo che nomina soltanto `@clodia` attribuirebbe la
+                    # richiesta all'agente, cioè direbbe la cosa sbagliata
+                    # proprio nel momento in cui a qualcuno si chiede di
+                    # decidere. Il ruolo sta accanto al nome perché è la
+                    # differenza fra «l'owner sta lavorando» e «una persona con
+                    # ruolo `user` chiede qualcosa in più».
+                    reason = (f"{current_principal() or 'una persona'} "
+                              f"(ruolo {current_human_role() or 'user'}) agisce "
+                              f"tramite @{_ag}. " + reason).strip()
                 gate_approval = await _require_gate_consent(
                     _ag, name, consume=True, reason=reason,
                     # Niente delega prefirmata sui verbi che aprono un'uscita o
@@ -3469,9 +3528,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         # Default `report`: decide e logga senza bloccare, perché la lista vera
         # delle destinazioni si impara dal traffico reale — è così che sono state
         # trovate le quattro lacune della whitelist di rete.
-        # NON si applica alle richieste on-behalf: l'utente autenticato dall'UI
-        # è trusted (§2), e una sua mail non è un'uscita dell'agente — è la sua.
-        if not is_on_behalf():
+        # SI APPLICA ANCHE ALLE RICHIESTE ON-BEHALF (decision record 38,
+        # clodia-platform#148). Fino al 23 ago 2026 non si applicava: «l'utente
+        # autenticato dall'UI è trusted (§2), e una sua mail non è un'uscita
+        # dell'agente — è la sua». La prima metà resta vera e il M-gate ne tiene
+        # conto (un admin non si fa confermare la propria azione); la seconda no,
+        # perché la DESTINAZIONE è perimetro e non segnale: dove i dati escono
+        # non dipende da chi ha premuto il tasto. Una persona con ruolo `user`
+        # raggiungeva così ogni destinazione, senza gate e senza whitelist.
+        # `_onbehalf_trusted()` è la maniglia di rientro, non un modo normale.
+        if not (is_on_behalf() and _onbehalf_trusted()):
             from . import egress as _egress
             try:
                 _acfg = agent_config(_ag) if _ag else {}
