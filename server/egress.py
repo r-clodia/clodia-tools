@@ -187,17 +187,33 @@ def _repo_url(a: dict) -> list[str]:
     `repo` già in forma di URL, e `github.push` non lo manda affatto — sa solo la
     directory. Chi chiama risolve il remote e lo aggiunge come `repo`: qui si
     legge, non si tocca il filesystem.
+
+    Cos'è «la forma di un repository» lo decide `normalize_repo`, e lo decide da
+    solo: un guard di scheme qui sarebbe una SECONDA definizione della stessa
+    forma, e le due divergono al primo cambio. È già accaduto con lo shorthand
+    `owner/repo`: accettato dal verbo, scartato qui prima di arrivarci, e il
+    rifiuto risultante — UNKNOWN, «destinazione non leggibile» — mandava a
+    dichiarare `egress_allow.github` per una forma che era solo scritta corta.
+
+    Il perimetro non si allarga: si passa da «negato perché illeggibile» a
+    «letto e confrontato con la whitelist», che è ciò che già accade alla forma
+    lunga dello stesso repository. Un repository non approvato resta negato (o
+    gated, se nuovo).
     """
     u = str(a.get("repo") or "").strip()
-    if not u or "/" not in u:
-        return []
-    if not u.lower().startswith(("http://", "https://", "git@", "ssh://")):
+    if not u:
         return []
     try:
         from .tools.github_repo import normalize_repo
-        return [normalize_repo(u).lower()]
-    except Exception:  # noqa: BLE001 — URL che non è un repository
+        dest = normalize_repo(u).lower()
+    except Exception:  # noqa: BLE001 — non è un repository: illeggibile
         return []
+    # `file://` non è un'uscita: è il filesystem del GATEWAY. `normalize_repo`
+    # lo rifiuta già, ma solo finché `ALLOW_LOCAL_REPOS` resta chiuso — e la
+    # proprietà 3 (illeggibile ⇒ negato) non deve dipendere da un seam dei test.
+    if not dest.startswith(("http://", "https://")):
+        return []
+    return [dest]
 
 
 #: Verbi nativi del gateway che ESCONO. `clone`/`pull` portano dentro e non

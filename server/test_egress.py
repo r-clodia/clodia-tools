@@ -55,6 +55,32 @@ class UriExtractionTests(unittest.TestCase):
                         {"owner": "r-clodia", "repo": "clodia-logic"}),
             ["https://github.com/r-clodia/clodia-logic"])
 
+    def test_the_short_form_is_a_readable_destination(self):
+        """`github.pull_request(repo="owner/repo")` è la forma che si scrive a
+        mano, e `normalize_repo` la accetta. Se l'estrattore la scarta prima,
+        `decide()` risponde UNKNOWN e il verbo viene negato «destinazione non
+        leggibile» — cioè si manda a toccare `egress_allow` per una forma che lo
+        schema del verbo dichiara valida. Il PDP gira prima del verbo: la nozione
+        di «forma di un repository» deve essere UNA."""
+        self.assertEqual(egress._repo_url({"repo": "acme/tool"}),
+                         ["https://github.com/acme/tool"])
+        self.assertEqual(egress._repo_url({"repo": "https://github.com/Acme/Tool.git"}),
+                         ["https://github.com/acme/tool"])
+
+    def test_what_is_not_a_repository_stays_unreadable(self):
+        """La proprietà 3 del modulo: una destinazione che non si legge dalla
+        chiamata non passa. Un path del filesystem non deve diventare una
+        destinazione leggibile — e `file://` nemmeno quando il seam dei test lo
+        apre a `normalize_repo`, perché è il filesystem del gateway, non
+        un'uscita."""
+        from .tools import github_repo as gh
+        for brutto in ("", "acme", "../etc/passwd", "/datadir/vault",
+                       "acme/tool/extra"):
+            with self.subTest(brutto):
+                self.assertEqual(egress._repo_url({"repo": brutto}), [])
+        with patch.object(gh, "ALLOW_LOCAL_REPOS", True):
+            self.assertEqual(egress._repo_url({"repo": "file:///datadir/vault"}), [])
+
     def test_drive_share_is_a_person_not_a_folder(self):
         """`gdrive.share` è uscita verso una PERSONA: con l'URI la differenza si
         vede, e non si confonde con una cartella."""
@@ -239,6 +265,39 @@ class ModeTests(unittest.TestCase):
     def test_an_unknown_mode_falls_back_to_gate(self):
         with patch.dict("os.environ", {"CLODIA_EGRESS_ENFORCE": "enforce"}):
             self.assertEqual(egress.mode(), "gate")
+
+
+class ShorthandGatesInsteadOfDenyingTests(unittest.TestCase):
+    """La forma breve deve poter essere APPROVATA, non solo letta.
+
+    Il difetto visibile non era il valore estratto: era che `UNKNOWN`, in modo
+    `gate`, fa deny SECCO — nessuna card, quindi nessun modo per un umano di dire
+    sì, e un messaggio che manda a dichiarare `egress_allow.github` per niente.
+    Questi test attraversano `check()`, dove quella differenza si vede.
+    """
+
+    def _check(self, mode, cfg, repo):
+        with patch.dict("os.environ", {"CLODIA_EGRESS_ENFORCE": mode,
+                                       "CLODIA_DANGEROUSLY_SKIP_GATES": "0"}), _with(cfg):
+            return egress.check("fullstack-dev", {}, "github.pull_request",
+                                {"repo": repo, "head": "b", "title": "t"})
+
+    def test_an_unlisted_short_form_asks_instead_of_denying(self):
+        v = self._check("gate", _cfg("https://github.com/r-clodia/"), "acme/tool")
+        self.assertEqual(v["action"], "gate")
+        self.assertEqual(v["remember"], ["https://github.com/acme/tool"])
+
+    def test_a_listed_short_form_passes_without_asking(self):
+        v = self._check("gate", _cfg("https://github.com/r-clodia/"),
+                        "r-clodia/clodia-tools")
+        self.assertEqual(v["action"], "allow")
+
+    def test_the_refusal_now_names_the_whitelist_not_the_illegibility(self):
+        """In modo `on` il perimetro decide ancora: negato, ma per il motivo
+        giusto — quello che dice cosa aggiungere."""
+        v = self._check("on", _cfg("https://github.com/r-clodia/"), "acme/tool")
+        self.assertEqual(v["action"], "deny")
+        self.assertIn("non in whitelist", v["reason"])
 
 
 class RememberTests(unittest.TestCase):
