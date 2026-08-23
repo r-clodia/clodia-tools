@@ -3803,8 +3803,25 @@ def _safe_scratch_path(p: str) -> str:
     controllo del livello. Rifiutare lì trasformerebbe l'assenza di un campo
     nuovo in un guasto, e la direzione della retrocompatibilità va verso «come
     prima».
+
+    **Il path deve essere assoluto**, e va chiesto PRIMA di normalizzare. Non è
+    una formalità: `realpath("")` e `realpath("out/report.pdf")` non sono errori,
+    sono la CWD del processo gateway. Un path relativo non veniva quindi
+    rifiutato — veniva *tradotto* in una destinazione che nessun chiamante ha
+    nominato, e l'esito dipendeva da dove gira il gateway: fuori dal cortile un
+    `ValueError` con un messaggio che parlava d'altro, dentro lo scratch di uno
+    spawn un **controllo superato** con i byte scritti nella CWD. Terza volta
+    che si incontra lo stesso modo silenzioso di sbagliare in questa funzione.
+    Nessun chiamante legittimo passa relativo: la scratch è nota e assoluta.
     """
-    rp = _os.path.realpath(p or "")
+    if not p or not _os.path.isabs(p):
+        raise ValueError(
+            f"path non consentito: '{p}' non è un path assoluto. Un path "
+            f"relativo (o vuoto) non verrebbe rifiutato da `realpath`: verrebbe "
+            f"RISOLTO contro la directory di lavoro del gateway, che non è la "
+            f"tua e che nessuno ha nominato. Passa un path assoluto sotto "
+            f"{_SPAWNS_ROOT}/<spawn>/ — la tua scratch è nota e assoluta.")
+    rp = _os.path.realpath(p)
     root = _os.path.realpath(_SPAWNS_ROOT)
     if not rp.startswith(root + "/"):
         raise ValueError(
