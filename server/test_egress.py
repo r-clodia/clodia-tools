@@ -267,6 +267,39 @@ class ModeTests(unittest.TestCase):
             self.assertEqual(egress.mode(), "gate")
 
 
+class ShorthandGatesInsteadOfDenyingTests(unittest.TestCase):
+    """La forma breve deve poter essere APPROVATA, non solo letta.
+
+    Il difetto visibile non era il valore estratto: era che `UNKNOWN`, in modo
+    `gate`, fa deny SECCO — nessuna card, quindi nessun modo per un umano di dire
+    sì, e un messaggio che manda a dichiarare `egress_allow.github` per niente.
+    Questi test attraversano `check()`, dove quella differenza si vede.
+    """
+
+    def _check(self, mode, cfg, repo):
+        with patch.dict("os.environ", {"CLODIA_EGRESS_ENFORCE": mode,
+                                       "CLODIA_DANGEROUSLY_SKIP_GATES": "0"}), _with(cfg):
+            return egress.check("fullstack-dev", {}, "github.pull_request",
+                                {"repo": repo, "head": "b", "title": "t"})
+
+    def test_an_unlisted_short_form_asks_instead_of_denying(self):
+        v = self._check("gate", _cfg("https://github.com/r-clodia/"), "acme/tool")
+        self.assertEqual(v["action"], "gate")
+        self.assertEqual(v["remember"], ["https://github.com/acme/tool"])
+
+    def test_a_listed_short_form_passes_without_asking(self):
+        v = self._check("gate", _cfg("https://github.com/r-clodia/"),
+                        "r-clodia/clodia-tools")
+        self.assertEqual(v["action"], "allow")
+
+    def test_the_refusal_now_names_the_whitelist_not_the_illegibility(self):
+        """In modo `on` il perimetro decide ancora: negato, ma per il motivo
+        giusto — quello che dice cosa aggiungere."""
+        v = self._check("on", _cfg("https://github.com/r-clodia/"), "acme/tool")
+        self.assertEqual(v["action"], "deny")
+        self.assertIn("non in whitelist", v["reason"])
+
+
 class RememberTests(unittest.TestCase):
     def setUp(self):
         from . import whitelist as wl
