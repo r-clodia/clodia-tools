@@ -1832,8 +1832,30 @@ class TopicService:
     def open(self, tier: str, name: str) -> dict:
         return self._open(tier, name, allow_archived=False)
 
-    def _open(self, tier: str, name: str, *, allow_archived: bool) -> dict:
-        """Read-only: meta + summary (+ summary_version per optimistic lock)."""
+    def _open(self, tier: str, name: str, *, allow_archived: bool,
+              light: bool = False) -> dict:
+        """Read-only: meta + summary (+ summary_version per optimistic lock).
+
+        `light=True` salta tutto ciò che la RIGA DI UNA LISTA non usa, e serve
+        perché `list()` chiama questo metodo una volta per topic:
+
+          - `recent_files`, che per un topic con un remote Drive montato è una
+            **chiamata di rete a Google**. È dichiarata «a decoration for the
+            card» nel commento qui sotto, e la card è quella di UN topic aperto:
+            in una lista di cento righe diventa cento richieste;
+          - `agents_md`, che la lista non emette;
+          - `recap_history`, altra lettura per topic che la lista non emette.
+
+        Misurato il 22 ago 2026 su 98 topic: `list()` costava 4–7 secondi contro
+        un budget client di 5, e la webui rispondeva 502 a intermittenza secondo
+        la latenza verso Drive. Il profilo diceva `_open` × 159 e, dentro,
+        `drive_fs.list` con due richieste HTTP reali.
+
+        In `light` i campi saltati NON compaiono nel dizionario invece di valere
+        una lista vuota: `recent_files: []` significa «questo topic non ha file»,
+        che è un'altra affermazione — la stessa distinzione che
+        `files_unavailable` esiste per fare.
+        """
         initial_meta, _ = self._read_meta(tier, name)
         if not allow_archived:
             self._assert_content_available(initial_meta)
@@ -1874,6 +1896,16 @@ class TopicService:
         # `files_unavailable` tells the caller the difference between "no files"
         # and "files could not be listed", so the UI can say so instead of
         # silently showing an empty topic.
+        base = {
+            "tier": meta["tier"], "tier_name": TIER_NAMES.get(meta["tier"], meta["tier"]), "name": name,
+            "meta": meta, "summary": summary, "summary_version": summary_version,
+            "tldr": _tldr(summary), "minutes": [],
+            "updated_at": updated_at,
+        }
+        if light:
+            # Niente `recent_files`, `agents_md`, `recap_history`: vedi il
+            # docstring. I campi sono ASSENTI, non vuoti.
+            return base
         fmt: list[tuple[float, str]] = []
         files_unavailable = False
         try:
@@ -1894,11 +1926,10 @@ class TopicService:
                         for mt, n in fmt[:3]]
         agents_md, agents_md_version = self._read_agents_md(tier, name)
         return {
-            "tier": meta["tier"], "tier_name": TIER_NAMES.get(meta["tier"], meta["tier"]), "name": name,
-            "meta": meta, "summary": summary, "summary_version": summary_version,
-            "tldr": _tldr(summary), "minutes": [], "agents_md": agents_md,
+            **base,
+            "agents_md": agents_md,
             "agents_md_version": agents_md_version,
-            "updated_at": updated_at, "recent_files": recent_files,
+            "recent_files": recent_files,
             # True when the file backend could not be listed: the caller must not
             # read an empty `recent_files` as "this topic has no files".
             "files_unavailable": files_unavailable,
@@ -2733,7 +2764,9 @@ class TopicService:
                 if e.kind != "dir":
                     continue
                 try:
-                    info = self._open(tr, e.name, allow_archived=True)
+                    # `light`: la riga di una lista non mostra i file recenti, e
+                    # ricavarli costa una chiamata a Drive PER TOPIC.
+                    info = self._open(tr, e.name, allow_archived=True, light=True)
                 except TopicError:
                     continue
                 m = info["meta"]
@@ -2761,7 +2794,13 @@ class TopicService:
                     "logo": m.get("logo"),
                     "channel": m.get("channel"),
                     "updated_at": info["updated_at"],
-                    "recent_files": info["recent_files"],
+                    # `recent_files` NON è più qui. Era calcolato con una
+                    # chiamata a Drive per topic, trasportato fino a
+                    # `recent_artifacts` nella risposta dell'agent-server,
+                    # dichiarato in `TopicSummary` nella webui — e mai
+                    # renderizzato da nessun componente (verificato il 22 ago
+                    # 2026 su tutti e quattro i repo). Chi ha bisogno dei file
+                    # recenti apre il topic, e lì `_open` non è `light`.
                 })
         return out
 
