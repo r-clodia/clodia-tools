@@ -44,6 +44,31 @@ class NormalizeTests(unittest.TestCase):
             with self.subTest(forma):
                 self.assertEqual(gh.normalize_repo(forma), atteso)
 
+    def test_the_short_form_is_the_fifth_way(self):
+        """`owner/repo` è come GitHub nomina un repository, ed è la forma che si
+        scrive a mano: se non collassa sulla canonica, la whitelist dice «non
+        approvato» a un repository approvato — con un messaggio che parla di
+        forma dell'URL, quindi manda a cercare il difetto altrove."""
+        atteso = "https://github.com/acme/tool"
+        for forma in ("acme/tool", "acme/tool.git", "acme/tool/"):
+            with self.subTest(forma):
+                self.assertEqual(gh.normalize_repo(forma), atteso)
+
+    def test_a_path_is_not_a_short_form(self):
+        """La porta della forma breve non deve far entrare un path del
+        filesystem: sarebbe un `file://` senza scriverlo."""
+        for brutto in ("/datadir/vault", "../etc/passwd", "./tool", "acme",
+                       "acme/tool/extra", "acme /tool"):
+            with self.subTest(brutto):
+                with self.assertRaises(gh.GitHubError):
+                    gh.normalize_repo(brutto)
+
+    def test_the_refusal_names_the_forms_that_work(self):
+        """Un rifiuto che nomina solo la forma canonica manda a indovinare."""
+        with self.assertRaises(gh.GitHubError) as ctx:
+            gh.normalize_repo("https://github.com/acme")
+        self.assertIn("owner/repo", str(ctx.exception))
+
     def test_credentials_in_the_url_are_stripped(self):
         """Un URL con le credenziali dentro non deve diventare la voce
         canonica: finirebbe nei log e nei messaggi d'errore."""

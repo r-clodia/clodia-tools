@@ -568,7 +568,9 @@ _GITHUB_TOOLS: list[Tool] = [
                      "scratch. La credenziale la fornisce l'owner al mount e non "
                      "entra mai nel tuo processo."),
         inputSchema={"type": "object", "properties": {
-            "repo": {"type": "string", "description": "https://github.com/<owner>/<repo>"},
+            "repo": {"type": "string", "description": (
+                "https://github.com/<owner>/<repo> — vale anche la forma breve "
+                "<owner>/<repo>, che assume github.com")},
             "dest": {"type": "string", "description": "cartella di destinazione nella tua scratch"},
             "branch": {"type": "string"},
         }, "required": ["repo", "dest"]},
@@ -591,7 +593,10 @@ _GITHUB_TOOLS: list[Tool] = [
         name="github.pull_request",
         description="Apre una pull request sul repository approvato.",
         inputSchema={"type": "object", "properties": {
-            "repo": {"type": "string"}, "head": {"type": "string"},
+            "repo": {"type": "string", "description": (
+                "https://github.com/<owner>/<repo> — vale anche la forma breve "
+                "<owner>/<repo>")},
+            "head": {"type": "string"},
             "base": {"type": "string", "description": "default: main"},
             "title": {"type": "string"}, "body": {"type": "string"}},
             "required": ["repo", "head", "title"]},
