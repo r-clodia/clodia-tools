@@ -1,0 +1,42 @@
+name: tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    env:
+      # Nessun gateway vero durante i test: porta 9 (discard). Il default nel
+      # codice punta a un host della colonia, che su un runner non risolve — ma
+      # «non risolve» è una proprietà dell'ambiente, non una garanzia scritta.
+      CLODIA_TOOLS_MCP_URL: http://127.0.0.1:9/mcp/
+      # Numero minimo di test ESEGUITI. Misurato 1181 su main (66e03a3) il
+      # 23 ago 2026, con le dipendenze di `requirements.txt`.
+      # Qui la soglia non è teorica: `requirements.txt` pinna `mcp>=1.2.0,<2` e
+      # con `mcp 2.0.0` installato la suite non fallisce, NON PARTE — misurato
+      # lo stesso giorno: 934 test eseguiti e 98 errori di import invece di
+      # 1181. Il conteggio coglie quel guasto anche il giorno in cui gli errori
+      # di collezione non facessero più uscire non-zero.
+      MIN_TEST: 1150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: dipendenze come le dichiara il repository (pin compresi)
+        run: pip install -r requirements.txt
+      # `make test` e non il comando unittest ricopiato qui: il modo di eseguire
+      # la suite vive nel Makefile (decision record 34). `set -o pipefail`
+      # perché senza di esso `tee` restituirebbe il proprio exit code e una
+      # suite rossa passerebbe.
+      - name: suite, esito e numero di test eseguiti
+        run: |
+          set -eo pipefail
+          make test 2>&1 | tee "$RUNNER_TEMP/suite.log"
+          eseguiti=$(sed -nE 's/^Ran ([0-9]+) tests?.*/\1/p' "$RUNNER_TEMP/suite.log" | tail -1)
+          echo "test eseguiti: ${eseguiti:-0} — minimo richiesto: ${MIN_TEST}"
+          if [ "${eseguiti:-0}" -lt "${MIN_TEST}" ]; then
+            echo "::error::solo ${eseguiti:-0} test eseguiti, minimo ${MIN_TEST}: la suite non è partita per intero, un verde qui non significherebbe niente"
+            exit 1
+          fi
