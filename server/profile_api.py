@@ -12,7 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from . import profile
+from . import internal_auth, profile
 from .pki_verify import verify_session_token
 
 LOG = logging.getLogger("clodia-tools.profile")
@@ -32,6 +32,20 @@ def _principal(request: Request) -> tuple[str | None, JSONResponse | None]:
     except PermissionError as e:
         LOG.warning("profile auth fallita: %s", e)
         return None, JSONResponse({"error": "unauthorized"}, status_code=401)
+    err = internal_auth.refuse_if_revoked(payload, log=LOG)
+    if err:
+        return None, err
+    # L'identità di servizio dell'agent-server è un token NUDO sul principal
+    # (`clodia-logic/server/api/profile.py:_headers`). Un token `on_behalf` o
+    # *scoped* porta lo stesso claim `agent` — è il carrier — ma non è quel
+    # servizio: senza questa riga un token di proxy stretto a quattro verbi di
+    # chat dichiarava nell'header il principal che voleva e leggeva i PII di
+    # chiunque, perché l'ACL di `profile.py` si applica al principal DICHIARATO
+    # (clodia-platform#261).
+    if payload.get("on_behalf") or payload.get("scoped_tools"):
+        LOG.warning("profile: sessione non di servizio rifiutata (principal=%s)",
+                    payload.get("principal"))
+        return None, JSONResponse({"error": "forbidden"}, status_code=403)
     agent = str(payload.get("agent") or "")
     # Un servizio fidato può agire per conto del principal reale (header).
     declared = request.headers.get("x-clodia-principal", "")

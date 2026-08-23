@@ -26,6 +26,8 @@ def main() -> int:
     importlib.reload(_vault)
     from . import providers_api as papi
     importlib.reload(papi)
+    from . import internal_auth
+    importlib.reload(internal_auth)
 
     from starlette.applications import Starlette
     from starlette.testclient import TestClient
@@ -38,7 +40,8 @@ def main() -> int:
             raise PermissionError("token non valido")
         return {"agent": _fake_agent["v"], "aud": "keystore"}
 
-    papi.verify_session_token = _fake_verify
+    # La verifica del bearer sta in un posto solo (clodia-platform#261).
+    internal_auth.verify_session_token = _fake_verify
 
     app = Starlette(routes=papi.routes)
     c = TestClient(app)

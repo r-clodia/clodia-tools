@@ -16,35 +16,24 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-import os
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from .pki_verify import verify_session_token
+from . import internal_auth
 from .tools import image as image_tool
 
 LOG = logging.getLogger("clodia-tools.imagegen")
 
-_PRINCIPALS = {
-    p.strip() for p in (os.environ.get("CLODIA_PROVIDER_PRINCIPALS") or "clodia").split(",")
-    if p.strip()
-}
-
 
 def _authorize(request: Request):
-    auth = request.headers.get("authorization", "")
-    token = auth[7:] if auth.lower().startswith("bearer ") else ""
-    try:
-        payload = verify_session_token(token)
-    except PermissionError as e:
-        LOG.warning("imagegen auth fallita: %s", e)
-        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
-    agent = str(payload.get("agent") or "")
-    if agent not in _PRINCIPALS:
-        return None, JSONResponse({"error": "forbidden"}, status_code=403)
-    return agent, None
+    """Regola unica delle rotte interne: `internal_auth.authorize` applica il
+    principal privilegiato **e** ciò che qui mancava — revoca, tetto
+    `scoped_tools` e rifiuto delle sessioni on-behalf. Questa è la porta di un
+    processo (il runner), non di un flusso umano (clodia-platform#261)."""
+    payload, err = internal_auth.authorize(request, log=LOG)
+    return (str(payload.get("agent")) if payload else None), err
 
 
 def _strip_data_url(s: str) -> str:

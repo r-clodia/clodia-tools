@@ -158,7 +158,10 @@ class TheInternalApiIsNotAProxyDoorTests(unittest.TestCase):
         from starlette.requests import Request
         scope = {"type": "http", "method": "POST", "path": "/internal/topics",
                  "headers": [(b"authorization", b"Bearer ckt1.x.y")]}
-        with patch("server.topics_api.verify_session_token", lambda t: payload):
+        # La verifica del bearer vive ora in `internal_auth`, un posto solo per
+        # tutte le rotte interne (clodia-platform#261): il punto da sostituire
+        # nel test si è spostato con lei.
+        with patch("server.internal_auth.verify_session_token", lambda t: payload):
             from . import topics_api
             return topics_api._authorize(Request(scope))
 

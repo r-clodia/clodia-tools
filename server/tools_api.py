@@ -85,6 +85,18 @@ def _is_human_admin(name: str) -> bool:
     return d.get("type") == "human" and str(d.get("role") or "") in _ADMIN_ROLES
 
 
+def _revocata(payload: dict) -> bool:
+    """Vero se la sessione è stata revocata.
+
+    Queste rotte acquisiscono credenziali (PAT, OAuth, backup, server MCP): la
+    revoca di un client MCP umano era letta solo da `_AuthMiddleware`, cioè solo
+    su `/mcp`, e un token revocato continuava ad amministrarle fino alla scadenza
+    naturale — che per un client MCP è di trenta giorni (clodia-platform#261).
+    """
+    from . import internal_auth
+    return internal_auth.refuse_if_revoked(payload, log=LOG) is not None
+
+
 def _authorized(request: Request) -> bool:
     """Gestione integrations/credenziali/backup = **territorio ADMIN**. Autorizza
     se: (a) trusted-core via UI token, oppure (b) ckt1 valido di un ADMIN — umano
@@ -101,6 +113,8 @@ def _authorized(request: Request) -> bool:
     try:
         p = verify_session_token(token)
     except Exception:
+        return False
+    if _revocata(p):
         return False
     if p.get("on_behalf"):
         return (p.get("human_role") or "user") == "admin"
@@ -127,6 +141,8 @@ def _authorized_owner(request: Request) -> bool:
     try:
         p = verify_session_token(token)
     except Exception:
+        return False
+    if _revocata(p):
         return False
     if p.get("on_behalf"):
         return (p.get("human_role") or "user") == "admin"

@@ -26,21 +26,33 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import whitelist
+from . import internal_auth, whitelist
 from .pki_verify import verify_session_token
 
 LOG = logging.getLogger("clodia-tools.tool_api")
 
 
 def _auth(request: Request):
-    """Verifica il token ckt1 e ritorna il payload, o (None, risposta 401)."""
+    """Verifica il token ckt1 e ritorna il payload, o (None, risposta 401).
+
+    Qui NON si applica il resto di `internal_auth`: questa è la facciata del PDP
+    e il suo lavoro è proprio autorizzare per ruolo umano (`on_behalf` è la
+    norma, non l'eccezione) mentre il tetto `scoped_tools` lo applica `call_tool`
+    a valle, sul verbo vero. Manca(va) però la revoca, che su `/mcp` c'è: senza,
+    un token revocato continuava a far eseguire tool da questa porta fino alla
+    scadenza naturale (clodia-platform#261).
+    """
     auth = request.headers.get("authorization", "")
     token = auth[7:] if auth.lower().startswith("bearer ") else ""
     try:
-        return verify_session_token(token), token, None
+        payload = verify_session_token(token)
     except PermissionError as e:
         return None, "", JSONResponse({"error": "unauthorized", "detail": str(e)},
                                       status_code=401)
+    err = internal_auth.refuse_if_revoked(payload, log=LOG)
+    if err:
+        return None, "", err
+    return payload, token, None
 
 
 class _Ctx:

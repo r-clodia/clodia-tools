@@ -8,35 +8,27 @@ Auth ckt1 ristretta al principal privilegiato (clodia), come gli altri /internal
 from __future__ import annotations
 
 import logging
-import os
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import whitelist
-from .pki_verify import verify_session_token
+from . import internal_auth, whitelist
 
 LOG = logging.getLogger("clodia-tools.agents_api")
 
-_PRINCIPALS = {
-    p.strip() for p in (os.environ.get("CLODIA_PROVIDER_PRINCIPALS") or "clodia").split(",")
-    if p.strip()
-}
-
 
 def _authorize(request: Request):
-    auth = request.headers.get("authorization", "")
-    token = auth[7:] if auth.lower().startswith("bearer ") else ""
-    try:
-        payload = verify_session_token(token)
-    except PermissionError as e:
-        LOG.warning("agents_api auth fallita: %s", e)
-        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
-    agent = str(payload.get("agent") or "")
-    if agent not in _PRINCIPALS:
-        return None, JSONResponse({"error": "forbidden"}, status_code=403)
-    return agent, None
+    """Regola unica delle rotte interne (`internal_auth.authorize`).
+
+    Questa API è il punto di ENFORCEMENT: `register` riscrive `allowed_tools` di
+    un agente. Un token stretto a quattro verbi di chat poteva allargarsi da sé
+    passando da qui, perché il tetto che lo tratteneva vive(va) solo sul percorso
+    MCP (clodia-platform#261). Nessun verbo del gateway corrisponde a queste
+    rotte: un token scoped, o on-behalf, non entra.
+    """
+    payload, err = internal_auth.authorize(request, log=LOG)
+    return (str(payload.get("agent") or "") if payload else None), err
 
 
 async def register(request: Request):

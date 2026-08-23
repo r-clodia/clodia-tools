@@ -24,24 +24,15 @@ clodia-logic, mai a un modello, e non viene loggato.
 from __future__ import annotations
 
 import logging
-import os
 import re
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import vault
-from .pki_verify import verify_session_token
+from . import internal_auth, vault
 
 LOG = logging.getLogger("clodia-tools.providers")
-
-# Principal autorizzati a leggere/scrivere le credenziali provider. Default: il
-# solo trusted-core `clodia`. Override via env (CSV) per scenari multi-core.
-_PRINCIPALS = {
-    p.strip() for p in (os.environ.get("CLODIA_PROVIDER_PRINCIPALS") or "clodia").split(",")
-    if p.strip()
-}
 
 # pid ammessi: slug semplice (evita path traversal nel nome credenziale).
 _PID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
@@ -55,20 +46,16 @@ def _cred(pid: str) -> str:
 
 
 def _authorize(request: Request) -> tuple[str | None, JSONResponse | None]:
-    """Verifica il Bearer ckt1 e che il principal sia tra quelli privilegiati.
-    Ritorna (agent, None) se ok, altrimenti (None, JSONResponse di errore)."""
-    auth = request.headers.get("authorization", "")
-    token = auth[7:] if auth.lower().startswith("bearer ") else ""
-    try:
-        payload = verify_session_token(token)
-    except PermissionError as e:
-        LOG.warning("providers auth fallita: %s", e)
-        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
-    agent = str(payload.get("agent") or "")
-    if agent not in _PRINCIPALS:
-        LOG.warning("providers: principal '%s' non autorizzato", agent)
-        return None, JSONResponse({"error": "forbidden"}, status_code=403)
-    return agent, None
+    """Regola unica delle rotte interne (`internal_auth.authorize`): principal
+    privilegiato, revoca, tetto `scoped_tools`, nessuna sessione on-behalf.
+
+    Le credenziali dei provider sono infrastruttura e il consumatore è un
+    processo: un token coniato per far parlare qualcuno in una stanza le leggeva
+    in chiaro e le riscriveva (clodia-platform#261).
+    Ritorna (agent, None) se ok, altrimenti (None, JSONResponse di errore).
+    """
+    payload, err = internal_auth.authorize(request, log=LOG)
+    return (str(payload.get("agent") or "") if payload else None), err
 
 
 def _valid_pid(pid: str) -> bool:

@@ -14,7 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import gate
+from . import gate, internal_auth
 from .pki_verify import verify_session_token
 
 LOG = logging.getLogger("clodia-tools.gate_api")
@@ -28,6 +28,12 @@ def _authorize(request: Request):
     except PermissionError as e:
         LOG.warning("gate_api auth fallita: %s", e)
         return None, JSONResponse({"error": "unauthorized"}, status_code=401)
+    # Il consenso di un umano è per definizione una sessione on-behalf, quindi
+    # qui non si applica il resto di `internal_auth`; la revoca sì, che su `/mcp`
+    # c'è e qui mancava — una sessione revocata concedeva gate (#261).
+    err = internal_auth.refuse_if_revoked(payload, log=LOG)
+    if err:
+        return None, err
     principal = str(payload.get("principal") or "")
     if not principal:
         return None, JSONResponse({"error": "forbidden"}, status_code=403)
