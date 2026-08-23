@@ -23,7 +23,10 @@ scratch di un altro.
 """
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
+from unittest import mock
 
 from . import main as M
 
@@ -79,6 +82,63 @@ class EscapeTests(unittest.TestCase):
     def test_an_empty_path_is_refused(self):
         with self.assertRaises(ValueError):
             M._safe_scratch_path("")
+
+
+class RelativeIsNotAPathTests(unittest.TestCase):
+    """Un path relativo non è «quasi assoluto»: `realpath` non lo rifiuta, lo
+    RISOLVE contro la directory di lavoro del *gateway* — una directory che
+    nessun chiamante ha nominato e che il chiamante non conosce.
+
+    Finché la CWD del gateway sta fuori dal cortile il difetto si travestiva da
+    rifiuto giusto con un messaggio sbagliato. Ma con la CWD dentro lo scratch
+    di uno spawn il controllo **passava**, e i byte finivano lì: di nuovo il
+    modo silenzioso di sbagliare del docstring, l'operazione riesce.
+
+    Per questo il test si mette nella condizione in cui il vecchio codice era
+    verde per il motivo sbagliato — CWD dentro il cortile — invece di dipendere
+    da dove gira la suite. Il vecchio
+    `EscapeTests::test_an_empty_path_is_refused` era rosso in locale e verde in
+    CI proprio perché il *codice* era CWD-dipendente: non era un test fragile,
+    stava segnalando questo.
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        dentro = os.path.join(tmp.name, "spawn-1", "sub")
+        os.makedirs(dentro)
+        p = mock.patch.object(M, "_SPAWNS_ROOT", tmp.name)
+        p.start()
+        self.addCleanup(p.stop)
+        prima = os.getcwd()
+        self.addCleanup(os.chdir, prima)
+        os.chdir(dentro)                      # la CWD che rendeva verde il bug
+
+    def test_a_relative_path_is_refused(self):
+        with self.assertRaises(ValueError):
+            M._safe_scratch_path("out/report.pdf")
+
+    def test_a_bare_filename_is_refused(self):
+        with self.assertRaises(ValueError):
+            M._safe_scratch_path("report.pdf")
+
+    def test_the_empty_path_is_refused_wherever_the_gateway_runs(self):
+        with self.assertRaises(ValueError):
+            M._safe_scratch_path("")
+
+    def test_the_refusal_names_the_problem_and_the_road(self):
+        """«path non consentito: ` `» non dice a chi legge che il problema è la
+        relatività, né come si esce."""
+        with self.assertRaises(ValueError) as cm:
+            M._safe_scratch_path("out/report.pdf")
+        t = str(cm.exception)
+        self.assertIn("assoluto", t)
+        self.assertIn(M._SPAWNS_ROOT, t)
+
+    def test_an_absolute_path_still_works_from_the_same_cwd(self):
+        """Il rifiuto nuovo non deve mangiarsi il caso legittimo."""
+        M._safe_scratch_path(
+            os.path.join(M._SPAWNS_ROOT, "spawn-1", "out", "report.pdf"))
 
 
 class CallersTests(unittest.TestCase):
