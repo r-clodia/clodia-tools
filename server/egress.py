@@ -184,19 +184,27 @@ def _repo_url(a: dict) -> list[str]:
     """Repository dai verbi NATIVI del gateway, che lo passano come URL intero.
 
     Il backend MCP di GitHub manda `owner` + `repo`; `github.pull_request` manda
-    `repo` già in forma di URL, e `github.push` non lo manda affatto — sa solo la
-    directory. Chi chiama risolve il remote e lo aggiunge come `repo`: qui si
-    legge, non si tocca il filesystem.
+    `repo` come lo scrive chi chiama — URL intero o forma breve `owner/repo` — e
+    `github.push` non lo manda affatto: sa solo la directory, e chi chiama
+    risolve il remote e lo aggiunge come `repo`. Qui si legge, non si tocca il
+    filesystem.
+
+    QUALI forme sono un repository lo decide `normalize_repo`, non questa
+    funzione: una copia della regola qui è esattamente ciò che ha rotto la forma
+    breve — `normalize_repo` l'ha imparata, il filtro locale no, e `owner/repo`
+    usciva come destinazione illeggibile. Illeggibile non è «negato dal
+    perimetro»: è `UNKNOWN`, che in modo `gate` nega SENZA aprire una card, cioè
+    senza lasciare a un umano modo di approvare. Ciò che non è un repository
+    (un path, un `file://`) resta rifiutato là dentro, e ciò che lo è resta
+    comunque confrontato con la whitelist a valle.
     """
     u = str(a.get("repo") or "").strip()
-    if not u or "/" not in u:
-        return []
-    if not u.lower().startswith(("http://", "https://", "git@", "ssh://")):
+    if not u:
         return []
     try:
         from .tools.github_repo import normalize_repo
         return [normalize_repo(u).lower()]
-    except Exception:  # noqa: BLE001 — URL che non è un repository
+    except Exception:  # noqa: BLE001 — non è un repository: nessuna destinazione
         return []
 
 

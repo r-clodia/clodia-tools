@@ -241,6 +241,68 @@ class ModeTests(unittest.TestCase):
             self.assertEqual(egress.mode(), "gate")
 
 
+class NativeRepoShorthandTests(unittest.TestCase):
+    """`github.pull_request` con `owner/repo`: il PDP deve LEGGERE la forma breve.
+
+    Non è una questione di messaggi: una destinazione illeggibile diventa
+    `UNKNOWN`, e in modo `gate` `UNKNOWN` è un deny SECCO — nessuna card, quindi
+    nessun modo per un umano di dire sì. La forma corta era così l'unica per cui
+    non esisteva alcuna strada, e il rifiuto mandava a modificare
+    `egress_allow.github`, che non c'entra: la lista non era il problema.
+    """
+
+    def _dests(self, repo):
+        with _with(_cfg("*")):
+            return egress.decide({}, "github.pull_request",
+                                 {"repo": repo, "head": "b", "title": "t"})["destinations"]
+
+    def _check(self, cfg, repo):
+        with patch.dict("os.environ", {"CLODIA_EGRESS_ENFORCE": "gate",
+                                       "CLODIA_DANGEROUSLY_SKIP_GATES": "0"}), _with(cfg):
+            return egress.check("fullstack-dev", {}, "github.pull_request",
+                                {"repo": repo, "head": "b", "title": "t"})
+
+    def test_the_short_form_is_a_readable_destination(self):
+        self.assertEqual(self._dests("acme/tool"), ["https://github.com/acme/tool"])
+
+    def test_the_long_forms_keep_working(self):
+        for repo in ("https://github.com/Acme/Tool.git",
+                     "git@github.com:acme/tool",
+                     "ssh://github.com/acme/tool/"):
+            with self.subTest(repo=repo):
+                self.assertEqual(self._dests(repo), ["https://github.com/acme/tool"])
+
+    def test_a_filesystem_path_is_still_not_a_destination(self):
+        """La forma breve non è una porta per un path: `normalize_repo` ammette
+        due soli segmenti di nome GitHub, e `file://` resta rifiutato lì."""
+        for repo in ("../etc/passwd", "/datadir/vault", "a/b/c",
+                     "file:///datadir/vault", ""):
+            with self.subTest(repo=repo):
+                self.assertEqual(self._dests(repo), [egress.UNKNOWN])
+
+    def test_an_unlisted_short_form_asks_instead_of_denying(self):
+        """Il punto del fix: prima era `deny` senza gate, cioè un rifiuto che
+        nessuno poteva approvare. Ora ha la stessa sorte della forma lunga."""
+        v = self._check(_cfg("https://github.com/r-clodia/"), "acme/tool")
+        self.assertEqual(v["action"], "gate")
+        self.assertEqual(v["remember"], ["https://github.com/acme/tool"])
+
+    def test_a_listed_short_form_passes_without_asking(self):
+        v = self._check(_cfg("https://github.com/r-clodia/"), "r-clodia/clodia-tools")
+        self.assertEqual(v["action"], "allow")
+
+    def test_the_whitelist_still_decides(self):
+        """La forma breve non allarga il perimetro: in modo `on` un repo non in
+        whitelist resta negato, breve o lungo che sia."""
+        with patch.dict("os.environ", {"CLODIA_EGRESS_ENFORCE": "on",
+                                       "CLODIA_DANGEROUSLY_SKIP_GATES": "0"}), \
+                _with(_cfg("https://github.com/r-clodia/")):
+            v = egress.check("fullstack-dev", {}, "github.pull_request",
+                             {"repo": "acme/tool", "head": "b", "title": "t"})
+        self.assertEqual(v["action"], "deny")
+        self.assertIn("non in whitelist", v["reason"])
+
+
 class RememberTests(unittest.TestCase):
     def setUp(self):
         from . import whitelist as wl
