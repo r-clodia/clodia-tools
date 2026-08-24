@@ -159,10 +159,42 @@ class TheGoogleCardIsTestableTests(Base):
             }), patch.object(ta.go, "get_userinfo_email", return_value="owner@example.com"):
                 r = ta._test_connector("google")
             self.assertIs(r["ok"], True)
-            self.assertIn("drive", r["detail"])
-            # Lo scope Gmail finisce con «/»: senza lo strip il nome corto
-            # sarebbe una stringa vuota, e la riserva direbbe «manca: , drive».
-            self.assertIn("mail.google.com", r["detail"])
+            # Il servizio si nomina come lo chiama l'owner. «drive» ricavato
+            # dalla coda dell'URI sarebbe leggibile per caso; «mail.google.com»
+            # (coda dello scope Gmail) non lo sarebbe affatto.
+            self.assertIn("Drive", r["detail"])
+            self.assertIn("Gmail", r["detail"])
+            self.assertIn("riconnetti", r["detail"])
+        self.run_with(_vault({"google_owner": dict(BUNDLE)}), go)
+
+    def test_the_scaffolding_scopes_are_not_named_as_missing_services(self):
+        """`openid`/`userinfo.email` non sono servizi che l'owner riconosce:
+        nominarli sarebbe rumore su una card verde e sana."""
+        def go():
+            with patch.object(ta.go, "refresh_access_token", return_value={
+                "access_token": "AT",
+                "scope": ("https://mail.google.com/ "
+                          "https://www.googleapis.com/auth/drive "
+                          "https://www.googleapis.com/auth/documents "
+                          "https://www.googleapis.com/auth/calendar"),
+            }), patch.object(ta.go, "get_userinfo_email", return_value="owner@example.com"):
+                r = ta._test_connector("google")
+            self.assertIs(r["ok"], True)
+            # Nessuna riserva di nessuna forma: il consenso è completo.
+            self.assertEqual(r["detail"], "owner: ok (owner@example.com)")
+        self.run_with(_vault({"google_owner": dict(BUNDLE)}), go)
+
+    def test_a_silent_scope_field_is_not_an_alarm(self):
+        """Se Google non riporta gli scope non si deduce nulla: dichiarare
+        «fuori dal consenso» tutto ciò che non si è visto sarebbe un allarme
+        inventato su un collegamento sano."""
+        def go():
+            with patch.object(ta.go, "refresh_access_token",
+                              return_value={"access_token": "AT"}), \
+                 patch.object(ta.go, "get_userinfo_email", return_value="owner@example.com"):
+                r = ta._test_connector("google")
+            self.assertIs(r["ok"], True)
+            self.assertEqual(r["detail"], "owner: ok (owner@example.com)")
         self.run_with(_vault({"google_owner": dict(BUNDLE)}), go)
 
     def test_other_credentials_are_not_dragged_into_the_google_card(self):
@@ -178,6 +210,40 @@ class TheGoogleCardIsTestableTests(Base):
             self.assertIsNone(r["ok"])
         self.run_with(_vault({"gmail_vecchio": dict(BUNDLE),
                               "mailbox_studio": {}}), go)
+
+    def test_a_legacy_card_tests_its_own_credentials(self):
+        """Le card storiche (Gmail, Google Workspace connessi separatamente) non
+        sono più in `BASE`, ma un'istanza non aggiornata le mostra ancora.
+        Puntarle sul prefisso unificato direbbe «nessun account connesso» a chi
+        ne ha uno — sotto un altro nome: la prova cercherebbe dove non è."""
+        provati = []
+
+        def refresh(client_id, client_secret, refresh_token):
+            provati.append(refresh_token)
+            return {"access_token": "AT"}
+
+        def go():
+            with patch.object(ta.go, "refresh_access_token", refresh), \
+                 patch.object(ta.go, "get_userinfo_email", return_value="vecchio@example.com"):
+                r = ta._test_connector("gworkspace")
+            self.assertIs(r["ok"], True, r["detail"])
+            self.assertIn("vecchio", r["detail"])
+            self.assertEqual(provati, ["RT-LEGACY"])
+        self.run_with(_vault({"google_owner": dict(BUNDLE),
+                              "gworkspace_vecchio": dict(BUNDLE, refresh_token="RT-LEGACY")}), go)
+
+    def test_a_legacy_card_is_measured_against_its_own_consent(self):
+        """Il consenso Workspace non contiene Gmail: misurarlo su quello
+        unificato accuserebbe «fuori dal consenso: Gmail» una card che Gmail
+        non l'ha mai promesso."""
+        def go():
+            with patch.object(ta.go, "refresh_access_token", return_value={
+                "access_token": "AT", "scope": ta.go.WORKSPACE_SCOPE,
+            }), patch.object(ta.go, "get_userinfo_email", return_value="vecchio@example.com"):
+                r = ta._test_connector("gworkspace")
+            self.assertIs(r["ok"], True)
+            self.assertNotIn("Gmail", r["detail"])
+        self.run_with(_vault({"gworkspace_vecchio": dict(BUNDLE)}), go)
 
 
 class TheRefreshHelperTests(unittest.TestCase):

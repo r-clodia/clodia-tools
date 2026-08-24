@@ -1193,7 +1193,31 @@ def _oscura(messaggio: str, bundle: dict) -> str:
     return messaggio
 
 
-def _test_google() -> dict:
+# Nome leggibile dei servizi dietro gli scope del consenso: chi guarda la card
+# ragiona per servizi («Drive»), non per URI. Uno scope fuori da questa mappa
+# (`openid`, `userinfo.email`) non si nomina: è impalcatura del consenso, non un
+# servizio che l'owner riconosce, e nominarlo sarebbe rumore su una card verde.
+_GOOGLE_SERVIZI = {
+    "https://mail.google.com/": "Gmail",
+    "https://www.googleapis.com/auth/drive": "Drive",
+    "https://www.googleapis.com/auth/documents": "Docs",
+    "https://www.googleapis.com/auth/calendar": "Calendar",
+}
+# id della card → (prefisso della credenziale, consenso che quella card promette).
+# La card unificata è `google` e prova SOLO le credenziali `google_*`, cioè gli
+# account che elenca (`list_tools`). Le due card storiche non esistono più in
+# `BASE`, ma gli endpoint di connessione sì e un'istanza non aggiornata le mostra
+# ancora: ognuna prova le PROPRIE credenziali. Puntarle tutte su `google_*`
+# direbbe «nessun account connesso» a chi ne ha uno — sotto un altro prefisso.
+_GOOGLE_CARD = {
+    "google": ("google_", go.UNIFIED_SCOPE),
+    "gworkspace": ("gworkspace_", go.WORKSPACE_SCOPE),
+    "google-workspace": ("gworkspace_", go.WORKSPACE_SCOPE),
+    "gmail": ("gmail_", go.SCOPE),
+}
+
+
+def _test_google(cid: str) -> dict:
     """Prova VERA del consenso Google, per account: rinnovo dell'access token
     dal refresh token + una chiamata leggera (`userinfo`).
 
@@ -1207,9 +1231,9 @@ def _test_google() -> dict:
     password cambiata, consenso ritirato) e nessuno se ne accorge finché un
     agente non prova a spedire o a leggere il Drive.
 
-    Si provano le credenziali `google_*`, cioè esattamente gli account che la
-    card elenca (`list_tools`). Il segreto non esce: si ritorna l'esito per
-    account, mai il bundle.
+    Si provano le credenziali della card che ha chiesto la prova (`_GOOGLE_CARD`),
+    cioè esattamente gli account che quella card elenca. Il segreto non esce: si
+    ritorna l'esito per account, mai il bundle.
 
     SHORTCUT: chiamate sincrone dentro un handler async, in serie sugli account
               — come già github/telegram/mailboxes. Regge finché gli account
@@ -1217,11 +1241,12 @@ def _test_google() -> dict:
               (`run_in_threadpool`) o parallelizzato: qui bloccherebbe l'event
               loop del gateway per la somma dei timeout.
     """
+    prefisso, promesso = _GOOGLE_CARD[cid]
     esiti, ok_tutti = [], True
     for nome in sorted(vault.store_names()):
-        if not nome.startswith("google_"):
+        if not nome.startswith(prefisso):
             continue
-        account = nome[len("google_"):]
+        account = nome[len(prefisso):]
         try:
             b = vault.read_internal(nome)
         except Exception:  # noqa: BLE001
@@ -1233,7 +1258,7 @@ def _test_google() -> dict:
         mancanti = [k for k in ("client_id", "client_secret", "refresh_token")
                     if not b.get(k)]
         if mancanti:
-            esiti.append(f"{account}: mancano {', '.join(mancanti)}")
+            esiti.append(f"{account}: mancano {', '.join(mancanti)} — riconnetti")
             ok_tutti = False
             continue
         try:
@@ -1253,18 +1278,20 @@ def _test_google() -> dict:
             ok_tutti = False
             continue
         riga = f"{account}: ok ({email})"
-        # Il consenso può essere valido ma più STRETTO di quello chiesto (chi
-        # autorizza può togliere una spunta): il collegamento funziona, ma
-        # Drive fallirebbe dopo, sulla prima chiamata vera. Dirlo qui — verde,
-        # con la riserva — evita di cercare quel guasto nel tool sbagliato.
+        # Il consenso può essere valido ma più STRETTO di quello che la card
+        # promette (chi autorizza può togliere una spunta): il collegamento
+        # FUNZIONA e un servizio no. È «non fa quella cosa», non «non funziona»
+        # — la stessa distinzione di «solo invio» per le caselle: rosso qui
+        # manderebbe a rigenerare un token sano, e il consenso nuovo scalza il
+        # vecchio. Verde con la riserva, e il servizio detto per nome.
         concessi = set((tok.get("scope") or "").split())
-        chiesti = set((b.get("scope") or "").split())
-        # Nome corto dello scope: `…/auth/drive` → «drive», e `https://mail.google.com/`
-        # → «mail.google.com» (senza lo strip finirebbe in una stringa vuota).
-        senza = sorted(s.rstrip("/").rsplit("/", 1)[-1]
-                       for s in chiesti - concessi) if concessi else []
-        if senza:
-            riga += f" · scope non concessi: {', '.join(senza)}"
+        # Se Google non riporta gli scope non si deduce nulla: dichiarare
+        # «fuori dal consenso» tutto ciò che non si è visto sarebbe un allarme
+        # inventato su un collegamento sano.
+        fuori = [_GOOGLE_SERVIZI[s] for s in promesso.split()
+                 if s in _GOOGLE_SERVIZI and s not in concessi] if concessi else []
+        if fuori:
+            riga += f" · fuori dal consenso: {', '.join(fuori)} (riconnetti per aggiungerli)"
         esiti.append(riga)
     if not esiti:
         # «Non connesso» non è «rotto»: ok=None lascia la card neutra.
@@ -1314,11 +1341,8 @@ def _test_connector(cid: str) -> dict:
             return ({"ok": True, "detail": "API key valida"} if r.status_code == 200
                     else {"ok": False, "detail": f"OpenAI {r.status_code}"})
 
-        # La card unificata è `google`; i due id storici (Gmail e Google
-        # Workspace connessi separatamente) portano alla stessa prova: chi ha
-        # ancora quelle card deve poterla premere allo stesso modo.
-        if cid in ("google", "gmail", "gworkspace", "google-workspace"):
-            return _test_google()
+        if cid in _GOOGLE_CARD:
+            return _test_google(cid)
 
         if cid == "mailboxes":
             return _test_mailboxes()
