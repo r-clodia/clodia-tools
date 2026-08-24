@@ -1246,7 +1246,16 @@ def _prova_google(bundle: dict, atteso: str) -> tuple[bool, str]:
     # È «non fa quella cosa», non «non funziona» — la stessa distinzione di
     # «solo invio» per le caselle. Rosso qui manderebbe a rigenerare un token
     # sano, e il consenso nuovo scalzerebbe quello vecchio.
-    mancanti = [s for s in atteso.split() if s not in (tok.get("scope") or "").split()]
+    #
+    # Il confronto si fa solo se Google DICE quali scope ha concesso: RFC 6749
+    # §5.1 rende `scope` opzionale nella risposta proprio quando coincide con
+    # quello richiesto, cioè l'assenza è il caso normale e non «nessuno scope».
+    # Dedurne il contrario nominerebbe tutti e cinque i servizi come fuori dal
+    # consenso su un collegamento sano — e il rimedio che quella riga suggerisce
+    # (riconnetti) fa un consenso nuovo che scalza il refresh token buono: la
+    # prova provocherebbe il guasto che esiste per scoprire.
+    concessi = (tok.get("scope") or "").split()
+    mancanti = [s for s in atteso.split() if s not in concessi] if concessi else []
     nominabili = [_nome_servizio(s) for s in mancanti if s in _GOOGLE_SERVIZI]
     if nominabili:
         detail += f" · fuori dal consenso: {', '.join(nominabili)} (riconnetti per aggiungerli)"
