@@ -1183,6 +1183,95 @@ def _test_mailboxes() -> dict:
     return {"ok": ok_tutti, "detail": " · ".join(esiti)}
 
 
+def _oscura(messaggio: str, bundle: dict) -> str:
+    """Toglie da un messaggio i valori segreti del bundle (refresh token,
+    client secret). Costa una riga e vale per ogni futuro messaggio d'errore."""
+    for chiave in ("refresh_token", "client_secret", "access_token"):
+        valore = str(bundle.get(chiave) or "")
+        if len(valore) > 6:
+            messaggio = messaggio.replace(valore, "…")
+    return messaggio
+
+
+def _test_google() -> dict:
+    """Prova VERA del consenso Google, per account: rinnovo dell'access token
+    dal refresh token + una chiamata leggera (`userinfo`).
+
+    Prima di questa, la card Google era l'unica connessa senza una verifica: il
+    bottone «Test» c'era già nella webui per ogni card, ma qui cadeva nel ramo
+    finale («test non disponibile») e l'unico segnale restava la parola
+    «Connesso» — che dice *la credenziale ha i campi giusti*, non *il consenso
+    è ancora valido*. È la stessa distanza fra «operativa» e «il login
+    funziona» già pagata sulle mailbox (clodia-platform#176), e qui pesa di
+    più: un refresh token Google si revoca da solo (app in Testing → 7 giorni,
+    password cambiata, consenso ritirato) e nessuno se ne accorge finché un
+    agente non prova a spedire o a leggere il Drive.
+
+    Si provano le credenziali `google_*`, cioè esattamente gli account che la
+    card elenca (`list_tools`). Il segreto non esce: si ritorna l'esito per
+    account, mai il bundle.
+
+    SHORTCUT: chiamate sincrone dentro un handler async, in serie sugli account
+              — come già github/telegram/mailboxes. Regge finché gli account
+              dell'owner sono pochi (1-2). Sopra, va spostato in un thread
+              (`run_in_threadpool`) o parallelizzato: qui bloccherebbe l'event
+              loop del gateway per la somma dei timeout.
+    """
+    esiti, ok_tutti = [], True
+    for nome in sorted(vault.store_names()):
+        if not nome.startswith("google_"):
+            continue
+        account = nome[len("google_"):]
+        try:
+            b = vault.read_internal(nome)
+        except Exception:  # noqa: BLE001
+            esiti.append(f"{account}: credenziale illeggibile")
+            ok_tutti = False
+            continue
+        # Una credenziale monca è già diagnosticata qui: chiamare Google per
+        # scoprirlo restituirebbe un errore di protocollo al posto della causa.
+        mancanti = [k for k in ("client_id", "client_secret", "refresh_token")
+                    if not b.get(k)]
+        if mancanti:
+            esiti.append(f"{account}: mancano {', '.join(mancanti)}")
+            ok_tutti = False
+            continue
+        try:
+            tok = go.refresh_access_token(b["client_id"], b["client_secret"],
+                                          b["refresh_token"])
+            email = go.get_userinfo_email(tok.get("access_token") or "")
+        except RuntimeError as e:  # messaggio nostro: leggibile, con il rimedio
+            # Reticella: il dettaglio finisce in un toast e nei log. I messaggi
+            # che scriviamo noi non contengono il segreto, ma un domani uno di
+            # essi potrebbe citare la risposta del provider — e il posto dove
+            # accorgersene non può essere il log di produzione.
+            esiti.append(f"{account}: {_oscura(str(e), b)[:160]}")
+            ok_tutti = False
+            continue
+        except Exception as e:  # noqa: BLE001 — rete, TLS, timeout, corpo strano
+            esiti.append(f"{account}: {type(e).__name__}")
+            ok_tutti = False
+            continue
+        riga = f"{account}: ok ({email})"
+        # Il consenso può essere valido ma più STRETTO di quello chiesto (chi
+        # autorizza può togliere una spunta): il collegamento funziona, ma
+        # Drive fallirebbe dopo, sulla prima chiamata vera. Dirlo qui — verde,
+        # con la riserva — evita di cercare quel guasto nel tool sbagliato.
+        concessi = set((tok.get("scope") or "").split())
+        chiesti = set((b.get("scope") or "").split())
+        # Nome corto dello scope: `…/auth/drive` → «drive», e `https://mail.google.com/`
+        # → «mail.google.com» (senza lo strip finirebbe in una stringa vuota).
+        senza = sorted(s.rstrip("/").rsplit("/", 1)[-1]
+                       for s in chiesti - concessi) if concessi else []
+        if senza:
+            riga += f" · scope non concessi: {', '.join(senza)}"
+        esiti.append(riga)
+    if not esiti:
+        # «Non connesso» non è «rotto»: ok=None lascia la card neutra.
+        return {"ok": None, "detail": "nessun account Google connesso"}
+    return {"ok": ok_tutti, "detail": " · ".join(esiti)}
+
+
 def _test_connector(cid: str) -> dict:
     """Verifica REALE della connessione di un'integrazione (chiamata al provider).
     Ritorna {ok: bool|None, detail}. ok=None → non testabile. Mai il segreto."""
@@ -1224,6 +1313,12 @@ def _test_connector(cid: str) -> dict:
                         headers={"Authorization": f"Bearer {key}"}, timeout=15)
             return ({"ok": True, "detail": "API key valida"} if r.status_code == 200
                     else {"ok": False, "detail": f"OpenAI {r.status_code}"})
+
+        # La card unificata è `google`; i due id storici (Gmail e Google
+        # Workspace connessi separatamente) portano alla stessa prova: chi ha
+        # ancora quelle card deve poterla premere allo stesso modo.
+        if cid in ("google", "gmail", "gworkspace", "google-workspace"):
+            return _test_google()
 
         if cid == "mailboxes":
             return _test_mailboxes()

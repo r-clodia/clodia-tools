@@ -122,6 +122,52 @@ def get_userinfo_email(access_token: str) -> str:
     return email
 
 
+def refresh_access_token(client_id: str, client_secret: str,
+                         refresh_token: str) -> dict:
+    """Rinnova l'access token dal refresh token. Ritorna il JSON di Google
+    ({access_token, expires_in, scope, …}).
+
+    Drive/Docs/Calendar lo ottengono dalla libreria Google (`google_svc`), che
+    però passa da `vault.get_secret(agent, …)`: è la strada di un *agente*. Qui
+    il chiamante è l'operatore dalla webui, e il consenso è dell'owner — serve
+    lo stesso rinnovo senza quel giro. Sono le uniche ~15 righe che mancavano
+    per poter DIRE a chi guarda la card se il consenso è ancora vivo.
+
+    L'errore torna come istruzione, non come stack trace: `invalid_grant` è di
+    gran lunga il caso più frequente (app in Testing → 7 giorni, password
+    cambiata, consenso ritirato) e il rimedio è sempre lo stesso. Del corpo
+    della risposta si riportano solo `error`/`error_description`: il body
+    grezzo non si stampa mai, così nessun eco può riportare un segreto.
+    """
+    from urllib.error import HTTPError
+
+    body = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }).encode()
+    req = Request(TOKEN_URL, data=body,
+                  headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode())
+    except HTTPError as e:
+        codice, descrizione = "", ""
+        try:
+            errore = json.loads(e.read().decode())
+            codice = str(errore.get("error") or "")
+            descrizione = str(errore.get("error_description") or "")
+        except Exception:  # noqa: BLE001 — corpo non JSON: resta il codice HTTP
+            pass
+        if codice == "invalid_grant":
+            raise RuntimeError(
+                "consenso scaduto o revocato (invalid_grant): riconnetti "
+                "l'account dalla card") from e
+        raise RuntimeError(
+            f"Google {e.code}: {descrizione or codice or e.reason}") from e
+
+
 def exchange_code(client_id: str, client_secret: str, code: str, redirect: str) -> dict:
     """Scambia l'authorization code con i token. Ritorna il JSON di Google."""
     body = urllib.parse.urlencode({
