@@ -1183,6 +1183,115 @@ def _test_mailboxes() -> dict:
     return {"ok": ok_tutti, "detail": " · ".join(esiti)}
 
 
+# Nome leggibile degli scope del consenso Google, per dire QUALE servizio manca
+# invece di stampare un URL. Chi legge la card ragiona per servizi, non per URI.
+_GOOGLE_SERVIZI = {
+    "https://mail.google.com/": "Gmail",
+    "https://www.googleapis.com/auth/drive": "Drive",
+    "https://www.googleapis.com/auth/documents": "Docs",
+    "https://www.googleapis.com/auth/calendar": "Calendar",
+}
+# id della card → prefisso della credenziale nel vault. `google` prova SOLO le
+# credenziali unificate, cioè gli account che la card elenca (list_tools li
+# prende da `credential_diagnostics` con kind=google): provare anche i legacy
+# renderebbe rossa una card per un account che non mostra.
+_GOOGLE_PREFISSI = {"google": "google_", "gworkspace": "gworkspace_", "gmail": "gmail_"}
+
+
+def _nome_servizio(scope: str) -> str:
+    return _GOOGLE_SERVIZI.get(scope) or scope.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _prova_google(bundle: dict, atteso: str) -> tuple[bool, str]:
+    """Prova UN account Google: refresh del token + una chiamata a `userinfo`.
+
+    Il refresh è il punto dove il guasto vero di questa integrazione si vede —
+    consenso revocato dal proprietario dell'account, oppure refresh token
+    scalzato da un secondo consenso sugli stessi scope — e Google lo dice con
+    `invalid_grant`. La chiamata a `userinfo` aggiunge la sola cosa che il
+    refresh non prova: che l'access token sia poi accettato da un'API, e da
+    quale identità. Nient'altro: `userinfo` è la chiamata più leggera coperta
+    dal consenso, non tocca dati dell'owner e non consuma quota di Drive/Gmail.
+    """
+    import requests as _rq
+
+    r = _rq.post(go.TOKEN_URL, data={
+        "client_id": bundle["client_id"],
+        "client_secret": bundle["client_secret"],
+        "refresh_token": bundle["refresh_token"],
+        "grant_type": "refresh_token",
+    }, timeout=15)
+    if r.status_code != 200:
+        try:
+            err = (r.json() or {}).get("error") or ""
+        except Exception:  # noqa: BLE001 — un 5xx di Google non è JSON
+            err = ""
+        if err == "invalid_grant":
+            # Il rimedio è uno e va detto qui: la webui non ha altro posto dove
+            # scriverlo, e «invalid_grant» da solo non dice cosa fare.
+            return False, ("consenso revocato o refresh token non più valido — "
+                           "riconnetti l'account")
+        return False, f"Google OAuth {r.status_code}{': ' + err if err else ''}"
+    tok = r.json() or {}
+    access = tok.get("access_token") or ""
+    if not access:
+        return False, "Google non ha restituito un access token"
+    ui = _rq.get("https://www.googleapis.com/oauth2/v2/userinfo",
+                 headers={"Authorization": f"Bearer {access}"}, timeout=15)
+    if ui.status_code != 200:
+        return False, f"userinfo {ui.status_code} (token rinfrescato ma non accettato)"
+    email = (ui.json() or {}).get("email") or "account senza email"
+    detail = f"ok ({email})"
+    # Consenso incompleto: la connessione FUNZIONA e una parte della card no.
+    # È «non fa quella cosa», non «non funziona» — la stessa distinzione di
+    # «solo invio» per le caselle. Rosso qui manderebbe a rigenerare un token
+    # sano, e il consenso nuovo scalzerebbe quello vecchio.
+    mancanti = [s for s in atteso.split() if s not in (tok.get("scope") or "").split()]
+    nominabili = [_nome_servizio(s) for s in mancanti if s in _GOOGLE_SERVIZI]
+    if nominabili:
+        detail += f" · fuori dal consenso: {', '.join(nominabili)} (riconnetti per aggiungerli)"
+    return True, detail
+
+
+def _test_google(cid: str) -> dict:
+    """Prova REALE del connettore Google della card /integrations (#284).
+
+    Prima di questa, l'id `google` cadeva nel ramo «test non disponibile» e sulla
+    card compariva il badge «—»: l'integrazione che apre cinque servizi era,
+    insieme alle caselle (chiuse in clodia-platform#176), la sola senza una
+    verifica. E «Connesso» dice che i campi della credenziale ci sono, non che il
+    refresh token sia ancora valido — cioè tace esattamente su ciò che scade.
+    """
+    prefisso = _GOOGLE_PREFISSI[cid]
+    atteso = go.UNIFIED_SCOPE if cid == "google" else ""
+    esiti, ok_tutti = [], True
+    for nome in sorted(vault.store_names()):
+        if not nome.startswith(prefisso):
+            continue
+        account = nome[len(prefisso):]
+        try:
+            b = vault.read_internal(nome)
+        except Exception:  # noqa: BLE001 — mai il motivo interno del vault
+            esiti.append(f"{account}: credenziale illeggibile")
+            ok_tutti = False
+            continue
+        # Un campo che manca si giudica dal vault: chiamare Google con un token
+        # vuoto ritorna un errore del provider al posto del nome del campo, e
+        # manda a cercare il guasto dalla parte dell'account invece che qui.
+        mancanti = [f for f in ("client_id", "client_secret", "refresh_token")
+                    if not b.get(f)]
+        if mancanti:
+            esiti.append(f"{account}: mancano {', '.join(mancanti)} — riconnetti")
+            ok_tutti = False
+            continue
+        ok, detail = _prova_google(b, atteso)
+        esiti.append(f"{account}: {detail}")
+        ok_tutti = ok_tutti and ok
+    if not esiti:
+        return {"ok": None, "detail": "nessun account Google connesso"}
+    return {"ok": ok_tutti, "detail": " · ".join(esiti)}
+
+
 def _test_connector(cid: str) -> dict:
     """Verifica REALE della connessione di un'integrazione (chiamata al provider).
     Ritorna {ok: bool|None, detail}. ok=None → non testabile. Mai il segreto."""
@@ -1224,6 +1333,9 @@ def _test_connector(cid: str) -> dict:
                         headers={"Authorization": f"Bearer {key}"}, timeout=15)
             return ({"ok": True, "detail": "API key valida"} if r.status_code == 200
                     else {"ok": False, "detail": f"OpenAI {r.status_code}"})
+
+        if cid in _GOOGLE_PREFISSI:
+            return _test_google(cid)
 
         if cid == "mailboxes":
             return _test_mailboxes()
