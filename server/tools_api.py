@@ -1191,11 +1191,24 @@ _GOOGLE_SERVIZI = {
     "https://www.googleapis.com/auth/documents": "Docs",
     "https://www.googleapis.com/auth/calendar": "Calendar",
 }
-# id della card → prefisso della credenziale nel vault. `google` prova SOLO le
-# credenziali unificate, cioè gli account che la card elenca (list_tools li
-# prende da `credential_diagnostics` con kind=google): provare anche i legacy
-# renderebbe rossa una card per un account che non mostra.
-_GOOGLE_PREFISSI = {"google": "google_", "gworkspace": "gworkspace_", "gmail": "gmail_"}
+# id della card → (prefisso della credenziale nel vault, consenso che la card
+# PROMETTE). `google` prova SOLO le credenziali unificate, cioè gli account che
+# la card elenca (list_tools li prende da `credential_diagnostics` con
+# kind=google): provare anche i legacy renderebbe rossa una card per un account
+# che non mostra.
+#
+# Lo scope atteso sta in questa tabella e non accanto al suo uso perché è una
+# proprietà della card, non del connettore nuovo: ogni card va misurata su ciò
+# che ha promesso. Misurare `gworkspace` su UNIFIED_SCOPE l'accuserebbe di non
+# avere Gmail, che non elenca; lasciarla senza scope atteso — com'era — non la
+# misura affatto, e un consenso Workspace senza Drive passa per completo. Una
+# tabella sola e non due mappe sulle stesse chiavi: quelle divergono, e a
+# divergere sarebbe di nuovo lo scope atteso.
+_GOOGLE_CARD = {
+    "google": ("google_", go.UNIFIED_SCOPE),
+    "gworkspace": ("gworkspace_", go.WORKSPACE_SCOPE),
+    "gmail": ("gmail_", go.SCOPE),
+}
 
 
 def _nome_servizio(scope: str) -> str:
@@ -1262,8 +1275,7 @@ def _test_google(cid: str) -> dict:
     verifica. E «Connesso» dice che i campi della credenziale ci sono, non che il
     refresh token sia ancora valido — cioè tace esattamente su ciò che scade.
     """
-    prefisso = _GOOGLE_PREFISSI[cid]
-    atteso = go.UNIFIED_SCOPE if cid == "google" else ""
+    prefisso, atteso = _GOOGLE_CARD[cid]
     esiti, ok_tutti = [], True
     for nome in sorted(vault.store_names()):
         if not nome.startswith(prefisso):
@@ -1334,7 +1346,7 @@ def _test_connector(cid: str) -> dict:
             return ({"ok": True, "detail": "API key valida"} if r.status_code == 200
                     else {"ok": False, "detail": f"OpenAI {r.status_code}"})
 
-        if cid in _GOOGLE_PREFISSI:
+        if cid in _GOOGLE_CARD:
             return _test_google(cid)
 
         if cid == "mailboxes":
