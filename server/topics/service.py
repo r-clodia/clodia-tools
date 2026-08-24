@@ -951,7 +951,10 @@ class TopicService:
         # tier = unica classe del topic + livello di privacy per l'enforcement.
         meta["tier"] = tier
         meta.setdefault("status", "active")
-        meta.setdefault("hook_enabled", True)
+        # Un topic nasce senza hook: la porta pubblica e il suo segreto si
+        # creano solo se qualcuno li chiede (clodia-tools#211). Il default a
+        # True aveva prodotto 8 hook e 0 invocazioni sull'istanza viva.
+        meta.setdefault("hook_enabled", False)
         # Il control-plane resta locale. I file sono locali per default; con un
         # remote Drive vengono serviti direttamente dalla cartella remota.
         sc = meta.get("storage_config") or {}

@@ -34,7 +34,7 @@ def main() -> int:
     # default tier SEAL-0 quando non specificato
     m0 = svc.new(None, "idea-libera")
     check("new: default tier SEAL-0", m0["tier"] == "SEAL-0")
-    check("new: hook automatico", m0["hook_enabled"] is True)
+    check("new: nessun hook automatico", m0["hook_enabled"] is False)
 
     # new idempotente
     again = svc.new("P2", "cliente-x")
