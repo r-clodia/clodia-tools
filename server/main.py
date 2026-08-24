@@ -630,7 +630,7 @@ _TOPIC_TOOLS: list[Tool] = [
             "meta": {"type": "object"},
             "hook_enabled": {
                 "type": "boolean",
-                "description": "crea il webhook del topic (default true)"},
+                "description": "crea il webhook del topic (default false)"},
         }, "required": ["name"]},
     ),
     Tool(
@@ -4384,7 +4384,10 @@ def _dispatch_topic(name: str, a: dict):
     if verb == "new":
         # Profilo topics:single → solo il workspace unico (DM sempre permessi).
         instance_profile.topic_creation_check(a["name"])
-        hook_enabled = bool(a.get("hook_enabled", True))
+        # Default False: nessun hook (né segreto) per un topic che non l'ha
+        # chiesto — clodia-tools#211. La `ensure` qui sotto resta, ma solo
+        # sulla richiesta esplicita, così il meta continua a dire il vero.
+        hook_enabled = bool(a.get("hook_enabled", False))
         meta = svc.new(
             a.get("tier"), a["name"],
             {**(a.get("meta") or {}), "hook_enabled": hook_enabled})

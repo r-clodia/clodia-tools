@@ -333,7 +333,10 @@ async def create_topic(request: Request):
     except PermissionError as e:
         return JSONResponse({"error": str(e)}, status_code=403)
     try:
-        hook_enabled = bool(body.get("hook_enabled", True))
+        # Default False: la creazione di un topic non provisiona più hook e
+        # segreto per conto di nessuno (clodia-tools#211). `ensure_hook` resta
+        # il modo con cui clodia-logic evita il ciclo logic→gateway→logic.
+        hook_enabled = bool(body.get("hook_enabled", False))
         requested_meta = {**(body.get("meta") or {}), "hook_enabled": hook_enabled}
         meta = _service().new(tier, name, requested_meta)
         if hook_enabled and bool(body.get("ensure_hook", True)):
