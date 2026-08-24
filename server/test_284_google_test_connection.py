@@ -217,6 +217,40 @@ class GoogleTestConnectionTests(Base):
         r = self._prova({"gmail_vecchio": BUNDLE})
         self.assertIs(r["ok"], None)
 
+    def test_a_response_without_scope_is_not_a_consent_without_scope(self):
+        """`scope` è OPZIONALE nella risposta al refresh (RFC 6749 §5.1) proprio
+        quando coincide con quello richiesto: la sua assenza è il caso normale,
+        non un consenso vuoto. Dedurne «nessuno scope concesso» nominerebbe
+        tutti i servizi come fuori dal consenso su un collegamento sano, e il
+        rimedio suggerito — riconnetti — rigenera il consenso scalzando il
+        refresh token che funziona. Cioè la prova causerebbe esattamente il
+        guasto che deve rilevare: se Google non riporta gli scope, non si
+        deduce nulla."""
+        r = self._prova(
+            {"google_owner": BUNDLE},
+            post=lambda *a, **k: _Risposta(200, {"access_token": "at-1"}),
+            get=lambda *a, **k: _Risposta(200, USERINFO_OK),
+        )
+        self.assertTrue(r["ok"], r["detail"])
+        self.assertNotIn("fuori dal consenso", r["detail"])
+        for servizio in ("Gmail", "Drive", "Docs", "Calendar"):
+            self.assertNotIn(servizio, r["detail"])
+
+    def test_a_scope_field_that_is_there_and_short_is_still_reported(self):
+        """Guardia di confine sul test qui sopra: silenziare il caso «campo
+        assente» non deve silenziare il caso vero — un consenso che il campo lo
+        riporta, più stretto di quello promesso, resta verde CON la riserva."""
+        parziale = " ".join(s for s in tools_api.go.UNIFIED_SCOPE.split()
+                            if "documents" not in s)
+        r = self._prova(
+            {"google_owner": BUNDLE},
+            post=lambda *a, **k: _Risposta(200, {"access_token": "at-1",
+                                                 "scope": parziale}),
+            get=lambda *a, **k: _Risposta(200, USERINFO_OK),
+        )
+        self.assertTrue(r["ok"], r["detail"])
+        self.assertIn("Docs", r["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()
