@@ -1,7 +1,10 @@
 """Tests for the unattended-session block (clodia-platform#104, jobs).
 
 Decision of 2 Aug 2026: "for async jobs a total block, no access to topic data,
-the only possibility is invoking topic hooks to send information."
+the only possibility is invoking topic hooks to send information." Since
+clodia-platform#223 the verb that sends is `topic.post_message`: the hook is
+gone, the possibility is not — same ACL (participant + clearance), plus the
+cross-topic gate that `invoke_hook` skipped by design.
 
 The reason a job is not defended by gates like a chat is that **nobody can
 answer**. A gate in an unattended session is not a protection, it is a stall
@@ -29,11 +32,18 @@ class UnattendedTopicBlockTests(unittest.TestCase):
                 msg = self._deny(verb)
                 self.assertIsNotNone(msg)
                 # the message must point at the one thing that IS allowed
-                self.assertIn("topic.invoke_hook", msg)
+                self.assertIn("topic.post_message", msg)
 
-    def test_invoke_hook_is_the_one_verb_that_passes(self):
+    def test_post_message_is_the_one_verb_that_passes(self):
         """Sending information to a topic does not read, list or download."""
-        self.assertIsNone(self._deny("topic.invoke_hook"))
+        self.assertIsNone(self._deny("topic.post_message"))
+
+    def test_the_removed_hook_verb_no_longer_passes(self):
+        """`topic.invoke_hook` was the allowed one until #223. Leaving it in the
+        set after deleting the verb would have been a hole shaped like a
+        permission: denied by the dispatch, allowed by this rule, and nobody
+        looking at either half alone would see it."""
+        self.assertIsNotNone(self._deny("topic.invoke_hook"))
 
     def test_nothing_is_denied_in_an_attended_session(self):
         for verb in ("topic.open", "topic.read_file"):
@@ -47,6 +57,21 @@ class UnattendedTopicBlockTests(unittest.TestCase):
         for verb in ("email.send", "web.fetch", "fs.list_dir"):
             with self.subTest(verb=verb):
                 self.assertIsNone(self._deny(verb))
+
+    def test_the_allowed_verb_actually_exists(self):
+        """The allow-list must name a verb the gateway still declares.
+
+        This is the joint that breaks in silence. `_UNATTENDED_TOPIC_ALLOW` is
+        the only way a job can put information into a topic, and the denial
+        message hands that name to the caller as the way out. Delete the verb
+        somewhere else in this file — as clodia-platform#223 does with
+        `topic.invoke_hook` — and every other test here stays green while a job
+        is left with no exit and an error that points at nothing.
+        """
+        catalogo = set(main.all_native_verb_names())
+        for verb in main._UNATTENDED_TOPIC_ALLOW:
+            with self.subTest(verb=verb):
+                self.assertIn(verb, catalogo)
 
 
 class UnattendedEgressTests(unittest.TestCase):

@@ -628,22 +628,7 @@ _TOPIC_TOOLS: list[Tool] = [
                      "description": "classe/sovranità del topic — scala SEAL (default SEAL-0 Public)"},
             "name": {"type": "string", "description": "slug a-z0-9_-"},
             "meta": {"type": "object"},
-            "hook_enabled": {
-                "type": "boolean",
-                "description": "crea il webhook del topic (default false)"},
         }, "required": ["name"]},
-    ),
-    Tool(
-        name="topic.invoke_hook",
-        description=(
-            "Invoca localmente l'hook di un topic senza segreto. Il chiamante deve "
-            "essere participant; messaggero può invocare qualunque topic. Il payload "
-            "viene accodato come @caller e sveglia il caller."),
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"},
-            "payload": {"type": "string"},
-        }, "required": ["tier", "name", "payload"]},
     ),
     Tool(
         name="topic.open",
@@ -3006,7 +2991,14 @@ def _norm_tier_str(t: str) -> str:
 
 #: L'UNICO verbo `topic.*` ammesso a una sessione non presidiata: spedire
 #: informazione verso un topic. Non legge, non elenca, non scarica.
-_UNATTENDED_TOPIC_ALLOW = frozenset({"topic.invoke_hook"})
+#:
+#: Era `topic.invoke_hook`, rimosso con la superficie hook (clodia-platform#223).
+#: La decisione del 2 ago resta intatta — un job deve poter *depositare*
+#: informazione — e cambia solo il verbo che la realizza. `post_message` fa la
+#: stessa cosa con la stessa ACL (participant + clearance ≥ tier) e in più
+#: attraversa il gate cross-topic, che `invoke_hook` saltava per disegno: la
+#: sessione non presidiata perde una scorciatoia, non una capacità.
+_UNATTENDED_TOPIC_ALLOW = frozenset({"topic.post_message"})
 
 
 #: Verbi che leggono FILE di un topic: la fonte è il topic (la sua cartella Drive,
@@ -3213,7 +3205,9 @@ def _unattended_denial(verb: str) -> str | None:
     """Blocco per le sessioni di job (clodia-platform#104, decisione 2 ago 2026).
 
     «Per i job asincroni blocco totale, nessun accesso ai dati dei topic, unica
-    possibilità invocare hook dei topic per spedire informazioni.»
+    possibilità invocare hook dei topic per spedire informazioni.» Dal #223 il
+    verbo che spedisce è `topic.post_message`: l'hook non esiste più, la
+    possibilità sì.
 
     Il motivo per cui un job non si difende con i gate come una chat: **non c'è
     nessuno che possa rispondere**. Un gate in una sessione non presidiata non è
@@ -3227,9 +3221,14 @@ def _unattended_denial(verb: str) -> str | None:
     if not is_unattended():
         return None
     if verb.startswith("topic.") and verb not in _UNATTENDED_TOPIC_ALLOW:
+        # La via d'uscita si LEGGE dall'allow-list invece di essere riscritta
+        # qui: erano due copie dello stesso nome, e togliendo il verbo altrove
+        # una delle due sarebbe rimasta a indicare qualcosa che non esiste —
+        # un errore che manda il chiamante a sbattere due volte.
+        via = ", ".join(sorted(_UNATTENDED_TOPIC_ALLOW))
         return (f"'{verb}' non è disponibile in un job schedulato: una sessione non "
                 f"presidiata non accede ai dati dei topic. Per spedire informazioni "
-                f"a un topic usa topic.invoke_hook.")
+                f"a un topic usa {via}.")
     return None
 
 
@@ -4119,26 +4118,6 @@ def _require_topic_member(svc, tier, name, mutating: bool = False) -> None:
             f"topic {tier}/{name} (accesso negato: livello)")
 
 
-def _require_local_hook_caller(svc, tier, name) -> str:
-    """ACL stretta dell'hook locale: niente principal umano né gate cross-topic."""
-    caller = agent_name()
-    if not caller:
-        raise PermissionError("invocazione hook locale riservata agli agenti")
-    if caller == "messaggero":
-        return caller
-    try:
-        meta = svc.open(tier, name).get("meta", {})
-    except Exception:  # noqa: BLE001
-        raise PermissionError(f"topic {tier}/{name}: accesso negato")
-    if not _topic_is_member(meta, caller):
-        raise PermissionError(
-            f"agent '{caller}' non è participant di {tier}/{name}")
-    if _rank(current_clearance()) < _rank(meta.get("tier", tier)):
-        raise PermissionError(
-            f"agent '{caller}': clearance insufficiente per {tier}/{name}")
-    return caller
-
-
 def _filter_member_rows(rows: list, caller: str) -> list:
     """Filtra allo scope need-to-know dell'AGENTE, su ENTRAMBI gli assi.
 
@@ -4384,21 +4363,7 @@ def _dispatch_topic(name: str, a: dict):
     if verb == "new":
         # Profilo topics:single → solo il workspace unico (DM sempre permessi).
         instance_profile.topic_creation_check(a["name"])
-        # Default False: nessun hook (né segreto) per un topic che non l'ha
-        # chiesto — clodia-tools#211. La `ensure` qui sotto resta, ma solo
-        # sulla richiesta esplicita, così il meta continua a dire il vero.
-        hook_enabled = bool(a.get("hook_enabled", False))
-        meta = svc.new(
-            a.get("tier"), a["name"],
-            {**(a.get("meta") or {}), "hook_enabled": hook_enabled})
-        if hook_enabled:
-            runtime.ensure_topic_hook(
-                meta["tier"], a["name"], by=agent_name() or "platform")
-        return meta
-    if verb == "invoke_hook":
-        caller = _require_local_hook_caller(svc, a["tier"], a["name"])
-        return runtime.invoke_topic_hook(
-            a["tier"], a["name"], a.get("payload") or "", caller=caller)
+        return svc.new(a.get("tier"), a["name"], dict(a.get("meta") or {}))
     if verb == "open":
         return svc.open(a["tier"], a["name"])
     if verb == "post_message":
