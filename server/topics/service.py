@@ -937,8 +937,16 @@ class TopicService:
         """Scaffold idempotente: se il topic esiste già ritorna il suo meta."""
         tier = _normalize_tier(tier or DEFAULT_TIER)
         mp = self._meta_p(tier, name)
-        # Lo slug è anche l'id del webhook: deve identificare un solo topic in
-        # tutta la piattaforma, indipendentemente dal tier.
+        # Lo slug identifica un solo topic in tutta la piattaforma,
+        # indipendentemente dal tier.
+        #
+        # La motivazione scritta qui era «lo slug è anche l'id del webhook», e
+        # quell'id non esiste più (clodia-platform#223). La REGOLA resta, con la
+        # ragione che le sopravvive: lo slug è il nome con cui il topic viaggia
+        # ovunque senza il tier accanto — nei binding Telegram, nei riferimenti
+        # in chat, nei path. Due topic omonimi in tier diversi renderebbero
+        # ambiguo ciò che oggi non lo è, e l'ambiguità cadrebbe sull'asse della
+        # riservatezza. Toglierla è una decisione a sé, non un residuo di #223.
         for other_tier in VALID_TIER:
             if other_tier != tier and self.s.exists(self._meta_p(other_tier, name)):
                 raise TopicError(
@@ -946,15 +954,17 @@ class TopicService:
         if self.s.exists(mp):
             return self.open(tier, name)["meta"]
         meta = dict(meta or {})
+        # `hook_enabled` è uscito col resto della superficie hook
+        # (clodia-platform#223). Si scarta invece di ignorarlo: un client vecchio
+        # che lo spedisce lo vedrebbe ricomparire nel meta del topic, dove
+        # somiglia a una scelta di chi ha creato la stanza e non abilita niente.
+        # Un permesso apparente è peggio di un permesso assente.
+        meta.pop("hook_enabled", None)
         meta.setdefault("title", name)
         meta.setdefault("type", "progetto")
         # tier = unica classe del topic + livello di privacy per l'enforcement.
         meta["tier"] = tier
         meta.setdefault("status", "active")
-        # Un topic nasce senza hook: la porta pubblica e il suo segreto si
-        # creano solo se qualcuno li chiede (clodia-tools#211). Il default a
-        # True aveva prodotto 8 hook e 0 invocazioni sull'istanza viva.
-        meta.setdefault("hook_enabled", False)
         # Il control-plane resta locale. I file sono locali per default; con un
         # remote Drive vengono serviti direttamente dalla cartella remota.
         sc = meta.get("storage_config") or {}

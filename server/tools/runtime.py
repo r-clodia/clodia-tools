@@ -89,21 +89,6 @@ def channel_trigger(tier: str, name: str, text: str, by: str) -> dict:
                  {"text": text, "by": by})
 
 
-def ensure_topic_hook(tier: str, name: str, by: str) -> dict:
-    """Assicura l'hook automatico associato allo slug del topic."""
-    return _post("/clodia/hooks/internal/ensure",
-                 {"tier": tier, "name": name, "by": by})
-
-
-def invoke_topic_hook(tier: str, name: str, payload: str, caller: str) -> dict:
-    """Invoca localmente l'hook, senza segreto. L'identità del caller NON viaggia
-    nel body (sarebbe impersonabile): il gateway inoltra il session token firmato
-    del chiamante e agent-server ne deriva l'identità autenticata. Il participant
-    -check del gateway resta come pre-verifica (difesa in profondità)."""
-    return _post(f"/clodia/hooks/{tier}/{name}/invoke/internal",
-                 {"payload": payload}, auth=True)
-
-
 def set_participant(tier: str, name: str, agent: str, by: str, add: bool) -> dict:
     """Proxy: aggiunge/rimuove un partecipante da un canale, per conto dell'agente
     `by` (autorizzazione lato agent-server: owner|partecipante|super)."""
