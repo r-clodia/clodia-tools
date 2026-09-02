@@ -804,6 +804,26 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name", "path"]},
     ),
     Tool(
+        name="topic.convert_document",
+        description=("Converte un documento del topic (DOCX, XLSX, PDF) in Markdown e "
+                     "SCRIVE il .md nei file del topic, server-side. Il contenuto NON "
+                     "passa dal tuo contesto: ricevi solo {path, chars, pages, fidelity}. "
+                     "USA QUESTO quando l'obiettivo è PRODURRE un .md — con "
+                     "topic.read_document + topic.write_file dovresti riemettere in "
+                     "output tutto il documento (minuti di generazione e migliaia di "
+                     "token per una copiatura). Se il documento esiste sia in DOCX sia in "
+                     "PDF converti il DOCX: il PDF ha già perso titoli e tabelle "
+                     "(fidelity='plain' contro 'structured'). Leggi il risultato con "
+                     "topic.read_file se ti serve rivederlo."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "path": {"type": "string", "description": "path del sorgente, es. files/accordo.docx"},
+            "out": {"type": "string", "description": "nome del .md di destinazione "
+                                                     "(default: stesso nome del sorgente con .md)"},
+        }, "required": ["tier", "name", "path"]},
+    ),
+    Tool(
         name="topic.write_file",
         description=("Carica/sovrascrive un file nella cartella files/ del topic/canale "
                      "(es. un deliverable, o i file estratti da uno zip). filename può "
@@ -3967,7 +3987,8 @@ _TOPIC_SCOPED_VERBS = {
     "open", "save_summary", "save_agents_md", "add_minute", "archive", "set_portable",
     "telegram_bind", "telegram_unbind",
     "files", "read_file",
-    "read_document", "write_file", "fetch", "put", "delete_file", "migrate_storage",
+    "read_document", "convert_document", "write_file", "fetch", "put", "delete_file",
+    "migrate_storage",
     "post_message", "messages", "my_mentions", "mark_seen",
     "remote_enable", "remote_disable", "remote_add", "remote_commit",
     "remote_push", "remote_pull", "remote_status",
@@ -3999,7 +4020,7 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
 _TOPIC_MUTATING_VERBS = frozenset({
     "save_summary", "save_agents_md", "add_minute", "archive", "set_portable",
     "telegram_bind", "telegram_unbind",
-    "write_file", "put", "delete_file", "migrate_storage",
+    "write_file", "convert_document", "put", "delete_file", "migrate_storage",
     "remote_enable", "remote_disable", "remote_add", "remote_commit",
     "remote_push", "remote_pull",
 })
@@ -4521,6 +4542,32 @@ def _dispatch_topic(name: str, a: dict):
         trunc = len(text) > cap
         return {"path": a["path"], "text": text[:cap], "chars": len(text),
                 "pages": pages, "truncated": trunc}
+    if verb == "convert_document":
+        from . import docmd
+        src = a["path"]
+        data = svc.read_file(a["tier"], a["name"], src)
+        try:
+            md, pages, fidelity = docmd.to_markdown(src.rsplit("/", 1)[-1], data)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:  # noqa: BLE001 — libreria di terzi su input di terzi
+            return {"ok": False, "error": f"conversione fallita: {str(e)[:160]}"}
+        out = str(a.get("out") or "").strip() or docmd.markdown_name(src)
+        # PROVENIENZA EREDITATA, non `agent`. Il Markdown è il CONTENUTO del
+        # documento sorgente, non il lavoro dell'agente: se il sorgente è
+        # `untrusted` — un allegato arrivato per posta, un PDF di controparte —
+        # il derivato lo è ancora, e convertire non è un modo per lavare
+        # un'etichetta (#104 §3). Senza questo, un documento ostile diventava
+        # fidato passando da qui, che è esattamente l'anello che il taint serve
+        # a non far saltare.
+        rel_src = src.split("files/", 1)[-1] if "files/" in src else src.lstrip("/")
+        prov = ((svc.provenance_map(a["tier"], a["name"]) or {})
+                .get(rel_src, {}).get("provenance") or "untrusted")
+        res = svc.put_file(a["tier"], a["name"], out, md.encode("utf-8"),
+                           prov, agent_name())
+        return {"ok": True, "path": res.get("path") or f"files/{out}", "source": src,
+                "chars": len(md), "pages": pages, "fidelity": fidelity,
+                "provenance": prov}
     if verb == "write_file":
         fn = a["filename"]
         enc = (a.get("encoding") or "text").lower()

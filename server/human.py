@@ -131,7 +131,7 @@ SEED_MEMBER = "member"
 #: matrice serve a fare. Sovrascrivibile in `config.yaml` (`human_seeds`).
 _MEMBER_VERBS = (
     "topic.open", "topic.list", "topic.files", "topic.search", "topic.fetch",
-    "topic.read_file", "topic.read_document",
+    "topic.read_file", "topic.read_document", "topic.convert_document",
     "topic.put", "topic.write_file", "topic.save_summary", "topic.post_message",
 )
 
