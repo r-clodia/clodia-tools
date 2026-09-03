@@ -94,7 +94,9 @@ class ConvertDocumentTests(unittest.TestCase):
              ("Heading2", "Art. 2 — Corrispettivo")],
             tabella=[["Voce", "Importo"], ["Canone", "1.000 EUR"]],
         )
-        md, pagine, fidelity = docmd.to_markdown("accordo.docx", data)
+        # 4 valori da quando `to_markdown` riporta anche le statistiche delle
+        # revisioni tracciate (vedi test_docx_tracked_changes).
+        md, pagine, fidelity, _revs = docmd.to_markdown("accordo.docx", data)
         self.assertEqual(fidelity, docmd.FIDELITY_STRUCTURED)
         self.assertIsNone(pagine)
         self.assertIn("# Accordo CPTO", md)
@@ -120,7 +122,7 @@ class ConvertDocumentTests(unittest.TestCase):
                           _docx([("Heading1", "Accordo CPTO"), ("", "Testo lungo.")]),
                           prov, by="davide")
         data = self.svc.read_file("SEAL-2", "ch", f"files/{src}")
-        md, pagine, fidelity = docmd.to_markdown(src, data)
+        md, pagine, fidelity, _revs = docmd.to_markdown(src, data)
         nome = out or docmd.markdown_name(src)
         prov_src = ((self.svc.provenance_map("SEAL-2", "ch") or {})
                     .get(src, {}).get("provenance") or "untrusted")

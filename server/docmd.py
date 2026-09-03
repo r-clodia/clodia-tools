@@ -34,14 +34,32 @@ FIDELITY_STRUCTURED = "structured"
 FIDELITY_PLAIN = "plain"
 
 
-def _md_from_docx(data: bytes) -> str:
-    """DOCX → Markdown passando per l'HTML semantico di mammoth.
+def _md_from_docx(data: bytes, revisions: str | None = None) -> tuple[str, dict]:
+    """DOCX → Markdown. Ritorna (markdown, statistiche delle revisioni).
 
-    `mammoth` mappa gli STILI di Word (Heading 1, elenchi, grassetto, tabelle)
-    su HTML, e `markdownify` porta quell'HTML in Markdown. È la via che conserva
-    ciò che l'autore ha davvero marcato, invece di indovinare i titoli dalla
-    lunghezza delle righe.
+    DUE STRADE, e la scelta la fa il documento, non chi chiama.
+
+    Se il file HA revisioni tracciate si usa `docrev`, che le rende esplicite in
+    CriticMarkup: `mammoth` include gli inserimenti e scarta le cancellazioni,
+    cioè restituisce il documento COME SE le revisioni fossero accettate, senza
+    dirlo — su un contratto è la differenza fra ciò che è concordato e ciò che
+    una parte ha proposto, e appiattirla in silenzio è il difetto peggiore dei
+    due (misurato il 3 set 2026: 7.055 caratteri cancellati spariti senza
+    traccia).
+
+    Se NON ne ha, resta `mammoth` + `markdownify`, che mappano gli stili di Word
+    (Heading, elenchi, grassetto, tabelle) meglio di quanto faccia un parser
+    scritto da noi: là dove non c'è niente da preservare, la libreria vince.
+
+    `revisions` forza la modalità (`inline` | `accepted` | `original`); assente,
+    un documento revisionato prende `inline` — chi apre un contratto revisionato
+    vuole vedere le revisioni, e il default non deve nascondere informazione.
     """
+    from . import docrev
+
+    if revisions or docrev.has_tracked_changes(data):
+        return docrev.docx_to_markdown(data, revisions or docrev.MODE_INLINE)
+
     import mammoth
     from markdownify import markdownify
 
@@ -49,7 +67,10 @@ def _md_from_docx(data: bytes) -> str:
     md = markdownify(html, heading_style="ATX", bullets="-")
     # markdownify lascia code di righe vuote fra i blocchi: tre o più newline
     # non hanno significato in Markdown e rendono il file scomodo da leggere.
-    return re.sub(r"\n{3,}", "\n\n", md).strip() + "\n"
+    md = re.sub(r"\n{3,}", "\n\n", md).strip() + "\n"
+    return md, {"revisioni": 0, "inserimenti": 0, "cancellazioni": 0,
+                "commenti": 0, "revisori": [], "caratteri": len(md),
+                "mode": None}
 
 
 def _md_from_xlsx(data: bytes) -> str:
@@ -108,26 +129,36 @@ def _md_from_pdf(data: bytes) -> tuple[str, int]:
     return "\n\n".join(blocchi).strip() + "\n", len(reader.pages)
 
 
-def to_markdown(filename: str, data: bytes) -> tuple[str, int | None, str]:
-    """Converte un documento in Markdown. Ritorna (markdown, pagine|None, fidelity).
+def to_markdown(filename: str, data: bytes,
+                revisions: str | None = None) -> tuple[str, int | None, str, dict]:
+    """Converte un documento in Markdown.
+
+    Ritorna (markdown, pagine|None, fidelity, revisioni), dove `revisioni` sono
+    le statistiche delle revisioni tracciate — vuote per i formati che non le
+    hanno. Servono a chi chiama per sapere che un documento È revisionato senza
+    doverne rileggere il testo.
 
     Solleva `ValueError` sulle estensioni che non si sanno convertire, invece di
     ripiegare in silenzio sul testo grezzo: un `.md` che sembra una conversione
     ed è spazzatura decodificata è peggio di un errore, perché nessuno lo
     ricontrolla.
     """
+    _vuote = {"revisioni": 0, "inserimenti": 0, "cancellazioni": 0,
+              "commenti": 0, "revisori": [], "mode": None}
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext == "docx":
-        return _md_from_docx(data), None, FIDELITY_STRUCTURED
+        md, stats = _md_from_docx(data, revisions)
+        return md, None, FIDELITY_STRUCTURED, stats
     if ext in ("xlsx", "xlsm"):
-        return _md_from_xlsx(data), None, FIDELITY_STRUCTURED
+        return _md_from_xlsx(data), None, FIDELITY_STRUCTURED, dict(_vuote)
     if ext == "pdf":
         md, pagine = _md_from_pdf(data)
-        return md, pagine, FIDELITY_PLAIN
+        return md, pagine, FIDELITY_PLAIN, dict(_vuote)
     if ext in ("md", "markdown", "txt"):
         # Già testo: si normalizza e si passa, così chi chiama non deve sapere
         # in anticipo se il file andava convertito o no.
-        return data.decode("utf-8", errors="replace").strip() + "\n", None, FIDELITY_PLAIN
+        return (data.decode("utf-8", errors="replace").strip() + "\n", None,
+                FIDELITY_PLAIN, dict(_vuote))
     raise ValueError(
         f"non so convertire '.{ext}' in Markdown (supportati: docx, xlsx, pdf, txt, md)")
 
