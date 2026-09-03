@@ -578,6 +578,33 @@ class TopicService:
     #: precedente e deve continuare a significare quello.
     RESERVED_MOUNTS = frozenset({MOUNT_LOCAL, MOUNT_REMOTE, "files"})
 
+    def _is_data_path(self, meta: dict, relpath: str) -> bool:
+        """Il path appartiene all'albero DATI (un mount), non al control-plane?
+
+        Esiste perché questa decisione era scritta a mano in tre punti, e i tre
+        punti sono divergiti: `list_files` includeva i mount montati al primo
+        livello col proprio nome (`drive/x`), `read_file` e `delete_file` no —
+        controllavano solo `_MOUNTS`, che contiene i due mount STATICI (`local`,
+        `remote`) e non i mount dichiarati nel meta.
+
+        La conseguenza, vista sul topic hedge-iot-new il 3 set 2026: la cartella
+        si NAVIGA (`topic.files` elenca `drive/40-budget/…`) ma i file non si
+        LEGGONO — `read_file` cadeva nel ramo control-plane e cercava i byte nel
+        filesystem locale del topic, dove per un mount `live` non ci sono. Da cui
+        un `NotFound` su ogni file di un mount, indistinguibile da un file
+        assente, mentre `put_file` — che il nome del mount lo gestiva — ci
+        scriveva senza problemi. Leggibile no, scrivibile sì.
+
+        Un path NUDO (`documento.pdf`, senza prefisso) resta control-plane, come
+        prima: `read_file` lo usa per `summary.md` e `meta.json`, e spostarlo
+        sull'albero dati cambierebbe in silenzio il bersaglio di riferimenti già
+        scritti nei messaggi e nella memoria degli agenti.
+        """
+        first = (relpath or "").lstrip("/").split("/", 1)[0]
+        return bool(first) and (first in self._MOUNTS
+                                or first in self._mount_names(meta)
+                                or self._files_rel(relpath)[0])
+
     def _mount_names(self, meta: dict) -> dict:
         """`{nome: mount}` dei mount che si montano al PRIMO livello.
 
@@ -1957,8 +1984,7 @@ class TopicService:
         rel = (relpath or "").lstrip("/")
         if not rel or ".." in rel.split("/"):
             raise TopicError(f"path non valido: {relpath}")
-        first = rel.split("/", 1)[0]
-        if first in self._MOUNTS or self._files_rel(rel)[0]:
+        if self._is_data_path(meta, rel):
             try:
                 store, base, sub, _mount = self._resolve_data_path(tier, name, rel)
             except TopicError:
@@ -2489,10 +2515,7 @@ class TopicService:
             # vede dove sono adesso invece di un vicolo cieco.
             return [{"name": n, "path": n, "kind": "dir", "mount": n}
                     for n in self._mount_names(_meta)]
-        first = rel.split("/", 1)[0] if rel else ""
-        is_files = bool(rel) and (first in self._MOUNTS
-                                  or first in self._mount_names(_meta)
-                                  or self._files_rel(rel)[0])
+        is_files = self._is_data_path(_meta, rel)
         sub = ""
         prov_map = {}
         if is_files:
@@ -2738,7 +2761,7 @@ class TopicService:
         parts = rel.split("/")
         if not rel or "\\" in rel or any(p in ("", ".", "..") for p in parts):
             raise TopicError(f"path non valido: {relpath}")
-        if parts[0] not in self._MOUNTS and parts[0] != "files":
+        if not self._is_data_path(meta, rel):
             raise TopicError(
                 "puoi rimuovere solo file dentro i mount del topic — "
                 f"`{self.MOUNT_LOCAL}/…` o `{self.MOUNT_REMOTE}/<nome>/…` "
