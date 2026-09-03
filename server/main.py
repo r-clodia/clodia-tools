@@ -842,6 +842,29 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name", "path"]},
     ),
     Tool(
+        name="topic.write_document",
+        description=("Scrive un DOCX con REVISIONI TRACCIATE partendo dal Markdown in "
+                     "CriticMarkup: {++inserito++} e {--cancellato--} diventano "
+                     "<w:ins>/<w:del> di Word, che la controparte apre e può accettare "
+                     "o rifiutare una per una, firmate con autore e data. USA QUESTO per "
+                     "consegnare un contratto revisionato: non serve eseguire codice e "
+                     "non serve chiedere a un altro agente di farlo. Il Markdown si passa "
+                     "in `content`, oppure si indica un .md già nel topic con `source`. "
+                     "Accetta anche {~~vecchio~>nuovo~~} (sostituzione) e {>>commento<<}. "
+                     "Ritorna {path, revisioni, inserimenti, cancellazioni, autore}: il "
+                     "contenuto non passa dal tuo contesto."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "out": {"type": "string", "description": "nome del .docx da scrivere, es. accordo-rev.docx"},
+            "content": {"type": "string", "description": "il Markdown in CriticMarkup"},
+            "source": {"type": "string", "description": "in alternativa a content: path di un .md "
+                                                        "del topic, es. files/accordo.md"},
+            "author": {"type": "string", "description": "autore delle revisioni (default: il "
+                                                        "display name dell'agente)"},
+        }, "required": ["tier", "name", "out"]},
+    ),
+    Tool(
         name="topic.write_file",
         description=("Carica/sovrascrive un file nella cartella files/ del topic/canale "
                      "(es. un deliverable, o i file estratti da uno zip). filename può "
@@ -4005,7 +4028,8 @@ _TOPIC_SCOPED_VERBS = {
     "open", "save_summary", "save_agents_md", "add_minute", "archive", "set_portable",
     "telegram_bind", "telegram_unbind",
     "files", "read_file",
-    "read_document", "convert_document", "write_file", "fetch", "put", "delete_file",
+    "read_document", "convert_document", "write_document", "write_file", "fetch",
+    "put", "delete_file",
     "migrate_storage",
     "post_message", "messages", "my_mentions", "mark_seen",
     "remote_enable", "remote_disable", "remote_add", "remote_commit",
@@ -4038,7 +4062,8 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
 _TOPIC_MUTATING_VERBS = frozenset({
     "save_summary", "save_agents_md", "add_minute", "archive", "set_portable",
     "telegram_bind", "telegram_unbind",
-    "write_file", "convert_document", "put", "delete_file", "migrate_storage",
+    "write_file", "convert_document", "write_document", "put", "delete_file",
+    "migrate_storage",
     "remote_enable", "remote_disable", "remote_add", "remote_commit",
     "remote_push", "remote_pull",
 })
@@ -4599,6 +4624,38 @@ def _dispatch_topic(name: str, a: dict):
         return {"ok": True, "path": res.get("path") or f"files/{out}", "source": src,
                 "chars": len(md), "pages": pages, "fidelity": fidelity,
                 "provenance": prov, "revisions": revs}
+    if verb == "write_document":
+        from . import docwrite
+        md = a.get("content")
+        if md is None:
+            src = str(a.get("source") or "").strip()
+            if not src:
+                return {"ok": False, "error": "serve `content` (il Markdown) oppure `source` "
+                                              "(il path di un .md del topic)"}
+            md = svc.read_file(a["tier"], a["name"], src).decode("utf-8", errors="replace")
+        else:
+            src = None
+        out = str(a.get("out") or "").strip()
+        if not out.lower().endswith(".docx"):
+            out = f"{out or 'documento'}.docx"
+        autore = str(a.get("author") or "").strip() or agent_name() or "Agente"
+        try:
+            data, stats = docwrite.markdown_to_docx(md, autore=autore)
+        except Exception as e:  # noqa: BLE001 — libreria di terzi su input del modello
+            return {"ok": False, "error": f"generazione del DOCX fallita: {str(e)[:160]}"}
+        # PROVENIENZA EREDITATA quando il Markdown viene da un file del topic: il
+        # DOCX è quel contenuto in un altro formato, e se il sorgente è
+        # `untrusted` — un .md ricavato da un allegato di controparte — lo resta
+        # (#104 §3). Quando invece il Markdown arriva in `content`, è l'agente ad
+        # averlo scritto: `agent`.
+        prov = "agent"
+        if src:
+            rel = src.split("files/", 1)[-1] if "files/" in src else src.lstrip("/")
+            prov = ((svc.provenance_map(a["tier"], a["name"]) or {})
+                    .get(rel, {}).get("provenance") or "untrusted")
+        res = svc.put_file(a["tier"], a["name"], out, data, prov, agent_name())
+        return {"ok": True, "path": res.get("path") or f"files/{out}",
+                "bytes": len(data), "provenance": prov, "source": src, **stats}
     if verb == "write_file":
         fn = a["filename"]
         enc = (a.get("encoding") or "text").lower()
