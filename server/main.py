@@ -795,7 +795,12 @@ _TOPIC_TOOLS: list[Tool] = [
                      "leggibile, non base64. USA QUESTO per leggere un PDF/DOCX/XLSX "
                      "invece di topic.read_file (che restituisce base64 binario). "
                      "Ritorna {text, chars, pages, truncated}. Per PDF lunghi usa "
-                     "max_chars per limitare il testo."),
+                     "max_chars per limitare il testo. Un DOCX con REVISIONI "
+                     "TRACCIATE viene reso in CriticMarkup ({++inserito++}, "
+                     "{--cancellato--}): se lo vedi, quel documento è in "
+                     "revisione e non è testo definitivo. Per scegliere la resa "
+                     "delle revisioni, o per SALVARE un .md, usa "
+                     "topic.convert_document."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
@@ -814,13 +819,26 @@ _TOPIC_TOOLS: list[Tool] = [
                      "token per una copiatura). Se il documento esiste sia in DOCX sia in "
                      "PDF converti il DOCX: il PDF ha già perso titoli e tabelle "
                      "(fidelity='plain' contro 'structured'). Leggi il risultato con "
-                     "topic.read_file se ti serve rivederlo."),
+                     "topic.read_file se ti serve rivederlo. REVISIONI TRACCIATE: "
+                     "se il DOCX ne ha, vengono rese esplicite in CriticMarkup "
+                     "({++inserito++}, {--cancellato--}, {>>commento<<}) con un "
+                     "riepilogo per revisore e data — usa `revisions` per "
+                     "scegliere inline | accepted | original. Il valore di ritorno "
+                     "porta `revisions` con i conteggi: se non è zero, il documento "
+                     "NON è un testo definitivo."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
             "path": {"type": "string", "description": "path del sorgente, es. files/accordo.docx"},
             "out": {"type": "string", "description": "nome del .md di destinazione "
                                                      "(default: stesso nome del sorgente con .md)"},
+            "revisions": {"type": "string", "enum": ["inline", "accepted", "original"],
+                          "description": "come rendere le REVISIONI TRACCIATE di un DOCX. "
+                                         "inline (default sui documenti revisionati): "
+                                         "{++inserito++} e {--cancellato--} in CriticMarkup, "
+                                         "con riepilogo per revisore e data. accepted: il testo "
+                                         "come se fossero accettate. original: il testo prima "
+                                         "delle revisioni."},
         }, "required": ["tier", "name", "path"]},
     ),
     Tool(
@@ -4345,6 +4363,18 @@ def _extract_document_text(filename: str, data: bytes) -> tuple[str, int | None]
         pages = [(p.extract_text() or "") for p in reader.pages]
         return "\n\n".join(pages), len(pages)
     if ext == "docx":
+        # REVISIONI TRACCIATE: `python-docx` legge `paragraph.text`, che
+        # concatena solo i run figli DIRETTI del paragrafo. Un run dentro
+        # `<w:ins>`/`<w:del>` è figlio di quell'elemento e viene SALTATO: su un
+        # contratto revisionato sparisce il testo proposto dalla controparte e
+        # quello cancellato (misurato il 3 set 2026: 19.277 caratteri su 54.531,
+        # e 33 paragrafi su 147 letti come vuoti). Chi legge non vede che manca
+        # qualcosa, ed è la parte che conta. Quindi i documenti con revisioni
+        # passano da `docrev`, che le rende esplicite.
+        from . import docrev
+        if docrev.has_tracked_changes(data):
+            md, _stats = docrev.docx_to_markdown(data, docrev.MODE_INLINE)
+            return md, None
         from docx import Document
         doc = Document(io.BytesIO(data))
         parts = [p.text for p in doc.paragraphs]
@@ -4547,7 +4577,8 @@ def _dispatch_topic(name: str, a: dict):
         src = a["path"]
         data = svc.read_file(a["tier"], a["name"], src)
         try:
-            md, pages, fidelity = docmd.to_markdown(src.rsplit("/", 1)[-1], data)
+            md, pages, fidelity, revs = docmd.to_markdown(
+                src.rsplit("/", 1)[-1], data, a.get("revisions"))
         except ValueError as e:
             return {"ok": False, "error": str(e)}
         except Exception as e:  # noqa: BLE001 — libreria di terzi su input di terzi
@@ -4567,7 +4598,7 @@ def _dispatch_topic(name: str, a: dict):
                            prov, agent_name())
         return {"ok": True, "path": res.get("path") or f"files/{out}", "source": src,
                 "chars": len(md), "pages": pages, "fidelity": fidelity,
-                "provenance": prov}
+                "provenance": prov, "revisions": revs}
     if verb == "write_file":
         fn = a["filename"]
         enc = (a.get("encoding") or "text").lower()
