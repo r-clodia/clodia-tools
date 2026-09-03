@@ -59,6 +59,13 @@ MODES = (MODE_INLINE, MODE_ACCEPTED, MODE_ORIGINAL)
 #: cliente che i titoli sono diventati paragrafi.
 _HEADING = re.compile(r"^(?:heading|titolo|kop|encabezado)\s*([1-6])$", re.I)
 
+#: Stili di elenco. Un elenco si riconosce da `w:numPr` **o** dallo stile: Word
+#: usa la numerazione, ma un documento generato con python-docx (compreso quello
+#: che scrive `docwrite`) porta solo lo stile `ListBullet`/`ListNumber`. Senza
+#: questo riconoscimento il giro `docwrite` → `docrev` restituiva le voci di
+#: elenco come paragrafi normali: il testo c'era, la struttura no.
+_ELENCO = re.compile(r"^(?:list(?:bullet|number|paragraph)|paragrafoelenco|elenco)\s*\d*$", re.I)
+
 
 def _q(tag: str) -> str:
     return W + tag
@@ -211,7 +218,8 @@ def _paragrafo_md(p, racc_mode: str, commenti: dict) -> tuple[str, list[dict]]:
     if ppr is not None:
         st = ppr.find(_q("pStyle"))
         stile = (st.get(_q("val")) if st is not None else "") or ""
-        elenco = ppr.find(_q("numPr")) is not None
+        elenco = (ppr.find(_q("numPr")) is not None
+                  or bool(_ELENCO.match(stile.replace(" ", ""))))
     m = _HEADING.match(stile)
     if m:
         return "#" * int(m.group(1)) + " " + testo, racc.revisioni
