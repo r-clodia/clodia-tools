@@ -37,6 +37,36 @@ _DBS = [d.strip() for d in (os.environ.get("CLODIA_BACKUP_DBS") or "").split(","
 # Esclusioni: backup vecchi, cache, snapshot DB temporanei (rigenerati).
 _EXCLUDES = ["*.bak-*", "topics-store.bak-*", "**/__pycache__", "**/*.pyc"]
 
+#: restic esce **3** quando lo snapshot è stato creato ma qualche file non si è
+#: potuto leggere. È un esito diverso da 1 (fallimento): una copia utilizzabile
+#: esiste. Trattarlo come un fallimento costava tre cose in una volta — il run
+#: risultava fallito pur avendo prodotto uno snapshot valido, e soprattutto
+#: l'eccezione saltava `forget` e `check`, quindi la retention non girava e il
+#: repository non veniva verificato. Osservato il 4 set 2026: snapshot 27fa63c7
+#: creato alle 07:21, run marcato fallito alle 07:22, nessuna verifica.
+_RESTIC_INCOMPLETO = 3
+
+
+def _spawn_excludes() -> list[str]:
+    """Le directory di lavoro degli spawn, che spariscono mentre restic legge.
+
+    Uno spawn (`avvocato-27`) nasce e muore col turno: se termina durante il
+    backup, restic trova la directory nell'elenco e non più sul filesystem, e
+    l'errore che ne esce (`xattr.list … no such file or directory`) faceva
+    fallire l'intero run. Non sono un dato da conservare: sono copie di lavoro
+    rigenerate a ogni spawn.
+
+    Il pattern chiude sulle CIFRE finali — uno spawn è `<seed>-<n>` — e non su
+    `spawns/*` né su `*-*`: entrambi catturerebbero `spawn-seq.json`, che è il
+    contatore degli ordinali e ha un trattino nel nome. Perderlo farebbe
+    ripartire la numerazione su nomi già usati. Un test lo verifica, ed è così
+    che il primo pattern che avevo scritto è stato scartato.
+    """
+    base = os.path.join(DATADIR, "spawns")
+    # Fino a quattro cifre: `filepath.Match` di Go (che restic usa) ha le classi
+    # di caratteri ma non i quantificatori, quindi le lunghezze si elencano.
+    return [os.path.join(base, "*-" + "[0-9]" * n) for n in range(1, 5)]
+
 
 def _declared_dbs() -> list[str]:
     """Datastore dichiarati dai plugin installati (perimetro dinamico).
@@ -216,13 +246,20 @@ def run_backup() -> dict:
     try:
         _snapshot_dbs(cfg)
         excludes = []
-        for e in _EXCLUDES:
+        for e in [*_EXCLUDES, *_spawn_excludes()]:
             excludes += ["--exclude", e]
         b = _run(["backup", *backup_targets(), "--tag", "platform", *excludes],
                  cfg, timeout=3600)
         result = {"backup_rc": b.returncode, "backup_err": b.stderr[-400:] if b.returncode else ""}
-        if b.returncode != 0:
+        # Uno snapshot INCOMPLETO è comunque uno snapshot: si prosegue con
+        # retention e verifica, e lo si dice. Fermarsi qui lasciava il repository
+        # senza `forget` né `check` per un file sparito durante la lettura.
+        incompleto = b.returncode == _RESTIC_INCOMPLETO
+        if b.returncode != 0 and not incompleto:
             raise RuntimeError(f"restic backup fallito: {b.stderr[:400]}")
+        if incompleto:
+            result["incomplete"] = True
+            result["skipped"] = b.stderr[-400:]
         ret = cfg["retention"]
         f = _run(["forget", "--prune", "--tag", "platform",
                   "--keep-daily", str(ret.get("daily", 7)),
@@ -231,8 +268,15 @@ def run_backup() -> dict:
         result["forget_rc"] = f.returncode
         c = _run(["check"], cfg, timeout=600)
         result["check_rc"] = c.returncode
-        result["ok"] = b.returncode == 0 and c.returncode == 0
-        _record_last_run(result["ok"], "" if result["ok"] else f"check_rc={c.returncode}")
+        # `ok` resta la verifica del REPOSITORY: uno snapshot incompleto non è un
+        # fallimento, ma non si tace — `incomplete` viaggia nel risultato e
+        # l'avviso finisce nello stato, così un'incompletezza che si ripete si
+        # vede invece di sparire in un `ok` verde.
+        result["ok"] = c.returncode == 0
+        _record_last_run(result["ok"],
+                         (f"snapshot incompleto: {result.get('skipped', '')[:200]}"
+                          if incompleto else "")
+                         if result["ok"] else f"check_rc={c.returncode}")
         return result
     except Exception as e:
         # Registra il FALLIMENTO (l'ultimo backup eseguito è fallito) poi rilancia.
