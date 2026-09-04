@@ -164,6 +164,36 @@ async def call(request: Request):
     return JSONResponse({"ok": True, "result": data})
 
 
+def _agent_allowed(tool: str) -> bool:
+    """La decisione per un AGENTE: la STESSA di `call_tool`.
+
+    Era `_is_super(agent)`, cioè «solo un super-agent». Da quando
+    `_SUPER_AGENTS` è vuoto (#104) quella riga risponde False a QUALUNQUE
+    agente, con qualunque grant: la matrice del principal — seed, ancestry,
+    archseed, più gli scoped e i connettori — non veniva consultata proprio
+    dall'endpoint che esiste per consultarla. `sysadmin`, che ha `packs.*`,
+    chiamava `packs.setup_done` e riceveva un 403 indistinguibile da un
+    permesso mancante (clodia-platform#297).
+
+    Le due metà sono quelle di `call_tool`: `_agent_tool_reachable` concede,
+    `agent_denies` sottrae (una sottrazione da `*`: vale anche per i super, che
+    è il punto della lista).
+    """
+    from . import main
+    try:
+        ag = whitelist.agent_name()
+    except PermissionError as e:
+        # Un'identità non dichiarata è una DECISIONE (negato), non un guasto:
+        # lasciarla propagare darebbe 500, e il chiamante traduce ogni non-200
+        # in «negato» — un guasto travestito da rifiuto, che è il modo più
+        # efficace di nascondere un guasto.
+        LOG.info("authorize: identità agente non valida (%s)", e)
+        return False
+    if not (main._is_super(ag) or main._agent_tool_reachable(tool, ag)):
+        return False
+    return not whitelist.agent_denies(tool, ag)
+
+
 async def authorize(request: Request):
     """POST /internal/authorize {tool} — SOLO decisione (per le azioni eseguite
     localmente dall'agent-server). Ritorna {allowed: bool}."""
@@ -180,9 +210,13 @@ async def authorize(request: Request):
     from . import main
     with _Ctx(payload, token):
         if whitelist.is_on_behalf():
-            allowed = main._human_tool_allowed(tool)
+            # Il tetto `scoped_tools` vale anche qui: `/internal/tool` lo fa
+            # applicare da `call_tool` a valle, ma questo endpoint non esegue
+            # nulla — non aveva nessun «a valle» che lo applicasse, e rispondeva
+            # «consentito» per verbi fuori dal token che li chiedeva.
+            allowed = main._human_tool_allowed(tool) and main._scoped_ceiling_ok(tool)
         else:
-            allowed = main._is_super(whitelist.agent_name())
+            allowed = _agent_allowed(tool)
     return JSONResponse({"allowed": bool(allowed),
                          "principal": payload.get("principal"),
                          "human_role": payload.get("human_role")})
