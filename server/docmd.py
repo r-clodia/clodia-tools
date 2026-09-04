@@ -173,3 +173,75 @@ def markdown_name(path: str) -> str:
     base = (path or "").rsplit("/", 1)[-1]
     radice = base.rsplit(".", 1)[0] if "." in base else base
     return f"{radice or 'documento'}.md"
+
+
+# ── Finestra di lettura ───────────────────────────────────────────────────────
+#
+# `read_document` consegnava `text[:max_chars]`: sempre dal PRINCIPIO, senza un
+# modo di chiedere il resto. Su un contratto di 71.801 caratteri (il dc10 di
+# titul-brightnode, 4 set 2026) significa che gli articoli finali — 8.3, 9.1,
+# 10, 11, 12, 13 — non erano raggiungibili in nessun modo: non «lenti da
+# leggere», irraggiungibili per costruzione. L'agente sapeva solo `truncated:
+# true`, che dice che manca qualcosa e non come averlo, e da lì l'unica mossa
+# era chiedere a un umano di estrarre i pezzi a mano.
+#
+# Il taglio va su un confine di RIGA: tagliare a metà carattere di un marcatore
+# CriticMarkup (`{++`, `{--`) produrrebbe due finestre in cui una revisione
+# sembra aperta e mai chiusa — cioè, su un documento in revisione, un errore di
+# lettura che somiglia a un dato.
+
+#: Quanto indietro si può arretrare per trovare un capo a riga prima di
+#: rassegnarsi a tagliare a metà. Su testo normale il capo è vicino; il limite
+#: serve al caso patologico di una riga lunghissima (una tabella su una riga).
+_RITORNO_MAX = 2000
+
+
+def finestra(text: str, offset: int = 0, max_chars: int = 60000) -> dict:
+    """Una finestra del testo, e come chiedere la prossima.
+
+    Ritorna `{text, offset, next_offset, remaining, truncated, window}`.
+    `next_offset` è `None` quando non resta niente: chi legge non deve dedurre
+    la fine da un confronto fra numeri.
+    """
+    total = len(text or "")
+    off = max(0, int(offset or 0))
+    cap = max(1, int(max_chars or 60000))
+    if off >= total:
+        return {"text": "", "offset": total, "next_offset": None,
+                "remaining": 0, "truncated": False, "window": 0}
+    fine = min(total, off + cap)
+    if fine < total:
+        # Arretra all'ultimo capo a riga dentro la finestra, così i marcatori
+        # non si spezzano e la finestra dopo comincia da una riga intera.
+        taglio = text.rfind("\n", off, fine)
+        if taglio > off and (fine - taglio) <= _RITORNO_MAX:
+            fine = taglio + 1
+    pezzo = text[off:fine]
+    resta = total - fine
+    return {"text": pezzo, "offset": off,
+            "next_offset": fine if resta else None,
+            "remaining": resta, "truncated": bool(resta), "window": len(pezzo)}
+
+
+#: Un'intestazione Markdown (`## Art. 8`) — è così che `docrev` rende i titoli.
+_TITOLO = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+
+
+def outline(text: str, limite: int = 200) -> list[dict]:
+    """I titoli del documento con il loro offset, per saltare al punto giusto.
+
+    Serve perché `next_offset` da solo permette di scorrere in avanti, e chi
+    cerca «l'art. 9.1» non vuole scorrere: vuole l'offset di quell'articolo. Con
+    l'indice, una lettura mirata costa una finestra invece di quattro.
+    """
+    fuori: list[dict] = []
+    pos = 0
+    for riga in (text or "").splitlines(keepends=True):
+        m = _TITOLO.match(riga.rstrip("\n"))
+        if m:
+            fuori.append({"level": len(m.group(1)), "title": m.group(2)[:120],
+                          "offset": pos})
+            if len(fuori) >= limite:
+                break
+        pos += len(riga)
+    return fuori

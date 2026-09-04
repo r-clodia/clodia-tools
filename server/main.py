@@ -794,8 +794,14 @@ _TOPIC_TOOLS: list[Tool] = [
                      "l'estrazione avviene server-side nel gateway, quindi ricevi TESTO "
                      "leggibile, non base64. USA QUESTO per leggere un PDF/DOCX/XLSX "
                      "invece di topic.read_file (che restituisce base64 binario). "
-                     "Ritorna {text, chars, pages, truncated}. Per PDF lunghi usa "
-                     "max_chars per limitare il testo. Un DOCX con REVISIONI "
+                     "Ritorna {text, chars, pages, truncated, offset, next_offset, "
+                     "remaining}. Su un documento LUNGO ricevi una finestra: se "
+                     "`truncated` è true, richiama lo stesso path con "
+                     "`offset=next_offset` per il pezzo dopo — il testo non è "
+                     "perduto, va chiesto. Quando è troncato ricevi anche "
+                     "`outline`, i titoli con il loro offset: per andare a un "
+                     "articolo preciso passa quell'offset invece di scorrere. Un "
+                     "DOCX con REVISIONI "
                      "TRACCIATE viene reso in CriticMarkup ({++inserito++}, "
                      "{--cancellato--}): se lo vedi, quel documento è in "
                      "revisione e non è testo definitivo. Per scegliere la resa "
@@ -805,7 +811,8 @@ _TOPIC_TOOLS: list[Tool] = [
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
             "path": {"type": "string", "description": "path relativo al topic, es. files/report.pdf"},
-            "max_chars": {"type": "integer", "description": "max caratteri restituiti (default 60000)"},
+            "max_chars": {"type": "integer", "description": "ampiezza della finestra in caratteri (default 60000)"},
+            "offset": {"type": "integer", "description": "da quale carattere leggere (default 0). Usa il `next_offset` della risposta precedente, o un offset preso da `outline`."},
         }, "required": ["tier", "name", "path"]},
     ),
     Tool(
@@ -1719,7 +1726,8 @@ _MEMORY_TOOLS: list[Tool] = [
          description=("Legge un DOCUMENTO della tua libreria estraendone il TESTO "
                       "(PDF/docx/xlsx/txt/md → testo per l'uso). `max_chars` opzionale."),
          inputSchema={"type": "object", "properties": {
-             "filename": {"type": "string"}, "max_chars": {"type": "integer"}},
+             "filename": {"type": "string"}, "max_chars": {"type": "integer"},
+             "offset": {"type": "integer", "description": "da quale carattere leggere: usa il `next_offset` della risposta precedente"}},
              "required": ["filename"]}),
     Tool(name="memory.get_document",
          description=("Recupera un DOCUMENTO della libreria come base64 grezzo (per "
@@ -2084,14 +2092,28 @@ def _dispatch_memory(name: str, a: dict):
     if verb == "list_documents":
         return mem.list_documents()
     if verb == "read_document":
+        from . import docmd as _docmd
         fn, data = mem.read_document_bytes(a["filename"])
         cap = int(a.get("max_chars") or 60000)
         try:
             text, pages = _extract_document_text(fn, data)
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": f"estrazione fallita: {str(e)[:160]}"}
-        return {"file": fn, "text": text[:cap], "chars": len(text),
-                "pages": pages, "truncated": len(text) > cap}
+        # Stessa finestra di `topic.read_document`: un documento lungo si legge
+        # a pezzi richiedibili, non tagliato dall'inizio e basta.
+        w = _docmd.finestra(text, a.get("offset"), cap)
+        out = {"file": fn, "text": w["text"], "chars": len(text),
+               "pages": pages, "truncated": w["truncated"],
+               "offset": w["offset"], "window": w["window"],
+               "next_offset": w["next_offset"], "remaining": w["remaining"]}
+        if w["truncated"]:
+            ind = _docmd.outline(text)
+            if ind:
+                out["outline"] = ind
+            out["note"] = (f"finestra {w['offset']}–{w['offset'] + w['window']} "
+                           f"di {len(text)}: per il resto richiama con "
+                           f"offset={w['next_offset']}")
+        return out
     if verb == "get_document":
         import base64 as _b64
         fn, data = mem.read_document_bytes(a["filename"])
@@ -4588,15 +4610,35 @@ def _dispatch_topic(name: str, a: dict):
                     "content": _b64.b64encode(data).decode("ascii"),
                     "note": "file binario (PDF/immagine/...): decodifica da base64"}
     if verb == "read_document":
+        from . import docmd as _docmd
         data = svc.read_file(a["tier"], a["name"], a["path"])
         cap = int(a.get("max_chars") or 60000)
         try:
             text, pages = _extract_document_text(a["path"].rsplit("/", 1)[-1], data)
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": f"estrazione fallita: {str(e)[:160]}"}
-        trunc = len(text) > cap
-        return {"path": a["path"], "text": text[:cap], "chars": len(text),
-                "pages": pages, "truncated": trunc}
+        # Prima si consegnava un taglio secco dei primi `max_chars` caratteri:
+        # sempre dal principio, senza un modo di chiedere il resto. Su un
+        # contratto di 71.801 caratteri gli articoli finali non erano lenti da
+        # raggiungere, erano IRRAGGIUNGIBILI — e `truncated: true` diceva che
+        # mancava qualcosa, non come averlo.
+        w = _docmd.finestra(text, a.get("offset"), cap)
+        out = {"path": a["path"], "text": w["text"], "chars": len(text),
+               "pages": pages, "truncated": w["truncated"],
+               "offset": w["offset"], "window": w["window"],
+               "next_offset": w["next_offset"], "remaining": w["remaining"]}
+        if w["truncated"]:
+            # L'indice dei titoli solo quando serve saltare: chi cerca «l'art.
+            # 9.1» non vuole scorrere quattro finestre per arrivarci.
+            ind = _docmd.outline(text)
+            if ind:
+                out["outline"] = ind
+            out["note"] = (f"finestra {w['offset']}–{w['offset'] + w['window']} "
+                           f"di {len(text)}: per il resto richiama con "
+                           f"offset={w['next_offset']}"
+                           + (", o usa `outline` per saltare a un articolo"
+                              if ind else ""))
+        return out
     if verb == "convert_document":
         from . import docmd
         src = a["path"]
