@@ -62,9 +62,15 @@ class _Rotte:
     o riscrivesse `config.yaml` misurerebbe anche altro."""
 
     def __enter__(self):
+        # `vault_api.vault` e `providers_api.vault` sono lo STESSO modulo: la
+        # doppia patch su `has_credential` si impilava, e uscendo si fermava in
+        # ordine di avvio invece che inverso — quindi la lambda della seconda
+        # restava installata su `server.vault` per tutta la sessione di test. Un
+        # modulo eseguito dopo vedeva ogni credenziale come assente, e falliva
+        # per un motivo che non era il suo. Una patch sola, e stop in ordine
+        # inverso: l'isolamento è ciò che rende leggibile un rosso.
         self._p = [
             patch.object(vault_api.vault, "has_credential", lambda _n: False),
-            patch.object(providers_api.vault, "has_credential", lambda _n: False),
             patch.object(agents_api.whitelist, "upsert_agent",
                          lambda name, **kw: {"allowed_tools": ["topic.messages"]}),
             patch.object(agents_api.whitelist, "reload_config", lambda: None),
@@ -75,7 +81,7 @@ class _Rotte:
                                             *agents_api.routes]))
 
     def __exit__(self, *a):
-        for p in self._p:
+        for p in reversed(self._p):
             p.stop()
         return False
 
