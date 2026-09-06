@@ -12,16 +12,16 @@ degli altri 134 topic senza gate e riversarli lì dentro. Il modello dichiara du
 assi — clearance E compartimento — ma il secondo compartimenta solo se valutato
 per spawn: per seed è un permesso globale vestito da compartimento.
 
-La regola nuova, con `qui` preso dal claim FIRMATO:
+La regola, con `qui` preso dal claim FIRMATO:
 
     T == qui                → consentito
-    T portabile e sono suo  → consentito   (dichiarato dal TOPIC, §2.4)
     agent ∈ participants(T) → GATE      ← il cambiamento
     altrimenti              → GATE
 
-*Aggiornato l'8 ago 2026*: la seconda riga era «T ∈ carries», dichiarato dal
-SEED. Rovesciata sul topic, perché un agente che si aggiunge un topic alla
-propria lista si dà da solo un canale fra le stanze.
+*Aggiornato il 6 set 2026*: esisteva un'eccezione, «T dichiarato portabile
+dal TOPIC → consentito» (decision-record #28/#29). Abrogata (decision-record
+#39, clodia-platform#313): nessun topic bypassa più il gate dichiarandosi
+tale, non resta nessuna terza via oltre "sei nella tua stanza" o "gate".
 """
 from __future__ import annotations
 
@@ -50,12 +50,8 @@ class _Chat:
         return False
 
 
-def _env(modo="on", portable=False, meta=None):
-    """`portable` è ora una proprietà del TOPIC bersaglio, non del seed che
-    chiede: è il ribaltamento dell'8 ago 2026."""
+def _env(modo="on", meta=None):
     base = meta if meta is not None else META_A
-    if portable:
-        base = dict(base, portable=True)
 
     class _Svc:
         def open(self, tier, name):
@@ -92,32 +88,20 @@ class EnforcedTests(Base):
                 self.assertEqual(self.key(), "topic-access:SEAL-1/topic-a")
         self.run_with(_env(), go)
 
-    def test_a_declared_carry_is_allowed_from_anywhere(self):
-        """L'eccezione esplicita: lo scope proprio dell'agente."""
-        def go():
-            with _Chat("chan:SEAL-1:topic-b:clodia"):
-                self.assertIsNone(self.key())
-        self.run_with(_env(portable=True), go)
-
     def test_a_non_member_still_gates(self):
         def go():
             with _Chat("chan:SEAL-1:topic-b:clodia"):
                 self.assertEqual(self.key(), "topic-access:SEAL-1/topic-a")
         self.run_with(_env(meta={"tier": "SEAL-1", "owner": "x", "participants": []}), go)
 
-    def test_outside_any_room_only_a_carry_passes(self):
-        """In un job non esiste un «qui». Solo ciò che è dichiarato passa, e il
-        resto gata — che per una sessione non presidiata significa negare."""
+    def test_outside_any_room_everything_gates(self):
+        """In un job non esiste un «qui», e non c'è più nessuna eccezione
+        dichiarata dal topic (decision-record #39): fuori dalla propria stanza
+        si gata sempre — che per una sessione non presidiata significa negare."""
         def go():
             with _Chat("job:42"):
                 self.assertEqual(self.key(), "topic-access:SEAL-1/topic-a")
         self.run_with(_env(), go)
-
-    def test_a_job_can_still_reach_what_it_declares(self):
-        def go():
-            with _Chat("job:42"):
-                self.assertIsNone(self.key())
-        self.run_with(_env(portable=True), go)
 
 
 class TierAliasTests(Base):
@@ -129,12 +113,6 @@ class TierAliasTests(Base):
             with _Chat("chan:P1:topic-a:clodia"):
                 self.assertIsNone(self.key())
         self.run_with(_env(), go)
-
-    def test_a_portable_topic_is_reachable_whatever_the_tier_alias(self):
-        def go():
-            with _Chat("chan:SEAL-1:topic-b:clodia"):
-                self.assertIsNone(self.key())
-        self.run_with(_env(portable=True), go)
 
 
 class ReportModeTests(Base):

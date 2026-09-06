@@ -736,18 +736,6 @@ _TOPIC_TOOLS: list[Tool] = [
             "required": ["message_id", "chat_id", "principal"]},
     ),
     Tool(
-        name="topic.set_portable",
-        description=("Dichiara (o revoca) la PORTABILITÀ di un topic: i suoi "
-                     "partecipanti possono leggerne i contenuti anche da altre "
-                     "stanze, entro il tier della stanza in cui si trovano. "
-                     "Atto sui muri dello scope: lo decide l'owner."),
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"},
-            "portable": {"type": "boolean", "description": "true = portabile, false = revoca"},
-        }, "required": ["tier", "name", "portable"]},
-    ),
-    Tool(
         name="topic.list",
         description="Elenca i topic (riga sintetica). Gli archived sono nascosti salvo include_archived.",
         inputSchema={"type": "object", "properties": {
@@ -2922,84 +2910,6 @@ def _spawn_compartment_mode() -> str:
     return m if m in ("off", "report", "on") else "report"
 
 
-def _is_portable(meta: dict, agent: str | None) -> bool:
-    """Il TOPIC si dichiara portabile, e chi lo porta ne è partecipante.
-
-    Rovesciato l'8 ago 2026. Prima la portabilità era `carries` sul SEED — «i
-    topic che questo agente si porta dietro» — ed era il lato sbagliato: un
-    agente che si aggiunge un topic alla propria lista **si dà da solo un
-    canale** fra le stanze. Dichiarata dal topic, la portabilità è una decisione
-    di chi possiede i contenuti (specification §2.4).
-
-    Restano due condizioni, non una: il topic è portabile **e** chi chiede ne è
-    partecipante. La prima da sola aprirebbe un topic portabile a chiunque; la
-    seconda da sola è la membership normale, che di per sé non attraversa i muri
-    (voce 29).
-
-    Nessuno usava `carries` — misurato su venere prima di toglierlo — quindi lo
-    spostamento non migra nulla e non rompe niente.
-    """
-    if not bool(meta.get("portable")):
-        return False
-    return _topic_is_member(meta, agent or "")
-
-
-def _require_room_carries(meta: dict, tier: str, tname: str, qui: str | None) -> None:
-    """La portabilità avviene solo se la STANZA regge il tier del topic portato.
-
-    Regola di Davide, 7 ago 2026: «se il topic portabile TP ha SEAL-3, allora di
-    sicuro un participant Alice sarà SEAL-3 o superiore. Se Alice viene convocata
-    in un topic T SEAL-1 semplicemente non avviene la portabilità dei dati».
-
-    È l'anello più debole applicato al trasporto. Il vincolo non sta
-    sull'appartenenza — chi partecipa a TP ha già la clearance — ma sulla stanza:
-    dati SEAL-3 non entrano in una stanza SEAL-1, perché lì li leggerebbero i
-    partecipanti di quella.
-
-    **Si rifiuta, non si gata.** Un gate lascerebbe a qualcuno la facoltà di
-    approvare proprio il travaso che questa regola esiste per impedire, e il
-    consenso di un owner non alza il tier di una stanza.
-
-    **In un job la regola vale come in una stanza**, da quando il tier del job
-    viaggia nel claim firmato (8 ago 2026). Fino a quel giorno qui si consentiva
-    e si loggava: era l'unico posto in cui questa regola era scritta e non
-    applicata, e la ragione era che il gateway non sapeva il tier — non che il
-    caso fosse innocuo.
-
-    Se il tier del job non è dichiarato non si rifiuta: assente significa
-    «nessun requisito», che è lo stato di ogni job esistente, e trasformare
-    un'assenza in un divieto spegnerebbe lavoro che gira.
-    """
-    t_topic = _rank(meta.get("tier", tier))
-    if not qui:
-        from .whitelist import current_scope_tier
-        t_job = current_scope_tier()
-        if not t_job:
-            if t_topic > 0:
-                import logging as _lg
-                _lg.getLogger("clodia-tools").warning(
-                    "portabilità · %s/%s è SEAL-%s e si porta in un'esecuzione "
-                    "che non dichiara un tier: consentito", tier, tname, t_topic)
-            return
-        if _rank(t_job) >= t_topic:
-            return
-        raise PermissionError(
-            f"il topic portabile {tier}/{tname} è SEAL-{t_topic}, e questo job "
-            f"dichiara {t_job}: qui la portabilità non avviene, e i suoi dati non "
-            f"sono disponibili. Non è un permesso che manca — è il livello "
-            f"dichiarato dal job. Alza il tier del job, o leggi quei dati in "
-            f"{tier}/{tname}.")
-        return
-    q_tier, _, _q = qui.partition("/")
-    if _rank(q_tier) >= t_topic:
-        return
-    raise PermissionError(
-        f"il topic portabile {tier}/{tname} è SEAL-{t_topic}, questa stanza è "
-        f"{q_tier}: qui la portabilità non avviene, e i suoi dati non sono "
-        f"disponibili. Non è un permesso che manca — è il livello della stanza. "
-        f"Se ti servono quei dati, il posto in cui leggerli è {tier}/{tname}.")
-
-
 def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
     """Chiave di gate per l'accesso CROSS-TOPIC.
 
@@ -3008,9 +2918,12 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
     argomento, che sarebbe la parola dell'agente su dove si trova.
 
         T == qui               → consentito   (agisci nel tuo scope)
-        T portabile e sono suo → consentito   (dichiarato dal TOPIC)
         agent ∈ participants(T) → GATE        ← il cambiamento
         altrimenti             → GATE         (invariato)
+
+    Non esiste più un'eccezione: la portabilità dei topic (l'esenzione «T
+    dichiarato portabile → consentito») è stata abrogata (decision-record #39,
+    clodia-platform#313). Nessun topic bypassa più il gate dichiarandosi tale.
 
     Perché. `_topic_is_member` confrontava il nome del SEED con i partecipanti, e
     nessuno guardava da dove partiva la chiamata. Su marte clodia è participant
@@ -3043,9 +2956,6 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
     qui = current_channel()
     if qui and _norm_scope(qui) == _norm_scope(target):
         return None                      # la propria stanza
-    if _is_portable(meta, agent):
-        _require_room_carries(meta, tier, tname, qui)
-        return None                      # portabile, e la stanza lo regge
     if _spawn_compartment_mode() == "report":
         if _topic_is_member(meta, agent):
             import logging as _lg
@@ -4047,7 +3957,7 @@ def _safe_scratch_path(p: str) -> str:
 # caller sia participant/owner (compartimento, need-to-know). `new`/`list`/`search`
 # sono gestiti a parte (creazione / risultati filtrati per membership).
 _TOPIC_SCOPED_VERBS = {
-    "open", "save_summary", "save_agents_md", "add_minute", "archive", "set_portable",
+    "open", "save_summary", "save_agents_md", "add_minute", "archive",
     "telegram_bind", "telegram_unbind",
     "files", "read_file",
     "read_document", "convert_document", "write_document", "write_file", "fetch",
@@ -4082,7 +3992,7 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
 #: stretto del ruolo. L'ha colto un test scritto apposta — «una classificazione
 #: su un verbo che non esiste è una regola che non si applica mai».
 _TOPIC_MUTATING_VERBS = frozenset({
-    "save_summary", "save_agents_md", "add_minute", "archive", "set_portable",
+    "save_summary", "save_agents_md", "add_minute", "archive",
     "telegram_bind", "telegram_unbind",
     "write_file", "convert_document", "write_document", "put", "delete_file",
     "migrate_storage",
@@ -4565,8 +4475,6 @@ def _dispatch_topic(name: str, a: dict):
                                  mount_name=a.get("mount"))
     if verb == "telegram_unbind":
         return svc.telegram_unbind(a["tier"], a["name"], a.get("mount"))
-    if verb == "set_portable":
-        return svc.set_portable(a["tier"], a["name"], bool(a["portable"]))
     if verb in ("list", "search"):
         # `list` e `search` non passano da `_require_topic_member`: filtrano da
         # sé, per membership del chiamante. E il chiamante lo leggevano da

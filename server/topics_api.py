@@ -202,30 +202,6 @@ async def telegram_binding(request: Request):
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
-async def set_portable(request: Request):
-    """Dichiara o revoca la portabilità di un topic.
-
-    La portabilità è dichiarata dal TOPIC, non dall'agente (voce 28 emendata):
-    se la dichiarasse l'agente, chiunque potesse scrivere la propria lista si
-    darebbe da solo un canale verso i contenuti di una stanza.
-    """
-    _, err = _authorize(request)
-    if err:
-        return err
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "bad_json"}, status_code=400)
-    try:
-        out = _service().set_portable(request.path_params["tier"],
-                                      request.path_params["name"],
-                                      bool(body.get("portable")))
-        _invalidate_list_cache()
-        return JSONResponse(out)
-    except TopicError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-
-
 async def archive_topic(request: Request):
     _, err = _authorize(request)
     if err:
@@ -779,7 +755,6 @@ routes = [
     Route("/internal/topics/{tier}/{name}/taint/clear", clear_taint, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/messages", post_message, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/archive", archive_topic, methods=["POST"]),
-    Route("/internal/topics/{tier}/{name}/portable", set_portable, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/telegram", telegram_binding, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/status", set_status, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/agents-md", set_agents_md, methods=["GET", "POST"]),
