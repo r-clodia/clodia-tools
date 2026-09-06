@@ -3396,6 +3396,35 @@ def _context_gate_needed(verb: str, agent: str, egress_verdict: dict) -> tuple[s
     return key, reason
 
 
+def _note_run_refusal(verb: str, why: str) -> bool:
+    """Fa arrivare al run record dell'agent-server un verbo NEGATO qui.
+
+    Best-effort per costruzione, ed è l'UNICO punto in cui la tolleranza al
+    guasto va applicata: sta su un percorso di errore che sta già tornando un
+    `DENIED:` spiegato, e sollevare lo sostituirebbe con un `ERROR:` che non
+    nomina più il permesso mancante — cioè peggiorerebbe proprio il messaggio
+    che l'agente legge per correggersi.
+
+    Fuori da una sessione con `chat` non c'è niente da annotare: il registro di
+    là è per turno, e un rifiuto senza turno non appartiene a nessun run.
+
+    Ritorna se la nota è stata consegnata — per i test e per la diagnostica; il
+    chiamante non ha nulla da farci.
+    """
+    chat = current_chat()
+    if not chat:
+        return False
+    try:
+        from .tools import runtime as _rt
+        _rt.note_run_refusal(chat_id=chat, verb=verb, why=why)
+        return True
+    except Exception as exc:
+        # `info` e non `warning`: l'agent-server irraggiungibile lo dice già
+        # forte qualcun altro, e qui il fatto è comunque nella telemetria locale.
+        LOG.info("nota di rifiuto non consegnata per %s (%s): %s", verb, why, exc)
+        return False
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     try:
@@ -3919,6 +3948,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 else "other")
         _tlm.record(name, agent_name_safe(), "denied", channel=current_chat(),
                     unattended=is_unattended(), detail=_why)
+        # L'altra metà di clodia-platform#206. La telemetria di sopra è NOSTRA;
+        # il run record sta sull'agent-server, ed è quello che una persona legge
+        # per sapere com'è andato il job di stanotte. Stesso fatto, due
+        # destinazioni: senza questa riga il verbo negato resta in un grafico che
+        # nessuno guarda mentre il run si chiude `success`.
+        _note_run_refusal(name, _why)
         return [TextContent(type="text", text=f"DENIED: {e}")]
     except VersionConflict as e:
         return [TextContent(type="text", text=(
