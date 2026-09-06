@@ -269,13 +269,20 @@ _AGENT_TOOLS: list[Tool] = [
              "agent": {"type": "string"}, "skill": {"type": "string"}},
              "required": ["agent", "skill"]}),
     Tool(name="agents.grant_tool",
-         description=("Concede un permesso tool a un agent editabile. Può essere un "
-                      "tool puntuale (es. `email.send`) o un namespace (`fs.*`)."),
+         description=("Scrive un permesso tool nei `tool_permissions` di un agent "
+                      "editabile (tool puntuale come `email.send`, o namespace `fs.*`). "
+                      "NON è da solo l'autorizzazione: quella è la whitelist del "
+                      "gateway, sincronizzata dal seed del pack. La risposta dice in "
+                      "`effective` se il verbo è davvero autorizzato dopo la scrittura, "
+                      "e in `detail` cosa fare se non lo è."),
          inputSchema={"type": "object", "properties": {
              "agent": {"type": "string"}, "tool": {"type": "string"}},
              "required": ["agent", "tool"]}),
     Tool(name="agents.revoke_tool",
-         description="Revoca un permesso tool a un agent editabile.",
+         description=("Toglie un permesso tool dai `tool_permissions` di un agent "
+                      "editabile. La risposta dice in `still_authorized` se il verbo "
+                      "resta comunque autorizzato (whitelist del gateway, o eredità da "
+                      "un antenato) e in `detail` dove va sottratto davvero."),
          inputSchema={"type": "object", "properties": {
              "agent": {"type": "string"}, "tool": {"type": "string"}},
              "required": ["agent", "tool"]}),

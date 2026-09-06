@@ -15,6 +15,14 @@ Modello di sicurezza (deciso con l'owner, 30 giu 2026):
 
 Il gateway NON conia token: per le scritture inoltra al backend il token grezzo
 del caller (whitelist.current_token), che il backend verifica con la sua CA.
+
+SCRIVERE NON È AUTORIZZARE (clodia-platform#304). Per i `tool_permissions` la
+datadir è la DICHIARAZIONE; l'autorizzazione è la whitelist del gateway, che
+l'agent-server non raggiunge per progetto (§3.5) e che si sincronizza dal seed
+del pack. Le due possono divergere, e finché `grant_tool` rispondeva solo
+`{"ok": true}` la divergenza era invisibile: il permesso compariva nel file e
+ogni chiamata veniva rifiutata. Da qui `_authority_report`, che dopo la scrittura
+verifica e lo dice.
 """
 from __future__ import annotations
 
@@ -170,6 +178,97 @@ def list_rules() -> dict:
     return {"rules": [s.get("name") for s in _get("/clodia/rules") if s.get("name")]}
 
 
+# ── l'autorizzazione EFFETTIVA, che non è quella che questo verbo scrive ──────
+#
+# `_patch_caps` scrive nella DATADIR. L'autorizzazione si legge dalla whitelist
+# del GATEWAY, che per progetto è irraggiungibile dall'agent-server (§3.5) e si
+# sincronizza dal seed del pack. Le due cose non coincidono, e finché la risposta
+# diceva solo `{"ok": true}` la differenza era invisibile: il permesso compariva
+# nel file, l'agente lo vedeva in lista, e ogni chiamata veniva rifiutata con un
+# messaggio che sembrava un problema di ruolo (clodia-platform#304).
+#
+# Qui non si CONCEDE dal gateway — sarebbe la seconda via della issue, e apre una
+# decisione che non è dello sviluppatore (cosa succede quando la sincronizzazione
+# dal seed sovrascrive un grant d'istanza). Qui si VERIFICA e si dice com'è
+# andata, che è meno comodo e più onesto.
+
+#: Dove sta l'autorità, e per che via si cambia. Va scritto in chiaro nella
+#: risposta: senza, un «non ha funzionato» costa un'altra indagine.
+_AUTHORITY = ("l'autorità è la whitelist del gateway (`allowed_tools` in "
+              "clodia-tools-config.yaml), che questo verbo non tocca e che si "
+              "sincronizza dal seed del pack.")
+_ROUTE_ADD = (f"{_AUTHORITY} Per renderlo effettivo: aggiungi il verbo ai "
+              "`tool_permissions` del seed NEL PACK e aggiorna il pack (`packs.*`) "
+              "— un grant di sola istanza tornerebbe comunque indietro al primo "
+              "Update.")
+_ROUTE_DEL = (f"{_AUTHORITY} Per toglierlo davvero: togli il verbo dai "
+              "`tool_permissions` del seed NEL PACK e aggiorna il pack (`packs.*`).")
+
+
+def _may(agent: str, verb: str) -> bool:
+    """Il verbo è autorizzato per l'agente? Stessa funzione che decide al
+    dispatch: un secondo lettore della matrice direbbe prima o poi una cosa
+    diversa da quella che vale davvero (è già successo, `whitelist.effective_tools`).
+    """
+    from .. import origin
+    return origin._agent_may(agent, verb)
+
+
+def _origin_of(agent: str, verb: str) -> str | None:
+    """Da dove arriva il verbo: `own`, il seed che lo eredita, o `archseed`.
+
+    Serve alla revoca, e non è un dettaglio: un verbo proprio si toglie
+    dall'agente, uno ereditato si sottrae con `denied_tools`. Sono due rimedi
+    diversi, e sbagliarli significa modificare un file e vedere che non cambia
+    niente. Il wildcard va risolto qui: la provenienza è chiavata sul pattern
+    dichiarato (`topic.*`), non sul verbo puntuale che si sta revocando.
+    """
+    prov = whitelist.tools_with_provenance(agent) or {}
+    ns = f"{verb.split('.', 1)[0]}.*" if "." in verb else None
+    for k in (verb, ns, "*"):
+        if k and k in prov:
+            return str(prov[k])
+    return None
+
+
+def _authority_report(agent: str, verb: str, granting: bool) -> dict:
+    """Cosa vale davvero dopo la scrittura, e cosa fare se non è quel che si
+    voleva. `effective`/`still_authorized` a `None` è il terzo stato — «non ho
+    potuto controllare» — e non va nascosto dentro un `true`: sarebbe la stessa
+    bugia rimessa dov'era."""
+    key = "effective" if granting else "still_authorized"
+    route = _ROUTE_ADD if granting else _ROUTE_DEL
+    try:
+        may = bool(_may(agent, verb))
+    except Exception as e:  # noqa: BLE001 — il verbo ha già scritto: non si rialza
+        return {"ok": True, key: None,
+                "detail": (f"«{verb}» è stato scritto nella datadir di «{agent}», ma "
+                           f"l'autorizzazione effettiva non è verificabile da qui "
+                           f"({type(e).__name__}): {route}")}
+    if granting and not may:
+        if whitelist.agent_denies(verb, agent):
+            why = (f"«{verb}» è nella `denied_tools` di «{agent}»: il deny vince su "
+                   "ogni allow, inclusi i wildcard, quindi va tolto di lì e "
+                   f"aggiungerlo altrove non lo riporta indietro. Per il resto, {route}")
+        else:
+            why = (f"«{verb}» è stato scritto nei `tool_permissions` di «{agent}» "
+                   f"nella datadir, ma NON è autorizzato: {route}")
+        return {"ok": False, key: False, "detail": why}
+    if not granting and may:
+        prov = _origin_of(agent, verb) or "sconosciuta"
+        eredita = prov not in ("own", "sconosciuta")
+        rimedio = (
+            f"Arriva da «{prov}»: toglierlo dall'agente non toglie ciò che eredita, "
+            "va sottratto con `denied_tools` nel suo seed."
+            if eredita else
+            f"Origine: {prov}. {route} Se invece risultasse ereditato da un antenato, "
+            "il rimedio è un altro: si sottrae con `denied_tools` nel seed.")
+        return {"ok": False, key: True, "detail": (
+            f"«{verb}» è stato tolto dai `tool_permissions` di «{agent}» nella "
+            f"datadir, ma resta AUTORIZZATO. {rimedio}")}
+    return {"ok": True, key: may if granting else False}
+
+
 # ── scritture (delta su lista, calcolato qui; set completo inviato al backend) ─
 def _modify(name: str, field: str, add: list[str] | None = None,
             remove: list[str] | None = None) -> dict:
@@ -189,7 +288,18 @@ def _modify(name: str, field: str, add: list[str] | None = None,
             if x not in cur:
                 cur.append(x)
     res = _patch_caps(name, {field: cur})
-    return {"ok": True, "name": name, field: res.get(field, cur)}
+    out = {"ok": True, "name": name, field: res.get(field, cur)}
+    # Solo per i verbi: skill e rule le consuma l'agent-server dalla datadir,
+    # cioè proprio dove questa scrittura arriva, e un avviso lì sarebbe un falso
+    # allarme. La verifica sta QUI, nell'unico punto che scrive, e non nei sei
+    # wrapper: tre letture parallele della stessa matrice hanno già divergito una
+    # volta (whitelist.effective_tools).
+    if field == "tool_permissions":
+        verbo = (add or remove or [None])[0]
+        if verbo:
+            out["written"] = True
+            out.update(_authority_report(name, str(verbo), granting=bool(add)))
+    return out
 
 
 def grant_skill(name: str, skill: str) -> dict:
