@@ -24,6 +24,15 @@ Layout della vault::
         grants:
           - agent: clodia
             actions: [fetch]           # fetch = ottieni il valore
+            principals: [davide]       # opzionale: per conto di CHI (assente = chiunque)
+            topics: [SEAL-1/studio]    # opzionale: DOVE (assente = ovunque)
+
+`principals` e `topics` sono chiavi di **restringimento**, e la loro assenza
+significa «qualunque»: una policy scritta prima che esistessero si comporta
+esattamente come prima (clodia-platform#270). Le due dimensioni non le dichiara
+il chiamante — si leggono dal contesto **firmato** della richiesta (claim
+`principal` e claim `chat` del token ckt1), quindi un agente non può dichiararsi
+in un topic in cui non è, né spendere l'identità di un'altra persona.
 
 Prima Legge: il valore del segreto è restituito SOLO a codice del gateway
 (non a un modello). I tool lo usano per l'handshake col servizio e lo
@@ -78,10 +87,34 @@ def _caller_hint() -> str:
         return "shell"
 
 
+def _caller_context() -> tuple[Optional[str], Optional[str]]:
+    """(principal, topic) della richiesta corrente, dal contesto FIRMATO.
+
+    Entrambi esistono già quando il vault decide, e nessuno dei due è
+    dichiarabile da un modello: il principal è il claim `principal` del token, il
+    topic è `<tier>/<nome>` derivato dal claim `chat` (`whitelist.current_channel`,
+    un punto solo, quello che usano anche i gate). `None` significa «il contesto
+    non lo dice» — un job schedulato, una shell — e NON «qualunque»: chi decide
+    tratta i due casi in modo diverso (vedi `_restriction_failed`).
+    """
+    try:
+        from . import whitelist as _w
+        return _w.current_principal(), _w.current_channel()
+    except Exception:  # noqa: BLE001 — il vault non deve dipendere dal contesto
+        return None, None
+
+
 def _audit(agent: str, action: str, credential: str, result: str, **extra) -> None:
+    principal, topic = _caller_context()
     rec = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "agent": agent,
+        # PER CONTO DI CHI e DOVE. Si scrivono sempre, anche `null`: la domanda
+        # «di chi era l'identità quando quella casella è stata letta» non aveva
+        # risposta nemmeno a posteriori, e un campo assente non si distingue da
+        # un campo mai scritto (clodia-platform#270).
+        "principal": principal,
+        "topic": topic,
         "action": action,
         "credential": credential,
         "result": result,
@@ -109,24 +142,77 @@ def _load_policy() -> dict:
         return {}
 
 
-def grants_for(agent: str) -> dict[str, dict]:
-    """{credential_name: {actions: set, type: str}} per l'agente.
+#: Le due dimensioni di restringimento, e da dove si legge ciascuna. Una tupla
+#: sola: aggiungere una terza dimensione qui la fa entrare insieme nel match,
+#: nella scrittura e nella matrice, senza tre modifiche che possono divergere.
+SCOPE_KEYS = ("principals", "topics")
 
-    Solo credenziali il cui bundle esiste effettivamente nello store.
+
+def _scope_list(g: dict, key: str) -> list[str]:
+    return [str(x).strip() for x in (g.get(key) or []) if str(x).strip()]
+
+
+def _restriction_failed(g: dict, principal: Optional[str],
+                        topic: Optional[str]) -> Optional[str]:
+    """Quale restrizione del grant vieta QUESTA richiesta, o None se nessuna.
+
+    Chiave assente (o lista vuota) = nessuna restrizione su quella dimensione:
+    è ciò che rende la policy di ieri identica a se stessa.
+
+    Contesto ignoto contro restrizione presente = **rifiuto**. È il verso in cui
+    si deve sbagliare: se non sappiamo in che topic siamo, un grant ristretto a
+    un topic varrebbe proprio là dove nessuno può verificarlo.
     """
+    for key, value in zip(SCOPE_KEYS, (principal, topic)):
+        allowed = _scope_list(g, key)
+        if not allowed:
+            continue
+        if value is None or value not in allowed:
+            return key
+    return None
+
+
+def _resolve_grant(spec: dict, agent: str, principal: Optional[str],
+                   topic: Optional[str]) -> tuple[Optional[dict], Optional[str]]:
+    """(grant applicabile, dimensione che ha rifiutato) — il PUNTO UNICO in cui
+    si decide se un agente può usare una credenziale qui e ora.
+
+    Lo interrogano `grants_for`, `list_for` e `get_secret`: tre letture parallele
+    dello stesso dict divergono, ed è il difetto che abbiamo appena pagato
+    altrove. Un elenco che mostra ciò che una fetch poi nega è una bugia con la
+    forma di un permesso.
+    """
+    denied: Optional[str] = None
+    for g in (spec.get("grants") or []):
+        g = g or {}
+        if g.get("agent") != agent:
+            continue
+        failed = _restriction_failed(g, principal, topic)
+        if failed is not None:
+            denied = denied or failed
+            continue
+        actions = {str(a) for a in (g.get("actions") or [])} & VALID_ACTIONS
+        if actions:
+            return {"actions": actions}, None
+    return None, denied
+
+
+def grants_for(agent: str) -> dict[str, dict]:
+    """{credential_name: {actions: set, type: str}} per l'agente **qui e ora**.
+
+    Solo credenziali il cui bundle esiste effettivamente nello store, e i cui
+    grant non siano ristretti a un altro principal o a un altro topic.
+    """
+    principal, topic = _caller_context()
     out: dict[str, dict] = {}
     creds = (_load_policy().get("credentials") or {})
     for name, spec in creds.items():
         spec = spec or {}
         if not (_store_dir() / f"{name}.json").is_file():
             continue
-        for g in (spec.get("grants") or []):
-            if (g or {}).get("agent") != agent:
-                continue
-            actions = {str(a) for a in (g.get("actions") or [])} & VALID_ACTIONS
-            if actions:
-                out[name] = {"actions": actions, "type": spec.get("type")}
-            break
+        grant, _ = _resolve_grant(spec, agent, principal, topic)
+        if grant:
+            out[name] = {"actions": grant["actions"], "type": spec.get("type")}
     return out
 
 
@@ -160,8 +246,10 @@ def get_secret(agent: str, credential: str) -> dict:
     Solleva VaultDenied se non autorizzato. Ogni accesso è auditato.
     Il chiamante è codice del gateway: il valore NON deve raggiungere un modello.
     """
-    grant = grants_for(agent).get(credential)
-    if grant is None and not has_credential(credential):
+    principal, topic = _caller_context()
+    spec = (_load_policy().get("credentials") or {}).get(credential) or {}
+    grant, fuori_ambito = _resolve_grant(spec, agent, principal, topic)
+    if not has_credential(credential):
         # TERZO caso, che il messaggio sotto non distingueva e che ha mandato un
         # admin a concedere una cosa inesistente. Su venere `telegram_bot_token`
         # non è nel vault: nessuno può averne il grant, e messaggero ha riferito
@@ -180,6 +268,29 @@ def get_secret(agent: str, credential: str) -> dict:
             f"Riferiscilo così: chiedere un permesso non risolve, e nemmeno "
             f"delegare a un altro agente — su questa istanza quel canale non c'è "
             f"per nessuno.")
+    if grant is None and fuori_ambito:
+        # QUARTO caso: il grant c'è, ma non copre questa richiesta. Va detto in
+        # modo diverso da «non ce l'hai», perché manda a fare una cosa diversa:
+        # non «chiedi il permesso», ma «questa credenziale non è di questa
+        # persona / di questa stanza». Chi legge deve poter riferire QUALE delle
+        # due dimensioni ha rifiutato, altrimenti la sola mossa che gli resta è
+        # chiedere di allargare tutto.
+        _audit(agent, "fetch", credential, "DENIED",
+               reason=f"out of scope: {fuori_ambito}")
+        dove = ("il principal per conto del quale stai operando "
+                f"({principal or 'nessuno: nessun utente firmato in questa richiesta'})"
+                if fuori_ambito == "principals" else
+                "il topic in cui stai operando "
+                f"({topic or 'nessuno: questa richiesta non arriva da un canale'})")
+        raise VaultDenied(
+            f"agent '{agent}' HA un grant su '{credential}', ma ristretto: "
+            f"{dove} non rientra nell'ambito concesso. Non è un permesso "
+            f"mancante da chiedere in blocco — quella credenziale è stata legata "
+            f"a un'altra persona o a un'altra stanza di proposito. Serve che un "
+            f"admin estenda l'ambito, se davvero deve valere anche qui. NON si "
+            f"risolve chiedendo a un altro agente di farlo per te: userebbe la "
+            f"propria credenziale, e sarebbe l'identità sbagliata sul dato "
+            f"esterno — cioè esattamente ciò che questa restrizione impedisce.")
     if grant is None:
         _audit(agent, "fetch", credential, "DENIED", reason="no grant")
         # Il rifiuto deve distinguere DUE cose che un modello confonde, e la
@@ -326,7 +437,9 @@ def deposit(credential: str, bundle: dict, *, cred_type: str = "opaque",
 
 
 def set_grant(credential: str, agent: str, granted: bool,
-              actions: Optional[list[str]] = None) -> None:
+              actions: Optional[list[str]] = None,
+              principals: Optional[list[str]] = None,
+              topics: Optional[list[str]] = None) -> None:
     """Aggiunge/rimuove il grant di `agent` su `credential` in vault-policy.yaml.
     Idempotente. Usato per delegare un connettore (es. gmail_studio) a un agent.
 
@@ -341,6 +454,11 @@ def set_grant(credential: str, agent: str, granted: bool,
     manda a cercare la causa in un posto qualunque. Registrare CHI cambia
     l'autorità è la sola cosa che rende quella domanda rispondibile la prossima
     volta.
+
+    `principals` / `topics` restringono il grant a certe persone o a certe
+    stanze. Ometterli (o passare una lista vuota) NON scrive la chiave: una
+    `principals: []` sul disco si leggerebbe «nessuno», che è l'opposto di
+    «chiunque» (clodia-platform#270).
     """
     actions = actions or ["fetch"]
     policy = _load_policy()
@@ -350,7 +468,12 @@ def set_grant(credential: str, agent: str, granted: bool,
     prima = {(g or {}).get("agent") for g in grants}
     grants[:] = [g for g in grants if (g or {}).get("agent") != agent]
     if granted:
-        grants.append({"agent": agent, "actions": list(actions)})
+        voce = {"agent": agent, "actions": list(actions)}
+        for key, valori in zip(SCOPE_KEYS, (principals, topics)):
+            valori = [str(v).strip() for v in (valori or []) if str(v).strip()]
+            if valori:
+                voce[key] = valori
+        grants.append(voce)
     _policy_file().write_text(yaml.safe_dump(policy, sort_keys=False, allow_unicode=True),
                               encoding="utf-8")
     os.chmod(_policy_file(), 0o600)
@@ -358,6 +481,29 @@ def set_grant(credential: str, agent: str, granted: bool,
     # «nessuno l'ha toccato» da «nessuno lo sa».
     _audit(agent, "grant" if granted else "revoke", credential,
            "OK", by=_caller_hint(), was_granted=agent in prima)
+
+
+def grant_scope(credential: str) -> dict[str, dict]:
+    """{agent: {actions, principals, topics}} — l'ambito di ogni grant, per la UI.
+
+    Liste vuote = nessuna restrizione su quella dimensione, cioè «chiunque» /
+    «ovunque»: chi mostra la matrice deve poter scrivere la differenza fra «tutta
+    l'istanza» e «solo Davide, solo in SEAL-1/studio», che oggi non è visibile in
+    nessun punto della UI. Mai valori di credenziali, solo ambiti.
+    """
+    spec = (_load_policy().get("credentials") or {}).get(credential) or {}
+    out: dict[str, dict] = {}
+    for g in (spec.get("grants") or []):
+        g = g or {}
+        ag = g.get("agent")
+        if not ag:
+            continue
+        voce = out.setdefault(ag, {"actions": [], "principals": [], "topics": []})
+        voce["actions"] = sorted(set(voce["actions"]) |
+                                 ({str(a) for a in (g.get("actions") or [])} & VALID_ACTIONS))
+        for key in SCOPE_KEYS:
+            voce[key] = sorted(set(voce[key]) | set(_scope_list(g, key)))
+    return out
 
 
 def agents_with_grant(credential: str) -> list[str]:

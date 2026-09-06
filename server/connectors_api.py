@@ -61,33 +61,36 @@ def _cred_for(connector_id: str) -> str | None:
     return None
 
 
+def _card(acct: str, cred: str, agent: str | None, **extra) -> dict:
+    """La parte comune delle tre viste, scritta una volta.
+
+    `scope` dice **a chi** e **dove** vale ciascun grant (clodia-platform#270):
+    senza, la UI mostrerebbe «Dairio: sì» tanto per un accesso all'intera
+    istanza quanto per uno ristretto a una persona e a una stanza — due cose
+    che una matrice dei permessi esiste apposta per distinguere. Liste vuote =
+    nessuna restrizione.
+    """
+    return {
+        "id": acct, "credential": cred,
+        "granted": bool(agent) and agent in vault.agents_with_grant(cred),
+        "agents": vault.agents_with_grant(cred),
+        "scope": vault.grant_scope(cred),
+        **extra,
+    }
+
+
 def _connectors(agent: str | None) -> list[dict]:
     out = []
     for acct in _google_accounts():
-        cred = f"google_{acct}"
-        out.append({
-            # `type: google` e non `email`: la credenziale unificata porta anche
-            # Drive/Calendar/Docs, e chiamarla «email» farebbe credere a chi
-            # concede di aprire un canale solo, mentre ne apre cinque.
-            "id": acct, "type": "google", "credential": cred,
-            "enables": ["email", "gdrive", "gcalendar", "gdocs", "gsheets"],
-            "granted": bool(agent) and agent in vault.agents_with_grant(cred),
-            "agents": vault.agents_with_grant(cred),
-        })
+        # `type: google` e non `email`: la credenziale unificata porta anche
+        # Drive/Calendar/Docs, e chiamarla «email» farebbe credere a chi
+        # concede di aprire un canale solo, mentre ne apre cinque.
+        out.append(_card(acct, f"google_{acct}", agent, type="google",
+                         enables=["email", "gdrive", "gcalendar", "gdocs", "gsheets"]))
     for acct in vault.email_connectors():
-        cred = f"gmail_{acct}"
-        out.append({
-            "id": acct, "type": "email", "credential": cred,
-            "granted": bool(agent) and agent in vault.agents_with_grant(cred),
-            "agents": vault.agents_with_grant(cred),
-        })
+        out.append(_card(acct, f"gmail_{acct}", agent, type="email"))
     for acct in _mailboxes():
-        cred = f"mailbox_{acct}"
-        out.append({
-            "id": acct, "type": "email", "credential": cred,
-            "granted": bool(agent) and agent in vault.agents_with_grant(cred),
-            "agents": vault.agents_with_grant(cred),
-        })
+        out.append(_card(acct, f"mailbox_{acct}", agent, type="email"))
     return out
 
 
@@ -110,6 +113,18 @@ async def grant_connector(request: Request):
     agent = (body.get("agent") or "").strip()
     account = (body.get("account") or "").strip()
     granted = bool(body.get("granted"))
+    # Restringimenti FACOLTATIVI (clodia-platform#270): un body che non li nomina
+    # concede come prima, a chiunque e ovunque — la UI di oggi non cambia di una
+    # riga. `[]` e assente sono la stessa cosa qui: «nessuna restrizione».
+    scope = {}
+    for key in vault.SCOPE_KEYS:
+        valori = body.get(key)
+        if valori is None:
+            continue
+        if not isinstance(valori, list) or any(not isinstance(v, str) for v in valori):
+            return JSONResponse({"error": f"'{key}' dev'essere una lista di stringhe"},
+                                status_code=400)
+        scope[key] = valori
     if not agent or not account:
         return JSONResponse({"error": "agent e account richiesti"}, status_code=400)
     cred = _cred_for(account)
@@ -119,8 +134,9 @@ async def grant_connector(request: Request):
     # connettore (email.*, …) è derivato dal grant vault nel gate del
     # gateway (main._connector_allows), così non dipende da config.yaml
     # (baked → effimero al rebuild).
-    vault.set_grant(cred, agent, granted)
-    return JSONResponse({"agent": agent, "account": account, "granted": granted})
+    vault.set_grant(cred, agent, granted, **scope)
+    return JSONResponse({"agent": agent, "account": account, "granted": granted,
+                         "scope": vault.grant_scope(cred).get(agent, {})})
 
 
 routes = [
