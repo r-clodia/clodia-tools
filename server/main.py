@@ -1269,6 +1269,16 @@ _PACKS_TOOLS: list[Tool] = [
                       "montati, RAG provisionato e verificato)."),
          inputSchema={"type": "object", "properties": {
              "name": {"type": "string"}}, "required": ["name"]}),
+    Tool(name="packs.drift",
+         description=("Il seed INSTALLATO di ogni agente del pack corrisponde ancora "
+                      "a quello che il pack DICHIARA? Elenca, per agente, i campi "
+                      "spariti dalla copia locale, quelli col valore cambiato e quelli "
+                      "presenti solo lì. Sola lettura: non ripristina niente. "
+                      "Se il pack non è nel catalogo bundled e non dichiara un "
+                      "upstream la risposta è `unavailable` — nessun riferimento con "
+                      "cui confrontare, che NON vuol dire «nessuna divergenza»."),
+         inputSchema={"type": "object", "properties": {
+             "name": {"type": "string"}}, "required": ["name"]}),
     Tool(name="packs.install_pip",
          description=("Installa package pip dichiarati da un pack nel venv persistente "
                       "$CLODIA_DATA/runtime/venv. Non è shell libera: accetta solo spec "
@@ -2301,6 +2311,8 @@ def _dispatch_packs(name: str, a: dict):
         return ops.packs_remove(a["name"])
     if sub == "setup_done":
         return ops.packs_setup_done(a["name"])
+    if sub == "drift":
+        return ops.packs_drift(a["name"])
     if sub == "install_pip":
         return pack_runtime.install_pip(a["packages"])
     if sub == "install_npm":
