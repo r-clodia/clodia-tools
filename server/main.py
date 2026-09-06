@@ -270,12 +270,18 @@ _AGENT_TOOLS: list[Tool] = [
              "required": ["agent", "skill"]}),
     Tool(name="agents.grant_tool",
          description=("Concede un permesso tool a un agent editabile. Può essere un "
-                      "tool puntuale (es. `email.send`) o un namespace (`fs.*`)."),
+                      "tool puntuale (es. `email.send`) o un namespace (`fs.*`). "
+                      "L'esito è MISURATO dopo la scrittura: `effective` dice se il "
+                      "verbo è davvero concesso, `ok: false` che non lo è. Vale su "
+                      "questa istanza (`persistence`): la permanenza sta nel seed."),
          inputSchema={"type": "object", "properties": {
              "agent": {"type": "string"}, "tool": {"type": "string"}},
              "required": ["agent", "tool"]}),
     Tool(name="agents.revoke_tool",
-         description="Revoca un permesso tool a un agent editabile.",
+         description=("Revoca un permesso tool a un agent editabile. L'esito è "
+                      "MISURATO: se il verbo resta attivo perché ereditato o coperto "
+                      "da un wildcard, `ok: false` e `detail` indicano da dove viene "
+                      "e come si sottrae (`denied_tools`)."),
          inputSchema={"type": "object", "properties": {
              "agent": {"type": "string"}, "tool": {"type": "string"}},
              "required": ["agent", "tool"]}),
