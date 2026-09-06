@@ -79,6 +79,17 @@ def packs_setup_done(name: str):
     return _req("POST", f"/clodia/packs/{name}/setup-done", {})
 
 
+def packs_drift(name: str):
+    """Divergenze fra i seed installati e quelli dichiarati dal pack (#266).
+
+    Sola LETTURA, benché POST: la rotta non muta niente — il metodo è quello
+    delle sorelle (`check-update`, `setup-done`) perché risolvere il riferimento
+    può costare un download dall'upstream, e non è una cosa da mettere dietro
+    una GET che una cache qualsiasi si sente in diritto di ripetere.
+    """
+    return _req("POST", f"/clodia/packs/{name}/drift", {})
+
+
 
 # ── Providers ───────────────────────────────────────────────────────────────
 
