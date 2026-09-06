@@ -33,7 +33,8 @@ def _get(path: str):
         return r.json()
 
 
-def _post(path: str, payload: dict, *, auth: bool = False):
+def _post(path: str, payload: dict, *, auth: bool = False,
+          timeout: httpx.Timeout | None = None):
     # auth=True: inoltra il session token ckt1 del chiamante corrente, così
     # agent-server verifica l'identità firmata (via _principal_from_request) e
     # non deve fidarsi di un campo auto-dichiarato nel body.
@@ -42,7 +43,7 @@ def _post(path: str, payload: dict, *, auth: bool = False):
         token = whitelist.current_token()
         if token:
             headers["Authorization"] = f"Bearer {token}"
-    with httpx.Client(timeout=_TIMEOUT) as c:
+    with httpx.Client(timeout=timeout or _TIMEOUT) as c:
         r = c.post(f"{AGENT_SERVER_URL}{path}", json=payload, headers=headers)
         r.raise_for_status()
         return r.json()
@@ -177,6 +178,33 @@ def report_run_status(*, chat_id: str, status: str, detail: str | None = None,
     return _post("/clodia/jobs/report-status/internal", {
         "chat_id": chat_id, "status": s, "detail": d, "agent": agent,
     })
+
+
+#: Timeout STRETTO, diverso da `_TIMEOUT`: questa nota parte da un percorso di
+#: errore, e chi lo attraversa sta già aspettando un `DENIED:`. Un agent-server
+#: lento non deve aggiungere quindici secondi a un verbo che è già stato negato.
+_TIMEOUT_REFUSAL = httpx.Timeout(connect=2.0, read=3.0, write=3.0, pool=2.0)
+
+
+def note_run_refusal(*, chat_id: str, verb: str, why: str = "") -> dict:
+    """Il gateway CONSTATA che `verb` è stato negato dentro il turno `chat_id`.
+
+    Metà gateway di clodia-platform#206, e il gemello di `report_run_status`:
+    là l'esito lo **dichiara** l'agente, qui il rifiuto lo constata chi ha
+    negato. Serve perché un agente può chiudere `success` in buona fede un run
+    in cui il lavoro non è avvenuto — l'ha visto negare e ne ha preso atto.
+
+    `why` è una CLASSE (`denied_tools`, `whitelist`, `unattended`, `egress`,
+    `clearance`), non il messaggio: i messaggi contengono nomi di file e
+    indirizzi, e il run record non deve diventare una rubrica.
+
+    `chat_id` viene dal claim firmato della sessione, come per `report_status`.
+    Solleva come qualunque altro proxy: la tolleranza al guasto è del chiamante,
+    che sta su un percorso di errore e la applica una volta sola.
+    """
+    return _post("/clodia/jobs/refusal/internal", {
+        "chat_id": chat_id, "verb": verb, "why": str(why or "").strip(),
+    }, timeout=_TIMEOUT_REFUSAL)
 
 
 def jobs() -> dict:
