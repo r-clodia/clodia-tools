@@ -118,6 +118,57 @@ async def flow_allow(request: Request):
     return JSONResponse(out)
 
 
+async def registration(request: Request):
+    """GET /internal/agents/{name}/registration → la entry REGISTRATA, alla lettera.
+
+    Serve a confrontare la dichiarazione del seed con ciò che il gateway
+    custodisce davvero (clodia-platform#203): la registrazione avveniva solo
+    all'import del pack, quindi da lì in poi questa config è la fotografia di
+    quel giorno — e nessuno la rileggeva. Tre guasti reali sono usciti di lì,
+    tutti silenziosi: quattro giorni di 500 sulla rotta di registrazione, un
+    wildcard `*` sopravvissuto al proprio ritiro, e un confinamento che non è
+    cambiato finché non è stato riscritto a mano su due istanze.
+
+    Perché non basta `/verbs`: quella è una vista da PANNELLO. Espande i
+    wildcard nel catalogo, salta i grant che compaiono anche nei `denied`, e
+    unisce quattro sorgenti. Ricostruire `allowed_tools` da lì darebbe una lista
+    che diverge dall'originale proprio nei casi che interessano a un rilevatore
+    di divergenze — cioè una seconda verità, che è il difetto che il confronto
+    dovrebbe scoprire, non commettere.
+
+    Sola lettura: non registra e non ripara. La decisione su cosa fare di una
+    divergenza sta a chi la legge.
+
+    `registered: false` quando l'agente NON è in config: non è «meno verbi», è
+    zero — `agent_config()` solleva e la lista dei tool torna vuota. Un agente
+    installato e mai registrato si vede nel pannello, entra nei canali, parla, e
+    non può fare niente. Va detto con una chiave, non dedotto da un dizionario
+    vuoto.
+    """
+    _agent, err = _authorize(request)
+    if err:
+        return err
+    name = (request.path_params.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "agent richiesto"}, status_code=400)
+    agents = whitelist.CONFIG.get("agents") or {}
+    spec = agents.get(name)
+    if spec is None:
+        return JSONResponse({"agent": name, "registered": False})
+    # Solo i campi che questa config CUSTODISCE davvero. `carries` e
+    # `gated_in_channel` viaggiano con la registrazione ma non vengono
+    # conservati (`upsert_agent` non ha il primo, `register` scarta il secondo):
+    # restituirli come `[]` farebbe leggere «il gateway li ha azzerati» a chi
+    # confronta, cioè una divergenza permanente e falsa su ogni agente.
+    return JSONResponse({
+        "agent": name, "registered": True,
+        "allowed_tools": list(spec.get("allowed_tools") or []),
+        "gated_tools": list(spec.get("gated_tools") or []),
+        "denied_tools": list(spec.get("denied_tools") or []),
+        "profile_tools": list(spec.get("profile_tools") or []),
+    })
+
+
 async def verbs(request: Request):
     """GET /internal/agents/{name}/verbs → verbi EFFETTIVI con il flag gated.
 
@@ -326,5 +377,6 @@ async def verbs(request: Request):
 routes = [
     Route("/internal/agents/whitelist", register, methods=["POST"]),
     Route("/internal/agents/flow-allow", flow_allow, methods=["POST"]),
+    Route("/internal/agents/{name}/registration", registration, methods=["GET"]),
     Route("/internal/agents/{name}/verbs", verbs, methods=["GET"]),
 ]
