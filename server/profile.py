@@ -71,6 +71,45 @@ def get(caller: str, target: str) -> dict:
     }
 
 
+#: Recapiti che NON sono dati personali liberi: sono campi della scheda agente,
+#: e da lì li leggono il lookup in ingresso (`get_by_telegram`), la notifica di
+#: menzione e l'ultimo gradino di R4. Scritti qui, invece, non li legge nessuno.
+#:
+#: È il difetto misurato in clodia-platform#200: il contatto Telegram dell'owner
+#: stava fra questi campi liberi, il campo della scheda era `None`, e la
+#: piattaforma si comportava esattamente come se il recapito non esistesse. Due
+#: case scrivibili per un fatto solo non sono ridondanza: una delle due divergerà
+#: e sarà quella che qualcuno ha compilato con cura.
+_CONTATTI_FISSI = {"telegram", "telegram_id", "telegram_handle",
+                   "telegram_chat_id", "chat_id"}
+#: Dove va scritto davvero. Un rifiuto che non indica la strada insegna solo che
+#: il sistema dice di no.
+_DOVE = ("scheda dell'agente → Modifica → Telegram "
+         "(PATCH /api/agents/<nome> {\"telegram\": ...})")
+
+
+def _key(k: object) -> str:
+    return str(k or "").strip().lower().replace("-", "_")
+
+
+def _refuse_fixed_contacts(fields: dict) -> None:
+    """Il profilo PII non è una seconda casa per i recapiti.
+
+    Si rifiuta solo la SCRITTURA di un valore: `None` resta ammesso, perché è
+    come si toglie un recapito finito qui per sbaglio — vietare anche quello
+    lascerebbe il valore sbagliato prigioniero del vault per sempre. La lettura
+    non è toccata: nessun dato sparisce di soppiatto sotto chi lo cercava.
+    """
+    colpevoli = sorted(k for k, v in fields.items()
+                       if _key(k) in _CONTATTI_FISSI and v is not None)
+    if colpevoli:
+        raise ValueError(
+            f"{', '.join(colpevoli)}: è un campo della scheda agente, non un "
+            f"dato del profilo. Scritto qui non lo legge nessuno — né il "
+            f"riconoscimento dei messaggi in ingresso né le notifiche di "
+            f"menzione. Scrivilo in: {_DOVE}")
+
+
 def set_fields(caller: str, target: str, fields: dict) -> dict:
     """Crea/aggiorna i campi del profilo di `target`. Solo self o admin."""
     _check_name(target)
@@ -78,6 +117,7 @@ def set_fields(caller: str, target: str, fields: dict) -> dict:
         raise PermissionError(f"'{caller}' non autorizzato a modificare il profilo di '{target}'")
     if not isinstance(fields, dict):
         raise ValueError("fields dev'essere un oggetto")
+    _refuse_fixed_contacts(fields)
     existing = vault.read_internal(_cred(target)) if vault.has_credential(_cred(target)) else {}
     merged = {**existing.get("fields", {}), **fields}
     # rimuove le chiavi esplicitamente svuotate (valore null)
