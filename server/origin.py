@@ -81,6 +81,20 @@ def _agent_may(name: str, verb: str) -> bool:
             or _m._connector_allows(verb, name))
 
 
+def agent_may(name: str, verb: str) -> bool:
+    """Alias PUBBLICO di `_agent_may`, per chi deve MISURARE l'autorità invece di
+    applicarla — `agents.grant_tool` verifica così l'esito della concessione.
+
+    Esiste perché la verifica dev'essere la funzione dell'enforcement, non una
+    copia della sua regola: `agents.grant_tool` rispondeva `ok` su permessi che
+    restavano negati (clodia-platform#304), e una seconda lettura della matrice
+    scritta apposta per il controllo avrebbe potuto dire `sì` esattamente dove
+    quella vera dice `no`. È già successo con tre lettori disallineati
+    (`whitelist.effective_tools`).
+    """
+    return _agent_may(name, verb)
+
+
 def _matrix_allows(verb: str, matrix: list) -> bool:
     """Semantica di ALLOW su una matrice dichiarata.
 

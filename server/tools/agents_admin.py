@@ -200,12 +200,108 @@ def revoke_skill(name: str, skill: str) -> dict:
     return _modify(name, "capabilities", remove=[skill])
 
 
+# ── l'esito si MISURA, non si dichiara ───────────────────────────────────────
+#
+# `grant_tool` rispondeva `{"ok": true}` avendo scritto la datadir, che non è
+# dove si decide: l'autorizzazione si legge da `allowed_tools` nella config del
+# gateway (clodia-platform#304). Un permesso concesso restava negato a ogni
+# chiamata e — direzione peggiore — una revoca non toglieva niente.
+#
+# La correzione ha due metà, e questa è la seconda: la prima fa arrivare la
+# modifica dove si decide (`patch_agent_caps` registra nel gateway), questa
+# verifica che ci sia arrivata. Serve anche quando la prima c'è: un verbo può
+# restare attivo perché lo eredita da un antenato o da un wildcard, e toglierlo
+# dai `tool_permissions` propri non lo toglie affatto.
+#
+# La verifica usa `origin.agent_may`, cioè la funzione dell'ENFORCEMENT. Non una
+# lettura scritta per l'occasione: tre lettori disallineati della stessa matrice
+# sono già costati un verbo concesso da un percorso e negato da un altro.
+def _covering(name: str, tool: str) -> tuple[str | None, str | None]:
+    """La riga che copre `tool` fra i verbi effettivi, e la sua ORIGINE.
+
+    Esatta, poi `ns.*`, poi `*`: un permesso ereditato da un wildcard non compare
+    come voce propria, ed è precisamente il caso in cui una revoca sembra fatta e
+    non toglie niente.
+    """
+    from .. import whitelist as _wl
+    try:
+        prov = _wl.tools_with_provenance(name)
+    except Exception:  # noqa: BLE001
+        return None, None
+    ns = tool.split(".", 1)[0] if "." in tool else ""
+    for riga in (tool, f"{ns}.*" if ns else None, "*"):
+        if riga and riga in prov:
+            return riga, prov[riga]
+    return None, None
+
+
+def _measure(name: str, tool: str, atteso: bool) -> dict:
+    """Stato REALE del verbo dopo la scrittura, con la ragione se non combacia."""
+    from .. import whitelist as _wl
+    from .. import origin as _origin
+    try:
+        _wl.reload_config()          # la registrazione può essere appena arrivata
+        effettivo = bool(_origin.agent_may(name, tool))
+    except Exception as e:  # noqa: BLE001
+        # Non si finge un esito: «non ho potuto misurare» è un caso esplicito, e
+        # va detto con le stesse lettere maiuscole di un rifiuto.
+        return {"ok": False, "effective": None, "verified": False,
+                "detail": f"verifica non riuscita ({type(e).__name__}): l'esito "
+                          f"di questa operazione NON è stato confermato"}
+    riga, origine = _covering(name, tool)
+    out: dict = {"ok": effettivo == atteso, "effective": effettivo,
+                 "verified": True, "granted_by": riga, "inherited_from": origine}
+    if effettivo == atteso:
+        # La durata si dice SEMPRE, anche quando è andata bene: un grant
+        # d'istanza torna indietro al primo Update del pack, e scoprirlo due
+        # update dopo è lo stesso difetto di prima con un ritardo più lungo.
+        out["persistence"] = "instance"
+        out["note"] = ("vale su QUESTA istanza; un Update del pack riscrive il "
+                       "seed e la registrazione: per renderla permanente serve "
+                       "modificare i `tool_permissions` del seed nel pack")
+        return out
+    if not atteso and effettivo:
+        if riga and origine and origine != "own":
+            out["detail"] = (
+                f"'{tool}' è ANCORA attivo per '{name}': non veniva dai suoi "
+                f"`tool_permissions` ma da '{riga}' ereditato da '{origine}'. "
+                f"Toglierlo dalla propria lista non lo toglie: la sottrazione di "
+                f"un verbo ereditato si fa con `denied_tools` nel seed, che batte "
+                f"anche i wildcard.")
+        elif riga and riga != tool:
+            out["detail"] = (
+                f"'{tool}' è ANCORA attivo per '{name}': lo copre il wildcard "
+                f"'{riga}' nella sua lista. Va tolto quello, o sottratto con "
+                f"`denied_tools` nel seed.")
+        else:
+            out["detail"] = (
+                f"'{tool}' è ANCORA attivo per '{name}' dopo la revoca. La "
+                f"scrittura sulla datadir non ha raggiunto la whitelist del "
+                f"gateway, che è dove si decide: la revoca NON è applicata.")
+        return out
+    if atteso and not effettivo:
+        if _wl.agent_denies(tool, name):
+            out["detail"] = (
+                f"'{tool}' resta NEGATO a '{name}': compare nei suoi "
+                f"`denied_tools`, che battono ogni concessione. Il permesso è "
+                f"scritto ma non ha effetto finché quel deny non viene tolto dal "
+                f"seed.")
+        else:
+            out["detail"] = (
+                f"'{tool}' NON è stato concesso a '{name}': la scrittura sulla "
+                f"datadir non ha raggiunto la whitelist del gateway, che è dove "
+                f"si decide. Il permesso è dichiarato e inerte.")
+    return out
+
+
 def grant_tool(name: str, tool: str) -> dict:
-    return _modify(name, "tool_permissions", add=[tool])
+    res = _modify(name, "tool_permissions", add=[tool])
+    return {**res, "tool": tool, **_measure(name, tool, atteso=True)}
 
 
 def revoke_tool(name: str, tool: str) -> dict:
-    return _modify(name, "tool_permissions", remove=[tool])
+    res = _modify(name, "tool_permissions", remove=[tool])
+    return {**res, "tool": tool, **_measure(name, tool, atteso=False)}
 
 
 def grant_rule(name: str, rule: str) -> dict:
