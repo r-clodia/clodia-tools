@@ -384,9 +384,13 @@ async def set_channel(request: Request):
         return JSONResponse({"error": str(e)[:200]}, status_code=400)
 
 
-async def remote(request: Request):
-    """POST /internal/topics/{tier}/{name}/remote {action, ...} → verbi Remote.
-    action: status|enable|disable|add|commit|push|pull."""
+async def drive_folder(request: Request):
+    """POST /internal/topics/{tier}/{name}/drive-folder {action, ...}.
+
+    Decision-record #40: nessun mount da navigare, solo la dichiarazione di
+    perimetro che `gdrive_root.roots_for_call` legge. action: add|remove|
+    set_credential (git — il credential rotation dello scope, indipendente
+    da qualunque cartella Drive)."""
     _, err = _authorize(request)
     if err:
         return err
@@ -398,39 +402,18 @@ async def remote(request: Request):
     svc = _service()
     action = body.get("action")
     try:
-        if action == "status":
-            return JSONResponse(svc.remote_status(tier, name, body.get("mount")))
-        if action == "enable":
-            return JSONResponse(svc.remote_enable(
-                tier, name, body.get("type"), body.get("config"),
-                confirm_hides_local=bool(body.get("confirm_hides_local")),
-                credential=body.get("credential"),
-                mount_name=body.get("mount")))
+        if action == "add":
+            return JSONResponse(svc.drive_folder_add(
+                tier, name, body.get("folder"),
+                mount_name=body.get("mount"), account=body.get("account")))
+        if action == "remove":
+            return JSONResponse(svc.drive_folder_remove(tier, name, body.get("mount")))
         if action == "set_credential":
-            # Cambiare o togliere la credenziale di uno scope senza ricollegare
-            # il remote: serve per la ROTAZIONE, che è il costo ricorrente di
-            # questo disegno. Senza una via per ruotare, una credenziale per
-            # topic si trasforma in N credenziali che nessuno rinnova più.
-            # `kind` distingue le due credenziali di un mount. Il default resta
-            # git: era l'unica quando questa azione è nata, e cambiarlo
-            # silenziosamente rimuoverebbe token git credendo di toccare Drive.
-            if (body.get("kind") or "git") == "drive":
-                return JSONResponse(svc.set_drive_credential(
-                    tier, name, body.get("credential") or None, body.get("mount")))
+            # Rotazione del PAT git dello scope: senza una via per cambiarlo,
+            # una credenziale per topic diventa una credenziale che nessuno
+            # rinnova più. Indipendente da qualunque cartella Drive dichiarata.
             return JSONResponse(svc.set_git_credential(
                 tier, name, body.get("credential"), body.get("mount")))
-        if action == "disable":
-            return JSONResponse(svc.remote_disable(tier, name, body.get("mount")))
-        if action == "add":
-            return JSONResponse(svc.remote_add(tier, name, body.get("path"), body.get("mount")))
-        if action == "unstage":
-            return JSONResponse(svc.remote_unstage(tier, name, body.get("path") or "", body.get("mount")))
-        if action == "commit":
-            return JSONResponse(svc.remote_commit(tier, name, body.get("message", ""), body.get("mount")))
-        if action == "push":
-            return JSONResponse(svc.remote_push(tier, name, body.get("mount")))
-        if action == "pull":
-            return JSONResponse(svc.remote_pull(tier, name, body.get("mount")))
         return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
     except TopicError as e:
         return JSONResponse({"error": str(e)[:200]}, status_code=400)
@@ -761,7 +744,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/deadline", set_deadline, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/participants", participants, methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
-    Route("/internal/topics/{tier}/{name}/remote", remote, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/mcp-clients", mcp_clients,
           methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/logo", topic_logo,
