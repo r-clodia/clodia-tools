@@ -1660,6 +1660,36 @@ class TopicService:
         except Exception as e:  # noqa: BLE001
             LOG.warning("notifica telegram non accodata per %s/%s: %s",
                         tier, name, str(e)[:160])
+        # L'ANNUNCIO APPARTIENE ALL'ATTO DI POSTARE (clodia-platform#219). Qui
+        # passano TUTTI gli scrittori — la webui via `/internal/topics`, il
+        # verbo MCP del gateway (proxy, messaggero, client MCP di una persona),
+        # lo scheduler — mentre l'evento `channel_message` sul bus SSE lo
+        # pubblicava una sola delle due porte, dentro `clodia-logic`: un
+        # messaggio scritto attraverso il gateway veniva persistito e annunciato
+        # a nessuno. Due proxy nella stessa stanza non si sentivano, e la cosa
+        # era invisibile solo per una proprietà del deployment di oggi — un solo
+        # proxy, e l'umano che scrive dalla webui.
+        #
+        # Best-effort e DOPO la scrittura, come la notifica Telegram qui sopra e
+        # per la stessa ragione già scritta lì: un messaggio nel topic non deve
+        # dipendere dalla raggiungibilità di un servizio esterno.
+        #
+        # SHORTCUT: chiamata HTTP SINCRONA sul percorso caldo di ogni post
+        #           (pochi ms sulla rete interna, timeout corto in
+        #           `announce_message`). Regge finché i post sono dell'ordine di
+        #           uno per interazione. Se pesa — un import massivo, un job che
+        #           scrive in ciclo — la forma giusta è la stessa di Telegram,
+        #           una coda con flush, non un thread per post.
+        try:
+            from ..tools import runtime as _rt
+            _rt.announce_message(_normalize_tier(tier), name, msg)
+        except Exception as e:  # noqa: BLE001
+            # `debug`, non `warning`: con l'agent-server giù ogni singolo post
+            # ne scriverebbe una riga, e un avviso che compare sempre smette di
+            # essere letto. La degradazione è comunque visibile — è il canale
+            # che non si aggiorna da sé.
+            LOG.debug("annuncio SSE non recapitato per %s/%s: %s",
+                      tier, name, str(e)[:160])
         return msg
 
     def list_messages(self, tier: str, name: str, limit: int = 200) -> list[dict]:

@@ -40,7 +40,7 @@ def _get(path: str):
 
 
 def _post(path: str, payload: dict, *, auth: bool = False,
-          timeout: httpx.Timeout | None = None):
+          secret: bool = False, timeout: httpx.Timeout | None = None):
     # auth=True: inoltra il session token ckt1 del chiamante corrente, così
     # agent-server verifica l'identità firmata (via _principal_from_request) e
     # non deve fidarsi di un campo auto-dichiarato nel body.
@@ -49,6 +49,15 @@ def _post(path: str, payload: dict, *, auth: bool = False,
         token = whitelist.current_token()
         if token:
             headers["Authorization"] = f"Bearer {token}"
+    # secret=True: secret orchestrator condiviso, come già fanno `logic_api` ed
+    # `egress_api` nella direzione opposta. Serve dove la chiamata NON è per
+    # conto di un chiamante identificato — l'annuncio di un messaggio parte
+    # dallo store, non da un principal — e l'unica cosa da provare è che questo
+    # processo sia il gateway accoppiato all'agent-server.
+    if secret:
+        condiviso = (os.environ.get("CLODIA_ORCHESTRATOR_SECRET") or "").strip()
+        if condiviso:
+            headers["X-Orchestrator-Secret"] = condiviso
     with httpx.Client(timeout=timeout or _TIMEOUT) as c:
         r = c.post(f"{AGENT_SERVER_URL}{path}", json=payload, headers=headers)
         # Qui il corpo vale più che nella #297: queste rotte MUTANO e il loro
@@ -98,6 +107,37 @@ def channel_trigger(tier: str, name: str, text: str, by: str) -> dict:
     lato agent-server."""
     return _post(f"/clodia/channels/{tier}/{name}/trigger/internal",
                  {"text": text, "by": by})
+
+
+# Timeout PIÙ CORTO del default: questa chiamata sta sul percorso caldo di ogni
+# post, e la sua utilità scade in fretta — un annuncio che arriva dopo secondi
+# non è più «il canale si è aggiornato», è rumore. Meglio perderlo che tenere
+# fermo chi sta scrivendo nella stanza.
+_ANNOUNCE_TIMEOUT = httpx.Timeout(connect=1.0, read=2.0, write=2.0, pool=1.0)
+
+
+def announce_message(tier: str, name: str, message: dict) -> dict:
+    """Annuncia sul bus SSE dell'agent-server un messaggio GIÀ persistito.
+
+    Il bus è in-process dentro `clodia-logic` (code `asyncio` in memoria): il
+    gateway non può pubblicare da sé, e la sola strada è questa chiamata. Da qui
+    ogni scrittore che passa da `TopicService.post_message` — proxy, messaggero,
+    client MCP di una persona, scheduler, webui — annuncia per costruzione,
+    invece che perché una delle due porte si è ricordata di farlo
+    (clodia-platform#219).
+
+    Il payload è ESPLICITO e non `message` intero: sul bus finiscono i campi che
+    i consumatori già leggono, e una colonna aggiunta domani allo store non
+    diventa un dato pubblicato per distrazione.
+    """
+    return _post(f"/clodia/channels/{tier}/{name}/announce/internal",
+                 {"id": message.get("id"),
+                  "author": message.get("author"),
+                  "kind": message.get("kind"),
+                  "ts": message.get("ts"),
+                  "text": message.get("text") or "",
+                  "mentions": message.get("mentions") or []},
+                 secret=True, timeout=_ANNOUNCE_TIMEOUT)
 
 
 def set_participant(tier: str, name: str, agent: str, by: str, add: bool) -> dict:

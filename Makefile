@@ -3,6 +3,15 @@
 # l'ha lanciato l'ultima volta (decision record 34).
 PY ?= $(shell test -x .venv/bin/python && echo .venv/bin/python || echo python3)
 
+# NESSUN agent-server vero durante i test: porta 9 (discard). Da quando l'annuncio
+# di un messaggio appartiene all'atto di postare (clodia-platform#219),
+# `TopicService.post_message` chiama l'agent-server a ogni post — e i test lo
+# chiamano centinaia di volte. Il default nel codice è un host della colonia:
+# su un runner non risolve, ma su una macchina della colonia SÌ, e la suite
+# dipingerebbe bolle nei topic veri. È la stessa garanzia scritta che il
+# workflow dà già a `CLODIA_TOOLS_MCP_URL`, spostata dove vale anche in locale.
+export AGENT_SERVER_URL ?= http://127.0.0.1:9
+
 .PHONY: test test-verbose test-one help
 
 help:
