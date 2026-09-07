@@ -237,83 +237,39 @@ def _coerce_deadline(value, ctx: str = "") -> str | None:
 #: Nome del mount quando il metadata legacy non ne ha uno. Il tipo va bene finché
 #: i mount sono uno: con due mount dello stesso tipo servirebbe distinguerli, ed è
 #: per questo che il nome nuovo si sceglie al collegamento invece di derivarlo.
-def _legacy_mount_name(rem: dict) -> str:
-    return str(rem.get("type") or "remote").strip().lower() or "remote"
+def drive_folders(meta: dict) -> list:
+    """Le cartelle Drive dichiarate per questo topic (decision-record #40).
 
-
-def mounts(meta: dict) -> list:
-    """I mount di uno scope, SEMPRE come lista (specification §2.6).
-
-    Uno scope può avere più mount remoti, ognuno di un tipo e con la propria
-    credenziale. Il metadata legacy ne aveva uno solo, sotto `remote`: qui viene
-    letto e convertito, come si fa per `participants` da lista a mappa — una
-    forma sola in memoria, il legacy tradotto al confine.
-
-    Un accessore solo, e questa è la ragione: `meta["remote"]` era letto in
-    **dodici** punti. Convertirne undici avrebbe lasciato il dodicesimo a vedere
-    una forma che non esiste più, e a fallire per un motivo che non somiglia alla
-    causa.
+    NON un mount da navigare: nessun codice le apre come filesystem. Sono
+    l'informazione — nome↔folder-id — che restringe il perimetro Drive di
+    questo canale (`gdrive_root.roots_for_call`) e che un agente legge per
+    sapere quale cartella raggiungere coi verbi `gdrive.*`. La cartella deve
+    già essere approvata (whitelist egress/ingress, entry 32) prima di poter
+    essere dichiarata qui — vedi `drive_folder_add`.
     """
-    raw = meta.get("mounts")
-    if isinstance(raw, list):
-        return [m for m in raw if isinstance(m, dict) and m.get("type")]
-    rem = meta.get("remote")
-    if isinstance(rem, dict) and rem.get("type"):
-        return [dict(rem, name=str(rem.get("name") or _legacy_mount_name(rem)))]
-    return []
+    raw = meta.get("drive_folders")
+    return [f for f in raw if isinstance(f, dict) and f.get("folder")] if isinstance(raw, list) else []
 
 
-def _mount_id(voluto: str, meta: dict) -> str:
-    """Identificatore del mount: validato, unico nel topic, stabile.
+def telegram_binds(meta: dict) -> list:
+    """I gruppi Telegram collegati a questo topic. Campo proprio, non più
+    condiviso con drive/git (decision-record #40): non è mai stato un
+    filesystem da navigare, solo metadata per il relay dei messaggi."""
+    raw = meta.get("telegram_binds")
+    return [b for b in raw if isinstance(b, dict)] if isinstance(raw, list) else []
 
-    Il default è il TIPO finché è libero — così `/remote/drive/` resta il caso
-    comune — e diventa `drive-2` solo quando serve davvero. Un identificatore
-    generato di nascosto sarebbe illeggibile; uno che collide silenziosamente
-    sovrascriverebbe un mount che qualcuno ha collegato.
-    """
+
+def _unique_name(voluto: str, presi: set) -> str:
+    """Identificatore validato, unico nell'insieme dato, stabile: il tipo
+    finché è libero, `-2`/`-3`… solo quando serve davvero."""
     import re as _re
-    base = _re.sub(r"[^a-z0-9-]+", "-", str(voluto or "remote").strip().lower()).strip("-")
-    base = base or "remote"
-    presi = {str(m.get("name") or "") for m in mounts(meta)}
+    base = _re.sub(r"[^a-z0-9-]+", "-", str(voluto or "x").strip().lower()).strip("-") or "x"
     if base not in presi:
         return base
     i = 2
     while f"{base}-{i}" in presi:
         i += 1
     return f"{base}-{i}"
-
-
-def _mount_of_cfg(meta: dict, cfg: dict) -> str | None:
-    """Il nome del mount che porta QUESTA config.
-
-    I chiamanti storici passano la config, non il mount: la config l'hanno
-    risolta prima. Risalire qui evita di cambiare dieci firme per un dato che
-    nel meta c'è già — e evita che nove le cambino e la decima no.
-    """
-    voluta = (cfg or {}).get("folder")
-    for m in mounts(meta):
-        if (m.get("config") or {}).get("folder") == voluta:
-            return m.get("name")
-    return None
-
-
-def mount_by_name(meta: dict, name: str | None = None) -> dict:
-    """Il mount indicato, o il PRIMO se non se ne indica uno.
-
-    Il ripiego sul primo tiene in piedi i verbi che parlano di «il remote» da
-    quando ce n'era uno solo. Non è una scelta definitiva: un verbo che agisce
-    sul primo mount di tre agisce su uno che chi chiama non ha nominato, e questa
-    è la metà del lavoro che resta.
-    """
-    ms = mounts(meta)
-    if not ms:
-        return {}
-    if not name:
-        return ms[0]
-    for m in ms:
-        if str(m.get("name") or "") == str(name):
-            return m
-    return {}
 
 
 def normalize_meta_v2(meta: dict, tier: str) -> dict:
@@ -332,334 +288,31 @@ def normalize_meta_v2(meta: dict, tier: str) -> dict:
     return out
 
 
-def _remote_unreachable(exc: Exception, tier: str, name: str) -> "TopicError":
-    """Traduce il fallimento di un backend remoto in un errore AZIONABILE.
-
-    Senza questo il chiamante riceve l'eccezione grezza della libreria del
-    provider (`RefreshError: invalid_grant…`), che diventa un 500 opaco e, in UI,
-    un fallimento silenzioso: l'utente vede una cartella vuota e non sa che il
-    collegamento è scaduto. Il prefisso `remote-unavailable:` è il marcatore su
-    cui i chiamanti (agent-server, webui) distinguono "non ci sono file" da
-    "non è stato possibile leggerli".
-    """
-    txt = str(exc)
-    if "invalid_grant" in txt or "expired or revoked" in txt:
-        why = ("il collegamento Google di questo topic è scaduto o è stato "
-               "revocato: riautorizza l'integrazione Google per riprendere "
-               "l'accesso ai file")
-    else:
-        why = f"storage remoto non raggiungibile ({txt[:120]})"
-    LOG.warning("topic %s/%s: %s", tier, name, why)
-    return TopicError(f"remote-unavailable: {why}")
-
-
 class TopicService:
     def __init__(self, storage: Storage):
-        self.s = storage          # control-plane local (meta, summary, .messages)
-        # Cache dei backend Drive PER THREAD, non condivisa. Il service di
-        # google-api-python-client NON è thread-safe: l'oggetto http sottostante
-        # tiene lo stato della connessione TLS, e due chiamate concorrenti lo
-        # corrompono. Sintomo osservato in produzione il 4 ago 2026, con tre topic
-        # Drive e il polling della vista file: `[SSL] record layer failure`
-        # seguito da `free(): invalid next size (normal)` — corruzione dello heap
-        # glibc, il processo aborta con exit 0 e nessun traceback, docker lo
-        # riavvia, e l'utente vede 503 intermittenti.
-        #
-        # Non un lock: serializzerebbe ogni accesso a Drive fra tutti i topic, e
-        # il gateway serve i topic in thread proprio per non bloccare l'event loop.
-        # Un service per thread costa una costruzione in più e nulla di condiviso.
-        self._drive_local = threading.local()
-
-    # ── routing storage dei FILE (control-plane resta su self.s) ─────────────
-    def _drive_service(self, account: str | None, bundle: dict | None = None):
-        """Client Drive. Con `bundle` usa QUELLA credenziale, altrimenti l'account
-        di piattaforma.
-
-        Il bundle è la credenziale che l'owner ha fornito al mount (§2.7): la
-        piattaforma non presta più la propria dove l'owner ne ha messa una. Il
-        segreto non raggiunge il modello in nessuno dei due casi — è il gateway
-        a costruire il client.
-        """
-        from .. import vault
-        from google.oauth2.credentials import Credentials
-        from google.auth.transport.requests import Request as GReq
-        from googleapiclient.discovery import build
-        if bundle:
-            return self._drive_build(bundle)
-        names = vault.store_names()
-        accts = sorted(
-            {n[len("google_"):] for n in names if n.startswith("google_")}
-            | {n[len("gworkspace_"):] for n in names
-               if n.startswith("gworkspace_")}
-        )
-        acct = account or (accts[0] if accts else None)
-        if not acct:
-            raise TopicError("storage drive: nessun account Google Workspace nel vault")
-        credential = (f"google_{acct}" if f"google_{acct}" in names
-                      else f"gworkspace_{acct}")
-        return self._drive_build(vault.get_secret("clodia", credential))
-
-    @staticmethod
-    def _drive_build(b: dict):
-        """Da bundle OAuth a client Drive. Un punto solo: due costruzioni
-        divergono, e la seconda è quella che si dimentica il timeout."""
-        # Il controllo PRIMA degli import: una credenziale incompleta è un dato
-        # sbagliato, non un problema di libreria, e deve dirlo anche dove le
-        # librerie Google non ci sono.
-        mancanti = [k for k in ("refresh_token", "client_id", "client_secret")
-                    if not (b or {}).get(k)]
-        if mancanti:
-            raise TopicError(
-                f"credenziale Drive incompleta: mancano {', '.join(mancanti)}")
-        from google.auth.transport.requests import Request as GReq
-        from google.oauth2.credentials import Credentials
-        from googleapiclient.discovery import build
-        creds = Credentials(token=None, refresh_token=b["refresh_token"],
-                            client_id=b["client_id"], client_secret=b["client_secret"],
-                            token_uri="https://oauth2.googleapis.com/token",
-                            scopes=(b.get("scope") or "").split())
-        creds.refresh(GReq())
-        # Timeout sull'HTTP di Drive: una chiamata stallata FALLISCE dopo N secondi
-        # invece di bloccare per sempre l'event loop del gateway (freeze totale).
-        import httplib2
-        from google_auth_httplib2 import AuthorizedHttp
-        authed = AuthorizedHttp(creds, http=httplib2.Http(timeout=30))
-        return build("drive", "v3", http=authed, cache_discovery=False)
-
-    def _provision_drive_folder(self, sc: dict, topic_name: str) -> dict:
-        """Risolve la config storage drive alla creazione: usa la cartella indicata
-        (link o id) oppure ne crea una nuova. Ritorna {folder, account}."""
-        account = sc.get("account")
-        raw = (sc.get("folder") or "").strip()
-        if raw:
-            # estrai l'id da un link Drive (…/folders/<ID>…) o usa l'id diretto.
-            m = re.search(r"/folders/([A-Za-z0-9_-]+)", raw)
-            folder = m.group(1) if m else raw
-        else:
-            # crea una cartella nuova dedicata al topic
-            svc = self._drive_service(account)
-            created = svc.files().create(
-                body={"name": sc.get("folder_name") or topic_name,
-                      "mimeType": "application/vnd.google-apps.folder"},
-                fields="id", supportsAllDrives=True).execute()
-            folder = created["id"]
-        return {"folder": folder, "account": account}
-
-    def _drive_backend_for(self, tier: str, name: str, cfg: dict,
-                           mount: str | None = None):
-        """DriveStorage live per la cartella autoritativa del topic.
-
-        La chiave di cache porta la PROVENIENZA della credenziale. Senza, il
-        primo client costruito per questa cartella resterebbe in cache anche
-        dopo che l'owner ha collegato la propria: lo scope continuerebbe a
-        lavorare con l'account di piattaforma credendo di non farlo — un
-        privilegio che sopravvive alla sua revoca è peggio che non averlo mai
-        tolto, perché la schermata dice il contrario.
-        """
-        folder = (cfg or {}).get("folder")
-        if not folder:
-            return None
-        from .drive_fs import DriveStorage
-        bundle, fonte = self.drive_credential(tier, name, mount)
-        key = f"{tier}/{name}:{folder}:{fonte}:{mount or '-'}"
-        cache = self._drive_thread_cache()
-        ds = cache.get(key)
-        if ds is None:
-            ds = DriveStorage(
-                self._drive_service((cfg or {}).get("account"), bundle=bundle), folder)
-            cache[key] = ds
-        return ds
-
-    def _drive_thread_cache(self) -> dict:
-        """Cache dei backend Drive del thread corrente (vedi `__init__`)."""
-        cache = getattr(self._drive_local, "cache", None)
-        if cache is None:
-            cache = {}
-            self._drive_local.cache = cache
-        return cache
-
-    def _drive_cache_clear(self) -> None:
-        """Svuota la cache del thread corrente.
-
-        Solo del corrente: i backend degli altri thread sono oggetti loro e
-        toccarli da qui sarebbe la stessa condivisione che questo cambio elimina.
-        Un backend stantio in un altro thread costa una chiamata a vuoto e viene
-        ricostruito; toccarlo costerebbe un crash.
-        """
-        self._drive_thread_cache().clear()
-
-    # Drive remote = source of truth: quando un topic è collegato a una cartella
-    # Drive NON si fa alcun upload dei file locali (niente "migrazione"): Drive è
-    # già la verità e si naviga direttamente il remoto. Nessun marker "live".
-    # I Google Docs nativi (Documenti/Fogli/Presentazioni) NON sono scaricabili
-    # come binari: si mostrano come proxy/link e si leggono/editano su Drive.
-    _NATIVE_DOC_PREFIX = "application/vnd.google-apps."
-
-    def _drive_pull_tree(self, ds, rel: str, local_base: str) -> None:
-        """Materializza Drive in locale quando il remote viene disabilitato."""
-        for e in ds.list(rel):
-            child = f"{rel}/{e.name}".strip("/")
-            if e.kind == "dir":
-                self._drive_pull_tree(ds, child, local_base)
-            elif e.mime and e.mime.startswith(self._NATIVE_DOC_PREFIX):
-                # Doc nativo → stub proxy locale col link al documento remoto.
-                stub = {"gdrive_url": e.url or "", "mimeType": e.mime, "name": e.name}
-                self.s.write(f"{local_base}/{child}.gdrive.json".strip("/"),
-                             json.dumps(stub, ensure_ascii=False).encode())
-            else:
-                dest = f"{local_base}/{child}".strip("/")
-                if self.s.exists(dest):
-                    continue  # resume: già in locale → salta (seed ripartibile)
-                try:
-                    self.s.write(dest, ds.read(child).data)
-                except Exception as ex:  # noqa: BLE001 — non scaricabile → salta, non bloccare
-                    LOG.warning("drive-seed: salto '%s' (%s)", child, ex)
-
-    @staticmethod
-    def _drive_remote_config(meta: dict, mount_name: str | None = None) -> dict | None:
-        remote = mount_by_name(meta, mount_name)
-        if remote.get("type") == "drive":
-            return remote.get("config") or {}
-        return None
-
-    def sync_now(self, tier: str, name: str) -> dict:
-        return {
-            "synced": 0,
-            "noop": True,
-            "deprecated": True,
-            "note": "Drive è live: ogni scrittura è già persistita",
-        }
+        self.s = storage          # control-plane e file: tutto locale (decision-record #40)
 
     def _files_backend(self, tier: str, name: str):
-        """Storage dei file: Drive live per remote drive, locale negli altri casi."""
-        try:
-            meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
-        except Exception:  # noqa: BLE001 — topic legacy/assente → local
-            meta = {}
-        if meta.get("storage") == "google-drive" and not mounts(meta):
-            self._migrate_legacy_drive(tier, name)
-            meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
-        cfg = self._drive_remote_config(meta)
-        if cfg is not None:
-            # Drive è la fonte: si naviga direttamente il remoto, i file locali
-            # non sono consultati né caricati.
-            ds = self._drive_backend_for(tier, name, cfg, _mount_of_cfg(meta, cfg))
-            if ds is None:
-                raise TopicError("remote drive: nessuna cartella configurata")
-            return ds, ""
+        """Storage dei file: sempre locale (decision-record #40)."""
         return self.s, f"{self._dir(tier, name)}/files"
 
-    # ── L'albero dei dati: UNA vista, due mount ─────────────────────────────
+    # ── L'albero dei dati: solo locale ───────────────────────────────────────
     #
-    # `local/` e `remote/<nome>/` sono due CARTELLE dello stesso albero, ognuna
-    # delle quali monta un filesystem. Non due viste affiancate: una sola, in cui
-    # nessuno deve scegliere quale aprire.
-    #
-    # Il montaggio non è decorazione, fissa cosa significa un path. `local/x` e
-    # `remote/drive/x` sono file DIVERSI che possono avere lo stesso nome — ed è
-    # per questo che la domanda «quale dei due risponde a una lettura?» non si
-    # pone: non è esprimibile. Con due viste affiancate lo stesso `x` comparirebbe
-    # in entrambe senza modo di dire quale intendesse un agente.
-    #
-    # Prima di questo, i due piani erano in XOR: collegare Drive faceva SPARIRE i
-    # file locali dalla vista (`DRIVE_REMOTE.md`: «Drive è la source of truth […]
-    # i file locali spariscono»). Su `proof-of-flex-2` significava 26 file
-    # mostrati e 65 invisibili su disco.
+    # Prima di decision-record #40 esisteva anche `remote/<nome>/`, un secondo
+    # mount per una cartella Drive collegata: proxy live, mai sincronizzato,
+    # e la causa misurata della lentezza (`_open`, 22 ago 2026: 4-7s per topic
+    # su 98, 502 intermittenti). Drive non è più un filesystem del topic — si
+    # raggiunge coi verbi `gdrive.*` nello scratch di un agente. `local/`
+    # resta, esplicito, perché path già scritti nei messaggi lo usano.
     MOUNT_LOCAL = "local"
-    MOUNT_REMOTE = "remote"
-    _MOUNTS = (MOUNT_LOCAL, MOUNT_REMOTE)
-    #: Nomi che un mount non può prendere: sono già cartelle di primo livello,
-    #: o lo sono state. `remote` resta riservato perché è l'alias dello schema
-    #: precedente e deve continuare a significare quello.
-    RESERVED_MOUNTS = frozenset({MOUNT_LOCAL, MOUNT_REMOTE, "files"})
+    _MOUNTS = (MOUNT_LOCAL,)
 
     def _is_data_path(self, meta: dict, relpath: str) -> bool:
-        """Il path appartiene all'albero DATI (un mount), non al control-plane?
-
-        Esiste perché questa decisione era scritta a mano in tre punti, e i tre
-        punti sono divergiti: `list_files` includeva i mount montati al primo
-        livello col proprio nome (`drive/x`), `read_file` e `delete_file` no —
-        controllavano solo `_MOUNTS`, che contiene i due mount STATICI (`local`,
-        `remote`) e non i mount dichiarati nel meta.
-
-        La conseguenza, vista sul topic hedge-iot-new il 3 set 2026: la cartella
-        si NAVIGA (`topic.files` elenca `drive/40-budget/…`) ma i file non si
-        LEGGONO — `read_file` cadeva nel ramo control-plane e cercava i byte nel
-        filesystem locale del topic, dove per un mount `live` non ci sono. Da cui
-        un `NotFound` su ogni file di un mount, indistinguibile da un file
-        assente, mentre `put_file` — che il nome del mount lo gestiva — ci
-        scriveva senza problemi. Leggibile no, scrivibile sì.
-
-        Un path NUDO (`documento.pdf`, senza prefisso) resta control-plane, come
-        prima: `read_file` lo usa per `summary.md` e `meta.json`, e spostarlo
-        sull'albero dati cambierebbe in silenzio il bersaglio di riferimenti già
-        scritti nei messaggi e nella memoria degli agenti.
-        """
+        """Il path appartiene all'albero DATI (`local/…` o legacy), non al
+        control-plane? Un path NUDO (`documento.pdf`, senza prefisso) resta
+        control-plane: `read_file` lo usa per `summary.md`/`meta.json`."""
         first = (relpath or "").lstrip("/").split("/", 1)[0]
-        return bool(first) and (first in self._MOUNTS
-                                or first in self._mount_names(meta)
-                                or self._files_rel(relpath)[0])
-
-    def _mount_names(self, meta: dict) -> dict:
-        """`{nome: mount}` dei mount che si montano al PRIMO livello.
-
-        Dal 12 ago 2026 una cartella montata col nome `comms` si indirizza
-        `comms/x`, non `remote/drive/x`. Il livello `remote/` raggruppava per
-        *come* la piattaforma raggiunge una cosa — l'unica proprietà a cui non
-        pensa chi scrive un path — e sotto ha sempre avuto un figlio solo.
-
-        Il nome è quello del MOUNT (`meta["mounts"][i]["name"]`), che è un
-        identificatore scelto al montaggio, non `config.name`, che è il titolo
-        della cartella Drive: può essere assente, contenere spazi, e cambia se
-        qualcuno la rinomina portandosi dietro ogni path memorizzato.
-
-        Si montano solo i remote che sono davvero un altro filesystem (Drive);
-        per la ragione vedi `_remote_mount_name`.
-        """
-        fuori: dict = {}
-        for m in mounts(meta):
-            if str(m.get("type") or "").strip().lower() != "drive":
-                continue
-            n = str(m.get("name") or "").strip().lower()
-            if not re.match(r"^[a-z0-9][a-z0-9-]{0,30}$", n):
-                continue
-            if n in self.RESERVED_MOUNTS:
-                # Non si rifiuta qui — leggere non è il momento di scoprirlo — ma
-                # non si monta: il montaggio lo rifiuta, e questo è il ripiego se
-                # un meta scritto prima di quel controllo arriva fin qui.
-                continue
-            fuori[n] = m
-        return fuori
-
-    def _remote_mount_name(self, meta: dict) -> Optional[str]:
-        """Nome del mount di un remote. Identificatore stabile, default sul tipo.
-
-        Il `config.name` NON va usato: è un nome di VISUALIZZAZIONE derivato dal
-        remote stesso (il titolo della cartella Drive), quindi può essere `None`,
-        può contenere spazi e slash, e cambia se qualcuno rinomina la cartella —
-        portandosi dietro ogni path memorizzato che lo citava.
-        """
-        r = mount_by_name(meta)
-        if not r:
-            return None
-        # SOLO i remote che sono davvero un altro FILESYSTEM si montano.
-        #
-        # Un remote **git** non lo è: i file stanno in locale e vengono spinti,
-        # quindi il remoto è lo stesso contenuto in un altro momento — una
-        # relazione di sincronizzazione, non un secondo piano. Montarlo produceva
-        # una cartella `remote/` annunciata nella radice e non risolvibile:
-        # entrandoci, «remote non raggiungibile» → 404 (7 ago 2026, su
-        # `proof-of-flex-sviluppo`).
-        #
-        # È la precisazione che mancava alla voce 17.6: i due piani convivono su
-        # Drive, dove il remoto è davvero un filesystem diverso. Su git i due
-        # piani sono gli stessi file, ed è per questo che lì la convivenza era già
-        # vera prima di A2.
-        if str(r.get("type") or "").strip().lower() != "drive":
-            return None
-        cfg = r.get("config") or {}
-        mid = str(cfg.get("id") or r.get("type") or "").strip().lower()
-        return mid if re.match(r"^[a-z0-9][a-z0-9-]{0,30}$", mid) else None
+        return bool(first) and (first in self._MOUNTS or self._files_rel(relpath)[0])
 
     def _local_mount(self, tier: str, name: str):
         """Il mount locale È la cartella `files/` di oggi. Nessun file spostato:
@@ -667,164 +320,37 @@ class TopicService:
         le chiavi di provenienza già memorizzate continuano a valere."""
         return self.s, f"{self._dir(tier, name)}/files"
 
-    def _remote_mount(self, tier: str, name: str, meta: dict):
-        """`(store, base)` del remote, o `None` se il topic non ne ha."""
-        cfg = self._drive_remote_config(meta)
-        if cfg is None:
-            return None
-        ds = self._drive_backend_for(tier, name, cfg, _mount_of_cfg(meta, cfg))
-        if ds is None:
-            raise TopicError("remote drive: nessuna cartella configurata")
-        return ds, ""
-
     def _resolve_data_path(self, tier: str, name: str, relpath: str):
         """`(store, base, sub, mount)` per un path dell'albero dati.
 
-        Tre forme, e la terza è la ragione per cui questa funzione esiste:
+        Due forme, entrambe locali (decision-record #40):
 
-        - `local/x`          → mount locale, esplicito;
-        - `remote/<n>/x`     → mount del remote `<n>`, esplicito;
-        - `files/x` o `x`    → **LEGACY**, e risolve al backend EFFETTIVO, cioè a
-          ciò a cui risolveva prima di questa modifica: Drive su un topic con
-          remote Drive, locale altrimenti.
-
-        La terza forma non è pigrizia. Mapparla su `local/` avrebbe cambiato in
-        silenzio il bersaglio di ogni riferimento già scritto — nei messaggi, nelle
-        etichette di provenienza, nella memoria degli agenti — facendo puntare a
-        file locali invisibili path che oggi consegnano documenti di Drive. Un
-        cambiamento di significato senza errore è il modo peggiore di migrare.
+        - `local/x`       → mount locale, esplicito;
+        - `files/x` o `x` → LEGACY, stesso backend, comportamento invariato.
         """
         rel = (relpath or "").strip().lstrip("/")
         if ".." in rel.split("/") or "\\" in rel:
             raise TopicError(f"path non valido: {relpath}")
-        meta, _ = self._read_meta(tier, name)
         parts = [x for x in rel.split("/") if x]
 
         if parts and parts[0] == self.MOUNT_LOCAL:
             store, base = self._local_mount(tier, name)
             return store, base, "/".join(parts[1:]), self.MOUNT_LOCAL
 
-        # Un mount montato al PRIMO livello, col proprio nome: `comms/x`.
-        if parts and parts[0] in self._mount_names(meta):
-            rm = self._remote_mount(tier, name, meta)
-            if rm is None:
-                raise TopicError("remote non raggiungibile")
-            store, base = rm
-            return store, base, "/".join(parts[1:]), parts[0]
-
-        # ALIAS `remote/<n>/…` — lo schema fino al 12 ago 2026. Si accetta e non
-        # si emette: i path già scritti nei messaggi, nei summary e nella memoria
-        # degli agenti devono continuare a risolvere. Il figlio si accetta sia col
-        # nome del mount sia col vecchio identificatore derivato dal tipo.
-        if parts and parts[0] == self.MOUNT_REMOTE:
-            nomi = self._mount_names(meta)
-            rn = self._remote_mount_name(meta)
-            if not nomi and rn is None:
-                raise TopicError(
-                    f"il topic {tier}/{name} non ha un remote: `remote/` non è montato")
-            primo = next(iter(nomi), rn)
-            if len(parts) == 1:
-                raise TopicError(
-                    f"`remote/` è un contenitore di mount: usa `{primo}/…`")
-            if parts[1] not in nomi and parts[1] != rn:
-                disponibili = ", ".join(sorted(nomi)) or str(rn)
-                raise TopicError(
-                    f"remote '{parts[1]}' non montato su {tier}/{name} "
-                    f"(disponibile: {disponibili})")
-            rm = self._remote_mount(tier, name, meta)
-            if rm is None:
-                raise TopicError("remote non raggiungibile")
-            store, base = rm
-            # Il mount RITORNATO è la forma nuova, anche quando l'ingresso era
-            # l'alias: chi riceve il path lo riceve nella forma che vogliamo
-            # veder circolare.
-            etichetta = parts[1] if parts[1] in nomi else primo
-            return store, base, "/".join(parts[2:]), etichetta
-
-        # LEGACY: `files/x` o `x` → backend effettivo, comportamento invariato.
+        # LEGACY: `files/x` o `x` → backend locale, comportamento invariato.
         _, sub = self._files_rel(rel)
         store, base = self._files_backend(tier, name)
-        mount = self.MOUNT_LOCAL
-        if store is not self.s:
-            nomi = self._mount_names(meta)
-            mount = next(iter(nomi), f"{self.MOUNT_REMOTE}/{self._remote_mount_name(meta)}")
-        return store, base, sub, mount
+        return store, base, sub, self.MOUNT_LOCAL
 
     def data_mounts(self, tier: str, name: str) -> list[dict]:
-        """I mount dell'albero dati, per la vista file."""
-        meta, _ = self._read_meta(tier, name)
-        out = [{"name": self.MOUNT_LOCAL, "path": self.MOUNT_LOCAL, "kind": "dir",
+        """I mount dell'albero dati, per la vista file. Solo locale dopo
+        decision-record #40."""
+        return [{"name": self.MOUNT_LOCAL, "path": self.MOUNT_LOCAL, "kind": "dir",
                 "mount": "local"}]
-        # Un mount, una cartella di primo livello col suo nome. Prima erano
-        # tutti dentro `remote/`, che è un livello che non discrimina niente:
-        # sotto c'è sempre stato un figlio solo, e il suo nome era già
-        # l'identificatore.
-        for n, m in self._mount_names(meta).items():
-            out.append({"name": n, "path": n, "kind": "dir",
-                        "mount": n, "remote_name": n,
-                        "type": str(m.get("type") or "")})
-        return out
 
     # storage drive: livello SEAL massimo (cap). eu-west-1 → SEAL-2.
+    #: Livello SEAL massimo per una cartella Drive dichiarata (`_require_approved_folder`).
     _DRIVE_SEAL_CAP = 2
-
-    def _copy_tree(self, src, src_base: str, dst, dst_base: str, rel: str = "") -> tuple[int, list]:
-        """Copia ricorsiva di files/ da src a dst. Non sovrascrive: se il file
-        esiste già nel dst → conflitto (skippato). Ritorna (copiati, conflitti)."""
-        copied, conflicts = 0, []
-        sp = f"{src_base}/{rel}".strip("/")
-        for e in src.list(sp):
-            if e.name.startswith("."):
-                continue
-            child = f"{rel}/{e.name}".strip("/")
-            if e.kind == "dir":
-                c, cf = self._copy_tree(src, src_base, dst, dst_base, child)
-                copied += c; conflicts += cf
-            else:
-                dpath = f"{dst_base}/{child}".strip("/")
-                if dst.exists(dpath):
-                    conflicts.append(child)
-                    continue
-                dst.write(dpath, src.read(f"{src_base}/{child}".strip("/")).data)
-                copied += 1
-        return copied, conflicts
-
-    def migrate_storage(self, tier: str, name: str, target: dict) -> dict:
-        """Migra i FILE del topic da uno storage all'altro (local↔drive). Copia
-        non distruttiva: il vecchio contenuto va nel cestino (recuperabile). Guard
-        SEAL: vietato migrare su uno storage con livello inferiore al tier."""
-        mp = self._meta_p(tier, name)
-        if not self.s.exists(mp):
-            raise TopicError(f"topic non trovato: {tier}/{name}")
-        meta = json.loads(self.s.read(mp).data.decode())
-        cur_storage = ("google-drive" if self._drive_remote_config(meta) is not None
-                       else (meta.get("storage") or self.s.capability().name))
-        tgt_type = (target or {}).get("type")
-        tgt_storage = "google-drive" if tgt_type == "drive" else "local-fs"
-        if tgt_storage == cur_storage:
-            return {"migrated": 0, "note": f"già su {cur_storage}"}
-        # guard SEAL anti-declassamento
-        try:
-            tier_n = int(_normalize_tier(tier).replace("SEAL-", ""))
-        except ValueError:
-            tier_n = 0
-        if tgt_type == "drive" and tier_n > self._DRIVE_SEAL_CAP:
-            raise TopicError(
-                f"storage drive ha cap SEAL-{self._DRIVE_SEAL_CAP}: un topic {tier} "
-                f"non può migrare su Drive (anti-declassamento)")
-        if tgt_type == "drive":
-            self.remote_enable(tier, name, "drive", target)
-            return {"migrated": 0, "conflicts": [],
-                    "from": cur_storage, "to": "google-drive",
-                    "backup": "(cartella Drive autoritativa)"}
-        if self._drive_remote_config(meta) is not None:
-            self.remote_disable(tier, name)
-        else:
-            meta["storage"] = "local-fs"
-            meta.pop("storage_config", None)
-            self.s.write(mp, json.dumps(meta, ensure_ascii=False, indent=2).encode())
-        return {"migrated": 0, "conflicts": [], "from": cur_storage,
-                "to": "local-fs", "backup": "(cartella Drive di origine conservata)"}
 
     @staticmethod
     def _files_rel(relpath: str) -> tuple[bool, str]:
@@ -1038,21 +564,18 @@ class TopicService:
             self.s.write(self._summary_p(tier, name),
                          f"{meta.get('title', name)}\n\n## Prossimi passi\n".encode())
         self._inherit_config_agents_md(tier, name)
-        if want_drive:
-            # Remote Drive dalla nascita: risolve/crea la cartella e abilita la
-            # vista live. Best-effort: un problema Drive non
-            # deve impedire la creazione del topic (resta local pulito).
+        if want_drive and sc.get("folder"):
+            # Cartella Drive dichiarata dalla nascita (decision-record #40): solo
+            # la restrizione di perimetro per `gdrive.*`, non un mount da
+            # navigare. Best-effort: un problema di whitelist non deve impedire
+            # la creazione del topic (resta local pulito).
             try:
-                # Si rilegge il meta invece di restituire l'esito dell'enable:
-                # `create` promette il meta del topic, e l'esito di un mount è
-                # un'altra cosa. Finché la forma era `{"ok":…,"remote":…}` la
-                # differenza passava inosservata; con più mount smetterebbe.
-                self.remote_enable(tier, name, "drive", dict(sc))
+                self.drive_folder_add(tier, name, sc["folder"], account=sc.get("account"))
                 meta, _ = self._read_meta(tier, name)
             except Exception as e:  # noqa: BLE001
                 import logging
                 logging.getLogger("clodia-tools.topics").warning(
-                    "remote drive alla creazione di %s/%s fallito (topic resta "
+                    "cartella Drive alla creazione di %s/%s fallita (topic resta "
                     "local): %s", tier, name, e)
         return meta
 
@@ -1138,12 +661,12 @@ class TopicService:
         self._require_bot_in_group(cid)
 
         meta, ver = self._read_meta(tier, name)
-        mount_id = _mount_id(mount_name or self.TELEGRAM_MOUNT, meta)
-        voce = {"name": mount_id, "type": self.TELEGRAM_MOUNT,
+        existing = telegram_binds(meta)
+        bind_id = _unique_name(mount_name or self.TELEGRAM_MOUNT,
+                               {str(b.get("name") or "") for b in existing})
+        voce = {"name": bind_id, "type": self.TELEGRAM_MOUNT,
                 "config": {"chat_id": cid, "mode": modo, "people": mappa}}
-        altri = [m for m in mounts(meta) if m.get("name") != mount_id]
-        meta["mounts"] = altri + [voce]
-        meta.pop("remote", None)
+        meta["telegram_binds"] = [b for b in existing if b.get("name") != bind_id] + [voce]
         self._write_meta(tier, name, meta, base_version=ver)
         self._declare_egress(tier, name, f"tg:{cid}")
         return {"ok": True, "mount": voce}
@@ -1157,7 +680,7 @@ class TopicService:
         vuole restringere lo fa dalla lista, dove la cosa ha un nome.
         """
         meta, ver = self._read_meta(tier, name)
-        tg = [m for m in mounts(meta) if m.get("type") == self.TELEGRAM_MOUNT]
+        tg = telegram_binds(meta)
         if not tg:
             raise TopicError("questo topic non ha un gruppo Telegram collegato")
         via = mount_name or tg[0].get("name")
@@ -1165,14 +688,13 @@ class TopicService:
             raise TopicError(
                 f"nessun gruppo Telegram '{via}' (ci sono: "
                 f"{', '.join(str(m.get('name')) for m in tg)})")
-        meta["mounts"] = [m for m in mounts(meta) if m.get("name") != via]
-        meta.pop("remote", None)
+        meta["telegram_binds"] = [m for m in tg if m.get("name") != via]
         self._write_meta(tier, name, meta, base_version=ver)
         return {"ok": True, "unbound": via}
 
     def telegram_mounts(self, meta: dict) -> list:
         """I gruppi Telegram collegati a questo topic."""
-        return [m for m in mounts(meta) if m.get("type") == self.TELEGRAM_MOUNT]
+        return telegram_binds(meta)
 
     @staticmethod
     def _clean_people(people: dict | None) -> dict:
@@ -1338,40 +860,6 @@ class TopicService:
         return meta
 
     # ── Remote pluggable (git/drive): storage sempre local, sync opzionale ─────
-    def _abs(self, tier: str, name: str, sub: str = "") -> str:
-        """Path filesystem ASSOLUTO del topic (le Remote git/drive vi operano)."""
-        root = getattr(self.s, "root", None)
-        if root is None:
-            raise TopicError("remote non supportato: storage non locale")
-        p = root / self._dir(tier, name)
-        return str(p / sub) if sub else str(p)
-
-    def _remote_drive_factory(self, account, folder):
-        from .drive_fs import DriveStorage
-        key = f"remote:{account or ''}:{folder}"
-        cache = self._drive_thread_cache()
-        ds = cache.get(key)
-        if ds is None:
-            ds = DriveStorage(self._drive_service(account), folder)
-            cache[key] = ds
-        return ds
-
-    def _remote_for(self, tier: str, name: str, meta: dict,
-                    mount_name: str | None = None):
-        from .remote import make_remote
-        r = mount_by_name(meta, mount_name)
-        if not r.get("type"):
-            return None
-        # Solo per i remote git su github.com iniettiamo il PAT del vault (scoping:
-        # il token non deve raggiungere altri host).
-        gh_token = None
-        if r["type"] == "git" and "github.com" in ((r.get("config") or {}).get("url") or ""):
-            gh_token, _fonte = self.git_credential(tier, name, r.get("name"))
-        return make_remote(r["type"], self._abs(tier, name, "files"),
-                           self._abs(tier, name, ".remote-drive.json"),
-                           drive_factory=self._remote_drive_factory,
-                           github_token=gh_token)
-
     @staticmethod
     def scope_credential_name(tier: str, name: str, kind: str = "git",
                               mount: str | None = None) -> str:
@@ -1432,57 +920,6 @@ class TopicService:
                 pass
         return self._platform_github_token(), "platform"
 
-    def drive_credential(self, tier: str, name: str,
-                         mount: str | None = None) -> tuple[dict | None, str]:
-        """`(bundle, provenienza)` per il mount Drive di questo topic.
-
-        Stesso ordine della git — mount → scope → piattaforma — e per la stessa
-        ragione: dal perimetro più stretto al più largo. Qui però il salto è più
-        grande. La credenziale di piattaforma è un ACCOUNT Google intero: usarla
-        dove l'owner ne ha fornita una significherebbe dare a quello scope
-        l'intero Drive dell'account condiviso.
-
-        `None` = nessuna credenziale di scope, e chi chiama ricade sull'account
-        di piattaforma. Non è un errore: è il comportamento storico, e la
-        provenienza restituita lo rende leggibile invece che silenzioso.
-        """
-        from .. import vault
-        candidati = []
-        if mount:
-            candidati.append((self.scope_credential_name(tier, name, "drive", mount), "mount"))
-        candidati.append((self.scope_credential_name(tier, name, "drive"), "scope"))
-        for cred, fonte in candidati:
-            try:
-                b = vault.read_internal(cred) or {}
-                if b.get("refresh_token"):
-                    return b, fonte
-            except Exception:  # noqa: BLE001 — assente o illeggibile → ripiego
-                pass
-        return None, "platform"
-
-    def set_drive_credential(self, tier: str, name: str, bundle: dict | None,
-                             mount: str | None = None) -> dict:
-        """Deposita (o toglie) la credenziale Drive di un mount.
-
-        Il bundle è un consenso OAuth dell'owner: `refresh_token`, `client_id`,
-        `client_secret`, `scope`. Non lo si valida contro Google qui — una
-        credenziale che il gateway non riesce a usare deve fallire quando la si
-        usa, con l'errore di Google, non con un nostro giudizio anticipato.
-        """
-        from .. import vault
-        cred = self.scope_credential_name(tier, name, "drive", mount)
-        if not (bundle or {}).get("refresh_token"):
-            try:
-                vault.remove(cred)
-            except Exception:  # noqa: BLE001 — già assente
-                pass
-            _, fonte = self.drive_credential(tier, name, mount)
-            return {"credential": None, "source": fonte}
-        tenuti = ("refresh_token", "client_id", "client_secret", "scope", "account")
-        vault.deposit(cred, {k: bundle[k] for k in tenuti if k in bundle},
-                      cred_type="google-oauth", grant_agents=[], actions=[])
-        return {"credential": cred, "source": "mount" if mount else "scope"}
-
     def set_git_credential(self, tier: str, name: str, token: str | None,
                            mount: str | None = None) -> dict:
         """Deposita (o rimuove) la credenziale git di questo scope.
@@ -1515,82 +952,6 @@ class TopicService:
             return (vault.read_internal("github_pat") or {}).get("value") or None
         except Exception:  # noqa: BLE001
             return None
-
-    def _remote_or_err(self, tier: str, name: str, mount_name: str | None = None):
-        meta, _ = self._read_meta(tier, name)
-        rem = self._remote_for(tier, name, meta, mount_name)
-        if rem is None:
-            noti = [m.get("name") for m in mounts(meta)]
-            if mount_name and noti:
-                # Nominare i mount esistenti: con più mount, «non configurato»
-                # su un nome sbagliato si legge come «il topic non ha remote»,
-                # che è una diagnosi diversa e manda a rifare il collegamento.
-                raise TopicError(
-                    f"il topic non ha un mount '{mount_name}' (ci sono: {', '.join(noti)})")
-            raise TopicError("il topic non ha un remote configurato (topic.remote_enable)")
-        return rem
-
-    def _remote_display_name(self, rtype: str, config: dict) -> str | None:
-        """Nome umano del remote per la UI: nome della cartella Drive o del repo
-        git. Best-effort: su errore (Drive irraggiungibile, URL anomalo) → None."""
-        try:
-            if rtype == "drive" and config.get("folder"):
-                svc = self._drive_service(config.get("account"))
-                got = svc.files().get(fileId=config["folder"], fields="name",
-                                      supportsAllDrives=True).execute()
-                return got.get("name") or None
-            if rtype == "git" and config.get("url"):
-                tail = str(config["url"]).rstrip("/").split("/")[-1]
-                tail = tail.split(":")[-1]           # git@host:org/repo(.git)
-                return re.sub(r"\.git$", "", tail) or None
-        except Exception:  # noqa: BLE001
-            return None
-        return None
-
-    def remote_status(self, tier: str, name: str,
-                      mount_name: str | None = None) -> dict:
-        meta, ver = self._read_meta(tier, name)
-        rem = self._remote_for(tier, name, meta, mount_name)
-        # Backfill lazy del nome remoto sui topic pre-esistenti (config senza
-        # `name`): risolto qui una volta e persistito. Best-effort.
-        r = mount_by_name(meta, mount_name)
-        if rem is not None and r and "name" not in (r.get("config") or {}):
-            display = self._remote_display_name(r["type"], r.get("config") or {})
-            try:
-                r["config"]["name"] = display
-                self._write_meta(tier, name, meta, base_version=ver)
-            except Exception:  # noqa: BLE001 — race sul meta: riproverà al prossimo status
-                pass
-        st = rem.status() if rem else {"enabled": False}
-        # L'ELENCO dei mount, sempre, anche quando se ne interroga uno. Uno
-        # stato che descrive solo il mount interrogato lascia la sidebar a
-        # mostrare il primo e a tacere degli altri — cioè lo stesso difetto
-        # dell'oggetto singolo, spostato dal meta alla UI.
-        st["mounts"] = [{"name": m.get("name"), "type": m.get("type"),
-                         "label": (m.get("config") or {}).get("name")}
-                        for m in mounts(meta)]
-        st["mount"] = r.get("name")
-        # QUALE credenziale usa questo remote, sempre. Un topic senza credenziale
-        # propria ricade su quella della piattaforma, e il ripiego silenzioso è il
-        # modo in cui ci si convince di essere isolati quando non lo si è: chi
-        # guarda lo stato deve poter distinguere «ha la sua» da «usa quella di
-        # tutti». Il VALORE non compare mai — solo la provenienza.
-        if r.get("type") == "git":
-            tok, fonte = self.git_credential(tier, name, r.get("name"))
-            st["credential_source"] = fonte if tok else "none"
-        elif r.get("type") == "drive":
-            # Anche per Drive la provenienza si vede sempre. Qui il salto fra
-            # «la sua» e «quella di tutti» è più grande che su git: la
-            # credenziale di piattaforma è un ACCOUNT Google intero.
-            _b, fonte = self.drive_credential(tier, name, r.get("name"))
-            st["credential_source"] = fonte
-        return st
-
-    #: Marcatore nel messaggio d'errore: dice alla UI che questo rifiuto è
-    #: CONFERMABILE, non definitivo. Senza un marcatore il frontend dovrebbe
-    #: riconoscere il caso dal testo italiano, che è il modo di rompere la
-    #: conferma alla prima riformulazione della frase.
-    CONFIRMABLE_HIDES_LOCAL = "confirmable:hides-local"
 
     @staticmethod
     def _require_approved_repo(url: str | None, tier: str, name: str) -> None:
@@ -1677,169 +1038,91 @@ class TopicService:
                 f"`gdrive:folder/{fid}` alla lista egress (globale o dello "
                 f"scope), poi il collegamento passa.")
 
-    def remote_enable(self, tier: str, name: str, rtype: str, config: dict | None = None,
-                      confirm_hides_local: bool = False,
-                      credential: str | None = None,
-                      mount_name: str | None = None) -> dict:
-        """`credential`: PAT valido SOLO per questo scope. Opzionale — senza, il
-        topic ricade sulla credenziale di piattaforma, e `remote_status` lo dice.
+    def drive_folder_add(self, tier: str, name: str, folder: str,
+                         mount_name: str | None = None,
+                         account: str | None = None) -> dict:
+        """Dichiara una cartella Drive per questo canale (decision-record #40).
 
-        Il momento del collegamento è quello giusto per chiederla: è l'unico in
-        cui chi la fornisce sa a quale repository serve, e una credenziale
-        ristretta a un repo limita il danno di una stanza compromessa a quel
-        repo — invece che a tutto ciò che il token di piattaforma raggiunge.
+        NON crea un mount da navigare: è la restrizione di perimetro che
+        `gdrive_root.roots_for_call` legge per narrowing le chiamate `gdrive.*`
+        fatte da dentro questo topic — «impostarlo, cambiarlo o toglierlo non è
+        una preferenza ma una dichiarazione di autorità» (stesso principio
+        dell'ex `remote_enable`, senza il layer di navigazione sopra).
+
+        La cartella deve già essere approvata (whitelist egress/ingress,
+        `_require_approved_folder`, entry 32): questo verbo NARROWS il
+        perimetro di un canale dentro ciò che è già autorizzato, non lo apre.
         """
-        if rtype not in ("git", "drive"):
-            raise TopicError(f"remote type non supportato: {rtype}")
-        # Il nome del mount è una CARTELLA DI PRIMO LIVELLO dell'albero dati
-        # (dal 12 ago 2026). Rifiutare qui e non alla lettura: un nome che
-        # collide si scopre altrimenti quando qualcuno apre un path e trova il
-        # mount al posto dei file, cioè lontano da chi l'ha scelto.
-        if mount_name and str(mount_name).strip().lower() in self.RESERVED_MOUNTS:
-            raise TopicError(
-                f"nome di mount riservato: '{mount_name}'. "
-                f"È una cartella di primo livello dell'albero dati "
-                f"({', '.join(sorted(self.RESERVED_MOUNTS))}) — scegline un altro.")
-        if rtype == "git":
-            self._require_approved_repo((config or {}).get("url"), tier, name)
-        # Guard SEAL sul VERO punto di attivazione di Drive (non solo in
-        # migrate_storage): dati confidenziali di tier > cap non devono finire su
-        # Google come filesystem live (#45 review, Prima Legge/GDPR). Copre anche
-        # new() (che chiama qui) e la migrazione legacy.
-        if rtype == "drive":
-            try:
-                tier_n = int(_normalize_tier(tier).replace("SEAL-", ""))
-            except (ValueError, AttributeError):
-                tier_n = 0
-            if tier_n > self._DRIVE_SEAL_CAP:
-                raise TopicError(
-                    f"storage drive ha cap SEAL-{self._DRIVE_SEAL_CAP}: un topic "
-                    f"{tier} non può usare Drive come storage live (anti-declassamento)")
-            # Guardia anti-nascondimento: collegare Drive rende Drive la fonte e i
-            # file locali NON vengono caricati (nessun push). Se il topic ha
-            # contenuti solo in locale, collegarlo li renderebbe invisibili →
-            # rifiuta. Va prima popolata la cartella Drive, o si resta local-fs.
-            try:
-                existing = [e for e in self.s.list(f"{self._dir(tier, name)}/files")
-                            if not e.name.startswith(".")
-                            and not e.name.endswith(".gdrive.json")]
-            except Exception:  # noqa: BLE001 — files/ assente → topic vuoto, ok
-                existing = []
-            if existing and not confirm_hides_local:
-                # NON un rifiuto definitivo: una conferma. I file locali non
-                # vengono cancellati — restano su disco e `remote_disable` li
-                # ripristina — ma spariscono dal topic finché Drive è la fonte.
-                # Dirlo con precisione: un avviso che dice «persi» quando i file
-                # tornano insegna a non fidarsi degli avvisi.
-                raise TopicError(
-                    f"{self.CONFIRMABLE_HIDES_LOCAL}: collegando Drive, i "
-                    f"{len(existing)} file già presenti in {tier}/{name} non "
-                    f"saranno più visibili nel topic: Drive diventa la fonte e i "
-                    f"locali NON vengono caricati. Restano su disco e ricompaiono "
-                    f"se scolleghi il remote, ma se ti servono su Drive vanno "
-                    f"copiati prima. Fai una copia se hai dubbi.")
+        self._require_approved_folder(folder, tier, name)
         meta, ver = self._read_meta(tier, name)
-        config = dict(config or {})
-        if rtype == "drive":
-            config.update(self._provision_drive_folder(config, name))  # risolve/crea la cartella
-            self._require_approved_folder(config.get("folder"), tier, name)
-        config["name"] = self._remote_display_name(rtype, config)
-        keep = ("url", "branch", "folder", "account", "user_name", "user_email", "message", "name")
-        # Il mount ha un NOME che lo identifica nell'albero (`/remote/<nome>/`).
-        # È un identificatore, non il nome visualizzato: quello può mancare,
-        # contenere uno slash, e cambiare quando la cartella viene rinominata —
-        # e ogni path memorizzato che lo citasse si romperebbe (§2.6).
-        mount_id = _mount_id(mount_name or rtype, meta)
-        voce = {"name": mount_id, "type": rtype,
-                "config": {k: v for k, v in config.items() if k in keep}}
-        altri = [m for m in mounts(meta) if m.get("name") != mount_id]
-        meta["mounts"] = altri + [voce]
-        meta.pop("remote", None)          # una forma sola: il legacy è convertito
-        meta["storage"] = self.s.capability().name   # storage torna esplicitamente local
-        meta.pop("storage_config", None)
+        existing = drive_folders(meta)
+        nome = _unique_name(mount_name or "drive", {str(f.get("name") or "") for f in existing})
+        voce = {"name": nome, "folder": str(folder).strip(), "account": account}
+        meta["drive_folders"] = [f for f in existing if f.get("name") != nome] + [voce]
         self._write_meta(tier, name, meta, base_version=ver)
-        if credential is not None and rtype == "git":
-            # Dopo che il mount esiste, non prima: la credenziale è depositata
-            # sotto il NOME del mount, e un deposito anticipato lascerebbe in
-            # giro una credenziale per un mount che l'abilitazione non ha
-            # creato. È anche ciò che il commento qui prometteva da sempre.
-            self.set_git_credential(tier, name, credential, mount_id)
-        rem = self._remote_for(tier, name, meta, mount_id)
-        rem.enable(voce["config"])
-        # Nessun upload: Drive è già la fonte (cartella appena provisionata o
-        # pre-popolata). Da qui i verbi file proxano direttamente a Drive.
-        return {"ok": True, "mount": voce, "mounts": meta["mounts"],
-                "status": rem.status()}
+        return {"ok": True, "drive_folder": voce}
 
-    def remote_disable(self, tier: str, name: str,
-                       mount_name: str | None = None) -> dict:
+    def drive_folder_remove(self, tier: str, name: str, mount_name: str) -> dict:
         meta, ver = self._read_meta(tier, name)
-        rem = self._remote_for(tier, name, meta, mount_name)
-        cfg = self._drive_remote_config(meta, mount_name)
-        if cfg is not None:
-            ds = self._drive_backend_for(tier, name, cfg, mount_name)
-            if ds is None:
-                raise TopicError("remote drive: nessuna cartella configurata")
-            local_base = f"{self._dir(tier, name)}/files"
-            # Scollegare Drive = materializzare il contenuto remoto in locale, così
-            # il topic torna local-fs con i suoi file. Pull ripartibile, nessun
-            # clear preventivo: se fallisce a metà, Drive resta la fonte.
-            self._drive_pull_tree(ds, "", local_base)
-        if rem is not None:
-            rem.disable()
-        # Si stacca il mount indicato, non «il remote»: con più mount, togliere
-        # tutto sarebbe scollegare cose che nessuno ha nominato.
-        via = mount_by_name(meta, mount_name).get("name")
-        meta["mounts"] = [m for m in mounts(meta) if m.get("name") != via]
+        existing = drive_folders(meta)
+        if mount_name not in {f.get("name") for f in existing}:
+            disponibili = ", ".join(sorted(str(f.get("name")) for f in existing))
+            raise TopicError(
+                f"nessuna cartella Drive '{mount_name}' dichiarata su {tier}/{name}"
+                + (f" (ci sono: {disponibili})" if disponibili else ""))
+        meta["drive_folders"] = [f for f in existing if f.get("name") != mount_name]
+        self._write_meta(tier, name, meta, base_version=ver)
+        return {"ok": True, "removed": mount_name}
+
+    def _migrate_mounts_field(self, tier: str, name: str) -> None:
+        """One-shot: il vecchio `meta["mounts"]` condiviso da drive/git/telegram
+        (decision-record #40) → i campi propri di ciascun tipo.
+
+        - `drive` → `drive_folders`: **conservato**, non scartato. È
+          l'associazione nome↔folder-id che `gdrive_root.roots_for_call` legge
+          per restringere il perimetro Drive di questo canale — cancellarla
+          silenziosamente lascerebbe un topic con un perimetro più largo di
+          quello che l'owner aveva scelto, senza che nessuno lo veda.
+        - `git`  → scartato: nessun topic in produzione ne aveva uno (misurato,
+          7 set 2026), ed è codice morto — nessuna UI lo ha mai creato.
+        - `telegram` → `telegram_binds`, stessa forma, solo un campo suo.
+        """
+        meta, ver = self._read_meta(tier, name)
+        raw = meta.get("mounts")
+        if not isinstance(raw, list) or not raw:
+            return
+        drive_new, tg_new, moved = [], [], 0
+        for m in raw:
+            if not isinstance(m, dict):
+                continue
+            ty = str(m.get("type") or "").strip().lower()
+            if ty == "drive":
+                cfg = m.get("config") or {}
+                folder = (cfg.get("folder") or "").strip()
+                if folder:
+                    drive_new.append({"name": m.get("name") or "drive",
+                                      "folder": folder, "account": cfg.get("account")})
+                    moved += 1
+            elif ty == "telegram":
+                tg_new.append(m)
+                moved += 1
+            # git (o qualunque altro tipo): scartato, nessun dato da preservare.
+        if not moved and "mounts" not in meta:
+            return
+        if drive_new:
+            meta["drive_folders"] = drive_folders(meta) or []
+            presi = {f.get("name") for f in meta["drive_folders"]}
+            meta["drive_folders"] += [f for f in drive_new if f.get("name") not in presi]
+        if tg_new:
+            meta["telegram_binds"] = telegram_binds(meta) or []
+            presi = {b.get("name") for b in meta["telegram_binds"]}
+            meta["telegram_binds"] += [b for b in tg_new if b.get("name") not in presi]
+        meta.pop("mounts", None)
         meta.pop("remote", None)
         self._write_meta(tier, name, meta, base_version=ver)
-        self._drive_cache_clear()
-        return {"ok": True}
-
-    def remote_add(self, tier: str, name: str, path: str,
-                   mount_name: str | None = None) -> dict:
-        self._remote_or_err(tier, name, mount_name).add(path)
-        return {"ok": True}
-
-    def remote_unstage(self, tier: str, name: str, path: str = "",
-                       mount_name: str | None = None) -> dict:
-        """Toglie dallo staging (path vuoto = tutto)."""
-        self._remote_or_err(tier, name, mount_name).unstage(path or "")
-        return {"ok": True}
-
-    def remote_commit(self, tier: str, name: str, msg: str = "",
-                      mount_name: str | None = None) -> dict:
-        res = self._remote_or_err(tier, name, mount_name).commit(msg) or {}
-        return {"ok": True, **res}
-
-    def remote_push(self, tier: str, name: str,
-                    mount_name: str | None = None) -> dict:
-        return self._remote_or_err(tier, name, mount_name).push()
-
-    def remote_pull(self, tier: str, name: str,
-                    mount_name: str | None = None) -> dict:
-        return self._remote_or_err(tier, name, mount_name).pull()
-
-    def _migrate_legacy_drive(self, tier: str, name: str) -> None:
-        """One-shot: legacy storage=google-drive → remote Drive live."""
-        meta, ver = self._read_meta(tier, name)
-        if meta.get("storage") != "google-drive" or mounts(meta):
-            return
-        sc = meta.get("storage_config") or {}
-        meta["mounts"] = [{"name": "drive", "type": "drive",
-                           "config": {"folder": sc.get("folder"),
-                                      "account": sc.get("account")}}]
-        meta["storage"] = self.s.capability().name
-        meta.pop("storage_config", None)
-        rem = self._remote_for(tier, name, meta)
-        try:
-            rem.enable(meta["mounts"][0]["config"])
-            self._write_meta(tier, name, meta, base_version=ver)
-            # storage=google-drive significa che i file vivevano GIÀ su Drive: la
-            # conversione a remote:drive è solo metadata. Nessun upload/clear.
-        except Exception:  # noqa: BLE001 — la migrazione non deve rompere open()
-            LOG.warning("migrazione drive→remote fallita per %s/%s (locale intatto)",
-                        tier, name)
+        LOG.warning("migrazione mounts→campi propri per %s/%s: %d voce/i spostate "
+                    "(drive_folders=%d, telegram_binds=%d)",
+                    tier, name, moved, len(drive_new), len(tg_new))
 
     @staticmethod
     def _assert_content_available(meta: dict) -> None:
@@ -1878,11 +1161,12 @@ class TopicService:
         initial_meta, _ = self._read_meta(tier, name)
         if not allow_archived:
             self._assert_content_available(initial_meta)
-        # Migrazione one-shot legacy storage=google-drive → remote drive.
+        # Migrazione one-shot: il vecchio meta["mounts"] condiviso (decision-
+        # record #40) → drive_folders/telegram_binds, i loro campi propri.
         try:
-            self._migrate_legacy_drive(tier, name)
+            self._migrate_mounts_field(tier, name)
         except Exception:  # noqa: BLE001
-            LOG.warning("migrazione storage→remote fallita per %s/%s", tier, name)
+            LOG.warning("migrazione mounts→campi propri fallita per %s/%s", tier, name)
         try:
             meta_r = self.s.read(self._meta_p(tier, name))
         except NotFound:
@@ -1929,12 +1213,10 @@ class TopicService:
         files_unavailable = False
         try:
             files_store, files_base = self._files_backend(tier, name)
-            is_drive_live = files_store is not self.s
             for e in files_store.list(files_base):
                 if e.kind != "file":
                     continue
-                st = None if is_drive_live else files_store.stat(
-                    f"{files_base}/{e.name}".strip("/"))
+                st = files_store.stat(f"{files_base}/{e.name}".strip("/"))
                 fmt.append((st.mtime if st else 0.0, e.name))
         except Exception as exc:  # noqa: BLE001 - never fatal for open()
             files_unavailable = True
@@ -1964,12 +1246,7 @@ class TopicService:
         if not rel or ".." in rel.split("/"):
             raise TopicError(f"path non valido: {relpath}")
         if self._is_data_path(meta, rel):
-            try:
-                store, base, sub, _mount = self._resolve_data_path(tier, name, rel)
-            except TopicError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - remote backend down
-                raise _remote_unreachable(exc, tier, name) from exc
+            store, base, sub, _mount = self._resolve_data_path(tier, name, rel)
             return store.read(f"{base}/{sub}".strip("/")).data
         # Fuori dai mount: control-plane (summary.md, meta.json, AGENTS.md), che
         # si legge ma non si naviga come dato.
@@ -2480,40 +1757,18 @@ class TopicService:
             _meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
         except Exception:  # noqa: BLE001
             _meta = {}
-        if _meta.get("storage") == "google-drive" and not _meta.get("remote"):
-            self._migrate_legacy_drive(tier, name)
+        try:
+            self._migrate_mounts_field(tier, name)
             _meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
-        _is_drive = self._drive_remote_config(_meta) is not None
+        except Exception:  # noqa: BLE001
+            pass
         out: list[dict] = []
-        # `remote/` senza nome è il CONTENITORE dei mount: elenca i mount, non
-        # delega a un backend. Senza questo ramo, navigare in `remote/` darebbe un
-        # errore là dove l'utente si aspetta di vedere cosa c'è montato.
-        if rel == self.MOUNT_REMOTE:
-            # `remote/` resta navigabile come ALIAS dello schema precedente, e
-            # mostra i mount ai loro path NUOVI: chi ci entra da un link vecchio
-            # vede dove sono adesso invece di un vicolo cieco.
-            return [{"name": n, "path": n, "kind": "dir", "mount": n}
-                    for n in self._mount_names(_meta)]
         is_files = self._is_data_path(_meta, rel)
         sub = ""
         prov_map = {}
         if is_files:
-            try:
-                store, base, sub, mount = self._resolve_data_path(tier, name, rel)
-            except TopicError:
-                raise
-            except Exception as exc:  # noqa: BLE001 — backend remoto giù
-                # Un token Drive revocato deve dare un errore AZIONABILE, non una
-                # traccia di stack: è la ragione per cui `_remote_unreachable`
-                # esiste. Catturare solo TopicError qui lo aggirava.
-                raise _remote_unreachable(exc, tier, name) from exc
-            # La provenienza è etichettata sui file del mount LOCALE: quelli del
-            # remote non l'hanno, e mostrarla come `unknown` sarebbe corretto ma
-            # inutile — sul remote la domanda «chi l'ha messo qui» ha una risposta
-            # che non passa da noi.
-            prov_map = (self.provenance_map(tier, name)
-                        if mount == self.MOUNT_LOCAL else {})
-            _is_drive = mount != self.MOUNT_LOCAL
+            store, base, sub, mount = self._resolve_data_path(tier, name, rel)
+            prov_map = self.provenance_map(tier, name)
         # I path emessi portano il prefisso del MOUNT, non `files/`: è ciò che
         # rende la vista una sola. Un path senza mount sarebbe ambiguo appena i
         # mount diventano due, ed è esattamente l'ambiguità che questo disegno
@@ -2522,50 +1777,15 @@ class TopicService:
             return f"{mount}/" + (f"{subdir}/" if subdir else "") + nome
 
         if is_files:
-            try:
-                entries = list(store.list(f"{base}/{sub}".strip("/")))
-            except TopicError:
-                raise
-            except Exception as exc:  # noqa: BLE001 — backend remoto giù
-                raise _remote_unreachable(exc, tier, name) from exc
+            entries = list(store.list(f"{base}/{sub}".strip("/")))
             for e in entries:
                 if e.name.startswith("."):
                     continue
-                # KIND BEFORE MIME, and the order is the whole point. A Drive
-                # folder has mime `application/vnd.google-apps.folder`, which
-                # matches _NATIVE_DOC_PREFIX: classified by mime first, every
-                # subfolder came out as a remote FILE with a webViewLink, so the
-                # UI rendered a link to the Drive web app and in-app navigation
-                # stopped at the first level (#117). `url` is kept on the entry
-                # so opening Drive stays available as an explicit choice.
                 if e.kind == "dir":
-                    out.append({"name": e.name,
-                                "path": _mp(sub, e.name),
-                                "kind": "dir", "url": e.url or ""})
+                    out.append({"name": e.name, "path": _mp(sub, e.name), "kind": "dir"})
                     continue
-                if e.mime and e.mime.startswith(self._NATIVE_DOC_PREFIX):
-                    p = _mp(sub, e.name)
-                    out.append({"name": e.name, "path": p, "kind": "file",
-                                "remote": True, "url": e.url or "", "mime": e.mime,
-                                "size": e.size, "md5": e.version})
-                    continue
-                if e.name.endswith(".gdrive.json"):
-                    # stub proxy di un Google Doc nativo → voce REMOTA (link a Drive)
-                    try:
-                        info = json.loads(store.read(f"{base}/{sub}/{e.name}".strip("/")).data.decode())
-                    except Exception:  # noqa: BLE001
-                        info = {}
-                    real = e.name[:-len(".gdrive.json")]
-                    out.append({"name": real,
-                                "path": _mp(sub, real),
-                                "kind": "file", "remote": True,
-                                "url": info.get("gdrive_url") or "",
-                                "mime": info.get("mimeType")})
-                    continue
-                # dirs are handled above, so this is a plain file
                 p = _mp(sub, e.name)
-                st = None if _is_drive else store.stat(
-                    f"{base}/{sub}/{e.name}".strip("/"))
+                st = store.stat(f"{base}/{sub}/{e.name}".strip("/"))
                 rel_in_files = (f"{sub}/" if sub else "") + e.name
                 out.append({"name": e.name, "path": p, "kind": "file",
                             "size": (getattr(st, "size", None) if st else e.size),
@@ -2686,18 +1906,6 @@ class TopicService:
         if rel == self.MOUNT_LOCAL or rel.startswith(self.MOUNT_LOCAL + "/"):
             mount_prefix = self.MOUNT_LOCAL
             rel = rel[len(self.MOUNT_LOCAL):].strip("/")
-        elif rel == self.MOUNT_REMOTE or rel.startswith(self.MOUNT_REMOTE + "/"):
-            # Alias dello schema precedente: si accetta in scrittura, e il
-            # prefisso conservato è quello NUOVO — chi rilegge il path lo rilegge
-            # nella forma che vogliamo veder circolare.
-            resto = rel[len(self.MOUNT_REMOTE):].strip("/")
-            rn, _, resto = resto.partition("/")
-            nomi = self._mount_names(meta)
-            mount_prefix = rn if rn in nomi else f"{self.MOUNT_REMOTE}/{rn}"
-            rel = resto.strip("/")
-        elif rel.split("/", 1)[0] in self._mount_names(meta):
-            mount_prefix, _, rel = rel.partition("/")
-            rel = rel.strip("/")
         if not rel or "\\" in rel:
             raise TopicError(f"nome file non valido: {filename}")
         parts = rel.split("/")
@@ -2743,7 +1951,7 @@ class TopicService:
         if not self._is_data_path(meta, rel):
             raise TopicError(
                 "puoi rimuovere solo file dentro i mount del topic — "
-                f"`{self.MOUNT_LOCAL}/…` o `{self.MOUNT_REMOTE}/<nome>/…` "
+                f"`{self.MOUNT_LOCAL}/…` "
                 "(meta, summary e AGENTS.md sono control-plane e non si "
                 "cancellano da qui)")
         store, base, sub, _mount = self._resolve_data_path(tier, name, rel)

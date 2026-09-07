@@ -1,104 +1,128 @@
-"""Uno scope può avere più mount.
+"""Drive e Telegram hanno un campo proprio, non più un array condiviso.
 
-Voce 33 (8 ago 2026): «non è corretto che esista un solo local ed un solo
-remote mount, posso avere due o più remote mount … ognuno con le sue
-credenziali». Fino a ieri `meta["remote"]` era un oggetto singolo, e collegare
-una seconda cartella significava scollegare la prima — silenziosamente, perché
-una scrittura che sostituisce non ha modo di segnalare cosa ha tolto.
+Decision-record #40 (7 set 2026): il vecchio `meta["mounts"]` — drive, git e
+telegram nella stessa lista, per riuso di schema — sparisce. Drive diventa
+`meta["drive_folders"]` (whitelist + confinamento per `gdrive.*`, mai un
+filesystem); Telegram diventa `meta["telegram_binds"]`; git non ha nulla da
+preservare (nessun topic in produzione ne aveva uno, misurato il 7 set 2026).
 
-Il rischio di questa conversione non è il modello, è l'aritmetica: `meta["remote"]`
-era letto in **dodici** punti. Convertirne undici avrebbe lasciato il dodicesimo
-a vedere una forma che non esiste più — e un lettore che non trova il remote non
-dà errore, conclude che non ci sia. Da qui l'accessore unico, e da qui questi
-test: la forma legacy deve continuare a leggersi, e nel meta non deve restare
-una seconda forma da cui qualcuno possa ancora leggere.
+I topic scritti prima di questa modifica hanno ancora il vecchio `mounts`: la
+migrazione one-shot (`_migrate_mounts_field`, dentro `_open`) li converte senza
+perdere l'associazione nome↔folder-id — è la restrizione di perimetro che
+`gdrive_root.roots_for_call` legge, e cancellarla silenziosamente lascerebbe
+un topic con un perimetro più largo di quello che l'owner aveva scelto.
 """
 from __future__ import annotations
 
 import unittest
+import tempfile
+import shutil
+from pathlib import Path
 
-from .service import _mount_id, mount_by_name, mounts
-
-
-LEGACY = {"remote": {"type": "drive", "config": {"folder": "1AbC"}}}
-PLURALE = {"mounts": [
-    {"name": "drive", "type": "drive", "config": {"folder": "1AbC"}},
-    {"name": "contratti", "type": "drive", "config": {"folder": "1XyZ"}},
-]}
+from .local_fs import LocalFsStorage
+from .service import TopicService, drive_folders, telegram_binds, _unique_name
 
 
-class LetturaTests(unittest.TestCase):
-    def test_il_singolare_storico_si_legge_ancora(self):
-        """Il meta su marte è quello di ieri: se smettesse di leggersi, i topic
-        con Drive collegato diventerebbero topic senza Drive — e senza errore."""
-        m = mounts(LEGACY)
-        self.assertEqual(len(m), 1)
-        self.assertEqual(m[0]["type"], "drive")
-        self.assertEqual(m[0]["config"]["folder"], "1AbC")
+class AccessorTests(unittest.TestCase):
+    def test_drive_folders_is_always_a_list(self):
+        self.assertEqual(drive_folders({}), [])
+        self.assertEqual(drive_folders({"drive_folders": None}), [])
 
-    def test_il_legacy_prende_un_nome(self):
-        """Un mount senza nome non è indirizzabile: `/remote/<nome>/` non
-        avrebbe un segmento da scrivere."""
-        self.assertTrue(mounts(LEGACY)[0]["name"])
+    def test_telegram_binds_is_always_a_list(self):
+        self.assertEqual(telegram_binds({}), [])
+        self.assertEqual(telegram_binds({"telegram_binds": None}), [])
 
-    def test_nessun_mount_e_lista_vuota(self):
-        self.assertEqual(mounts({}), [])
-
-    def test_il_plurale_passa_intero(self):
-        self.assertEqual([m["name"] for m in mounts(PLURALE)], ["drive", "contratti"])
+    def test_malformed_entries_are_dropped(self):
+        self.assertEqual(drive_folders({"drive_folders": ["x", {"name": "a"}]}), [])
+        self.assertEqual(drive_folders({"drive_folders": [{"name": "a", "folder": "F"}]}),
+                         [{"name": "a", "folder": "F"}])
 
 
-class RicercaTests(unittest.TestCase):
-    def test_per_nome(self):
-        self.assertEqual(mount_by_name(PLURALE, "contratti")["config"]["folder"], "1XyZ")
+class UniqueNameTests(unittest.TestCase):
+    def test_the_default_is_the_type(self):
+        self.assertEqual(_unique_name("drive", set()), "drive")
 
-    def test_senza_nome_ripiega_sul_primo(self):
-        """I chiamanti storici non passano un nome perché il mount era uno solo.
-        Farli fallire li romperebbe tutti insieme."""
-        self.assertEqual(mount_by_name(PLURALE)["name"], "drive")
+    def test_a_collision_does_not_overwrite(self):
+        self.assertEqual(_unique_name("drive", {"drive"}), "drive-2")
+        self.assertEqual(_unique_name("drive", {"drive", "drive-2"}), "drive-3")
 
-    def test_un_nome_sconosciuto_non_e_il_primo(self):
-        """La direzione d'errore che conta: ripiegare sul primo quando il nome è
-        sbagliato scriverebbe nel mount sbagliato — cioè nel Drive di qualcun
-        altro, visto che ogni mount ha la credenziale del suo owner."""
-        self.assertEqual(mount_by_name(PLURALE, "inesistente"), {})
-
-
-class IdentificatoreTests(unittest.TestCase):
-    def test_il_default_e_il_tipo(self):
-        self.assertEqual(_mount_id("drive", {}), "drive")
-
-    def test_una_collisione_non_sovrascrive(self):
-        self.assertEqual(_mount_id("drive", PLURALE), "drive-2")
-
-    def test_un_nome_umano_diventa_un_segmento_di_path(self):
-        """Il nome del mount finisce in un path. Uno slash dentro creerebbe un
-        livello che nessuno ha chiesto."""
+    def test_a_human_name_becomes_a_safe_segment(self):
         for grezzo in ("50 - Execution / Final", "../etc", "Contratti 2026"):
             with self.subTest(grezzo):
-                mid = _mount_id(grezzo, {})
-                self.assertNotIn("/", mid)
-                self.assertNotIn("..", mid)
-                self.assertTrue(mid)
+                nome = _unique_name(grezzo, set())
+                self.assertNotIn("/", nome)
+                self.assertNotIn("..", nome)
+                self.assertTrue(nome)
 
 
-class UnaFormaSolaTests(unittest.TestCase):
-    """Due forme nel meta sono la stessa cosa di dodici lettori: una diverge."""
+class MigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="mountmig-"))
+        self.svc = TopicService(LocalFsStorage(str(self.root)))
+        self.svc.new("SEAL-1", "acme", {"title": "Acme", "owner": "davide"})
 
-    def test_le_scritture_non_lasciano_il_singolare(self):
-        import inspect
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
 
-        from .service import TopicService
-        for m in (TopicService.remote_enable, TopicService.remote_disable):
-            with self.subTest(m.__name__):
-                self.assertIn('meta.pop("remote"', inspect.getsource(m))
+    def _seed_legacy_mounts(self, mounts):
+        meta, ver = self.svc._read_meta("SEAL-1", "acme")
+        meta["mounts"] = mounts
+        self.svc._write_meta("SEAL-1", "acme", meta, base_version=ver)
 
-    def test_nessuno_scrive_piu_meta_remote(self):
-        """Il conto, non l'ispezione di un singolo punto: è l'aritmetica ad
-        aver fatto danno qui."""
-        import pathlib
-        src = pathlib.Path(__file__).with_name("service.py").read_text()
-        self.assertNotIn('meta["remote"] =', src)
+    def test_a_drive_mount_becomes_a_drive_folder(self):
+        """L'associazione nome↔folder-id è quella che `gdrive_root` legge per
+        restringere il perimetro: sparire silenziosamente la allargherebbe."""
+        self._seed_legacy_mounts([
+            {"name": "contratti", "type": "drive",
+             "config": {"folder": "1XyZ", "account": "a@b.it"}}])
+        self.svc._migrate_mounts_field("SEAL-1", "acme")
+        meta, _ = self.svc._read_meta("SEAL-1", "acme")
+        self.assertEqual(drive_folders(meta),
+                         [{"name": "contratti", "folder": "1XyZ", "account": "a@b.it"}])
+        self.assertNotIn("mounts", meta)
+
+    def test_a_telegram_mount_becomes_a_telegram_bind(self):
+        voce = {"name": "gruppo", "type": "telegram",
+                "config": {"chat_id": "-100999", "mode": "excerpt", "people": {}}}
+        self._seed_legacy_mounts([voce])
+        self.svc._migrate_mounts_field("SEAL-1", "acme")
+        meta, _ = self.svc._read_meta("SEAL-1", "acme")
+        self.assertEqual(telegram_binds(meta), [voce])
+
+    def test_a_git_mount_is_dropped_without_a_trace(self):
+        """Nessun topic in produzione ne aveva uno (misurato il 7 set 2026):
+        non c'è nulla da preservare."""
+        self._seed_legacy_mounts([
+            {"name": "codice", "type": "git", "config": {"url": "https://github.com/x/y"}}])
+        self.svc._migrate_mounts_field("SEAL-1", "acme")
+        meta, _ = self.svc._read_meta("SEAL-1", "acme")
+        self.assertEqual(drive_folders(meta), [])
+        self.assertNotIn("mounts", meta)
+
+    def test_mixed_mounts_split_correctly(self):
+        self._seed_legacy_mounts([
+            {"name": "drive", "type": "drive", "config": {"folder": "F1"}},
+            {"name": "codice", "type": "git", "config": {"url": "https://x/y"}},
+            {"name": "gruppo", "type": "telegram",
+             "config": {"chat_id": "-1", "mode": "notify", "people": {}}},
+        ])
+        self.svc._migrate_mounts_field("SEAL-1", "acme")
+        meta, _ = self.svc._read_meta("SEAL-1", "acme")
+        self.assertEqual([f["name"] for f in drive_folders(meta)], ["drive"])
+        self.assertEqual([b["name"] for b in telegram_binds(meta)], ["gruppo"])
+
+    def test_a_topic_with_no_legacy_mounts_is_untouched(self):
+        self.svc._migrate_mounts_field("SEAL-1", "acme")  # non deve sollevare
+        meta, _ = self.svc._read_meta("SEAL-1", "acme")
+        self.assertEqual(drive_folders(meta), [])
+
+    def test_migration_is_idempotent(self):
+        self._seed_legacy_mounts([
+            {"name": "drive", "type": "drive", "config": {"folder": "F1"}}])
+        self.svc._migrate_mounts_field("SEAL-1", "acme")
+        self.svc._migrate_mounts_field("SEAL-1", "acme")
+        meta, _ = self.svc._read_meta("SEAL-1", "acme")
+        self.assertEqual(len(drive_folders(meta)), 1)
 
 
 if __name__ == "__main__":

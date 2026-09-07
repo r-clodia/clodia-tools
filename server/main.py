@@ -992,84 +992,33 @@ _TOPIC_TOOLS: list[Tool] = [
             "path": {"type": "string", "description": "path da eliminare, dentro files/"},
         }, "required": ["tier", "name", "path"]},
     ),
+    # ── Cartelle Drive dichiarate: whitelist + confinamento, MAI un mount da
+    # navigare (decision-record #40). Un agente che deve lavorare su un file
+    # Drive lo raggiunge coi verbi `gdrive.*` nel proprio scratch.
     Tool(
-        name="topic.migrate_storage",
-        description=("Migra i FILE del topic da locale a Google Drive o viceversa. "
-                     "Su Drive la cartella remota diventa il filesystem live autoritativo; "
-                     "tornando a locale, i file remoti vengono materializzati nel topic. "
-                     "Guard SEAL: vietato migrare su uno storage con livello inferiore al tier "
-                     "(es. SEAL-3 non va su Drive). target.type=local|drive; per drive folder "
-                     "(link/id) opzionale (vuoto = crea cartella)."),
+        name="topic.drive_folder_add",
+        description=("Dichiara una cartella Drive per questo canale: restringe il "
+                     "perimetro delle chiamate gdrive.* fatte da dentro il topic a "
+                     "quella cartella. La cartella deve già essere approvata "
+                     "(whitelist egress/ingress `gdrive:folder/<id>`). NON crea un "
+                     "filesystem da navigare — per leggere/scrivere un file usa "
+                     "gdrive.download/upload nello scratch."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
-            "target": {"type": "object", "properties": {
-                "type": {"type": "string", "enum": ["local", "drive"]},
-                "folder": {"type": "string"}, "account": {"type": "string"}},
-                "required": ["type"]},
-        }, "required": ["tier", "name", "target"]},
+            "folder": {"type": "string", "description": "id (o link) della cartella Drive"},
+            "account": {"type": "string"},
+            "mount": {"type": "string", "description": "nome che identifica questa dichiarazione (default: 'drive'). Un canale può averne più d'una."},
+        }, "required": ["tier", "name", "folder"]},
     ),
-    # ── Remote pluggable: git usa il ciclo di sync; Drive è un filesystem live. ──
     Tool(
-        name="topic.remote_enable",
-        description=("Attiva un remote per i FILE del topic. Git conserva il ciclo "
-                     "add/commit/push/pull. Drive diventa il filesystem autoritativo live: "
-                     "config.folder link/id opzionale (vuoto = crea cartella), config.account."),
+        name="topic.drive_folder_remove",
+        description="Toglie una cartella Drive dichiarata per questo canale.",
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
-            "type": {"type": "string", "enum": ["git", "drive"]},
-            "config": {"type": "object", "description": "git: {url,branch} · drive: {folder,account}"},
-            "mount": {"type": "string", "description": "nome del mount (default: il tipo). Uno scope può averne più d'uno."},
-        }, "required": ["tier", "name", "type"]},
-    ),
-    Tool(
-        name="topic.remote_disable",
-        description=("Disattiva il remote preservando i file. Per Drive materializza "
-                     "prima la cartella remota nel filesystem locale."),
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"},
-            "mount": {"type": "string", "description": "quale mount staccare (default: l'unico)"}},
-            "required": ["tier", "name"]},
-    ),
-    Tool(
-        name="topic.remote_add",
-        description=("Marca un file per il sync Git. Su Drive è un no-op deprecato "
-                     "perché topic.write_file/topic.put caricano immediatamente."),
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"}, "path": {"type": "string"}}, "required": ["tier", "name", "path"]},
-    ),
-    Tool(
-        name="topic.remote_commit",
-        description="Snapshot delle modifiche Git. Su Drive live è un no-op deprecato.",
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"}, "message": {"type": "string"}}, "required": ["tier", "name"]},
-    ),
-    Tool(
-        name="topic.remote_push",
-        description="Invia le modifiche Git. Su Drive live è un no-op deprecato.",
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"}}, "required": ["tier", "name"]},
-    ),
-    Tool(
-        name="topic.remote_pull",
-        description=("Riceve dal remote Git (conflitto→escala). Su Drive live è un "
-                     "no-op deprecato perché le letture vedono già il remoto."),
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"}}, "required": ["tier", "name"]},
-    ),
-    Tool(
-        name="topic.remote_status",
-        description=("Stato del remote del topic. Per Drive include mode=live e "
-                     "last_write_wins=true."),
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"}}, "required": ["tier", "name"]},
+            "mount": {"type": "string", "description": "nome della dichiarazione da togliere"}},
+            "required": ["tier", "name", "mount"]},
     ),
     Tool(
         name="topic.suggest_team",
@@ -1841,29 +1790,13 @@ def _origin_of(workdir: str) -> str:
 
 
 def _repo_credential(svc, tier: str, tname: str, repo_canonico: str):
-    """La credenziale del MOUNT che porta QUESTO repository nello scope.
+    """La credenziale git di QUESTO scope, o il ripiego di piattaforma.
 
-    Cercata per repository e non per nome del mount: chi chiama `github.push`
-    non sa (e non deve sapere) come l'owner ha battezzato il mount, e chiedergli
-    il nome significherebbe lasciargli scegliere quale credenziale usare.
+    Prima di decision-record #40 si cercava anche una credenziale per-MOUNT
+    (un repository poteva avere la sua, distinta dallo scope). Il mount git è
+    stato ritirato — nessuno lo usava in produzione — e resta solo il livello
+    scope→piattaforma, che `git_credential` rende esplicito.
     """
-    from .tools import github_repo as gh
-    from .topics.service import mounts as _mounts
-    try:
-        meta, _ = svc._read_meta(tier, tname)
-    except Exception:  # noqa: BLE001 — meta illeggibile → nessuna credenziale di mount
-        meta = {}
-    for m in _mounts(meta):
-        if m.get("type") != "git":
-            continue
-        try:
-            if gh.normalize_repo((m.get("config") or {}).get("url") or "") == repo_canonico:
-                return svc.git_credential(tier, tname, m.get("name"))[0]
-        except Exception:  # noqa: BLE001 — URL anomalo nel meta: non è questo
-            continue
-    # Nessun mount per questo repo: resta il ripiego dello scope/piattaforma,
-    # che `git_credential` rende esplicito. Rifiutare qui romperebbe i repo
-    # approvati per lista ma non montati — che la voce 31 prevede.
     return svc.git_credential(tier, tname)[0]
 
 
@@ -3016,10 +2949,6 @@ _UNATTENDED_TOPIC_ALLOW = frozenset({"topic.post_message"})
 #: o l'etichetta del file locale).
 _TOPIC_READ_VERBS = frozenset({
     "topic.read_file", "topic.read_document", "topic.files", "topic.fetch",
-    # `remote_pull` scarica il contenuto del remote: è una lettura da quella
-    # fonte come le altre, e trattarla diversamente contaminerebbe anche il pull
-    # da una cartella vagliata.
-    "topic.remote_pull",
 })
 
 #: Verbi che leggono una risorsa Drive/Workspace PER ID: la fonte è quella
@@ -3489,7 +3418,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             #
             # Quello che NON cambia: le tre ragioni restano distinte nel testo
             # della card, e il perimetro tace su chi non gli fa una domanda di
-            # destinazione (`gate.perimeter_answers`) — `topic.remote_*`,
+            # destinazione (`gate.perimeter_answers`) — `topic.drive_folder_*`,
             # `agents.grant_*`, `egress.allow`, e `web.post`, la cui whitelist
             # censisce un host senza il path.
             _perimetro_ok = False
@@ -4015,10 +3944,8 @@ _TOPIC_SCOPED_VERBS = {
     "files", "read_file",
     "read_document", "convert_document", "write_document", "write_file", "fetch",
     "put", "delete_file",
-    "migrate_storage",
     "post_message", "messages", "my_mentions", "mark_seen",
-    "remote_enable", "remote_disable", "remote_add", "remote_commit",
-    "remote_push", "remote_pull", "remote_status",
+    "drive_folder_add", "drive_folder_remove",
 }
 
 
@@ -4048,9 +3975,7 @@ _TOPIC_MUTATING_VERBS = frozenset({
     "save_summary", "save_agents_md", "add_minute", "archive",
     "telegram_bind", "telegram_unbind",
     "write_file", "convert_document", "write_document", "put", "delete_file",
-    "migrate_storage",
-    "remote_enable", "remote_disable", "remote_add", "remote_commit",
-    "remote_push", "remote_pull",
+    "drive_folder_add", "drive_folder_remove",
 })
 
 
@@ -4707,24 +4632,12 @@ def _dispatch_topic(name: str, a: dict):
                             "agent", agent_name())
     if verb == "delete_file":
         return svc.delete_file(a["tier"], a["name"], a["path"])
-    if verb == "migrate_storage":
-        return svc.migrate_storage(a["tier"], a["name"], a["target"])
-    # Remote pluggable (git/drive): storage sempre local, sync opzionale/manuale.
-    if verb == "remote_status":
-        return svc.remote_status(a["tier"], a["name"], a.get("mount"))
-    if verb == "remote_enable":
-        return svc.remote_enable(a["tier"], a["name"], a["type"], a.get("config"),
-                                 mount_name=a.get("mount"))
-    if verb == "remote_disable":
-        return svc.remote_disable(a["tier"], a["name"], a.get("mount"))
-    if verb == "remote_add":
-        return svc.remote_add(a["tier"], a["name"], a["path"], a.get("mount"))
-    if verb == "remote_commit":
-        return svc.remote_commit(a["tier"], a["name"], a.get("message", ""), a.get("mount"))
-    if verb == "remote_push":
-        return svc.remote_push(a["tier"], a["name"], a.get("mount"))
-    if verb == "remote_pull":
-        return svc.remote_pull(a["tier"], a["name"], a.get("mount"))
+    # Cartelle Drive dichiarate: whitelist + confinamento, mai un mount (#40).
+    if verb == "drive_folder_add":
+        return svc.drive_folder_add(a["tier"], a["name"], a["folder"],
+                                    mount_name=a.get("mount"), account=a.get("account"))
+    if verb == "drive_folder_remove":
+        return svc.drive_folder_remove(a["tier"], a["name"], a["mount"])
     raise ValueError(f"unknown topic verb: {name}")
 
 

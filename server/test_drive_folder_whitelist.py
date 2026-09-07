@@ -75,7 +75,7 @@ class ApprovedFoldersTests(unittest.TestCase):
             self.assertEqual(G.approved_folders(), [])
 
 
-class RemoteEnableTests(unittest.TestCase):
+class DriveFolderAddTests(unittest.TestCase):
     """La seconda metà della voce 24: l'owner sposta i muri, ma dentro il
     perimetro già approvato."""
 
@@ -110,11 +110,11 @@ class RemoteEnableTests(unittest.TestCase):
             TopicService._require_approved_folder(None, "SEAL-1", "acme")
             TopicService._require_approved_folder("", "SEAL-1", "acme")
 
-    def test_the_check_runs_where_the_remote_is_actually_declared(self):
+    def test_the_check_runs_where_the_folder_is_actually_declared(self):
         """Controllarlo altrove lascerebbe la strada aperta a chi passa da
-        `remote_enable` diretto — ed è il verbo che l'owner usa."""
+        `drive_folder_add` diretto — ed è il verbo che l'owner usa."""
         import inspect
-        src = inspect.getsource(TopicService.remote_enable)
+        src = inspect.getsource(TopicService.drive_folder_add)
         self.assertIn("_require_approved_folder", src)
 
 

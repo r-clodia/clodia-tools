@@ -56,56 +56,25 @@ class TheRepositoryOfAPushComesFromTheOriginTests(unittest.TestCase):
         self.assertEqual(visti["approvato"], "https://github.com/acme/vero")
 
 
-class TheCredentialIsFoundByRepositoryTests(unittest.TestCase):
-    META = {"mounts": [
-        {"name": "pubblico", "type": "git",
-         "config": {"url": "https://github.com/acme/pubblico.git"}},
-        {"name": "privato", "type": "git",
-         "config": {"url": "git@github.com:acme/privato.git"}},
-        {"name": "drive", "type": "drive", "config": {"folder": "X"}},
-    ]}
+class TheCredentialIsScopeLevelTests(unittest.TestCase):
+    """Da decision-record #40: il mount git è ritirato (nessuno lo usava in
+    produzione), e con lui la ricerca per-mount. Resta solo lo scope, che
+    `git_credential` risolve già (mount→scope→piattaforma, qui sempre senza
+    mount)."""
 
     def _svc(self, chiamate):
         class FintoSvc:
-            def _read_meta(_s, t, n):
-                return (TheCredentialIsFoundByRepositoryTests.META, "v1")
-
-            def git_credential(_s, t, n, mount=None):
-                chiamate.append(mount)
-                return (f"PAT-{mount or 'scope'}", "mount" if mount else "scope")
+            def git_credential(_s, t, n):
+                chiamate.append((t, n))
+                return ("PAT-scope", "scope")
         return FintoSvc()
 
-    def test_the_mount_that_carries_this_repository_supplies_it(self):
+    def test_it_asks_the_scope_credential_with_no_mount(self):
         chiamate = []
         tok = M._repo_credential(self._svc(chiamate), "SEAL-1", "acme",
-                                 "https://github.com/acme/privato")
-        self.assertEqual(tok, "PAT-privato")
-        self.assertEqual(chiamate, ["privato"])
-
-    def test_the_form_of_the_url_in_the_meta_does_not_matter(self):
-        """Nel meta l'URL è come l'owner l'ha scritto: SSH, con `.git`, con lo
-        slash. Un confronto testuale userebbe la credenziale sbagliata — o
-        nessuna — su un repository perfettamente approvato."""
-        chiamate = []
-        tok = M._repo_credential(self._svc(chiamate), "SEAL-1", "acme",
-                                 "https://github.com/acme/pubblico")
-        self.assertEqual(tok, "PAT-pubblico")
-
-    def test_a_repository_with_no_mount_falls_back_visibly(self):
-        """Un repo approvato per lista ma non montato resta usabile: la voce 31
-        lo prevede. Rifiutare qui romperebbe il caso che la lista serve a
-        rendere possibile."""
-        chiamate = []
-        tok = M._repo_credential(self._svc(chiamate), "SEAL-1", "acme",
-                                 "https://github.com/acme/altro")
+                                 "https://github.com/acme/qualunque")
         self.assertEqual(tok, "PAT-scope")
-        self.assertEqual(chiamate, [None])
-
-    def test_a_drive_mount_is_never_asked_for_a_git_credential(self):
-        chiamate = []
-        M._repo_credential(self._svc(chiamate), "SEAL-1", "acme",
-                           "https://github.com/acme/altro")
-        self.assertNotIn("drive", chiamate)
+        self.assertEqual(chiamate, [("SEAL-1", "acme")])
 
 
 class GateClassTests(unittest.TestCase):

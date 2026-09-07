@@ -91,14 +91,13 @@ class VerbClassificationTests(unittest.TestCase):
         self.assertNotIn("post_message", M._TOPIC_MUTATING_VERBS)
 
     def test_reading_verbs_are_not_mutating(self):
-        for v in ("open", "files", "read_file", "read_document", "fetch",
-                  "remote_status"):
+        for v in ("open", "files", "read_file", "read_document", "fetch"):
             with self.subTest(verbo=v):
                 self.assertNotIn(v, M._TOPIC_MUTATING_VERBS)
 
     def test_writing_verbs_are_mutating(self):
         for v in ("put", "write_file", "delete_file", "save_summary",
-                  "save_agents_md", "remote_push", "migrate_storage"):
+                  "save_agents_md", "drive_folder_add", "drive_folder_remove"):
             with self.subTest(verbo=v):
                 self.assertIn(v, M._TOPIC_MUTATING_VERBS)
 

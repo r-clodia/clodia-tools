@@ -252,7 +252,8 @@ def pull_request(repo: str, head: str, base: str, title: str,
         raise GitHubError(f"pull request supportata solo su github.com: {url}")
     if not token:
         raise GitHubError("nessuna credenziale per questo repository: "
-                          "l'owner la fornisce al mount (topic.remote_enable)")
+                          "l'owner deposita un PAT per questo scope, o si "
+                          "ricade sul token di piattaforma se presente")
     owner_repo = url.split("github.com/", 1)[1]
     req = urllib.request.Request(
         f"https://api.github.com/repos/{owner_repo}/pulls",

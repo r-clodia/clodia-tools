@@ -42,8 +42,8 @@ from . import pki_mint
 #: quella che dimentica una regola.
 #:
 #: Fuori resta tutto il control plane — `agents.*`, `jobs.*`, `settings.*`,
-#: `topic.remote_*`, `topic.telegram_bind`. Un token per parlare in una stanza
-#: non deve poter spostare i muri della stanza.
+#: `topic.drive_folder_*`, `topic.telegram_bind`. Un token per parlare in una
+#: stanza non deve poter spostare i muri della stanza.
 VERBS: tuple[str, ...] = (
     "topic.open",
     "topic.messages",

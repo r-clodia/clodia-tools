@@ -155,12 +155,12 @@ _TOPIC_TTL = 20.0
 
 
 def _topic_drive_folder(tier: str, name: str) -> Optional[str]:
-    """La cartella Drive del remote di un topic, o None.
+    """La cartella Drive dichiarata per questo topic, o None (decision-record #40).
 
     Cache breve: questa lettura avviene su ogni chiamata Drive dentro un canale,
     e il meta di un topic cambia raramente. La finestra di staleness è
-    accettabile perché cambiare il remote è ora un'azione da admin — e un admin
-    che sposta il perimetro può attendere venti secondi.
+    accettabile perché dichiarare/togliere una cartella è ora un'azione da
+    admin — e un admin che sposta il perimetro può attendere venti secondi.
     """
     import time
     key = (tier, name)
@@ -172,10 +172,13 @@ def _topic_drive_folder(tier: str, name: str) -> Optional[str]:
     try:
         from .. import main as _m
         meta = (_m._topics().open(tier, name) or {}).get("meta") or {}
-        from ..topics.service import mount_by_name
-        rem = mount_by_name(meta)
-        if str(rem.get("type") or "").lower() == "drive":
-            folder = ((rem.get("config") or {}).get("folder") or "").strip() or None
+        from ..topics.service import drive_folders
+        declared = drive_folders(meta)
+        # Prima dichiarata: stesso ripiego di `mount_by_name` pre-#40. Un topic
+        # con più cartelle dichiarate ha solo la prima come perimetro — la metà
+        # del lavoro che resta, come lo era allora.
+        if declared:
+            folder = str(declared[0].get("folder") or "").strip() or None
     except Exception as e:                       # noqa: BLE001
         # Meta illeggibile → nessuna radice DAL TOPIC. Non è un via libera: il
         # chiamante ricade sulle radici d'account, che possono essere vuote o

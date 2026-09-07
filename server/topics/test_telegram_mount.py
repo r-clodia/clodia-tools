@@ -1,10 +1,10 @@
 """Un gruppo Telegram collegato a uno scope, e le menzioni che ne escono.
 
-Il modello, deciso il 10 ago 2026: il gruppo è **un mount** — una risorsa che
-l'owner porta dentro lo scope, come un repository o una cartella Drive. Stessa
-forma (`{name, type, config}`), stessa collezione, stesso gate `walls`. Non è un
-filesystem, e non serve dirlo: la vista dei file monta già solo i tipi che lo
-sono, come fa da agosto col mount `git`.
+Il modello, deciso il 10 ago 2026 e ristrutturato il 7 set (decision-record
+#40): il gruppo è una risorsa che l'owner porta dentro lo scope, stessa forma
+(`{name, type, config}`), stesso gate `walls` — ma da #40 in un campo suo,
+`meta["telegram_binds"]`, non più condiviso con drive/git. Non è un
+filesystem e la vista dei file non lo tocca affatto.
 
 Cosa questi test tengono fermo, in ordine di quanto costa sbagliarlo.
 
@@ -273,16 +273,6 @@ class BindTests(Base):
         with self.assertRaises(TopicError):
             self.svc.telegram_bind("SEAL-1", "acme", "-100999",
                                    mode="tutto", people={"1": "matteo"})
-
-
-class ItIsNotAFilesystemTests(Base):
-    def test_a_telegram_mount_is_not_mounted_in_the_file_view(self):
-        """Non serve una regola nuova: la vista monta solo i tipi che sono
-        davvero un altro filesystem, ed è la stessa ragione per cui un mount
-        `git` ne è fuori dal 7 agosto."""
-        from .service import TopicService as T
-        svc = T.__new__(T)
-        self.assertIsNone(T._remote_mount_name(svc, {"mounts": [MOUNT]}))
 
 
 if __name__ == "__main__":

@@ -40,8 +40,8 @@ class ClassificationTests(unittest.TestCase):
     def test_moving_the_walls_is_its_own_class(self):
         """Il gate va all'OWNER dello scope, non a un admin qualunque (voce 24):
         è per questo che non stanno con i verbi di sistema."""
-        for v in ("topic.add_participant", "topic.remote_add",
-                  "topic.remote_disable", "topic.save_agents_md"):
+        for v in ("topic.add_participant", "topic.drive_folder_add",
+                  "topic.drive_folder_remove", "topic.save_agents_md"):
             with self.subTest(verbo=v):
                 self.assertEqual(gate.gate_class(v), gate.GATE_WALLS)
 
