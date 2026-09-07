@@ -39,16 +39,22 @@ def _motivo(response) -> str:
     return (getattr(response, "text", "") or "").strip()[:_MAX_TESTO]
 
 
-def raise_for_backend_error(response) -> None:
+def raise_for_backend_error(response, *, policy_deny: bool = True) -> None:
     """Solleva l'eccezione corrispondente allo status, col motivo del backend.
 
     403 → `PermissionError` (rifiuto), qualunque altro >= 400 → `ValueError`
     (guasto). Sotto il 400 non fa niente, come `raise_for_status`.
+
+    `policy_deny=False` per le chiamate a rotte che NON autorizzano per verbo —
+    le GET di metadati di `runtime.*`, per esempio. Lì un 403 non può venire da
+    una policy: verrebbe da un intermediario, e registrarlo come rifiuto
+    conterebbe come decisione un guasto — la confusione della #297, al
+    contrario. Il motivo passa comunque; cambia solo la classe.
     """
     status = getattr(response, "status_code", 0)
     if status < 400:
         return
     motivo = _motivo(response)
-    if status == 403:
+    if status == 403 and policy_deny:
         raise PermissionError(motivo or f"azione non consentita (HTTP {status})")
     raise ValueError(motivo or f"richiesta rifiutata dal backend (HTTP {status})")
