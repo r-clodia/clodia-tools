@@ -10,14 +10,16 @@ Avvio: ``python cli.py --http [--host 0.0.0.0] [--port 7849]``.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.routing import Mount
 
-from . import whitelist
+from . import inflight, whitelist
 from .main import app as mcp_server
 from .pki_verify import verify_session_token
 
@@ -106,6 +108,15 @@ class _AuthMiddleware:
 async def _lifespan(_app):
     async with _sm.run():
         LOG.info("clodia-tools MCP HTTP: session manager attivo")
+        # OFFLOAD + WATCHDOG (clodia-platform#316). `asyncio.to_thread` — che
+        # qui serve topic, github, telegram, web.fetch e imagegen — usa
+        # l'executor di default, che asyncio crea da sé con `min(32, cpu+4)`
+        # thread: su un'istanza da 2 vCPU sono 6, un tetto implicito e derivato
+        # dalle CPU per lavoro che aspetta disco e rete. Preso qui, il tetto è
+        # dichiarato e lo stato del pool diventa leggibile — che è la condizione
+        # per nominare una saturazione invece di dedurla.
+        inflight.install_offload_pool()
+        guardia = asyncio.create_task(inflight.watch())
         # M3++: in modalità runtime-keyless (CLODIA_ORCHESTRATOR_SECRET set) il
         # gateway è il trust-anchor → bootstrap PKI qui (CA + identità native),
         # idempotente. L'entrypoint di agent-server la salta in questa modalità.
@@ -137,7 +148,10 @@ async def _lifespan(_app):
                 LOG.warning("configurazione non operativa: %s", warning)
         except Exception as e:  # noqa: BLE001 - diagnostica best-effort
             LOG.warning("controllo coerenza configurazione fallito: %s", e)
-        yield
+        try:
+            yield
+        finally:
+            guardia.cancel()
 
 
 def build_app() -> Starlette:
@@ -182,6 +196,11 @@ def build_app() -> Starlette:
                 *telegram_routes, *agents_routes, *vault_routes,
                 *tool_routes, *mint_routes, *gate_routes, *logic_routes,
                 *egress_routes, *proxy_auth_routes],
+        # Chi è in volo, su tutte le rotte (clodia-platform#316). Attorno a tutto
+        # e non alle due rotte della issue: nell'incidente del 7 set le rotte
+        # «innocenti» erano quelle in timeout, e un contatore puntato sui
+        # sospetti misura solo l'alibi.
+        middleware=[Middleware(inflight.InflightMiddleware)],
         lifespan=_lifespan)
 
 
