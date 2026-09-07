@@ -18,6 +18,7 @@ import os
 import httpx
 
 from .. import whitelist
+from ._backend import raise_for_backend_error
 
 # agent-server è un container distinto: si raggiunge per service-name sulla rete
 # compose (non 127.0.0.1). Override via env per dev locale (es. 127.0.0.1:7842).
@@ -29,7 +30,12 @@ _TIMEOUT = httpx.Timeout(connect=4.0, read=15.0, write=10.0, pool=4.0)
 def _get(path: str):
     with httpx.Client(timeout=_TIMEOUT) as c:
         r = c.get(f"{AGENT_SERVER_URL}{path}")
-        r.raise_for_status()
+        # Il motivo del backend invece di metodo + URL (clodia-platform#297).
+        # `policy_deny=False`: queste rotte sono metadati anonimi e non
+        # autorizzano per verbo, quindi un 403 qui non è una decisione di policy
+        # ma un intermediario — chiamarlo rifiuto sporcherebbe il registro che
+        # serve a contare i rifiuti veri.
+        raise_for_backend_error(r, policy_deny=False)
         return r.json()
 
 
@@ -45,7 +51,11 @@ def _post(path: str, payload: dict, *, auth: bool = False,
             headers["Authorization"] = f"Bearer {token}"
     with httpx.Client(timeout=timeout or _TIMEOUT) as c:
         r = c.post(f"{AGENT_SERVER_URL}{path}", json=payload, headers=headers)
-        r.raise_for_status()
+        # Qui il corpo vale più che nella #297: queste rotte MUTANO e il loro
+        # rifiuto dice il RIMEDIO, non solo la causa («non è owner/partecipante
+        # di questo canale», «aggiungi un agent/utente registrato»). Un rimedio
+        # scartato dal proxy è un rimedio che non esiste.
+        raise_for_backend_error(r)
         return r.json()
 
 
