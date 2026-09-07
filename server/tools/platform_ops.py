@@ -18,6 +18,7 @@ import os
 import httpx
 
 from .. import whitelist
+from ._backend import raise_for_backend_error
 
 # Stesso agent-server di runtime.py (service-name sulla rete compose).
 AGENT_SERVER_URL = os.environ.get("AGENT_SERVER_URL", "http://agent-server:7842")
@@ -35,7 +36,11 @@ def _req(method: str, path: str, payload: dict | None = None):
         r = c.request(method, f"{AGENT_SERVER_URL}{path}",
                       json=payload if payload is not None else None,
                       headers=headers)
-        r.raise_for_status()
+        # Era `raise_for_status()`: il motivo scritto dal backend nel corpo
+        # veniva buttato via, e l'agente leggeva solo metodo e URL — il 403 di
+        # clodia-platform#297, indistinguibile da un grant mancante mentre il
+        # grant c'era.
+        raise_for_backend_error(r)
         # alcuni endpoint (204/delete) possono non avere body JSON
         if r.status_code == 204 or not (r.content or b"").strip():
             return {"ok": True}

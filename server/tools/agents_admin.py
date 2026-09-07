@@ -23,6 +23,7 @@ import os
 import httpx
 
 from .. import whitelist
+from ._backend import raise_for_backend_error
 
 AGENT_SERVER_URL = os.environ.get("AGENT_SERVER_URL", "http://agent-server:7842")
 _TIMEOUT = httpx.Timeout(connect=4.0, read=15.0, write=10.0, pool=4.0)
@@ -42,14 +43,7 @@ def _patch_caps(name: str, body: dict) -> dict:
     headers = {"Authorization": f"Bearer {tok}"} if tok else {}
     with httpx.Client(timeout=_TIMEOUT) as c:
         r = c.patch(f"{AGENT_SERVER_URL}/api/agents/{name}/caps", json=body, headers=headers)
-        if r.status_code >= 400:
-            try:
-                detail = r.json().get("detail") or r.text
-            except Exception:  # noqa: BLE001
-                detail = r.text
-            if r.status_code == 403:
-                raise PermissionError(detail)
-            raise ValueError(detail)
+        raise_for_backend_error(r)
         return r.json()
 
 
@@ -58,14 +52,7 @@ def _request(method: str, path: str, body: dict | None = None) -> dict:
     headers = {"Authorization": f"Bearer {tok}"} if tok else {}
     with httpx.Client(timeout=_TIMEOUT) as c:
         r = c.request(method, f"{AGENT_SERVER_URL}{path}", json=body, headers=headers)
-        if r.status_code >= 400:
-            try:
-                detail = r.json().get("detail") or r.text
-            except Exception:  # noqa: BLE001
-                detail = r.text
-            if r.status_code == 403:
-                raise PermissionError(detail)
-            raise ValueError(detail)
+        raise_for_backend_error(r)
         return r.json()
 
 
