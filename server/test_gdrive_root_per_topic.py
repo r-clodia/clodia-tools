@@ -234,24 +234,17 @@ class PerimeterMovingVerbsAreGatedTests(unittest.TestCase):
     esiste per non avere.
     """
 
-    def test_setting_or_removing_a_drive_remote_is_gated(self):
+    def test_setting_or_removing_a_drive_folder_is_gated(self):
         from . import gate
-        for v in ("topic.remote_add", "topic.remote_enable", "topic.remote_disable"):
+        for v in ("topic.drive_folder_add", "topic.drive_folder_remove"):
             with self.subTest(verb=v):
                 self.assertTrue(gate.is_gated(v), f"{v} sposta il perimetro")
 
-    def test_disable_is_gated_because_removing_the_perimeter_widens_it(self):
-        """La ragione meno ovvia: togliere il remote fa ricadere sulle radici
+    def test_remove_is_gated_because_removing_the_perimeter_widens_it(self):
+        """La ragione meno ovvia: togliere la cartella fa ricadere sulle radici
         d'account, che possono essere più larghe o assenti."""
         from . import gate
-        self.assertTrue(gate.is_gated("topic.remote_disable"))
-
-    def test_reading_the_remote_state_is_not_gated(self):
-        """Non si gata la lettura: `remote_status` e `remote_pull` non spostano
-        il confine, e gatarli renderebbe il gate un riflesso."""
-        from . import gate
-        self.assertFalse(gate.is_gated("topic.remote_status"))
-        self.assertFalse(gate.is_gated("topic.remote_pull"))
+        self.assertTrue(gate.is_gated("topic.drive_folder_remove"))
 
 
 if __name__ == "__main__":

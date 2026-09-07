@@ -61,7 +61,7 @@ _TAINTING_EXACT = frozenset({
     "email.read", "email.list", "email.search", "email.get_attachment",
     "telegram.inbox", "telegram.receive", "telegram.pull",
     # file e documenti caricati in un topic da chiunque
-    "topic.read_file", "topic.read_document", "topic.fetch", "topic.remote_pull",
+    "topic.read_file", "topic.read_document", "topic.fetch",
     # documenti esterni
     "gdrive.download", "gdocs.read", "gsheets.read", "gsheets.list_tabs",
     "gcalendar.list_events",

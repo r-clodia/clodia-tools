@@ -76,16 +76,14 @@ _GATE_CLASS = {
     # è la stessa cosa vista dall'altro lato.
     "topic.telegram_bind": GATE_WALLS, "topic.telegram_unbind": GATE_WALLS,
     "topic.remove_participant": GATE_WALLS,
-    "topic.remote_add": GATE_WALLS, "topic.remote_enable": GATE_WALLS,
-    "topic.remote_disable": GATE_WALLS,
+    "topic.drive_folder_add": GATE_WALLS, "topic.drive_folder_remove": GATE_WALLS,
     # OUTWARD — verso fuori
     "web.post": GATE_OUTWARD,
     # `github.push` e `github.pull_request` portano FUORI il lavoro fatto nella
     # scratch: il codice esce dallo scope e, sulla pull request, titolo e corpo
     # diventano leggibili sul repository. `github.clone` e `github.pull` portano
-    # DENTRO, e non sono gated per la stessa ragione per cui non lo è
-    # `remote_pull`: tirare dentro non sposta il confine — è già la lista dei
-    # repository approvati a dire da dove si può tirare.
+    # DENTRO e non spostano il confine — è già la lista dei repository approvati
+    # a dire da dove si può tirare — quindi non sono gated.
     "github.push": GATE_OUTWARD, "github.pull_request": GATE_OUTWARD,
     "egress.allow": GATE_OUTWARD, "ingress.allow": GATE_OUTWARD,
     "topic.save_agents_md": GATE_WALLS,
@@ -137,19 +135,16 @@ _DEFAULT_GATED_EXACT = frozenset({
     # gestione partecipanti di un topic (auto-invito / confused-deputy)
     "topic.add_participant", "topic.remove_participant",
     "topic.telegram_bind", "topic.telegram_unbind",
-    # Il remote Drive di un topic È il suo perimetro di accesso (la cartella del
-    # remote è la radice del confine per le chiamate dentro quel canale). Quindi
-    # impostarlo, cambiarlo o TOGLIERLO non è una preferenza: è una dichiarazione
-    # di autorità, e va autorizzata come tale — per un umano un verbo gated
-    # richiede il ruolo admin.
+    # La cartella Drive dichiarata di un topic È il suo perimetro di accesso
+    # per gdrive.* (decision-record #40, `gdrive_root.roots_for_call`). Quindi
+    # dichiararla, cambiarla o TOGLIERLA non è una preferenza: è una
+    # dichiarazione di autorità, e va autorizzata come tale — per un umano un
+    # verbo gated richiede il ruolo admin.
     #
-    # `remote_disable` è nella lista per la ragione meno ovvia: disabilitare il
-    # remote fa ricadere gli accessi sulle radici d'ACCOUNT, che possono essere
-    # più larghe. Togliere il perimetro è un allargamento.
-    #
-    # `remote_status` e `remote_pull` NON sono gated: leggere lo stato e tirare
-    # dentro i contenuti non spostano il confine.
-    "topic.remote_add", "topic.remote_enable", "topic.remote_disable",
+    # `drive_folder_remove` è nella lista per la ragione meno ovvia: toglierla
+    # fa ricadere gli accessi sulle radici d'ACCOUNT, che possono essere più
+    # larghe. Togliere il perimetro è un allargamento.
+    "topic.drive_folder_add", "topic.drive_folder_remove",
     # Le istruzioni di scope entrano nel contesto di OGNI agente della stanza a
     # OGNI turno: scriverle è un atto di autorità, non una preferenza. Finché il
     # gate non sarà rivolto all'owner dello scope (modello «titolo», voci 23-25

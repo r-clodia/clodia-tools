@@ -100,19 +100,14 @@ class BackwardCompatibilityTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
-    def test_the_check_runs_where_the_remote_is_declared(self):
+    def test_the_check_runs_where_github_verbs_are_dispatched(self):
+        """Da decision-record #40 non c'è più un `remote_enable` che monta un
+        repository: il controllo vive dove `github.clone/pull/push` risolvono
+        davvero il repository, in `_dispatch_github`."""
         import inspect
-        src = inspect.getsource(T.remote_enable)
+        from . import main as gw_main
+        src = inspect.getsource(gw_main._dispatch_github)
         self.assertIn("_require_approved_repo", src)
-
-    def test_it_runs_before_the_credential_is_stored(self):
-        """Se l'abilitazione viene rifiutata non deve restare in giro una
-        credenziale per un remote che non esiste — la stessa ragione per cui
-        `set_git_credential` era già stato messo prima di abilitare."""
-        import inspect
-        src = inspect.getsource(T.remote_enable)
-        self.assertLess(src.index("_require_approved_repo"),
-                        src.index("self.set_git_credential"))
 
 
 class ScopeTests(unittest.TestCase):

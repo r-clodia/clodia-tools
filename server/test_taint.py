@@ -240,8 +240,3 @@ class SourceResolutionTests(unittest.TestCase):
         self.assertEqual(unaccounted, set(),
                          f"verbi che contaminano senza fonte né motivo: {unaccounted}")
 
-    def test_a_read_from_a_vetted_folder_does_not_taint_on_pull_either(self):
-        """`remote_pull` è una lettura da quella fonte come le altre: trattarla a
-        parte contaminerebbe anche il pull da una cartella vagliata."""
-        from . import main
-        self.assertIn("topic.remote_pull", main._TOPIC_READ_VERBS)
