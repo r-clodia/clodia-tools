@@ -9,6 +9,7 @@ from __future__ import annotations
 import httpx
 
 from ..whitelist import tool_allowed
+from ._backend import raise_for_backend_error
 
 AGENT_SERVER_URL = "http://127.0.0.1:7842"
 _KNOWN_KINDS = {"clodia", "ada", "looper"}
@@ -45,7 +46,12 @@ def spawn(agent_type: str, task: str, wait_for_reply: bool = False) -> dict:
     with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=read_timeout, write=15.0, pool=5.0)) as c:
         # 1. Create chat of the requested kind
         r = c.post(f"{AGENT_SERVER_URL}/clodia/chats", json={"kind": kind})
-        r.raise_for_status()
+        # Il motivo del backend, non metodo + URL (clodia-platform#297). Se
+        # questa fallisce la seconda POST non parte, quindi non c'è un secondo
+        # errore da cui dedurre il primo. `policy_deny=False`: il permesso su
+        # `agent.spawn` è già stato deciso sopra da `tool_allowed`, e queste
+        # rotte non autorizzano per verbo — un 403 qui sarebbe un intermediario.
+        raise_for_backend_error(r, policy_deny=False)
         chat = r.json()
         chat_id = chat["chat_id"]
 
@@ -54,7 +60,7 @@ def spawn(agent_type: str, task: str, wait_for_reply: bool = False) -> dict:
         if not wait_for_reply:
             url += "?wait=false"
         r2 = c.post(url, json={"content": task})
-        r2.raise_for_status()
+        raise_for_backend_error(r2, policy_deny=False)
         result = r2.json()
         out: dict = {
             "ok": True,
