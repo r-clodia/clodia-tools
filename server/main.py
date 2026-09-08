@@ -775,11 +775,25 @@ _TOPIC_TOOLS: list[Tool] = [
         name="topic.read_file",
         description=("Legge il contenuto di un file del topic/canale. path relativo "
                      "(es. 'files/report.md'). I file di testo tornano come testo; "
-                     "i binari (PDF/immagini) tornano come base64 con encoding='base64'."),
+                     "i binari (PDF/immagini) tornano come base64 con encoding='base64'. "
+                     "Ritorna anche {size, offset, window, truncated, next_offset, "
+                     "remaining}. Su un file di testo LUNGO ricevi una FINESTRA di "
+                     "64 KB: se `truncated` è true, richiama lo stesso path con "
+                     "`offset=next_offset` per il pezzo dopo — il file non è tagliato, "
+                     "il resto va chiesto. Il taglio cade su un capo a riga, quindi le "
+                     "finestre si ricuciono senza righe spezzate. Alza `max_bytes` solo "
+                     "se il default ha tagliato ciò che serve: il risultato resta nel "
+                     "contesto e viene riletto a ogni azione successiva del turno."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
             "path": {"type": "string", "description": "path relativo al topic, es. files/foo.md"},
+            "offset": {"type": "integer", "minimum": 0,
+                       "description": ("byte da cui cominciare; usa il `next_offset` "
+                                       "della risposta precedente. Default 0.")},
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576,
+                          "description": ("byte di testo da tenere; default 65536 "
+                                          "(come web.fetch).")},
         }, "required": ["tier", "name", "path"]},
     ),
     Tool(
@@ -3839,6 +3853,22 @@ _BINARY_EXTS = {
 # mediato dal gateway). ~128KB grezzi ≈ ~170KB di base64.
 _B64_INLINE_CAP = 128 * 1024
 
+# Byte di TESTO che `topic.read_file` consegna in una risposta quando il
+# chiamante non dice quanti ne vuole. Stesso valore di `web.fetch` (#213) e per
+# la stessa ragione: il risultato non si paga una volta, si paga a ogni azione
+# successiva del turno. Il resto del file non è perduto — si chiede con
+# `offset=next_offset` (clodia-platform#228).
+_READ_FILE_WINDOW = 64 * 1024
+
+
+def _e_testo_utf8(data: bytes) -> bool:
+    """Il file è testo UTF-8? Deciso sul contenuto intero, non sull'estensione."""
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
 
 def _decode_b64_strict(content: str, filename: str) -> bytes:
     """Decodifica base64 in modo robusto: tollera whitespace/newline e padding
@@ -4479,22 +4509,37 @@ def _dispatch_topic(name: str, a: dict):
         return svc.list_files(a["tier"], a["name"], a.get("subpath", ""))
     if verb == "read_file":
         data = svc.read_file(a["tier"], a["name"], a["path"])
-        try:
-            return {"path": a["path"], "encoding": "utf-8", "content": data.decode("utf-8")}
-        except UnicodeDecodeError:
-            # File binario: NON riversare base64 grossi nel contesto (si tronca, brucia
-            # token, spesso fallisce). Sopra soglia → indirizza a topic.fetch (copia nello
-            # scratch, byte fuori dal modello). Vedi anche topic.read_document per il testo.
-            if len(data) > _B64_INLINE_CAP:
-                return {"ok": False, "path": a["path"], "size": len(data),
-                        "error": (f"file binario di {len(data)} byte: troppo grande per "
-                                  "read_file (base64 nel contesto). USA topic.fetch(tier, name, "
-                                  f"path='{a['path']}', dest=<path nel tuo scratch>) e lavora sul "
-                                  "file locale; per il solo testo usa topic.read_document.")}
-            import base64 as _b64
-            return {"path": a["path"], "encoding": "base64",
-                    "content": _b64.b64encode(data).decode("ascii"),
-                    "note": "file binario (PDF/immagine/...): decodifica da base64"}
+        # Testo o binario si decide sul file INTERO, non sulla finestra: un
+        # binario i cui primi 64 KB fossero per caso UTF-8 valido non deve
+        # cambiare natura a seconda di quanto ne si chiede.
+        if _e_testo_utf8(data):
+            # Un risultato di tool si paga una volta per produrlo e N volte per
+            # rileggerlo: resta nella sessione e il modello lo ri-legge a ogni
+            # chiamata successiva del turno (clodia-platform#228). Quindi il
+            # testo esce a FINESTRE, con il default di `web.fetch`, e la
+            # risposta dice come chiedere la prossima — un taglio muto farebbe
+            # concludere che il file finisce lì.
+            from . import docmd as _docmd
+            w = _docmd.finestra_byte(data, a.get("offset"),
+                                     a.get("max_bytes") or _READ_FILE_WINDOW)
+            return {"path": a["path"], "encoding": "utf-8",
+                    "content": w["data"].decode("utf-8"),
+                    "size": w["size"], "offset": w["offset"], "window": w["window"],
+                    "truncated": w["truncated"], "next_offset": w["next_offset"],
+                    "remaining": w["remaining"]}
+        # File binario: NON riversare base64 grossi nel contesto (si tronca, brucia
+        # token, spesso fallisce). Sopra soglia → indirizza a topic.fetch (copia nello
+        # scratch, byte fuori dal modello). Vedi anche topic.read_document per il testo.
+        if len(data) > _B64_INLINE_CAP:
+            return {"ok": False, "path": a["path"], "size": len(data),
+                    "error": (f"file binario di {len(data)} byte: troppo grande per "
+                              "read_file (base64 nel contesto). USA topic.fetch(tier, name, "
+                              f"path='{a['path']}', dest=<path nel tuo scratch>) e lavora sul "
+                              "file locale; per il solo testo usa topic.read_document.")}
+        import base64 as _b64
+        return {"path": a["path"], "encoding": "base64",
+                "content": _b64.b64encode(data).decode("ascii"),
+                "note": "file binario (PDF/immagine/...): decodifica da base64"}
     if verb == "read_document":
         from . import docmd as _docmd
         data = svc.read_file(a["tier"], a["name"], a["path"])

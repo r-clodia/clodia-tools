@@ -223,6 +223,70 @@ def finestra(text: str, offset: int = 0, max_chars: int = 60000) -> dict:
             "remaining": resta, "truncated": bool(resta), "window": len(pezzo)}
 
 
+def _continuazione(b: int) -> bool:
+    """Vero se questo byte è la CONTINUAZIONE di un carattere UTF-8 (`10xxxxxx`),
+    cioè se un taglio qui cadrebbe in mezzo a un carattere."""
+    return (b & 0xC0) == 0x80
+
+
+def finestra_byte(data: bytes, offset: int = 0, max_bytes: int = 65536) -> dict:
+    """La stessa finestra di `finestra`, ma su BYTE.
+
+    Serve a `topic.read_file`, che consegna un FILE e non un testo già estratto:
+    la quantità da cappare è quella dei byte che entrano nel contesto, e l'offset
+    che il chiamante può ripassare deve essere una posizione nel file — non
+    l'indice di un testo che si ottiene solo dopo averlo decodificato.
+
+    Ritorna `{data, offset, next_offset, remaining, truncated, window, size}`.
+    Due arretramenti, in quest'ordine:
+
+    1. all'ultimo capo a riga dentro la finestra, come per il testo, così la
+       finestra dopo comincia da una riga intera;
+    2. se non c'è (o è troppo lontano), all'inizio dell'ultimo carattere UTF-8
+       cominciato dentro la finestra. Senza questo passo un taglio a metà
+       sequenza multibyte non darebbe un carattere sbagliato, darebbe una
+       finestra INDECODIFICABILE: il verbo classificherebbe come binario un file
+       di testo perfettamente valido, e la sola cosa che decide se ci finisce
+       dentro è dove capita l'accento.
+    """
+    dati = data or b""
+    total = len(dati)
+    off = max(0, int(offset or 0))
+    cap = max(1, int(max_bytes or 65536))
+    # `next_offset` cade sempre su un confine; un offset scritto a mano no. Si
+    # avanza fino al confine invece di rifiutare: un byte in meno vale più di una
+    # finestra che non si decodifica.
+    while off < total and _continuazione(dati[off]):
+        off += 1
+    if off >= total:
+        return {"data": b"", "offset": total, "next_offset": None,
+                "remaining": 0, "truncated": False, "window": 0, "size": total}
+    fine = min(total, off + cap)
+    if fine < total:
+        taglio = dati.rfind(b"\n", off, fine)
+        if taglio > off and (fine - taglio) <= _RITORNO_MAX:
+            fine = taglio + 1
+        else:
+            indietro = fine
+            while indietro > off and _continuazione(dati[indietro]):
+                indietro -= 1
+            if indietro > off:
+                fine = indietro
+            else:
+                # La finestra è più corta di un carattere solo: arretrare la
+                # svuoterebbe e la paginazione non avanzerebbe MAI. Si allunga
+                # di ≤3 byte per chiudere il carattere — sforare il tetto di
+                # qualche byte è meno grave che non finire.
+                while fine < total and _continuazione(dati[fine]):
+                    fine += 1
+    pezzo = dati[off:fine]
+    resta = total - fine
+    return {"data": pezzo, "offset": off,
+            "next_offset": fine if resta else None,
+            "remaining": resta, "truncated": bool(resta),
+            "window": len(pezzo), "size": total}
+
+
 #: Un'intestazione Markdown (`## Art. 8`) — è così che `docrev` rende i titoli.
 _TITOLO = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 
