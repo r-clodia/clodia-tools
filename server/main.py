@@ -791,9 +791,12 @@ _TOPIC_TOOLS: list[Tool] = [
             "offset": {"type": "integer", "minimum": 0,
                        "description": ("byte da cui cominciare; usa il `next_offset` "
                                        "della risposta precedente. Default 0.")},
-            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576,
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 524288,
                           "description": ("byte di testo da tenere; default 65536 "
-                                          "(come web.fetch).")},
+                                          "(come web.fetch), tetto 524288 — un "
+                                          "valore più alto viene stretto al tetto. "
+                                          "Se ti serve tutto il file, non ti serve "
+                                          "nel contesto: usa topic.fetch.")},
         }, "required": ["tier", "name", "path"]},
     ),
     Tool(
@@ -3860,6 +3863,34 @@ _B64_INLINE_CAP = 128 * 1024
 # `offset=next_offset` (clodia-platform#228).
 _READ_FILE_WINDOW = 64 * 1024
 
+# Tetto FISICO: oltre questo non si va nemmeno chiedendolo, come per `web.fetch`
+# (`MAX_RESPONSE_BYTES`). Dichiararlo solo nello `inputSchema` non basta: lo
+# schema è un suggerimento a chi compone la chiamata, e l'argomento arriva da un
+# modello — o da un client MCP che quello schema non l'ha letto. Senza il clamp
+# qui, `max_bytes` è la porta di servizio per rimettere il file intero nel
+# contesto, cioè per riaprire clodia-platform#228 da dentro il verbo che lo
+# chiude. Chi ha davvero bisogno di più di 512 KB non li vuole nel contesto:
+# vuole `topic.fetch` e il file nel proprio scratch.
+_READ_FILE_MAX = 512 * 1024
+
+
+def _read_file_limite(grezzo) -> int:
+    """Byte da consegnare: `max_bytes` se chiesto, entro il tetto fisico.
+
+    Gemello di `web_fetch._limite`, messaggi compresi: un `int()` nudo su
+    `max_bytes="molti"` solleva un `ValueError` che dice «invalid literal for
+    int()», e chi lo legge non sa quale parametro correggere.
+    """
+    if grezzo in (None, ""):
+        return _READ_FILE_WINDOW
+    try:
+        n = int(grezzo)
+    except (TypeError, ValueError):
+        raise ValueError("max_bytes deve essere un intero di byte") from None
+    if n <= 0:
+        raise ValueError("max_bytes deve essere positivo")
+    return min(n, _READ_FILE_MAX)
+
 
 def _e_testo_utf8(data: bytes) -> bool:
     """Il file è testo UTF-8? Deciso sul contenuto intero, non sull'estensione."""
@@ -4521,12 +4552,22 @@ def _dispatch_topic(name: str, a: dict):
             # concludere che il file finisce lì.
             from . import docmd as _docmd
             w = _docmd.finestra_byte(data, a.get("offset"),
-                                     a.get("max_bytes") or _READ_FILE_WINDOW)
-            return {"path": a["path"], "encoding": "utf-8",
-                    "content": w["data"].decode("utf-8"),
-                    "size": w["size"], "offset": w["offset"], "window": w["window"],
-                    "truncated": w["truncated"], "next_offset": w["next_offset"],
-                    "remaining": w["remaining"]}
+                                     _read_file_limite(a.get("max_bytes")))
+            out = {"path": a["path"], "encoding": "utf-8",
+                   "content": w["data"].decode("utf-8"),
+                   "size": w["size"], "offset": w["offset"], "window": w["window"],
+                   "truncated": w["truncated"], "next_offset": w["next_offset"],
+                   "remaining": w["remaining"]}
+            if w["truncated"]:
+                # I campi da soli dicono CHE è tagliato; la nota dice cosa fare.
+                # È la stessa forma di `web.fetch` e `read_document`, e sta nel
+                # risultato — che è dove l'agente guarda — invece che nella
+                # descrizione del tool, che ha letto una volta all'inizio.
+                out["note"] = (
+                    f"finestra {w['offset']}–{w['offset'] + w['window']} di "
+                    f"{w['size']} byte (default {_READ_FILE_WINDOW}): per il "
+                    f"resto richiama con offset={w['next_offset']}")
+            return out
         # File binario: NON riversare base64 grossi nel contesto (si tronca, brucia
         # token, spesso fallisce). Sopra soglia → indirizza a topic.fetch (copia nello
         # scratch, byte fuori dal modello). Vedi anche topic.read_document per il testo.

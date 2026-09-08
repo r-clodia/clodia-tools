@@ -187,5 +187,92 @@ class IlVerboLaUsa(unittest.TestCase):
         self.assertIn("finestra_byte(", corpo)
 
 
+class IlTettoValeAncheSeChiediDiPiu(unittest.TestCase):
+    """Un tetto dichiarato solo nello `inputSchema` non è un tetto.
+
+    Lo schema è un SUGGERIMENTO a chi compone la chiamata: dice `maximum` e si
+    fida. Ma l'argomento arriva da un modello — e a volte da un modello che ha
+    sbagliato uno zero, o da un client MCP che non ha letto lo schema affatto.
+    Se il dispatch passa il valore così com'è, `max_bytes` diventa la strada per
+    riottenere il difetto che questo verbo ha appena chiuso: file intero nel
+    contesto, riletto a ogni azione del turno (clodia-platform#228).
+
+    `web.fetch` questo pezzo lo ha (`_limite` fa `min(n, MAX_RESPONSE_BYTES)`):
+    qui si prova che ce l'ha anche `read_file`, e che quando la finestra taglia
+    lo DICE nel risultato — non solo nella descrizione del tool, che l'agente
+    legge una volta, ma nel dizionario che sta guardando.
+    """
+
+    #: Più grande del tetto, non solo del default: serve a distinguere «cappato
+    #: a 512 KB» da «cappato a 64 KB».
+    ENORME = ("riga di testo con accenti à è ì ò ù\n" * 20000).encode("utf-8")
+
+    def _read(self, **extra):
+        class _S:
+            def read_file(self, tier, name, path):
+                return IlTettoValeAncheSeChiediDiPiu.ENORME
+
+        with patch.object(M, "_topics", lambda: _S()), \
+             patch.object(M, "_require_topic_member", lambda *a, **k: None):
+            return M._dispatch_topic("topic.read_file",
+                                     {"tier": "SEAL-1", "name": "acme",
+                                      "path": "files/report.md", **extra})
+
+    def test_un_max_bytes_assurdo_viene_stretto_al_tetto(self) -> None:
+        """IL CASO: `max_bytes=100000000` non deve consegnare 780 KB di file."""
+        self.assertGreater(len(self.ENORME), M._READ_FILE_MAX,
+                           "il fixture deve superare il tetto, o il test non prova nulla")
+        r = self._read(max_bytes=100_000_000)
+        self.assertLessEqual(r["window"], M._READ_FILE_MAX)
+        self.assertTrue(r["truncated"])
+        self.assertIsNotNone(r["next_offset"])
+
+    def test_il_resto_resta_raggiungibile_anche_dopo_il_clamp(self) -> None:
+        """Stringere non deve rendere irraggiungibile la coda: è il difetto
+        originale di `read_document`, non lo si reintroduce dalla porta del tetto."""
+        pezzi, off, giri = [], 0, 0
+        while off is not None and giri < 50:
+            r = self._read(offset=off, max_bytes=100_000_000)
+            pezzi.append(r["content"])
+            off = r["next_offset"]
+            giri += 1
+        self.assertEqual(self.ENORME.decode("utf-8"), "".join(pezzi))
+
+    def test_un_max_bytes_non_numerico_lo_dice(self) -> None:
+        """`int("molti")` grezzo dà un ValueError che non insegna niente."""
+        with self.assertRaises(ValueError) as e:
+            self._read(max_bytes="molti")
+        self.assertIn("max_bytes", str(e.exception))
+
+    def test_un_max_bytes_negativo_non_svuota_la_finestra(self) -> None:
+        with self.assertRaises(ValueError) as e:
+            self._read(max_bytes=-1)
+        self.assertIn("max_bytes", str(e.exception))
+
+    def test_la_finestra_troncata_dice_come_chiedere_il_resto(self) -> None:
+        """`truncated: true` senza istruzioni è la metà inutile del messaggio:
+        è nel RISULTATO che si guarda, non nella descrizione del verbo."""
+        r = self._read()
+        self.assertIn("note", r)
+        self.assertIn(f"offset={r['next_offset']}", r["note"])
+
+    def test_un_file_intero_non_porta_una_nota_che_non_serve(self) -> None:
+        class _S:
+            def read_file(self, tier, name, path):
+                return b"corto\n"
+
+        with patch.object(M, "_topics", lambda: _S()), \
+             patch.object(M, "_require_topic_member", lambda *a, **k: None):
+            r = M._dispatch_topic("topic.read_file",
+                                  {"tier": "SEAL-1", "name": "acme", "path": "files/x.md"})
+        self.assertNotIn("note", r)
+
+    def test_lo_schema_non_promette_piu_del_tetto(self) -> None:
+        """Se schema e codice divergono, l'agente pianifica su un numero falso."""
+        t = {x.name: x for x in M._TOPIC_TOOLS}["topic.read_file"]
+        self.assertEqual(M._READ_FILE_MAX,
+                         t.inputSchema["properties"]["max_bytes"]["maximum"])
+
+
 if __name__ == "__main__":
     unittest.main()
