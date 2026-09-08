@@ -1080,9 +1080,24 @@ _PROFILE_TOOLS: list[Tool] = [
          description="Elenca i file allegati al profilo di un agent (se autorizzato): name, size, mtime.",
          inputSchema={"type": "object", "properties": {"agent": {"type": "string"}}, "required": ["agent"]}),
     Tool(name="profile.read_file",
-         description="Legge un file allegato al profilo (se autorizzato). Ritorna testo, o base64 per i binari.",
+         description=("Legge un file allegato al profilo (se autorizzato). Ritorna "
+                      "testo, o base64 per i binari PICCOLI: per un binario grande "
+                      "(PDF, immagine, scansione) usa profile.fetch, che porta i byte "
+                      "nel tuo scratch invece che nel contesto."),
          inputSchema={"type": "object", "properties": {
              "agent": {"type": "string"}, "filename": {"type": "string"}}, "required": ["agent", "filename"]}),
+    Tool(name="profile.fetch",
+         description=("Scarica un file allegato al profilo (se autorizzato) nel TUO "
+                      "scratch: i byte finiscono su file, niente base64 nel modello "
+                      "(come topic.fetch/memory.fetch). USA QUESTO per i BINARI e i "
+                      "file grandi al posto di profile.read_file, e poi lavora sul "
+                      "file locale con le skill standard (pdf/xlsx/docx/…). "
+                      "L'autorizzazione è la stessa di profile.read_file."),
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string"}, "filename": {"type": "string"},
+             "dest": {"type": "string",
+                      "description": "path assoluto di destinazione nel tuo scratch"}},
+             "required": ["agent", "filename", "dest"]}),
     Tool(name="profile.grant",
          description="Concedi/revoca a un altro agent la lettura del TUO profilo (o, se admin, di un altro). granted=false per revocare.",
          inputSchema={"type": "object", "properties": {
@@ -1712,7 +1727,34 @@ def _dispatch_profile(name: str, a: dict, caller: str | None):
         try:
             return {"filename": a["filename"], "text": raw.decode("utf-8")}
         except UnicodeDecodeError:
+            # File binario: NON riversare base64 grossi nel contesto (si tronca,
+            # brucia token, spesso fallisce). Stessa soglia e stesso rimedio di
+            # `topic.read_file`, che qui mancava: un allegato di profilo (un CV
+            # scansionato, un estratto conto) usciva intero a qualunque
+            # dimensione (clodia-platform#320). Sopra soglia → `profile.fetch`,
+            # e il rifiuto porta l'alternativa, non solo il divieto.
+            if len(raw) > _B64_INLINE_CAP:
+                return {"ok": False, "filename": a["filename"], "size": len(raw),
+                        "error": (f"file binario di {len(raw)} byte: troppo grande per "
+                                  "read_file (base64 nel contesto). USA "
+                                  f"profile.fetch(agent='{target}', "
+                                  f"filename='{a['filename']}', dest=<path nel tuo "
+                                  "scratch>) e lavora sul file locale.")}
             return {"filename": a["filename"], "encoding": "base64", "data": _b64.b64encode(raw).decode()}
+    if sub == "fetch":
+        # I byte del profilo → un file nello scratch dell'agent, mai nel modello
+        # (come `topic.fetch`/`memory.fetch`). L'ACL è la STESSA di `read_file`
+        # perché è `prof.read_file` a farla: `fetch` è un'altra strada per gli
+        # stessi byte, non una porta di servizio sui PII di un altro.
+        # Destinazione validata PRIMA di leggere: un `dest` sbagliato è un
+        # errore del chiamante, e non c'è ragione di tirare fuori dal vault i
+        # PII di qualcuno per una chiamata che finirà in un rifiuto.
+        dest = _safe_scratch_path(a["dest"])
+        raw = prof.read_file(caller, target, a["filename"])
+        _os.makedirs(_os.path.dirname(dest) or ".", exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(raw)
+        return {"filename": a["filename"], "bytes": len(raw), "dest": dest, "ok": True}
     if sub == "grant":
         return prof.grant(caller, target, a["grantee"], bool(a.get("granted", True)))
     raise ValueError(f"unknown profile tool: {name}")
