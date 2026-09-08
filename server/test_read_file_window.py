@@ -185,7 +185,9 @@ class IlVerboLaUsa(unittest.TestCase):
         src = inspect.getsource(M._dispatch_topic)
         corpo = src[src.index('if verb == "read_file":'):]
         corpo = corpo[:corpo.index('if verb == "read_document":')]
-        self.assertIn("finestra_byte(", corpo)
+        # `_finestra_testo` è il wrapper che chiama `finestra_byte` e monta lo
+        # schema della risposta: condiviso con profile.read_file/memory.read.
+        self.assertIn("_finestra_testo(", corpo)
 
 
 class IlTettoValeAncheSeChiediDiPiu(unittest.TestCase):

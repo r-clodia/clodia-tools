@@ -1099,9 +1099,24 @@ _PROFILE_TOOLS: list[Tool] = [
          description="Elenca i file allegati al profilo di un agent (se autorizzato): name, size, mtime.",
          inputSchema={"type": "object", "properties": {"agent": {"type": "string"}}, "required": ["agent"]}),
     Tool(name="profile.read_file",
-         description="Legge un file allegato al profilo (se autorizzato). Ritorna testo, o base64 per i binari.",
+         description=("Legge un file allegato al profilo (se autorizzato). Ritorna testo, "
+                      "o base64 per i binari. SUI FILE DI TESTO ritorna anche {size, "
+                      "offset, window, truncated, next_offset, remaining}: ricevi una "
+                      "FINESTRA di 64 KB e, se `truncated` è true, richiami lo stesso "
+                      "file con `offset=next_offset` per il pezzo dopo — il file non è "
+                      "tagliato, il resto va chiesto. I binari escono interi, senza "
+                      "campi di finestra (un base64 a metà non si decodifica)."),
          inputSchema={"type": "object", "properties": {
-             "agent": {"type": "string"}, "filename": {"type": "string"}}, "required": ["agent", "filename"]}),
+             "agent": {"type": "string"}, "filename": {"type": "string"},
+             "offset": {"type": "integer", "minimum": 0,
+                        "description": ("byte da cui cominciare; usa il `next_offset` "
+                                        "della risposta precedente. Default 0.")},
+             "max_bytes": {"type": "integer", "minimum": 1, "maximum": 524288,
+                           "description": ("byte di testo da tenere; default 65536 "
+                                           "(come topic.read_file e web.fetch), tetto "
+                                           "524288 — un valore più alto viene stretto "
+                                           "al tetto.")}},
+             "required": ["agent", "filename"]}),
     Tool(name="profile.grant",
          description="Concedi/revoca a un altro agent la lettura del TUO profilo (o, se admin, di un altro). granted=false per revocare.",
          inputSchema={"type": "object", "properties": {
@@ -1642,9 +1657,20 @@ _MEMORY_TOOLS: list[Tool] = [
     Tool(name="memory.read",
          description=("Legge un file della tua seed memory (default `MEMORY.md`, la tua "
                       "memoria di note/esperienza sempre disponibile). La memory è "
-                      "condivisa fra le tue istanze."),
+                      "condivisa fra le tue istanze. Ritorna anche {size, offset, "
+                      "window, truncated, next_offset, remaining}: se `truncated` è "
+                      "true richiama con `offset=next_offset` per il pezzo dopo — il "
+                      "file non è tagliato, il resto va chiesto."),
          inputSchema={"type": "object", "properties": {
-             "filename": {"type": "string", "description": "default MEMORY.md"}}}),
+             "filename": {"type": "string", "description": "default MEMORY.md"},
+             "offset": {"type": "integer", "minimum": 0,
+                        "description": ("byte da cui cominciare; usa il `next_offset` "
+                                        "della risposta precedente. Default 0.")},
+             "max_bytes": {"type": "integer", "minimum": 1, "maximum": 524288,
+                           "description": ("byte di testo da tenere; default 65536 "
+                                           "(come topic.read_file e web.fetch), tetto "
+                                           "524288 — un valore più alto viene stretto "
+                                           "al tetto.")}}}),
     Tool(name="memory.write",
          description=("Scrive (sovrascrive) un file della tua seed memory. Usa per "
                       "aggiornare note durature o dati strutturati (es. una whitelist "
@@ -1728,10 +1754,13 @@ def _dispatch_profile(name: str, a: dict, caller: str | None):
     if sub == "read_file":
         import base64 as _b64
         raw = prof.read_file(caller, target, a["filename"])
-        try:
-            return {"filename": a["filename"], "text": raw.decode("utf-8")}
-        except UnicodeDecodeError:
-            return {"filename": a["filename"], "encoding": "base64", "data": _b64.b64encode(raw).decode()}
+        # Stesso difetto e stesso rimedio di `topic.read_file`: un allegato di
+        # profilo (un CV, un estratto conto) entrava INTERO nel contesto e da lì
+        # si ripagava a ogni azione del turno (clodia-platform#228, #319). Testo
+        # o binario si decide sul file intero, non sulla finestra.
+        if _e_testo_utf8(raw):
+            return {"filename": a["filename"], **_finestra_testo(raw, a, "text")}
+        return {"filename": a["filename"], "encoding": "base64", "data": _b64.b64encode(raw).decode()}
     if sub == "grant":
         return prof.grant(caller, target, a["grantee"], bool(a.get("granted", True)))
     raise ValueError(f"unknown profile tool: {name}")
@@ -2020,7 +2049,18 @@ def _dispatch_memory(name: str, a: dict):
     from .tools import memory as mem
     verb = name.split(NS_SEP_DOT, 1)[1]
     if verb == "read":
-        return mem.read(a.get("filename"))
+        r = mem.read(a.get("filename"))
+        if not r.get("exists"):
+            return r
+        # `memory.write` cappa a 64 KB, ma `read` legge anche i file arrivati da
+        # un'altra strada (webui, versioni precedenti, un JSON cresciuto): il
+        # tetto di chi scrive non è il tetto di chi legge, ed è la lettura che
+        # finisce nel contesto (clodia-platform#228). Il testo si ri-codifica per
+        # tagliare su BYTE come gli altri verbi di lettura: un `offset` che
+        # significa la stessa cosa in tre verbi vale la ri-codifica di un file
+        # che sta già in memoria.
+        return {"file": r["file"], "exists": True,
+                **_finestra_testo(r["content"].encode("utf-8"), a)}
     if verb == "write":
         return mem.write(a["content"], a.get("filename"))
     if verb == "append":
@@ -3903,6 +3943,35 @@ def _e_testo_utf8(data: bytes) -> bool:
     return True
 
 
+def _finestra_testo(data: bytes, a: dict, campo: str = "content") -> dict:
+    """La finestra di byte di un file di TESTO, nella forma che i verbi di
+    lettura ritornano: `{<campo>, size, offset, window, truncated, next_offset,
+    remaining}` più, quando resta qualcosa, la `note` che dice come chiederlo.
+
+    Sta qui in un posto solo perché il difetto era lo stesso in tre verbi
+    (`topic.read_file`, `profile.read_file`, `memory.read`: clodia-platform#228
+    e #319) e perché lo SCHEMA della risposta è un contratto: se un verbo
+    chiamasse `remaining` «rest» o dimenticasse la nota, l'agente che ha
+    imparato a paginare su un verbo si fermerebbe sull'altro. Chi aggiungerà il
+    quarto verbo di lettura aggiunge una riga, non ricopia questo dizionario.
+    """
+    from . import docmd as _docmd
+    w = _docmd.finestra_byte(data, a.get("offset"),
+                             _read_file_limite(a.get("max_bytes")))
+    out = {campo: w["data"].decode("utf-8"),
+           "size": w["size"], "offset": w["offset"], "window": w["window"],
+           "truncated": w["truncated"], "next_offset": w["next_offset"],
+           "remaining": w["remaining"]}
+    if w["truncated"]:
+        # I campi da soli dicono CHE è tagliato; la nota dice cosa fare. Sta nel
+        # risultato — che è dove l'agente guarda — invece che nella descrizione
+        # del tool, che ha letto una volta all'inizio.
+        out["note"] = (f"finestra {w['offset']}–{w['offset'] + w['window']} di "
+                       f"{w['size']} byte (default {_READ_FILE_WINDOW}): per il "
+                       f"resto richiama con offset={w['next_offset']}")
+    return out
+
+
 def _decode_b64_strict(content: str, filename: str) -> bytes:
     """Decodifica base64 in modo robusto: tollera whitespace/newline e padding
     mancante (errori comuni quando un LLM passa un blob lungo), ma su input non
@@ -4551,25 +4620,11 @@ def _dispatch_topic(name: str, a: dict):
             # chiamata successiva del turno (clodia-platform#228). Quindi il
             # testo esce a FINESTRE, con il default di `web.fetch`, e la
             # risposta dice come chiedere la prossima — un taglio muto farebbe
-            # concludere che il file finisce lì.
-            from . import docmd as _docmd
-            w = _docmd.finestra_byte(data, a.get("offset"),
-                                     _read_file_limite(a.get("max_bytes")))
-            out = {"path": a["path"], "encoding": "utf-8",
-                   "content": w["data"].decode("utf-8"),
-                   "size": w["size"], "offset": w["offset"], "window": w["window"],
-                   "truncated": w["truncated"], "next_offset": w["next_offset"],
-                   "remaining": w["remaining"]}
-            if w["truncated"]:
-                # I campi da soli dicono CHE è tagliato; la nota dice cosa fare.
-                # È la stessa forma di `web.fetch` e `read_document`, e sta nel
-                # risultato — che è dove l'agente guarda — invece che nella
-                # descrizione del tool, che ha letto una volta all'inizio.
-                out["note"] = (
-                    f"finestra {w['offset']}–{w['offset'] + w['window']} di "
-                    f"{w['size']} byte (default {_READ_FILE_WINDOW}): per il "
-                    f"resto richiama con offset={w['next_offset']}")
-            return out
+            # concludere che il file finisce lì. Stessa forma di `web.fetch` e
+            # `read_document`, e la stessa di `profile.read_file`/`memory.read`:
+            # è `_finestra_testo` a tenerle allineate.
+            return {"path": a["path"], "encoding": "utf-8",
+                    **_finestra_testo(data, a)}
         # File binario: NON riversare base64 grossi nel contesto (si tronca, brucia
         # token, spesso fallisce). Sopra soglia → indirizza a topic.fetch (copia nello
         # scratch, byte fuori dal modello). Vedi anche topic.read_document per il testo.
