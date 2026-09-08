@@ -21,7 +21,8 @@ Le proprietà provate qui:
   5. il verbo li usa davvero, dichiara i parametri e il default è 64 KB come
      `web.fetch`;
   6. i binari continuano a comportarsi come prima: base64 sotto soglia, rinvio a
-     `topic.fetch` sopra.
+     `topic.fetch` sopra — identici anche se si passano `offset`/`max_bytes`,
+     perché un base64 a metà non è un pezzo di file, è un file illeggibile.
 """
 from __future__ import annotations
 
@@ -272,6 +273,50 @@ class IlTettoValeAncheSeChiediDiPiu(unittest.TestCase):
         t = {x.name: x for x in M._TOPIC_TOOLS}["topic.read_file"]
         self.assertEqual(M._READ_FILE_MAX,
                          t.inputSchema["properties"]["max_bytes"]["maximum"])
+
+
+class IlRamoBinarioIgnoraLaFinestra(unittest.TestCase):
+    """L'unico punto dove i due percorsi possono divergere in SILENZIO.
+
+    `offset`/`max_bytes` valgono per il testo: un base64 tagliato a metà non è un
+    pezzo di file, è un file che non si decodifica — e chi lo riceve non ha modo
+    di accorgersene guardando il contenuto. Il ramo binario deve quindi
+    rispondere identico con o senza i parametri nuovi, e non deve portare campi
+    di finestra: un `next_offset` lì prometterebbe un resto richiedibile che
+    nessuna chiamata sa consegnare.
+
+    Sono invarianti, non un difetto corretto: la finestra si applica dopo la
+    decisione testo/binario e quindi oggi passano. Restano perché quella
+    decisione è a due righe da qui, e chi la sposterà sopra il ramo binario per
+    «cappare prima» non ha altro modo di scoprire cosa ha rotto.
+    """
+
+    #: Non decodificabile come UTF-8, e più corto di `_B64_INLINE_CAP`.
+    PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4
+
+    def _read(self, **extra):
+        class _S:
+            def read_file(self, tier, name, path):
+                return IlRamoBinarioIgnoraLaFinestra.PNG
+
+        with patch.object(M, "_topics", lambda: _S()), \
+             patch.object(M, "_require_topic_member", lambda *a, **k: None):
+            return M._dispatch_topic("topic.read_file",
+                                     {"tier": "SEAL-1", "name": "acme",
+                                      "path": "files/foto.png", **extra})
+
+    def test_la_risposta_non_cambia_con_offset_e_max_bytes(self) -> None:
+        self.assertEqual(self._read(), self._read(offset=5000, max_bytes=1))
+
+    def test_il_base64_resta_quello_del_file_intero(self) -> None:
+        import base64
+        r = self._read(offset=5000, max_bytes=1)
+        self.assertEqual(self.PNG, base64.b64decode(r["content"]))
+
+    def test_non_dichiara_una_finestra_che_non_esiste(self) -> None:
+        r = self._read(offset=5000, max_bytes=1)
+        for campo in ("window", "next_offset", "remaining", "truncated"):
+            self.assertNotIn(campo, r)
 
 
 if __name__ == "__main__":
