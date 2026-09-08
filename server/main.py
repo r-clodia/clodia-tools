@@ -1100,12 +1100,14 @@ _PROFILE_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {"agent": {"type": "string"}}, "required": ["agent"]}),
     Tool(name="profile.read_file",
          description=("Legge un file allegato al profilo (se autorizzato). Ritorna testo, "
-                      "o base64 per i binari. SUI FILE DI TESTO ritorna anche {size, "
-                      "offset, window, truncated, next_offset, remaining}: ricevi una "
-                      "FINESTRA di 64 KB e, se `truncated` è true, richiami lo stesso "
+                      "o base64 per i binari PICCOLI. SUI FILE DI TESTO ritorna anche "
+                      "{size, offset, window, truncated, next_offset, remaining}: ricevi "
+                      "una FINESTRA di 64 KB e, se `truncated` è true, richiami lo stesso "
                       "file con `offset=next_offset` per il pezzo dopo — il file non è "
-                      "tagliato, il resto va chiesto. I binari escono interi, senza "
-                      "campi di finestra (un base64 a metà non si decodifica)."),
+                      "tagliato, il resto va chiesto. I binari escono interi, senza campi "
+                      "di finestra (un base64 a metà non si decodifica): per un binario "
+                      "GRANDE (PDF, immagine, scansione) usa profile.fetch, che porta i "
+                      "byte nel tuo scratch invece che nel contesto."),
          inputSchema={"type": "object", "properties": {
              "agent": {"type": "string"}, "filename": {"type": "string"},
              "offset": {"type": "integer", "minimum": 0,
@@ -1115,8 +1117,21 @@ _PROFILE_TOOLS: list[Tool] = [
                            "description": ("byte di testo da tenere; default 65536 "
                                            "(come topic.read_file e web.fetch), tetto "
                                            "524288 — un valore più alto viene stretto "
-                                           "al tetto.")}},
+                                           "al tetto. Se ti serve tutto il file, non ti "
+                                           "serve nel contesto: usa profile.fetch.")}},
              "required": ["agent", "filename"]}),
+    Tool(name="profile.fetch",
+         description=("Scarica un file allegato al profilo (se autorizzato) nel TUO "
+                      "scratch: i byte finiscono su file, niente base64 nel modello "
+                      "(come topic.fetch/memory.fetch). USA QUESTO per i BINARI e i "
+                      "file grandi al posto di profile.read_file, e poi lavora sul "
+                      "file locale con le skill standard (pdf/xlsx/docx/…). "
+                      "L'autorizzazione è la stessa di profile.read_file."),
+         inputSchema={"type": "object", "properties": {
+             "agent": {"type": "string"}, "filename": {"type": "string"},
+             "dest": {"type": "string",
+                      "description": "path assoluto di destinazione nel tuo scratch"}},
+             "required": ["agent", "filename", "dest"]}),
     Tool(name="profile.grant",
          description="Concedi/revoca a un altro agent la lettura del TUO profilo (o, se admin, di un altro). granted=false per revocare.",
          inputSchema={"type": "object", "properties": {
@@ -1760,7 +1775,35 @@ def _dispatch_profile(name: str, a: dict, caller: str | None):
         # o binario si decide sul file intero, non sulla finestra.
         if _e_testo_utf8(raw):
             return {"filename": a["filename"], **_finestra_testo(raw, a, "text")}
+        # Il binario non ha finestra (un base64 a metà non si decodifica), e
+        # quindi ha bisogno dell'altro rimedio: NON riversare base64 grossi nel
+        # contesto (si tronca, brucia token, spesso fallisce). Stessa soglia di
+        # `topic.read_file`, che qui mancava: un allegato di profilo (un CV
+        # scansionato, un estratto conto) usciva intero a qualunque dimensione
+        # (clodia-platform#320). Sopra soglia → `profile.fetch`, e il rifiuto
+        # porta l'alternativa, non solo il divieto.
+        if len(raw) > _B64_INLINE_CAP:
+            return {"ok": False, "filename": a["filename"], "size": len(raw),
+                    "error": (f"file binario di {len(raw)} byte: troppo grande per "
+                              "read_file (base64 nel contesto). USA "
+                              f"profile.fetch(agent='{target}', "
+                              f"filename='{a['filename']}', dest=<path nel tuo "
+                              "scratch>) e lavora sul file locale.")}
         return {"filename": a["filename"], "encoding": "base64", "data": _b64.b64encode(raw).decode()}
+    if sub == "fetch":
+        # I byte del profilo → un file nello scratch dell'agent, mai nel modello
+        # (come `topic.fetch`/`memory.fetch`). L'ACL è la STESSA di `read_file`
+        # perché è `prof.read_file` a farla: `fetch` è un'altra strada per gli
+        # stessi byte, non una porta di servizio sui PII di un altro.
+        # Destinazione validata PRIMA di leggere: un `dest` sbagliato è un
+        # errore del chiamante, e non c'è ragione di tirare fuori dal vault i
+        # PII di qualcuno per una chiamata che finirà in un rifiuto.
+        dest = _safe_scratch_path(a["dest"])
+        raw = prof.read_file(caller, target, a["filename"])
+        _os.makedirs(_os.path.dirname(dest) or ".", exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(raw)
+        return {"filename": a["filename"], "bytes": len(raw), "dest": dest, "ok": True}
     if sub == "grant":
         return prof.grant(caller, target, a["grantee"], bool(a.get("granted", True)))
     raise ValueError(f"unknown profile tool: {name}")
