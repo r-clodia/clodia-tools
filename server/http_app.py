@@ -190,12 +190,15 @@ def build_app() -> Starlette:
     # Identità dei proxy: l'unica rotta pubblica per costruzione — un sistema
     # terzo scambia un'asserzione firmata con un token breve. Vedi proxy_auth.
     from .proxy_auth_api import routes as proxy_auth_routes
+    # Inventario collection RAG (pagina Databases della webui): lettura non
+    # filtrata per grant, stesso principio di providers_api.
+    from .rag_api import routes as rag_routes
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
                 *imagegen_routes, *topics_routes, *connectors_routes, *profile_routes,
                 *telegram_routes, *agents_routes, *vault_routes,
                 *tool_routes, *mint_routes, *gate_routes, *logic_routes,
-                *egress_routes, *proxy_auth_routes],
+                *egress_routes, *proxy_auth_routes, *rag_routes],
         # Chi è in volo, su tutte le rotte (clodia-platform#316). Attorno a tutto
         # e non alle due rotte della issue: nell'incidente del 7 set le rotte
         # «innocenti» erano quelle in timeout, e un contatore puntato sui
