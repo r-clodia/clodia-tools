@@ -41,6 +41,70 @@ class ChannelKeyTests(unittest.TestCase):
             self.assertIsNone(taint.channel_of(empty))
 
 
+class TierAliasTests(unittest.TestCase):
+    """Una stanza, un flag — anche se il tier arriva con un altro nome.
+
+    Il taint si scrive da due porte con due vocabolari. Le sessioni portano il
+    tier come l'ha scritto chi ha coniato il token: `proxy_auth.token_for` lo
+    copia dall'asserzione firmata, quindi un `p1` o un `seal-1` arrivano tali e
+    quali dentro `chan:<tier>:<topic>:<principal>`. I chiamanti interni invece
+    compongono `f"{tier}/{name}"` dal path della rotta, dove il tier è già
+    canonico. Due nomi per la stessa stanza sono DUE FLAG: si marca da una porta
+    e si legge dall'altra senza vedere niente — nella direzione d'errore che non
+    si vede (un taint che non si accende).
+    """
+
+    def test_a_legacy_or_lowercase_tier_names_the_same_channel(self):
+        for chat in ("chan:SEAL-1:ch:crm", "chan:seal-1:ch:crm",
+                     "chan:p1:ch:crm", "chan:P1:ch:crm", "chan:p1:CH:crm"):
+            with self.subTest(chat=chat):
+                self.assertEqual(taint.channel_of(chat), "SEAL-1/ch")
+
+    def test_the_direct_form_used_by_internal_callers_agrees(self):
+        """`topics_api` e `post_message` passano `f"{tier}/{name}"`, non una
+        chiave di sessione: la stessa stanza deve dare la stessa chiave."""
+        for key in ("SEAL-1/ch", "p1/ch", "P1/CH", "seal-1/ch"):
+            with self.subTest(key=key):
+                self.assertEqual(taint.channel_of(key), "SEAL-1/ch")
+
+    def test_what_is_not_a_tier_is_left_alone(self):
+        """Non si canonicalizza a indovinare: una chiave che non nomina un tier
+        (una DM, una forma futura) resta sé stessa, altrimenti due chat diverse
+        finirebbero sullo stesso flag."""
+        for key in ("dm:davide:clodia", "davide/clodia", "SEAL-9/ch"):
+            with self.subTest(key=key):
+                self.assertEqual(taint.channel_of(key), key)
+
+
+class TierAliasStateTests(unittest.TestCase):
+    """La proprietà che conta: marcato da una porta, visto dall'altra."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        p = patch.object(taint, "_path",
+                         side_effect=lambda: Path(self.tmp.name) / "taint.json")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_marking_from_the_route_is_visible_from_the_session(self):
+        taint.mark("SEAL-1/ch", "message", "proxy:crm-esterno")
+        self.assertTrue(taint.status("chan:p1:ch:crm-esterno")["tainted"])
+
+    def test_marking_from_a_legacy_session_is_visible_from_the_route(self):
+        taint.mark("chan:p1:ch:crm-esterno", "message", "proxy:crm-esterno")
+        self.assertTrue(taint.status("SEAL-1/ch")["tainted"])
+
+    def test_the_human_unlock_disarms_the_flag_whatever_the_alias(self):
+        """L'unico interruttore legittimo passa dalla rotta interna con il tier
+        del path: se non combaciasse, un canale contaminato non si potrebbe
+        declassificare — il gate resterebbe acceso e l'umano approverebbe a
+        vuoto."""
+        taint.mark("chan:p1:ch:crm-esterno", "message", "proxy:crm-esterno")
+        taint.clear("SEAL-1/ch", by="davide")
+        self.assertFalse(taint.status("chan:p1:ch:crm-esterno")["tainted"])
+
+
 class TaintingVerbTests(unittest.TestCase):
     def test_verbs_that_return_third_party_content_taint(self):
         for verb in ("web.fetch", "email.read", "github.get_file_contents",

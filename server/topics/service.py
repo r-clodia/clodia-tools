@@ -1646,6 +1646,47 @@ class TopicService:
             "attachments": attachments or [], "ts": now.isoformat(timespec="microseconds"),
             "mentions": mentions.extract_mentions(text or ""),
         }
+        # UN INGRESSO EXTERNAL CONTAMINA IL CANALE (clodia-platform#262).
+        #
+        # La #222 ha consegnato l'etichetta (`kind: proxy` scritto dove il
+        # messaggio nasce); l'etichetta però è soft mitigation — la nota di
+        # provenienza aggiunta in lettura vale finché il modello la rispetta.
+        # L'enforcement è il taint: senza, un sistema terzo avvia lavoro dentro
+        # la colonia e il gate di contesto che scatta leggendo una issue
+        # pubblica non scatta affatto.
+        #
+        # PRIMA della scrittura, e non fra i best-effort qui sotto: il flag è la
+        # premessa del messaggio, non una notifica sul suo conto. Se si marcasse
+        # dopo, un guasto in mezzo lascerebbe nella stanza un messaggio di terzi
+        # con la bandiera spenta — e un taint che non si accende non lo si vede.
+        # `taint.mark` assorbe da sé i propri errori di I/O, quindi qui non c'è
+        # nulla da tollerare in più.
+        #
+        # Solo `proxy`: `human` è l'utente autenticato dall'UI (trusted per
+        # definizione, §2 di #104) e `ai`/`system` sono la colonia. `telegram`
+        # NON è coperto qui di proposito — quel contenuto entra attraverso i
+        # verbi `telegram.*`, che `taint._TAINTING_EXACT` già marca alla
+        # sorgente; marcarlo una seconda volta all'arrivo non aggiunge una
+        # difesa, aggiunge un secondo posto in cui la stessa regola può divergere.
+        #
+        # La sedia NON vale come vaglio: `egress.is_perimeter_source` dichiara
+        # fidato chi è nella stanza, e un proxy È fra i partecipanti (è così che
+        # `proxy_auth` lo ammette). Ma il proxy non è la fonte — è un tubo che
+        # ripete i byte di un sistema di cui nessuno risponde. La regola del
+        # perimetro resta dov'è, sulla posta, e non si estende a `kind: proxy`.
+        #
+        # SHORTCUT: il flag acceso qui è letto dai soli gate di USCITA
+        #           (`main._context_gate_for`). La quinta proprietà chiesta in
+        #           #262 — «limitato a egress E SEGRETI» — copre metà: nessun
+        #           percorso che legge un segreto consulta `taint.status`. Regge
+        #           finché i verbi che aprono il vault restano fuori dalla
+        #           superficie MCP degli agenti (oggi lo sono: `/internal/vault`
+        #           è rotta interna). Quando ci entreranno, la lettura va
+        #           aggiunta là, non allargata qui.
+        if kind == "proxy":
+            from .. import taint as _taint
+            _taint.mark(f"{_normalize_tier(tier)}/{name}", "message",
+                        f"proxy:{author}", author)
         self.s.write(f"{self._dir(tier, name)}/.messages/{msg['id']}.json",
                      json.dumps(msg, ensure_ascii=False).encode())
         # Menzioni → coda per il gruppo Telegram collegato. Best-effort e DOPO

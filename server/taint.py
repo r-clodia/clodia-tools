@@ -82,6 +82,25 @@ def taints(verb: str) -> bool:
     return v in _TAINTING_EXACT or v.startswith(_TAINTING_PREFIX)
 
 
+def _room(tier: str, name: str) -> Optional[str]:
+    """`p1` + `CH` → `SEAL-1/ch`. `None` se `tier` non nomina un tier.
+
+    Il vocabolario dei tier NON è ricopiato qui: appartiene a `topics.service`, e
+    una seconda tabella divergerebbe al primo alias nuovo — nella direzione
+    d'errore silenziosa di questo modulo (un flag che si scrive su una chiave e
+    si legge su un'altra). Import differito perché `topics.service` chiama a sua
+    volta `taint.mark` sull'ingresso di un proxy.
+    """
+    from .topics.service import VALID_TIER, _normalize_tier
+    t = (tier or "").strip()
+    if not t:
+        return None
+    canon = _normalize_tier(t)
+    if canon not in VALID_TIER:
+        return None
+    return f"{canon}/{(name or '').strip().lower()}"
+
+
 def channel_of(chat: Optional[str]) -> Optional[str]:
     """Chiave di sessione → canale. `chan:SEAL-2:contract:clodia#2` → `SEAL-2/contract`.
 
@@ -89,16 +108,32 @@ def channel_of(chat: Optional[str]) -> Optional[str]:
     pagina ostile, la contaminazione riguarda la stanza, non quell'istanza. Con
     il multi-spawn la distinzione è concreta — quattro spawn dello stesso seed
     condividono il canale.
+
+    E il canale è UNO anche se il tier arriva con un altro nome. Qui entrano due
+    vocabolari: le sessioni portano il tier come l'ha scritto chi ha coniato il
+    token — `proxy_auth.token_for` lo copia dall'asserzione firmata, quindi un
+    `p1` o un `seal-1` arrivano tali e quali — mentre i chiamanti interni
+    (`topics_api`, `post_message`) compongono `f"{tier}/{name}"` dal path della
+    rotta, già canonico. Senza canonicalizzazione sono due flag per la stessa
+    stanza: si marca da una porta e si legge dall'altra senza vedere niente.
     """
     c = (chat or "").strip()
     if not c:
         return None
     parts = c.split(":")
     if len(parts) >= 3 and parts[0] == "chan":
-        return f"{parts[1]}/{parts[2]}"
+        return _room(parts[1], parts[2]) or f"{parts[1]}/{parts[2]}"
+    if "/" in c:
+        # Forma `<tier>/<topic>`: la usano i chiamanti interni, che non hanno una
+        # chiave di sessione da passare.
+        room = _room(*c.split("/", 1))
+        if room:
+            return room
     # Chat diretta o forma non riconosciuta: si usa la chiave così com'è. Una DM
     # non è diversa da un canale (decisione del 2 ago 2026), quindi ha un suo
-    # flag invece di non averne nessuno.
+    # flag invece di non averne nessuno. Non si canonicalizza a indovinare: ciò
+    # che non nomina un tier resta sé stesso, o due chat diverse finirebbero
+    # sullo stesso flag.
     return c
 
 
