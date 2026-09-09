@@ -30,11 +30,19 @@ except ImportError:  # mcp >=2 ha rinominato il simbolo
     )
 from mcp.types import Tool
 
+from . import docmd as _docmd
 from . import vault
 from .whitelist import CONFIG
 
 NS_SEP = "."
 _NATIVE_PREFIXES = {"fs", "email", "agent", "web"}
+
+#: Byte di testo che la risposta di un backend MCP può portare nel contesto.
+#: Stesso numero di `web.fetch` (`DEFAULT_RESPONSE_BYTES`) e dei tre verbi di
+#: lettura del gateway (`_READ_FILE_WINDOW`), e per la stessa ragione: il
+#: risultato non si paga una volta, si paga a ogni azione successiva del turno.
+#: Qui però il taglio è DEFINITIVO — vedi `_cappa`.
+MAX_RESULT_BYTES = 64 * 1024
 
 # Placeholder per i secret dei backend: ${VAULT:<credential>} risolto a runtime
 # dalla vault (read_internal) → il valore reale NON sta mai nel config.yaml.
@@ -149,6 +157,46 @@ def _response_text(content: list) -> str:
     return "\n".join(parts) if parts else "(nessun contenuto testuale)"
 
 
+def _cappa(text: str, name: str) -> str:
+    """Il testo del backend entro `MAX_RESULT_BYTES`, con una nota se tagliato.
+
+    A differenza dei verbi di lettura del gateway, qui NON c'è paginazione di
+    recupero: la connessione è per-chiamata (v1, vedi il docstring del modulo),
+    il protocollo non dà un cursore sul risultato di una `call_tool` e i tool di
+    un backend di terzi hanno ognuno i propri parametri — non esiste un
+    `offset` che questo strato possa offrire. Quindi il taglio è definitivo, e
+    la nota deve dirlo: una nota che invitasse a «richiamare per il resto»
+    manderebbe a spendere un secondo turno per riottenere gli stessi 64 KB.
+
+    Tre cose non deducibili dal testo tagliato, e per questo scritte:
+      - un JSON troncato NON è JSON. Senza avviso finisce in un parser e
+        l'errore viene letto come un guasto del backend, non come un taglio
+        fatto qui;
+      - la strada che consegna il contenuto intero — `github.clone` e i file
+        nella propria scratch — dove il contenuto è un repository;
+      - per un verbo di ricerca o di elenco (non un file) la via d'uscita è
+        diversa: non c'è uno "scarica tutto", si stringe la query (filtri,
+        path, `perPage`) e si richiama, invece di riprovare la stessa.
+    """
+    grezzo = (text or "").encode("utf-8")
+    if len(grezzo) <= MAX_RESULT_BYTES:
+        return text
+    # Il taglio cade su un capo a riga (o almeno su un confine UTF-8): una
+    # finestra indecodificabile trasformerebbe una risposta valida in un errore
+    # che dipende da dove capita l'accento.
+    w = _docmd.finestra_byte(grezzo, 0, MAX_RESULT_BYTES)
+    return w["data"].decode("utf-8") + (
+        f"\n\n[gateway: la risposta di `{name}` era {w['size']} byte, "
+        f"consegnati i primi {w['window']} (tetto {MAX_RESULT_BYTES}). "
+        f"Il resto NON si recupera richiamando: questo strato non pagina. "
+        f"Se sopra c'è un JSON, è troncato e non è JSON valido: non parsarlo. "
+        f"Per il contenuto intero di un repository usa `github.clone` e leggi i "
+        f"file nella tua scratch; per un documento del topic usa "
+        f"`topic.read_file` con offset/max_bytes; per un verbo di ricerca o "
+        f"di elenco stringi la query (filtri, path, `perPage`) invece di "
+        f"riprovare la stessa.]")
+
+
 async def call_proxied(name: str, arguments: dict) -> str:
     """Instrada la call al backend giusto e ritorna il testo concatenato."""
     backend_name, tool_name = name.split(NS_SEP, 1)
@@ -157,4 +205,4 @@ async def call_proxied(name: str, arguments: dict) -> str:
         raise ValueError(f"backend MCP sconosciuto: {backend_name!r}")
     async with _session(b) as s:
         res = await s.call_tool(tool_name, arguments)
-        return _response_text(res.content)
+        return _cappa(_response_text(res.content), name)
