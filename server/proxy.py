@@ -30,11 +30,16 @@ except ImportError:  # mcp >=2 ha rinominato il simbolo
     )
 from mcp.types import Tool
 
-from . import vault
+from . import docmd, vault
 from .whitelist import CONFIG
 
 NS_SEP = "."
 _NATIVE_PREFIXES = {"fs", "email", "agent", "web"}
+
+#: Quanto testo di un backend di terzi può entrare nel contesto in una chiamata.
+#: Stesso 64 KB di `web.fetch` e dei tre verbi di lettura, così il numero è uno
+#: solo in tutto il gateway invece di uno per porta (clodia-platform#228, #328).
+RESULT_CAP_BYTES = 64 * 1024
 
 # Placeholder per i secret dei backend: ${VAULT:<credential>} risolto a runtime
 # dalla vault (read_internal) → il valore reale NON sta mai nel config.yaml.
@@ -149,6 +154,42 @@ def _response_text(content: list) -> str:
     return "\n".join(parts) if parts else "(nessun contenuto testuale)"
 
 
+def _cap(text: str) -> str:
+    """Il testo del backend, tagliato a `RESULT_CAP_BYTES` e con detto che lo è.
+
+    Il tetto sta qui, nel punto di rientro comune, e non sui singoli verbi: i 19
+    verbi GitHub concessi (`tools_api._GH_CONCESSI`) sarebbero 19 porte per lo
+    stesso difetto, e la ventesima nascerebbe aperta. Qui la porta è una e nasce
+    chiusa anche per il backend che verrà montato domani.
+
+    Taglio, NON paginazione: la fetta successiva costerebbe di nuovo l'intera
+    chiamata a monte, quindi non c'è nessun `next_offset` da promettere — e
+    prometterlo sarebbe peggio del taglio, perché manderebbe a pagare tre volte
+    l'upstream per leggere una volta il risultato. La nota dice invece la strada
+    che costa una chiamata sola.
+
+    `finestra_byte` invece di uno slice: cappiamo i BYTE (è quello che entra nel
+    contesto) ma dobbiamo restituire una `str`, e un taglio in mezzo a una
+    sequenza UTF-8 non darebbe un carattere sbagliato, darebbe un testo che non
+    si decodifica — con la sola sorte dell'ultimo accento a decidere.
+    """
+    raw = text.encode("utf-8")
+    if len(raw) <= RESULT_CAP_BYTES:
+        return text
+    w = docmd.finestra_byte(raw, 0, RESULT_CAP_BYTES)
+    return w["data"].decode("utf-8") + (
+        f"\n\n[truncated: {w['window']} byte di {w['size']}. Il risultato del "
+        f"backend supera il tetto di {RESULT_CAP_BYTES} byte e il resto NON è "
+        f"richiamabile: rileggerlo vorrebbe dire rifare per intero la chiamata "
+        f"a monte, quindi non c'è offset da ripassare. Se questo risultato era "
+        f"JSON, quello che leggi NON è JSON valido — un errore di parsing qui è "
+        f"il taglio, non una risposta malformata del backend. Per il contenuto "
+        f"intero di un file: `github.clone` e leggilo dalla scratch, che è una "
+        f"chiamata sola. Per un verbo di ricerca o di elenco: stringi la query "
+        f"(filtri, path, `perPage`) invece di riprovare la stessa.]"
+    )
+
+
 async def call_proxied(name: str, arguments: dict) -> str:
     """Instrada la call al backend giusto e ritorna il testo concatenato."""
     backend_name, tool_name = name.split(NS_SEP, 1)
@@ -157,4 +198,4 @@ async def call_proxied(name: str, arguments: dict) -> str:
         raise ValueError(f"backend MCP sconosciuto: {backend_name!r}")
     async with _session(b) as s:
         res = await s.call_tool(tool_name, arguments)
-        return _response_text(res.content)
+        return _cap(_response_text(res.content))
