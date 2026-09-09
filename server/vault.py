@@ -79,10 +79,18 @@ def _caller_hint() -> str:
     a mano. Quest'ultimo caso è quello che serviva di più e mancava: distingue
     «l'ha tolto la UI» da «l'ha tolto qualcuno dal guscio», che portano in due
     direzioni opposte.
+
+    La composizione vive in `whitelist.caller_hint`, che è dove stanno le due
+    letture: qui restava un secondo lettore, e chiedeva un `agent_name_safe` che
+    in `whitelist` non esiste — sta in `main`. L'`AttributeError` finiva
+    nell'`except`, quindi OGNI revoca senza principal umano (un job, un agente
+    che agisce per sé) risultava fatta dalla `shell`, cioè la distinzione per cui
+    questa funzione era stata scritta cadeva sempre dalla parte sbagliata e senza
+    rumore (clodia-platform#219).
     """
     try:
         from . import whitelist as _w
-        return (_w.current_principal() or _w.agent_name_safe() or "shell")
+        return _w.caller_hint()
     except Exception:  # noqa: BLE001 — l'audit non deve dipendere dal contesto
         return "shell"
 
