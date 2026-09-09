@@ -38,12 +38,23 @@ class _Scena:
                  denied: tuple = ()):
         self.effettivo, self.prov, self.denied = effettivo, prov or {}, set(denied)
         self.patched: list[dict] = []
+        # Copia PROPRIA e backend che APPLICA la scrittura. Prima il finto
+        # backend rispondeva senza toccare lo stato: dal #219 la risposta rilegge
+        # il record, e un backend che ignora le scritture modellava proprio il
+        # difetto che questi test non stanno misurando. Qui si misura
+        # l'ENFORCEMENT, quindi il record dev'essere quello di un backend sano.
+        self.agente = {**AGENTE,
+                       "tool_permissions": list(AGENTE["tool_permissions"])}
 
     def __enter__(self):
+        def _patch(name: str, body: dict) -> dict:
+            self.patched.append(body)
+            self.agente.update({k: list(v) for k, v in body.items()})
+            return body
+
         self._p = [
-            patch.object(AA, "_all_agents", lambda: [AGENTE]),
-            patch.object(AA, "_patch_caps",
-                         lambda name, body: self.patched.append(body) or body),
+            patch.object(AA, "_all_agents", lambda: [self.agente]),
+            patch.object(AA, "_patch_caps", _patch),
         ]
         for p in self._p:
             p.start()

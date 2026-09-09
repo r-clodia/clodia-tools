@@ -259,12 +259,17 @@ _AGENT_TOOLS: list[Tool] = [
          description="Namespace dei tool nativi del gateway concedibili a un agent (es. fs, email, topic, gdrive).",
          inputSchema={"type": "object", "properties": {}}),
     Tool(name="agents.grant_skill",
-         description="Aggiunge una skill (capability) a un agent editabile.",
+         description=("Aggiunge una skill (capability) a un agent editabile. "
+                      "L'esito è RILETTO dal record: `added` dice cosa è stato "
+                      "aggiunto davvero."),
          inputSchema={"type": "object", "properties": {
              "agent": {"type": "string"}, "skill": {"type": "string"}},
              "required": ["agent", "skill"]}),
     Tool(name="agents.revoke_skill",
-         description="Rimuove una skill da un agent editabile.",
+         description=("Rimuove una skill da un agent editabile. La scrittura è un "
+                      "upsert del set completo, quindi l'esito è RILETTO: `removed` "
+                      "dice cosa è stato tolto davvero, `ok: false` che la riga è "
+                      "ancora lì."),
          inputSchema={"type": "object", "properties": {
              "agent": {"type": "string"}, "skill": {"type": "string"}},
              "required": ["agent", "skill"]}),
@@ -286,12 +291,16 @@ _AGENT_TOOLS: list[Tool] = [
              "agent": {"type": "string"}, "tool": {"type": "string"}},
              "required": ["agent", "tool"]}),
     Tool(name="agents.grant_rule",
-         description="Aggiunge una rule (regola di stile/comportamento) a un agent editabile.",
+         description=("Aggiunge una rule (regola di stile/comportamento) a un agent "
+                      "editabile. L'esito è RILETTO dal record: `added` dice cosa è "
+                      "stato aggiunto davvero."),
          inputSchema={"type": "object", "properties": {
              "agent": {"type": "string"}, "rule": {"type": "string"}},
              "required": ["agent", "rule"]}),
     Tool(name="agents.revoke_rule",
-         description="Rimuove una rule da un agent editabile.",
+         description=("Rimuove una rule da un agent editabile. L'esito è RILETTO "
+                      "dal record: `removed` dice cosa è stato tolto davvero, "
+                      "`ok: false` che la riga è ancora lì."),
          inputSchema={"type": "object", "properties": {
              "agent": {"type": "string"}, "rule": {"type": "string"}},
              "required": ["agent", "rule"]}),

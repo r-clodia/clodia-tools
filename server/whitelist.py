@@ -558,6 +558,34 @@ def agent_name() -> str:
     return name
 
 
+def caller_hint() -> str:
+    """CHI sta agendo, per quanto il gateway riesce a saperlo — MAI solleva.
+
+    Il principal umano se la chiamata arriva dalla webui, l'agente altrimenti, e
+    `shell` quando non c'è nessuna identità nel contesto, cioè un `docker exec` a
+    mano. La distinzione serve a chi legge un audit: «l'ha tolto la UI», «l'ha
+    tolto un job», «l'ha tolto qualcuno dal guscio» portano in tre direzioni
+    diverse.
+
+    Sta QUI perché qui vivono le due letture che compone (`current_principal`,
+    `agent_name`). Viveva nel vault, che chiedeva a questo modulo un
+    `agent_name_safe` inesistente — sta in `main` — e si prendeva l'`AttributeError`
+    in un `except` largo: ogni operazione senza principal umano risultava fatta
+    dalla `shell` (clodia-platform#219). Un secondo lettore della stessa identità
+    scritto altrove avrebbe rifatto lo stesso errore altrove.
+    """
+    try:
+        principal = current_principal()
+        if principal:
+            return str(principal)
+    except Exception:  # noqa: BLE001 — l'audit non deve dipendere dal contesto
+        pass
+    try:
+        return agent_name() or "shell"
+    except Exception:  # noqa: BLE001 — nessuna identità agente = shell
+        return "shell"
+
+
 def agent_config(name: str | None = None) -> dict:
     return CONFIG["agents"][name or agent_name()]
 

@@ -18,6 +18,7 @@ del caller (whitelist.current_token), che il backend verifica con la sua CA.
 """
 from __future__ import annotations
 
+import logging
 import os
 
 import httpx
@@ -25,6 +26,7 @@ import httpx
 from .. import whitelist
 from ._backend import raise_for_backend_error
 
+LOG = logging.getLogger("clodia-tools.agents_admin")
 AGENT_SERVER_URL = os.environ.get("AGENT_SERVER_URL", "http://agent-server:7842")
 _TIMEOUT = httpx.Timeout(connect=4.0, read=15.0, write=10.0, pool=4.0)
 
@@ -158,6 +160,37 @@ def list_rules() -> dict:
 
 
 # ── scritture (delta su lista, calcolato qui; set completo inviato al backend) ─
+#
+# La scrittura è un UPSERT: si manda il set completo, non si cancella una riga.
+# È la forma giusta per questa API — un PATCH del set è idempotente e non ha
+# bisogno di conoscere l'id della riga — ma ha un costo che va pagato qui:
+# «ho mandato il set senza X» non è «X non c'è più». Se il backend applica a
+# metà, ignora il campo, o risponde OK senza toccare il record, la sottrazione
+# non è avvenuta e nessuno se ne accorge (clodia-platform#219).
+#
+# Rispondere con l'insieme che si VOLEVA è ciò che rendeva la cosa invisibile:
+# il chiamante rileggeva `capabilities: []` mentre la riga era ancora al suo
+# posto. La stessa classe di difetto era già stata pagata su `grant_tool` (#304)
+# e corretta lì soltanto. La correzione appartiene al punto CONDIVISO: `_modify`
+# rilegge, confronta, e riporta lo stato invece dell'intenzione.
+def _readback(name: str, field: str) -> list[str] | None:
+    """Il valore che il backend CUSTODISCE dopo la scrittura, o `None` se non si
+    è potuto rileggere. `None` non è «vuoto»: è «non lo so», e va detto.
+
+    Costa una GET in più per ogni scrittura, e si paga volentieri: sono verbi di
+    amministrazione, chiamati a mano qualche volta al giorno. Non si usa l'eco
+    del PATCH perché è la parola dello stesso interlocutore di cui si sta
+    verificando l'operato.
+    """
+    try:
+        a = _find(name)
+    except Exception:  # noqa: BLE001 — la verifica non deve mascherare la scrittura
+        return None
+    if a is None:
+        return None
+    return [str(x) for x in (a.get(field) or [])]
+
+
 def _modify(name: str, field: str, add: list[str] | None = None,
             remove: list[str] | None = None) -> dict:
     a = _find(name)
@@ -167,7 +200,8 @@ def _modify(name: str, field: str, add: list[str] | None = None,
         raise PermissionError(
             f"agent '{name}' è immutabile (super o protetto): si modifica solo via "
             "codice/rebuild del seed")
-    cur = list(a.get(field, []) or [])
+    prima = [str(x) for x in (a.get(field) or [])]
+    cur = list(prima)
     if remove:
         rm = set(remove)
         cur = [x for x in cur if x not in rm]
@@ -175,8 +209,46 @@ def _modify(name: str, field: str, add: list[str] | None = None,
         for x in add:
             if x not in cur:
                 cur.append(x)
-    res = _patch_caps(name, {field: cur})
-    return {"ok": True, "name": name, field: res.get(field, cur)}
+    _patch_caps(name, {field: cur})
+    dopo = _readback(name, field)
+    if dopo is None:
+        # Non si finge un esito. Stesse lettere di `_measure`: «non ho potuto
+        # misurare» è un caso esplicito, non un `ok` per mancanza di notizie.
+        return {"ok": False, "verified": False, "name": name, field: cur,
+                "detail": (f"scrittura inviata, stato NON riletto: l'esito di "
+                           f"questa operazione su '{field}' non è confermato")}
+    voluti_via = sorted(set(remove or []))
+    voluti_su = sorted(set(add or []))
+    residui = [x for x in voluti_via if x in dopo]
+    mancanti = [x for x in voluti_su if x not in dopo]
+    out: dict = {"ok": not residui and not mancanti, "verified": True,
+                 "name": name, field: dopo,
+                 # `removed: []` con `ok: true` è «non c'era», che è una risposta
+                 # diversa da «l'ho tolto» — e chi verifica un audit ha bisogno
+                 # esattamente di quella differenza.
+                 "removed": [x for x in voluti_via if x in prima and x not in dopo],
+                 "added": [x for x in voluti_su if x not in prima and x in dopo]}
+    if residui:
+        out["detail"] = (
+            f"{', '.join(residui)}: ANCORA presente in `{field}` di '{name}' dopo "
+            f"la revoca. La scrittura è un upsert del set completo: il backend ha "
+            f"risposto senza applicare la sottrazione, quindi la revoca NON è "
+            f"avvenuta e il record è invariato.")
+    elif mancanti:
+        out["detail"] = (
+            f"{', '.join(mancanti)}: NON compare in `{field}` di '{name}' dopo la "
+            f"concessione. Il backend ha risposto senza applicarla: il permesso è "
+            f"dichiarato e inerte.")
+    # Chi cambia l'autorità di un altro agente resta scritto. Un permesso che
+    # cambia senza che si sappia chi l'ha chiesto lascia la domanda «chi l'ha
+    # tolto» senza risposta — ed è la domanda che si fa sempre, e sempre dopo,
+    # quando qualcosa ha smesso di funzionare.
+    LOG.warning("agents · %s[%s] %s %s%s (richiesto da %s)",
+                name, field, "-=" if remove else "+=",
+                ", ".join(voluti_via or voluti_su) or "-",
+                "" if out["ok"] else " — NON APPLICATO",
+                whitelist.caller_hint())
+    return out
 
 
 def grant_skill(name: str, skill: str) -> dict:
@@ -281,14 +353,38 @@ def _measure(name: str, tool: str, atteso: bool) -> dict:
     return out
 
 
+def _verdetto(res: dict, misura: dict) -> dict:
+    """Unisce le due domande, che sono diverse e servono entrambe.
+
+    `res` dice cosa CUSTODISCE il record dopo la scrittura; `misura` dice cosa
+    DECIDE il gateway. Non sono ridondanti: un verbo può sparire dalla lista
+    propria e restare attivo perché ereditato (il caso di #304), e può restare
+    nella lista propria pur non essendo più concesso — un record che tiene una
+    riga già revocata è ciò che la riscrive alla prima rilettura, ed è il modo in
+    cui una revoca torna indietro da sola (#219).
+
+    `ok` solo se entrambe rispondono di sì: fra le due la direzione d'errore
+    grave è la stessa, dichiarare tolto ciò che è ancora lì.
+    """
+    out = {**res, **misura}
+    out["ok"] = bool(res.get("ok")) and bool(misura.get("ok"))
+    out["verified"] = bool(res.get("verified")) and bool(misura.get("verified"))
+    dettagli = [d for d in (misura.get("detail"), res.get("detail")) if d]
+    if dettagli:
+        out["detail"] = " ".join(dettagli)
+    else:
+        out.pop("detail", None)
+    return out
+
+
 def grant_tool(name: str, tool: str) -> dict:
     res = _modify(name, "tool_permissions", add=[tool])
-    return {**res, "tool": tool, **_measure(name, tool, atteso=True)}
+    return {**_verdetto(res, _measure(name, tool, atteso=True)), "tool": tool}
 
 
 def revoke_tool(name: str, tool: str) -> dict:
     res = _modify(name, "tool_permissions", remove=[tool])
-    return {**res, "tool": tool, **_measure(name, tool, atteso=False)}
+    return {**_verdetto(res, _measure(name, tool, atteso=False)), "tool": tool}
 
 
 def grant_rule(name: str, rule: str) -> dict:
