@@ -168,12 +168,15 @@ def _cappa(text: str, name: str) -> str:
     la nota deve dirlo: una nota che invitasse a «richiamare per il resto»
     manderebbe a spendere un secondo turno per riottenere gli stessi 64 KB.
 
-    Due cose non deducibili dal testo tagliato, e per questo scritte:
+    Tre cose non deducibili dal testo tagliato, e per questo scritte:
       - un JSON troncato NON è JSON. Senza avviso finisce in un parser e
         l'errore viene letto come un guasto del backend, non come un taglio
         fatto qui;
       - la strada che consegna il contenuto intero — `github.clone` e i file
-        nella propria scratch — dove il contenuto è un repository.
+        nella propria scratch — dove il contenuto è un repository;
+      - per un verbo di ricerca o di elenco (non un file) la via d'uscita è
+        diversa: non c'è uno "scarica tutto", si stringe la query (filtri,
+        path, `perPage`) e si richiama, invece di riprovare la stessa.
     """
     grezzo = (text or "").encode("utf-8")
     if len(grezzo) <= MAX_RESULT_BYTES:
@@ -189,7 +192,9 @@ def _cappa(text: str, name: str) -> str:
         f"Se sopra c'è un JSON, è troncato e non è JSON valido: non parsarlo. "
         f"Per il contenuto intero di un repository usa `github.clone` e leggi i "
         f"file nella tua scratch; per un documento del topic usa "
-        f"`topic.read_file` con offset/max_bytes.]")
+        f"`topic.read_file` con offset/max_bytes; per un verbo di ricerca o "
+        f"di elenco stringi la query (filtri, path, `perPage`) invece di "
+        f"riprovare la stessa.]")
 
 
 async def call_proxied(name: str, arguments: dict) -> str:

@@ -100,6 +100,13 @@ class IlRitornoProxatoHaUnTetto(unittest.TestCase):
                       "un JSON tagliato non è JSON: senza avviso finisce in un "
                       "parser e l'errore sembra del backend")
 
+    def test_la_nota_indica_di_stringere_la_query_sui_verbi_di_ricerca(self) -> None:
+        """Per un verbo di ricerca/elenco non c'è uno «scarica tutto» come
+        `github.clone`: l'unica via d'uscita è restringere la query."""
+        out = _chiama(self.GROSSO)
+        coda = out[-800:]
+        self.assertIn("query", coda)
+
     def test_la_nota_dice_quanto_e_stato_consegnato_e_quanto_c_era(self) -> None:
         out = _chiama(self.GROSSO)
         self.assertIn(str(len(self.GROSSO.encode("utf-8"))), out[-800:],
