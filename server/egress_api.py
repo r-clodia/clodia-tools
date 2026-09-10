@@ -129,6 +129,29 @@ async def whitelist_view(request: Request):
     return JSONResponse(egress.summary())
 
 
+async def scope_whitelist_view(request: Request):
+    """GET /internal/egress/whitelist/scope/{tier}/{name} → le due liste
+    LOCALI di un topic, in notazione URI.
+
+    Gemella di `whitelist_view`, ma per lo scope invece che per l'istanza:
+    `scope_uris` esisteva già (nato con #150, la lista per-canale) ma non era
+    mai stato esposto fuori dal modulo — la webui non aveva modo di mostrare
+    all'owner cosa vale SOLO in questo topic, distinto da ciò che vale
+    ovunque. Nessuna nuova logica di lettura: la stessa funzione che
+    `effective_uris` già usa per fare l'unione.
+    """
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    tier = request.path_params["tier"]
+    name = request.path_params["name"]
+    from . import egress
+    scope = f"{tier}/{name}"
+    return JSONResponse({
+        "egress": egress.scope_uris("egress", scope),
+        "ingress": egress.scope_uris("ingress", scope),
+    })
+
+
 async def whitelist_edit(request):
     """Aggiunge o rimuove una voce dalle liste globali, per conto dell'OWNER.
 
@@ -175,6 +198,8 @@ async def whitelist_edit(request):
 
 routes = [Route("/internal/egress", profile, methods=["GET"]),
           Route("/internal/egress/whitelist", whitelist_view, methods=["GET"]),
+          Route("/internal/egress/whitelist/scope/{tier}/{name}", scope_whitelist_view,
+                methods=["GET"]),
           Route("/internal/egress/whitelist/{direction}/{action}", whitelist_edit,
                 methods=["POST"]),
           Route("/internal/observations", observations, methods=["GET"])]
