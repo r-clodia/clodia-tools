@@ -389,6 +389,37 @@ _WEB_TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="web.download",
+        description=(
+            "Scarica un binario pubblico (PDF, PNG/JPEG/GIF/WebP) dal web via HTTP "
+            "GET, direttamente sullo scratch dell'agente — i byte non passano dal "
+            "contesto, come `gdrive.download`. Diverso da `web.fetch`: quello legge "
+            "testo/feed/JSON dentro la risposta del tool-call, questo scrive un file "
+            "su `dest`. Stessi controlli di rete di `web.fetch` (solo destinazioni "
+            "pubbliche, redirect non seguiti), content-type limitato ai formati "
+            "elencati sopra, tetto 25 MB."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL http/https del binario"},
+                "dest": {"type": "string",
+                        "description": "path assoluto nello scratch dell'agente dove scrivere il file"},
+                "headers": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": ("header opzionali; Host, Cookie, Authorization e "
+                                    "hop-by-hop sono vietati"),
+                },
+                "timeout_seconds": {
+                    "type": "number", "minimum": 0.1, "maximum": 30,
+                    "description": "timeout, massimo 30 secondi",
+                },
+            },
+            "required": ["url", "dest"],
+        },
+    ),
+    Tool(
         name="web.post",
         description=(
             "Invia una richiesta HTTP POST dopo approvazione umana per questa "
@@ -3691,6 +3722,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = fs.list_dir(arguments["path"])
         elif name == "web.fetch":
             result = await asyncio.to_thread(web_fetch.fetch, arguments, agent=_ag or "")
+        elif name == "web.download":
+            _dest = _safe_scratch_path(arguments["dest"])
+            _os.makedirs(_os.path.dirname(_dest), exist_ok=True)
+            result = await asyncio.to_thread(
+                web_fetch.download, arguments, agent=_ag or "", dest=_dest)
         elif name == "web.post":
             result = await asyncio.to_thread(web_post.post, arguments, agent=_ag or "")
         elif name == "logs.tail":

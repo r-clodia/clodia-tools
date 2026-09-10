@@ -186,6 +186,121 @@ class WebFetchTests(unittest.TestCase):
                     web_fetch.fetch({"url": url}, agent="clodia")
 
 
+class WebDownloadTests(unittest.TestCase):
+    """`web.download`: un binario finisce su scratch, mai nel contesto."""
+
+    def test_it_taints_like_any_other_external_document(self):
+        self.assertTrue(taint.taints("web.download"))
+
+    def test_pdf_is_written_to_dest(self):
+        with TemporaryDirectory() as tmp:
+            seen: dict = {}
+            corpo = b"%PDF-1.4 finto pdf"
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(200, headers={"content-type": "application/pdf"},
+                                      content=corpo)
+
+            dest = str(Path(tmp) / "out.pdf")
+            with patch.object(web_fetch.httpx, "Client", _client(handler, seen)), \
+                    patch.object(web_fetch, "_public_ips", return_value=["93.184.216.34"]), \
+                    patch.dict(os.environ, {"CLODIA_VAULT_DIR": tmp}):
+                result = web_fetch.download({"url": "https://fidata.example/a.pdf"},
+                                            agent="clodia", dest=dest)
+
+            self.assertEqual(Path(dest).read_bytes(), corpo)
+            self.assertEqual(result["local_path"], dest)
+            self.assertEqual(result["size"], len(corpo))
+            self.assertTrue(result["ok"])
+
+    def test_non_whitelisted_content_type_is_refused_and_audited(self):
+        with TemporaryDirectory() as tmp:
+            seen: dict = {}
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(200, headers={"content-type": "application/zip"},
+                                      content=b"PK\x03\x04")
+
+            dest = str(Path(tmp) / "out.zip")
+            with patch.object(web_fetch.httpx, "Client", _client(handler, seen)), \
+                    patch.object(web_fetch, "_public_ips", return_value=["93.184.216.34"]), \
+                    patch.dict(os.environ, {"CLODIA_VAULT_DIR": tmp}):
+                with self.assertRaises(ValueError):
+                    web_fetch.download({"url": "https://fidata.example/a.zip"},
+                                       agent="clodia", dest=dest)
+
+            self.assertFalse(Path(dest).exists())
+            righe = [json.loads(x) for x in
+                     (Path(tmp) / "web-fetch-audit.log").read_text().splitlines()]
+            self.assertEqual(righe[-1]["result"], "REFUSED")
+            self.assertEqual(righe[-1]["action"], "web.download")
+
+    def test_missing_content_type_is_refused_not_assumed(self):
+        """A differenza di `fetch()`, qui l'assenza di content-type non è
+        letta come testo: senza dichiarazione non c'è nulla da vagliare prima
+        di scrivere byte su disco."""
+        with TemporaryDirectory() as tmp:
+            seen: dict = {}
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(200, content=b"???")
+
+            dest = str(Path(tmp) / "out.bin")
+            with patch.object(web_fetch.httpx, "Client", _client(handler, seen)), \
+                    patch.object(web_fetch, "_public_ips", return_value=["93.184.216.34"]), \
+                    patch.dict(os.environ, {"CLODIA_VAULT_DIR": tmp}):
+                with self.assertRaises(ValueError):
+                    web_fetch.download({"url": "https://fidata.example/x"},
+                                       agent="clodia", dest=dest)
+
+    def test_over_the_cap_is_refused_and_nothing_is_left_on_disk(self):
+        with TemporaryDirectory() as tmp:
+            seen: dict = {}
+            grosso = b"x" * (web_fetch.DOWNLOAD_MAX_BYTES + 1000)
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(200, headers={"content-type": "application/pdf"},
+                                      content=grosso)
+
+            dest = str(Path(tmp) / "out.pdf")
+            with patch.object(web_fetch.httpx, "Client", _client(handler, seen)), \
+                    patch.object(web_fetch, "_public_ips", return_value=["93.184.216.34"]), \
+                    patch.dict(os.environ, {"CLODIA_VAULT_DIR": tmp}):
+                with self.assertRaises(ValueError):
+                    web_fetch.download({"url": "https://fidata.example/big.pdf"},
+                                       agent="clodia", dest=dest)
+
+            self.assertFalse(Path(dest).exists())
+
+    def test_private_destinations_are_refused_same_as_fetch(self):
+        with TemporaryDirectory() as tmp:
+            dest = str(Path(tmp) / "out.pdf")
+            with patch.object(web_fetch.socket, "getaddrinfo",
+                              return_value=[(2, 1, 6, "", ("127.0.0.1", 80))]):
+                with self.assertRaises(PermissionError):
+                    web_fetch.download({"url": "http://interno.example/a.pdf"},
+                                       agent="clodia", dest=dest)
+
+    def test_redirects_are_reported_not_followed(self):
+        with TemporaryDirectory() as tmp:
+            seen: dict = {}
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(301, headers={"location": "https://altrove.example/x"},
+                                      content=b"")
+
+            dest = str(Path(tmp) / "out.pdf")
+            with patch.object(web_fetch.httpx, "Client", _client(handler, seen)), \
+                    patch.object(web_fetch, "_public_ips", return_value=["93.184.216.34"]), \
+                    patch.dict(os.environ, {"CLODIA_VAULT_DIR": tmp}):
+                with self.assertRaises(ValueError):
+                    web_fetch.download({"url": "https://fidata.example/a.pdf"},
+                                       agent="clodia", dest=dest)
+
+            self.assertFalse(seen["kwargs"]["follow_redirects"])
+            self.assertFalse(Path(dest).exists())
+
+
 class ContextCostTests(unittest.TestCase):
     """Quanto di una pagina entra nel CONTESTO, e come si chiede il resto.
 

@@ -70,7 +70,7 @@ _TAINTING_EXACT = frozenset({
 
 #: Prefissi: il web aperto e GitHub in lettura sono interamente contenuto di
 #: terzi, e l'elenco dei verbi upstream cambia senza di noi.
-_TAINTING_PREFIX = ("web.fetch", "web.search", "web.render", "web.get",
+_TAINTING_PREFIX = ("web.fetch", "web.download", "web.search", "web.render", "web.get",
                     "github.get_", "github.list_", "github.search_",
                     "github.issue_read", "github.pull_request_read",
                     "normattiva.", "contabilita.", "sedia.")

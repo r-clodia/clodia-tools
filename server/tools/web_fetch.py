@@ -70,6 +70,20 @@ _ALLOWED_CONTENT = ("text/", "application/json", "application/xml",
                     "application/xhtml+xml", "application/rss+xml",
                     "application/atom+xml", "application/ld+json")
 
+#: Content-type binari ammessi per `download()`. Whitelist esplicita e stretta
+#: di proposito: qui i byte non finiscono nel contesto (vanno su scratch), ma
+#: restano scaricabili solo formati che un agente ha un motivo legittimo per
+#: raccogliere — non un octet-stream generico o un archivio che potrebbe
+#: portare un eseguibile.
+_ALLOWED_BINARY_CONTENT = ("application/pdf", "image/png", "image/jpeg",
+                           "image/gif", "image/webp")
+
+#: Tetto fisico per `download()`: qui non c'è il costo di rilettura nel
+#: contesto che limita `fetch()` a 512 KB (i byte vanno su scratch, non nel
+#: turno), ma resta un tetto — coerente con `_MAX_DOC_BYTES` di `memory.py` e
+#: con il limite di `content_b64` in main.py, entrambi 25 MB.
+DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024
+
 #: Headers worth returning: enough to judge the answer, nothing that carries
 #: session state. `Set-Cookie` in particular never comes back — an agent has no
 #: use for it and repeating it into the context is how it would leak onwards.
@@ -155,11 +169,20 @@ def _readable(content_type: str) -> bool:
     return ct.startswith("text/") or ct in _ALLOWED_CONTENT or ct.endswith("+xml")
 
 
-def _audit(agent: str, target: str, result: str, **extra) -> None:
+def _downloadable(content_type: str) -> bool:
+    """A differenza di `_readable`, nessun default permissivo: un binario
+    senza content-type dichiarato non ha modo di essere vagliato prima di
+    scrivere byte su disco, quindi va rifiutato invece di essere assunto."""
+    ct = (content_type or "").split(";", 1)[0].strip().lower()
+    return ct in _ALLOWED_BINARY_CONTENT
+
+
+def _audit(agent: str, target: str, result: str, *, action: str = "web.fetch",
+           **extra) -> None:
     record = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "agent": agent,
-        "action": "web.fetch",
+        "action": action,
         "target": target,
         "result": result,
         **extra,
@@ -263,4 +286,88 @@ def fetch(arguments: dict, *, agent: str) -> dict:
         raise
     except Exception as exc:
         _audit(agent, display, "ERROR", error=type(exc).__name__, resolved_ips=ips)
+        raise
+
+
+def download(arguments: dict, *, agent: str, dest: str) -> dict:
+    """Scarica un binario (PDF, immagine — vedi `_ALLOWED_BINARY_CONTENT`) da
+    un URL pubblico direttamente su `dest`, un path scratch dell'agente già
+    validato dal dispatch (come `gdrive.download`).
+
+    Perché un verbo separato invece di allargare `fetch()`: qui il body non
+    finisce MAI nella risposta al tool-call. `fetch()` decodifica il corpo
+    come testo (`errors="replace"`) perché quel testo è ciò che il modello
+    legge — su un binario produrrebbe solo caratteri di sostituzione, uno
+    spreco di budget di contesto che dice nulla. Qui invece i byte vanno su
+    disco e il risultato riporta solo un path e una dimensione, esattamente
+    il pattern di `gdrive.download`.
+
+    Stessi controlli di `fetch()` per la parte di rete (SSRF-guard, redirect
+    rifiutati, timeout): il rischio di destinazione non cambia scaricando un
+    binario invece di un testo. Cambia invece la whitelist di content-type
+    (binaria e stretta, non testuale) e il tetto dimensione (25 MB fisici,
+    non il 512 KB pensato per un risultato che rientra nel turno).
+    """
+    url = str(arguments.get("url") or "").strip()
+    display, host, port, _scheme = _safe_url(url)
+    headers = _headers(arguments)
+    timeout = min(
+        max(float(arguments.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)), 0.1),
+        MAX_TIMEOUT_SECONDS,
+    )
+    ips: list[str] = []
+    written = 0
+    try:
+        ips = _public_ips(host, port)
+        with httpx.Client(follow_redirects=False, timeout=timeout) as client:
+            with client.stream("GET", url, headers=headers) as response:
+                status = response.status_code
+                response_headers = dict(response.headers)
+                content_type = response_headers.get("content-type", "")
+                if not _downloadable(content_type):
+                    response.close()
+                    _audit(agent, display, "REFUSED", action="web.download",
+                           status=status, content_type=content_type, resolved_ips=ips)
+                    raise ValueError(
+                        f"content-type non scaricabile ({content_type or 'assente'}): "
+                        f"web.download accetta solo {', '.join(_ALLOWED_BINARY_CONTENT)}")
+                if not (200 <= status < 300):
+                    response.close()
+                    _audit(agent, display, "REFUSED", action="web.download",
+                           status=status, content_type=content_type, resolved_ips=ips)
+                    raise ValueError(f"risposta non 2xx ({status}): nessun file scritto")
+                with open(dest, "wb") as fh:
+                    for chunk in response.iter_bytes():
+                        written += len(chunk)
+                        if written > DOWNLOAD_MAX_BYTES:
+                            fh.close()
+                            Path(dest).unlink(missing_ok=True)
+                            _audit(agent, display, "REFUSED", action="web.download",
+                                   status=status, content_type=content_type,
+                                   resolved_ips=ips, at_bytes=written)
+                            raise ValueError(
+                                f"file oltre il tetto ({DOWNLOAD_MAX_BYTES} byte): "
+                                "scaricamento interrotto, nessun file parziale lasciato")
+                        fh.write(chunk)
+        _audit(agent, display, "OK", action="web.download", status=status,
+               content_type=content_type, resolved_ips=ips, response_bytes=written)
+        return {
+            "ok": True,
+            "status": status,
+            "url": display,
+            "resolved_ips": ips,
+            "content_type": content_type,
+            "local_path": dest,
+            "size": written,
+        }
+    except PermissionError as exc:
+        _audit(agent, display, "DENIED", action="web.download", error=str(exc),
+               resolved_ips=ips)
+        raise
+    except ValueError:
+        raise
+    except Exception as exc:
+        Path(dest).unlink(missing_ok=True)
+        _audit(agent, display, "ERROR", action="web.download",
+               error=type(exc).__name__, resolved_ips=ips)
         raise
