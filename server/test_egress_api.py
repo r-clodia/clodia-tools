@@ -13,9 +13,10 @@ from . import egress_api
 
 
 class _Req:
-    def __init__(self, secret=None, uri=None):
+    def __init__(self, secret=None, uri=None, path_params=None):
         self.headers = {"x-orchestrator-secret": secret} if secret else {}
         self.query_params = {"uri": uri} if uri else {}
+        self.path_params = path_params or {}
 
 
 def _call(req):
@@ -120,6 +121,72 @@ class MembershipQueryTests(unittest.TestCase):
                 _with({"agents": {}}):
             b = json.loads(_call(_Req("s3cr3t")).body)
         self.assertNotIn("allowed", b)
+
+
+class ScopeWhitelistViewTests(unittest.TestCase):
+    """`/internal/egress/whitelist/scope/{tier}/{name}` — le due liste LOCALI
+    di un topic, distinte da quella globale (`whitelist_view`).
+
+    Sidebar "Egress/Ingress" della webui (9 set 2026): la lista globale era già
+    leggibile, quella per-scope no — `scope_uris` esisteva solo come funzione
+    interna usata da `effective_uris` per fare l'unione, mai esposta.
+    """
+
+    def _call(self, tier, name, secret="s3cr3t"):
+        return asyncio.run(egress_api.scope_whitelist_view(
+            _Req(secret, path_params={"tier": tier, "name": name})))
+
+    def _cfg(self):
+        return {
+            "agents": {},
+            "egress_allow": ["mailto:globale@tomato.blue"],
+            "scope_egress_allow": {"SEAL-1/acme": ["gdrive:folder/1AbC"]},
+            "scope_source_allow": {"SEAL-1/acme": ["https://esempio.it/feed"]},
+        }
+
+    def test_without_the_secret_it_is_unauthorized(self):
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}):
+            self.assertEqual(self._call("SEAL-1", "acme", secret=None).status_code, 401)
+
+    def test_the_scope_s_own_entries_come_back(self):
+        import json
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), \
+                _with(self._cfg()):
+            r = self._call("SEAL-1", "acme")
+        self.assertEqual(r.status_code, 200)
+        b = json.loads(r.body)
+        self.assertEqual(b["egress"], ["gdrive:folder/1AbC"])
+        self.assertEqual(b["ingress"], ["https://esempio.it/feed"])
+
+    def test_the_global_list_is_not_mixed_in(self):
+        """Questa rotta è la lista SOLO locale: l'unione con la globale la fa
+        `effective_uris` altrove, non qui — mischiarle renderebbe la sidebar
+        del topic indistinguibile dalle impostazioni globali."""
+        import json
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), \
+                _with(self._cfg()):
+            r = self._call("SEAL-1", "acme")
+        b = json.loads(r.body)
+        self.assertNotIn("mailto:globale@tomato.blue", b["egress"])
+
+    def test_a_scope_with_no_entries_answers_empty_not_an_error(self):
+        import json
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), \
+                _with(self._cfg()):
+            r = self._call("SEAL-1", "un-altro-topic")
+        b = json.loads(r.body)
+        self.assertEqual(b, {"egress": [], "ingress": []})
+
+    def test_the_legacy_tier_alias_still_resolves(self):
+        """`P1/acme` e `SEAL-1/acme` sono lo stesso posto (`_norm_scope_key`):
+        una voce scritta con l'alias vecchio non deve sparire da qui."""
+        import json
+        cfg = {"agents": {}, "scope_egress_allow": {"P1/acme": ["mailto:x@y.it"]}}
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), \
+                _with(cfg):
+            r = self._call("SEAL-1", "acme")
+        b = json.loads(r.body)
+        self.assertEqual(b["egress"], ["mailto:x@y.it"])
 
 
 if __name__ == "__main__":
