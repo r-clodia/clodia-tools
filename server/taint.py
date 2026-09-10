@@ -65,6 +65,9 @@ _TAINTING_EXACT = frozenset({
     # documenti esterni
     "gdrive.download", "gdocs.read", "gsheets.read", "gsheets.list_tabs",
     "gcalendar.list_events",
+    # datastore di un pack: possono portare testo di origine esterna (es. note
+    # OSINT), non è testo che l'agente ha prodotto
+    "datastore.read",
     # corpora e board di terzi
 })
 

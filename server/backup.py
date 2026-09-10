@@ -69,33 +69,15 @@ def _spawn_excludes() -> list[str]:
 
 
 def _declared_dbs() -> list[str]:
-    """Datastore dichiarati dai plugin installati (perimetro dinamico).
+    """Datastore dichiarati dai plugin installati (perimetro dinamico), quelli
+    con `backup: true` (default). Legge da `server.datastores.declared()`
+    (unica fonte, condivisa con `_datastore_authorize` in `main.py`) e
+    ricalcola a ogni run: un pack importato dopo la configurazione del backup
+    è coperto senza toccare l'env."""
+    from . import datastores as _ds
 
-    Scansiona CLODIA_DATA/plugins/*/plugin.yaml alla ricerca del campo
-    `datastores:` (dichiarazione curated del pack developer, propagata
-    dall'import a partire da plugin.json). Ogni entry con `backup: true`
-    (default) entra nello snapshot pre-restic; il path è relativo alla
-    datadir del plugin → `plugins/<nome>/<path>`. Ricalcolato a ogni run:
-    un pack importato dopo la configurazione del backup è coperto senza
-    toccare l'env.
-    """
-    import yaml
-
-    found: list[str] = []
-    for manifest in sorted(Path(DATADIR).glob("plugins/*/plugin.yaml")):
-        try:
-            meta = yaml.safe_load(manifest.read_text()) or {}
-        except Exception:
-            continue
-        if not isinstance(meta, dict):
-            continue
-        for ds in meta.get("datastores") or []:
-            if not isinstance(ds, dict) or not ds.get("path"):
-                continue
-            if ds.get("backup", True):
-                rel = Path("plugins") / manifest.parent.name / str(ds["path"])
-                found.append(str(rel))
-    return found
+    return [str(Path("plugins") / ds["pack"] / ds["path"])
+            for ds in _ds.declared() if ds["backup"]]
 
 
 def _cfg() -> dict | None:
