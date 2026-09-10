@@ -12,11 +12,12 @@ from . import __version__
 from . import origin
 from . import instance_profile
 from . import proxy
+from . import datastores
 from . import taint as _taint
 from . import telemetry as _tlm
 from . import transfer_channel
 from .tools import email, fs, logs, runtime
-from .tools import web_fetch, web_post
+from .tools import datastore_sql, web_fetch, web_post
 
 #: `LOG` era usato in cinque punti di questo modulo e **definito in nessuno**.
 #: Ognuno di quei punti sta in un `except` — cioè si scopre solo quando qualcosa
@@ -442,6 +443,51 @@ _WEB_TOOLS: list[Tool] = [
                 },
             },
             "required": ["url"],
+        },
+    ),
+]
+
+_DATASTORE_TOOLS: list[Tool] = [
+    Tool(
+        name="datastore.read",
+        description=(
+            "SELECT (o PRAGMA table_info/table_list) su un datastore dichiarato da "
+            "un pack. `datastore` in forma '<pack>/<nome>' (es. 'base-pack/contacts'). "
+            "Richiede clearance ≥ quella del datastore E di essere nel suo elenco "
+            "seed — stesso schema a due assi dei topic. Connessione read-only: una "
+            "scrittura camuffata da lettura fallisce comunque. Risultato limitato "
+            "(default 32 KB, alzabile con max_bytes fino a 256 KB): resta nel "
+            "contesto e viene riletto a ogni azione successiva del turno."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "datastore": {"type": "string", "description": "'<pack>/<nome>', es. 'base-pack/contacts'"},
+                "query": {"type": "string", "description": "una SELECT (o PRAGMA table_info/table_list)"},
+                "params": {"type": "array", "description": "parametri posizionali legati con '?'"},
+                "max_bytes": {"type": "integer", "minimum": 1, "maximum": 262144,
+                             "description": "byte di risultato da tenere; default 32768"},
+            },
+            "required": ["datastore", "query"],
+        },
+    ),
+    Tool(
+        name="datastore.write",
+        description=(
+            "INSERT/UPDATE/DELETE su un datastore dichiarato da un pack. `datastore` "
+            "in forma '<pack>/<nome>'. Stessa autorizzazione di datastore.read "
+            "(clearance + elenco seed) ma per la scrittura. Nessun DDL (CREATE/DROP/"
+            "ALTER/ATTACH restano fuori dal perimetro dichiarato dal pack) e una sola "
+            "istruzione per chiamata."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "datastore": {"type": "string", "description": "'<pack>/<nome>', es. 'base-pack/contacts'"},
+                "statement": {"type": "string", "description": "una INSERT/UPDATE/DELETE"},
+                "params": {"type": "array", "description": "parametri posizionali legati con '?'"},
+            },
+            "required": ["datastore", "statement"],
         },
     ),
 ]
@@ -2213,7 +2259,7 @@ def _native_tool_namespaces() -> list[str]:
     quindi l'omissione può essere deliberata. Va deciso, non uniformato di
     soppiatto: clodia-platform#140.
     """
-    tools = (_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TOPIC_TOOLS + _GITHUB_TOOLS + _IMAGE_TOOLS
+    tools = (_FS_TOOLS + _WEB_TOOLS + _DATASTORE_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TOPIC_TOOLS + _GITHUB_TOOLS + _IMAGE_TOOLS
              + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS
              + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
              + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS
@@ -2768,7 +2814,7 @@ def _all_native_tools() -> list:
     Resta fuori `_native_tool_namespaces`, che omette `settings` — una divergenza
     preesistente che non si sana con un refactor (vedi la nota là).
     """
-    native = list(_FS_TOOLS + _WEB_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS
+    native = list(_FS_TOOLS + _WEB_TOOLS + _DATASTORE_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS
                   + _TOPIC_TOOLS + _GITHUB_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS
                   + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS
                   + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
@@ -3102,6 +3148,7 @@ _RESOURCE_READ_VERBS = {
     "gsheets.list_tabs": ("spreadsheet_id", "gsheets:{}"),
     "gdocs.read": ("document_id", "gdrive:doc/{}"),
     "gdrive.download": ("file_id", "gdrive:file/{}"),
+    "datastore.read": ("datastore", "datastore:{}"),
 }
 
 
@@ -3727,6 +3774,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             _os.makedirs(_os.path.dirname(_dest), exist_ok=True)
             result = await asyncio.to_thread(
                 web_fetch.download, arguments, agent=_ag or "", dest=_dest)
+        elif name == "datastore.read":
+            _entry = _datastore_authorize(str(arguments.get("datastore") or ""), write=False)
+            result = await asyncio.to_thread(
+                datastore_sql.read, _entry, arguments, agent=_ag or "")
+        elif name == "datastore.write":
+            _entry = _datastore_authorize(str(arguments.get("datastore") or ""), write=True)
+            result = await asyncio.to_thread(
+                datastore_sql.write, _entry, arguments, agent=_ag or "")
         elif name == "web.post":
             result = await asyncio.to_thread(web_post.post, arguments, agent=_ag or "")
         elif name == "logs.tail":
@@ -4409,6 +4464,33 @@ def _rag_authorize(collection: str, write: bool) -> None:
         raise PermissionError(
             f"agent '{ag}': clearance insufficiente per la collection '{collection}' "
             f"(tier {tier})")
+
+
+def _datastore_authorize(key: str, *, write: bool) -> dict:
+    """Reference monitor per-datastore: stesso schema a due assi di
+    `_rag_authorize` sopra, ma con l'allowlist dichiarata DIRETTAMENTE nel
+    manifest del pack (`seeds:`) invece che in un grant store separato nel
+    core — un datastore non ha un provisioner che lo alimenta run-time come le
+    collection RAG, la sua fonte di verità è la dichiarazione del pack.
+
+    `key` in forma `<pack>/<nome>` (`server.datastores.parse_key`). Ritorna
+    l'entry autorizzata (con `abs_path` già risolto) così il chiamante non
+    deve rileggerla. Super-agent bypassa l'allowlist ma NON la clearance: un
+    dato dichiarato SEAL-3 resta SEAL-3 anche per chi ha tutti i verbi.
+    """
+    pack, dsname = datastores.parse_key(key)
+    entry = datastores.find(pack, dsname)
+    if entry is None:
+        raise ValueError(f"datastore sconosciuto: '{key}'")
+    ag = agent_name()
+    if not (_is_super(ag) or ag in (entry["seeds"] or [])):
+        raise PermissionError(
+            f"agent '{ag}' non è nell'elenco seed del datastore '{key}'")
+    if _rank(current_clearance()) < _rank(entry["clearance"]):
+        raise PermissionError(
+            f"agent '{ag}': clearance insufficiente per il datastore '{key}' "
+            f"(richiesta {entry['clearance']})")
+    return entry
 
 
 def _dispatch_rag(name: str, a: dict):
