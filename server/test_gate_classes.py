@@ -41,9 +41,25 @@ class ClassificationTests(unittest.TestCase):
         """Il gate va all'OWNER dello scope, non a un admin qualunque (voce 24):
         è per questo che non stanno con i verbi di sistema."""
         for v in ("topic.add_participant", "topic.drive_folder_add",
-                  "topic.drive_folder_remove", "topic.save_agents_md"):
+                  "topic.drive_folder_remove", "topic.save_agents_md",
+                  "topic.egress_add", "topic.egress_remove",
+                  "topic.ingress_add", "topic.ingress_remove"):
             with self.subTest(verbo=v):
                 self.assertEqual(gate.gate_class(v), gate.GATE_WALLS)
+
+    def test_scoped_egress_is_symmetric_unlike_the_global_list(self):
+        """`egress.revoke`/`ingress.revoke` (globali) NON sono gated — togliere
+        autorità non richiede consenso. Ma la coppia scoped-al-topic vive sotto
+        WALLS, dove aggiunta e rimozione sono trattate identiche (come
+        `add_participant`/`remove_participant`): il perimetro è di UNA stanza,
+        e quanto è largo — in entrambe le direzioni — lo decide il suo owner,
+        non chi lo chiede."""
+        self.assertFalse(gate.is_gated("egress.revoke"))
+        self.assertFalse(gate.is_gated("ingress.revoke"))
+        for v in ("topic.egress_add", "topic.egress_remove",
+                  "topic.ingress_add", "topic.ingress_remove"):
+            with self.subTest(verbo=v):
+                self.assertTrue(gate.is_gated(v))
 
     def test_crossing_outward_is_its_own_class(self):
         for v in ("web.post", "egress.allow", "ingress.allow"):
