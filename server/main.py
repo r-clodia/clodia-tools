@@ -1125,6 +1125,55 @@ _TOPIC_TOOLS: list[Tool] = [
             "mount": {"type": "string", "description": "nome della dichiarazione da togliere"}},
             "required": ["tier", "name", "mount"]},
     ),
+    # Whitelist egress/ingress LOCALE a questo canale (router-notebook R17,
+    # clodia-platform#334): a differenza di egress.allow/ingress.allow (GLOBALI,
+    # per tutti gli agenti, per sempre) queste voci valgono solo dentro questo
+    # topic. Gated WALLS come drive_folder_add/remove: l'owner dello scope
+    # decide, in entrambe le direzioni (aggiunta E rimozione).
+    Tool(
+        name="topic.egress_add",
+        description=("Aggiunge una DESTINAZIONE ammessa in uscita SOLO per questo "
+                     "canale (non per tutti gli agenti). Stessa notazione URI di "
+                     "egress.allow. Richiede approvazione dell'owner dello scope."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "uri": {"type": "string"}},
+            "required": ["tier", "name", "uri"]},
+    ),
+    Tool(
+        name="topic.egress_remove",
+        description=("Toglie una destinazione ammessa localmente a questo canale. "
+                     "Non tocca la whitelist globale. Richiede approvazione "
+                     "dell'owner dello scope."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "uri": {"type": "string"}},
+            "required": ["tier", "name", "uri"]},
+    ),
+    Tool(
+        name="topic.ingress_add",
+        description=("Aggiunge una FONTE FIDATA SOLO per questo canale (non per "
+                     "tutti gli agenti). Stessa notazione URI di ingress.allow. "
+                     "Richiede approvazione dell'owner dello scope."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "uri": {"type": "string"}},
+            "required": ["tier", "name", "uri"]},
+    ),
+    Tool(
+        name="topic.ingress_remove",
+        description=("Toglie una fonte fidata locale a questo canale. Non tocca la "
+                     "whitelist globale. Richiede approvazione dell'owner dello "
+                     "scope."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "uri": {"type": "string"}},
+            "required": ["tier", "name", "uri"]},
+    ),
     Tool(
         name="topic.suggest_team",
         description=("Proponi la SQUADRA di agenti per un topic, data una breve "
@@ -3644,6 +3693,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                              else "destinazione ammessa")
                     reason = (f"@{_ag} chiede di aggiungere {_u} come {_what}, "
                               f"per TUTTI gli agenti. {_eg.admin_note(_dir, _u)}")
+                elif name in ("topic.egress_add", "topic.egress_remove",
+                              "topic.ingress_add", "topic.ingress_remove"):
+                    # Stessa logica del ramo globale sopra, ma il perimetro che
+                    # si sposta è quello di QUESTA stanza soltanto — il dialog
+                    # deve dirlo, o l'owner rischia di confonderlo con una
+                    # richiesta che vale per tutti gli agenti ovunque.
+                    from . import egress as _eg
+                    _u = _eg.canonical(str(arguments.get("uri") or ""))
+                    _dir, _verb = name.split(".", 1)[1].rsplit("_", 1)
+                    _what = "fonte fidata" if _dir == "ingress" else "destinazione ammessa"
+                    _azione = "aggiungere" if _verb == "add" else "togliere"
+                    reason = (f"@{_ag} chiede di {_azione} {_u} come {_what} "
+                              f"SOLO in questo canale (non per tutti gli agenti).")
                 elif _off_profile:
                     reason = (f"@{_ag} chiede di usare `{name}`, che PUÒ raggiungere ma "
                               f"non dichiara nel proprio profilo. Non è un verbo "
@@ -4221,6 +4283,7 @@ _TOPIC_SCOPED_VERBS = {
     "put", "delete_file",
     "post_message", "messages", "my_mentions", "mark_seen",
     "drive_folder_add", "drive_folder_remove",
+    "egress_add", "egress_remove", "ingress_add", "ingress_remove",
 }
 
 
@@ -4251,6 +4314,7 @@ _TOPIC_MUTATING_VERBS = frozenset({
     "telegram_bind", "telegram_unbind",
     "write_file", "convert_document", "write_document", "put", "delete_file",
     "drive_folder_add", "drive_folder_remove",
+    "egress_add", "egress_remove", "ingress_add", "ingress_remove",
 })
 
 
@@ -4951,6 +5015,19 @@ def _dispatch_topic(name: str, a: dict):
                                     mount_name=a.get("mount"), account=a.get("account"))
     if verb == "drive_folder_remove":
         return svc.drive_folder_remove(a["tier"], a["name"], a["mount"])
+    # Whitelist egress/ingress locale al canale (router-notebook R17,
+    # clodia-platform#334): stesso storage di egress.allow/revoke, chiave
+    # scoped `<tier>/<name>` invece che globale. Il gate WALLS (owner dello
+    # scope, in entrambe le direzioni) è già stato applicato prima di arrivare
+    # qui — vedi `_GATE_CLASS` in gate.py.
+    if verb in ("egress_add", "ingress_add"):
+        from . import egress as eg
+        direction = "egress" if verb == "egress_add" else "ingress"
+        return eg.scope_allow(direction, f"{a['tier']}/{a['name']}", a["uri"])
+    if verb in ("egress_remove", "ingress_remove"):
+        from . import egress as eg
+        direction = "egress" if verb == "egress_remove" else "ingress"
+        return eg.scope_revoke(direction, f"{a['tier']}/{a['name']}", a["uri"])
     raise ValueError(f"unknown topic verb: {name}")
 
 

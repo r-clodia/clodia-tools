@@ -77,6 +77,14 @@ _GATE_CLASS = {
     "topic.telegram_bind": GATE_WALLS, "topic.telegram_unbind": GATE_WALLS,
     "topic.remove_participant": GATE_WALLS,
     "topic.drive_folder_add": GATE_WALLS, "topic.drive_folder_remove": GATE_WALLS,
+    # Whitelist egress/ingress LOCALE al topic (router-notebook R17, clodia-
+    # platform#334): stessa forma di drive_folder_add/remove due righe sopra —
+    # un agent può chiedere, solo l'owner dello scope allarga o restringe il
+    # perimetro di UNA stanza. Simmetrico apposta: `topic.remove_participant`
+    # è gated quanto `add_participant`, e qui vale la stessa ragione — "quanto
+    # è largo lo scope" lo decide sempre l'owner, in entrambe le direzioni.
+    "topic.egress_add": GATE_WALLS, "topic.egress_remove": GATE_WALLS,
+    "topic.ingress_add": GATE_WALLS, "topic.ingress_remove": GATE_WALLS,
     # OUTWARD — verso fuori
     "web.post": GATE_OUTWARD,
     # `github.push` e `github.pull_request` portano FUORI il lavoro fatto nella
@@ -145,6 +153,13 @@ _DEFAULT_GATED_EXACT = frozenset({
     # fa ricadere gli accessi sulle radici d'ACCOUNT, che possono essere più
     # larghe. Togliere il perimetro è un allargamento.
     "topic.drive_folder_add", "topic.drive_folder_remove",
+    # Whitelist egress/ingress LOCALE a un topic (router-notebook R17,
+    # clodia-platform#334): stessa ragione di drive_folder_add/remove due
+    # righe sopra — è il perimetro DI QUESTA STANZA, quindi simmetrico
+    # (aggiunta E rimozione), a differenza della whitelist globale due voci
+    # più sotto dove `revoke` non è gated.
+    "topic.egress_add", "topic.egress_remove",
+    "topic.ingress_add", "topic.ingress_remove",
     # Le istruzioni di scope entrano nel contesto di OGNI agente della stanza a
     # OGNI turno: scriverle è un atto di autorità, non una preferenza. Finché il
     # gate non sarà rivolto all'owner dello scope (modello «titolo», voci 23-25

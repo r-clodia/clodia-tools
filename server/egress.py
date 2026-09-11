@@ -985,6 +985,40 @@ def scope_allow(direction: str, scope: str, uri: str) -> dict:
             "added": added, "total": len(cur)}
 
 
+def scope_revoke(direction: str, scope: str, uri: str) -> dict:
+    """Rimuove `uri` dalla lista di UNO scope. Idempotente.
+
+    Questa funzione non decide da sola se l'azione richieda un consenso: come
+    `scope_allow`, il gate è deciso a monte dal chiamante (`gate.py::_GATE_CLASS`
+    in clodia-tools), non qui. Per i verbi topic-scoped la classe `WALLS` gate
+    simmetricamente aggiunta E rimozione — stesso trattamento di
+    `topic.add_participant`/`topic.remove_participant` e di
+    `topic.drive_folder_add`/`topic.drive_folder_remove`: chi sta nello scope
+    e quanto è largo lo decide sempre l'owner, in entrambe le direzioni.
+    Diverso dalla whitelist GLOBALE (`revoke`, sopra), dove restringere non è
+    gated perché lì il "muro" non è di nessuno scope in particolare."""
+    key = _SCOPE_KEYS[direction]
+    u = canonical(uri)
+    chiave = _norm_scope_key(scope)
+    from . import whitelist as _wl
+    per_scope = dict(_wl.CONFIG.get(key) or {})
+    cur: list = []
+    for k in [k for k in per_scope if _norm_scope_key(str(k)) == chiave]:
+        cur.extend(per_scope.pop(k) or [])
+    if u not in cur:
+        per_scope[chiave] = cur
+        _wl.CONFIG[key] = per_scope
+        return {"direction": direction, "scope": chiave, "uri": u,
+                "removed": False, "total": len(cur)}
+    cur = [x for x in cur if x != u]
+    per_scope[chiave] = cur
+    _wl.CONFIG[key] = per_scope
+    _wl.save_config()
+    LOG.warning("%s[%s] · -= %s", key, chiave, u)
+    return {"direction": direction, "scope": chiave, "uri": u,
+            "removed": True, "total": len(cur)}
+
+
 def revoke(direction: str, uri: str) -> dict:
     """Rimuove `uri`. NON gated: togliere autorità non richiede un consenso —
     chiederlo insegnerebbe che anche restringere è un'operazione da negoziare."""

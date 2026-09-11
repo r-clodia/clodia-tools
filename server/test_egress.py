@@ -558,3 +558,52 @@ class AdminVerbTests(unittest.TestCase):
     def test_the_egress_note_describes_the_class_of_destination(self):
         self.assertIn("pubblico", egress.admin_note(
             "egress", "https://github.com/a/b"))
+
+
+class ScopeAdminVerbTests(unittest.TestCase):
+    """`scope_allow`/`scope_revoke` — la coppia LOCALE a un topic (router-notebook
+    R17, clodia-platform#334). A differenza della lista globale sopra, qui
+    aggiunta e rimozione sono gated ALLO STESSO MODO (owner dello scope): il
+    gate vive nel gateway (`gate.py::_GATE_CLASS`), non in queste funzioni, che
+    restano pure mutazioni — questa classe verifica solo la mutazione."""
+
+    def setUp(self):
+        from . import whitelist as wl
+        self.cfg = {"agents": {}, "egress_allow": [], "source_allow": [],
+                    "scope_egress_allow": {}, "scope_source_allow": {}}
+        for pt in (patch.object(wl, "CONFIG", self.cfg),
+                   patch.object(wl, "save_config", lambda: None)):
+            pt.start()
+            self.addCleanup(pt.stop)
+
+    def test_scope_allow_normalises_and_is_idempotent(self):
+        r1 = egress.scope_allow("egress", "SEAL-1/acme",
+                                "https://drive.google.com/drive/folders/1AbC")
+        self.assertEqual(r1["uri"], "gdrive:folder/1AbC")
+        self.assertTrue(r1["added"])
+        self.assertFalse(
+            egress.scope_allow("egress", "SEAL-1/acme", "gdrive://1AbC")["added"])
+        self.assertEqual(egress.scope_uris("egress", "SEAL-1/acme"),
+                         ["gdrive:folder/1AbC"])
+
+    def test_scope_allow_does_not_leak_into_another_scope(self):
+        egress.scope_allow("egress", "SEAL-1/acme", "mailto:a@b.it")
+        self.assertEqual(egress.scope_uris("egress", "SEAL-1/altro"), [])
+
+    def test_a_legacy_tier_alias_still_resolves_on_write(self):
+        egress.scope_allow("egress", "P1/acme", "mailto:a@b.it")
+        self.assertEqual(egress.scope_uris("egress", "SEAL-1/acme"),
+                         ["mailto:a@b.it"])
+
+    def test_scope_revoke_removes_and_reports_when_absent(self):
+        egress.scope_allow("ingress", "SEAL-1/acme", "mailfrom:a@b.it")
+        self.assertTrue(
+            egress.scope_revoke("ingress", "SEAL-1/acme", "mailfrom:a@b.it")["removed"])
+        self.assertFalse(
+            egress.scope_revoke("ingress", "SEAL-1/acme", "mailfrom:a@b.it")["removed"])
+
+    def test_scope_revoke_does_not_touch_the_global_list(self):
+        egress.allow("egress", "mailto:global@x.it")
+        egress.scope_allow("egress", "SEAL-1/acme", "mailto:global@x.it")
+        egress.scope_revoke("egress", "SEAL-1/acme", "mailto:global@x.it")
+        self.assertIn("mailto:global@x.it", egress.allowed_uris())
