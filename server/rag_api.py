@@ -10,6 +10,11 @@ non un modello, quindi l'autorizzazione è il principal privilegiato di questa
 rotta, non un grant per-risorsa.
 
   GET /internal/rag/collections   → {"collections": [...]}  (eu_corpus.collections(), non filtrato)
+  GET /internal/rag/documents?collection=X → {"documents": [...]} (eu_corpus.list_documents)
+
+La seconda è il contenuto della prima: una collection con «12 documenti» e
+nessun modo di sapere QUALI non si può amministrare — si vede il conteggio di
+ciò che è stato iniettato, non ciò che è stato iniettato (clodia-platform#342).
 
 Sola lettura: non esiste ancora un modo di cancellare una collection (il
 servizio `eu-rag-search` non espone l'endpoint — clodia-platform, decisione
@@ -47,6 +52,26 @@ async def list_collections(request: Request):
     return JSONResponse(data)
 
 
+async def list_documents(request: Request):
+    agent, err = _authorize(request)
+    if err:
+        return err
+    collection = (request.query_params.get("collection") or "").strip()
+    if not collection:
+        # `eu_corpus.list_documents` ha un default (`eu-normativa`): senza
+        # questo controllo una richiesta senza `collection` risponderebbe 200
+        # con i documenti di un'ALTRA collection — un errore del chiamante
+        # travestito da risposta valida, che è il modo peggiore di sbagliare.
+        return JSONResponse({"error": "parametro 'collection' richiesto"},
+                            status_code=400)
+    try:
+        data = eu_corpus.list_documents(collection)
+    except RuntimeError as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+    return JSONResponse(data)
+
+
 routes = [
     Route("/internal/rag/collections", list_collections, methods=["GET"]),
+    Route("/internal/rag/documents", list_documents, methods=["GET"]),
 ]
