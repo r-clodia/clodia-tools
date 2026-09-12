@@ -61,5 +61,63 @@ class ListCollectionsTests(unittest.TestCase):
         self.assertEqual(403, r.status_code)
 
 
+class ListDocumentsTests(unittest.TestCase):
+    """I documenti INIETTATI in una collection (clodia-platform#342).
+
+    `eu_corpus.list_documents` esisteva già e la pagina Databases non aveva da
+    dove chiamarla: la lista delle collection usciva, il contenuto no.
+    """
+
+    def setUp(self) -> None:
+        self.app = Starlette(routes=rag_api.routes)
+        self.client = TestClient(self.app)
+
+    def test_returns_the_documents_of_the_collection(self) -> None:
+        dati = {"collection": "eu-normativa", "documents": [
+            {"name": "GDPR", "version": "2016/679", "status": "indexed", "chunks": 120},
+        ]}
+        visto = {}
+
+        def _docs(collection):
+            visto["collection"] = collection
+            return dati
+
+        with _sessione(_RUNNER), patch.object(eu_corpus, "list_documents", _docs):
+            r = self.client.get("/internal/rag/documents?collection=eu-normativa",
+                                headers=_H)
+        self.assertEqual(200, r.status_code)
+        self.assertEqual(dati, r.json())
+        # La collection chiesta è quella servita: senza questo il test passerebbe
+        # anche se la rotta leggesse sempre la collection di default.
+        self.assertEqual("eu-normativa", visto["collection"])
+
+    def test_missing_collection_is_400_not_the_default_one(self) -> None:
+        """`list_documents` ha un default (`eu-normativa`): una richiesta senza
+        `collection` risponderebbe 200 con i documenti di un'ALTRA collection —
+        un errore del chiamante travestito da risposta valida."""
+        with _sessione(_RUNNER), patch.object(eu_corpus, "list_documents",
+                                              lambda collection: {"documents": []}):
+            r = self.client.get("/internal/rag/documents", headers=_H)
+        self.assertEqual(400, r.status_code)
+
+    def test_eu_rag_search_unreachable_is_502_not_500(self) -> None:
+        def _boom(collection):
+            raise RuntimeError("eu-rag-search irraggiungibile (http://x): timeout")
+        with _sessione(_RUNNER), patch.object(eu_corpus, "list_documents", _boom):
+            r = self.client.get("/internal/rag/documents?collection=eu-normativa",
+                                headers=_H)
+        self.assertEqual(502, r.status_code)
+
+    def test_missing_token_is_401(self) -> None:
+        r = self.client.get("/internal/rag/documents?collection=eu-normativa")
+        self.assertEqual(401, r.status_code)
+
+    def test_non_privileged_principal_is_403(self) -> None:
+        with _sessione({"agent": "looper"}):
+            r = self.client.get("/internal/rag/documents?collection=eu-normativa",
+                                headers=_H)
+        self.assertEqual(403, r.status_code)
+
+
 if __name__ == "__main__":
     unittest.main()

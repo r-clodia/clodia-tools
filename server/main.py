@@ -4541,11 +4541,16 @@ def _datastore_authorize(key: str, *, write: bool) -> dict:
     l'entry autorizzata (con `abs_path` già risolto) così il chiamante non
     deve rileggerla. Super-agent bypassa l'allowlist ma NON la clearance: un
     dato dichiarato SEAL-3 resta SEAL-3 anche per chi ha tutti i verbi.
+
+    DUE ASSI, ma non le stesse due domande per un agente e per una persona:
+    vedi il ramo `is_on_behalf()` qui sotto.
     """
     pack, dsname = datastores.parse_key(key)
     entry = datastores.find(pack, dsname)
     if entry is None:
         raise ValueError(f"datastore sconosciuto: '{key}'")
+    if is_on_behalf():
+        return _datastore_authorize_human(entry, key, write=write)
     ag = agent_name()
     if not (_is_super(ag) or ag in (entry["seeds"] or [])):
         raise PermissionError(
@@ -4554,6 +4559,50 @@ def _datastore_authorize(key: str, *, write: bool) -> dict:
         raise PermissionError(
             f"agent '{ag}': clearance insufficiente per il datastore '{key}' "
             f"(richiesta {entry['clearance']})")
+    return entry
+
+
+def _datastore_authorize_human(entry: dict, key: str, *, write: bool) -> dict:
+    """L'asse di una PERSONA che legge on-behalf dalla webui (#342).
+
+    `seeds:` è un elenco di AGENTI e di una persona non dice nulla. Chiederlo
+    comunque — cioè chiedere «il CARRIER è nell'elenco?» — è la domanda
+    sbagliata posta a nome di qualcun altro, e dava due risposte entrambe
+    sbagliate: negava a un admin la lettura di un datastore della sua istanza
+    (nessun datastore era navigabile da un umano, che è la issue) e la
+    concedeva a CHIUNQUE quando il carrier tecnico `clodia` compariva per caso
+    nei seeds del pack — l'autorità di un agente ereditata da una persona che
+    non ce l'ha, cioè il difetto che `_human_tool_allowed` esiste per chiudere.
+
+    Le domande che si possono porre di una persona sono i suoi claim FIRMATI
+    dall'agent-server, e sono due come per gli agenti:
+    - **ruolo**: admin. La navigazione tabellare apre dati che il manifest
+      marca `pii`, e l'istanza dichiara già chi la amministra;
+    - **livello**: clearance ≥ quella del datastore, lo stesso asse degli
+      agenti. Un claim assente vale SEAL-0 (`_rank(None)`), non «nessun
+      limite»: finché l'agent-server non conia la clearance dell'umano nel
+      token on-behalf, un admin vede solo i datastore SEAL-0 — negato per
+      difetto, mai concesso per difetto.
+
+    La SCRITTURA resta fuori: #342 chiede di navigare, e l'unico posto dove
+    qualcuno ha autorizzato una scrittura su questi dati è il manifest del
+    pack, che nomina agenti. Un `DELETE` dalla UI non l'ha chiesto nessuno.
+    """
+    chi = current_principal() or "sconosciuto"
+    if write:
+        raise PermissionError(
+            f"scrittura sul datastore '{key}' non consentita da una sessione "
+            f"umana: la dichiara il pack, e nomina agenti ('{key}' → seeds). "
+            f"Dalla UI il datastore è navigabile in sola lettura.")
+    if not _human_is_admin():
+        raise PermissionError(
+            f"datastore '{key}' riservato agli admin (umano '{chi}' ruolo "
+            f"'{current_human_role() or 'user'}')")
+    if _rank(current_clearance()) < _rank(entry["clearance"]):
+        raise PermissionError(
+            f"umano '{chi}': clearance insufficiente per il datastore '{key}' "
+            f"(richiesta {entry['clearance']}, questa sessione porta "
+            f"{current_clearance() or 'nessuna clearance'})")
     return entry
 
 
