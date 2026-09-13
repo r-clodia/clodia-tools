@@ -3520,6 +3520,133 @@ def _note_run_refusal(verb: str, why: str) -> bool:
         return False
 
 
+# Verbi gated che oggi cadono nel ramo generico (`reason = ""`, "chiede di
+# usare `X`") mappati a una funzione che descrive l'EFFETTO concreto
+# dell'approvazione — Davide, 13 set 2026: chi legge il gate deve sapere cosa
+# ottiene chi lo chiede, non solo il nome del verbo. Non tocca i rami già
+# specifici sopra (web.post, egress/ingress.allow, topic.egress/ingress_*,
+# off-profile): quelli descrivono già l'effetto a modo loro.
+def _gate_effect_reason(name: str, arguments: dict) -> str:
+    """Continuazione di «**{agente}** chiede di usare `{verbo}` — <effetto>».
+
+    Il chiamante compone il messaggio finale come "di usare `{verbo}`" +
+    " — " + questo ritorno: la frase qui NON deve riaprire con «@agente chiede
+    di» (sarebbe una ripetizione), deve proseguirla — stesso stile della
+    reason già in uso per le destinazioni egress non censite («verso
+    mailto:X, che non è fra le destinazioni consentite. Approvando...»).
+
+    Meglio una descrizione un po' meno elegante di un fallback silenzioso: se
+    il verbo non è fra quelli mappati qui sotto ritorna `""` (il chiamante
+    resta con «chiede di usare `X`» e basta), così un verbo nuovo non
+    ancora coperto resta visibile come lacuna invece di un crash.
+    """
+    a = arguments or {}
+    bersaglio = str(a.get("agent") or "?")
+
+    try:
+        if name == "agents.grant_tool":
+            return f"concede a @{bersaglio} il permesso `{a.get('tool')}`."
+        if name == "agents.revoke_tool":
+            return f"toglie a @{bersaglio} il permesso `{a.get('tool')}`."
+        if name == "agents.grant_rule":
+            return f"aggiunge a @{bersaglio} la regola `{a.get('rule')}`."
+        if name == "agents.revoke_rule":
+            return f"toglie a @{bersaglio} la regola `{a.get('rule')}`."
+        if name == "agents.grant_skill":
+            return f"aggiunge a @{bersaglio} la skill `{a.get('skill')}`."
+        if name == "agents.revoke_skill":
+            return f"toglie a @{bersaglio} la skill `{a.get('skill')}`."
+        if name == "agents.grant_scoped":
+            pezzi = []
+            if a.get("capabilities"):
+                pezzi.append("skill " + ", ".join(f"`{c}`" for c in a["capabilities"]))
+            if a.get("rules"):
+                pezzi.append("regole " + ", ".join(f"`{r}`" for r in a["rules"]))
+            if a.get("tools"):
+                pezzi.append("tool " + ", ".join(f"`{t}`" for t in a["tools"]))
+            if a.get("model") or a.get("provider"):
+                pezzi.append(f"modello `{a.get('model') or '?'}`/`{a.get('provider') or '?'}`")
+            cosa = "; ".join(pezzi) if pezzi else "nessuna capacità aggiuntiva dichiarata"
+            scope_kind = a.get("scope_kind", "topic")
+            scope_id = a.get("scope_id") or "(scope corrente)"
+            ttl = a.get("ttl_minutes", 15)
+            return (f"concede TEMPORANEAMENTE a @{bersaglio}: {cosa} — "
+                    f"scope {scope_kind} `{scope_id}`, per {ttl} minuti.")
+        if name == "agents.revoke_scoped":
+            return (f"revoca SUBITO l'override scoped `{a.get('override_id')}` "
+                    f"di @{bersaglio}.")
+        if name == "mcp.add":
+            server_names = list(((a.get("config") or {}).get("mcpServers") or {}).keys())
+            elenco = ", ".join(f"`{n}`" for n in server_names) or "(nessun server nel config)"
+            return (f"monta {len(server_names)} server MCP: {elenco} — nuova "
+                    f"superficie di codice nel gateway.")
+        if name == "mcp.remove":
+            return f"smonta il server MCP `{a.get('name')}`."
+        if name == "packs.import_url":
+            return f"installa un pack da `{a.get('url')}` — codice di terzi eseguito nel gateway."
+        if name == "packs.remove":
+            return (f"rimuove il pack `{a.get('name')}` — via i suoi agent, skill e "
+                    f"datastore installati.")
+        if name == "packs.install_pip":
+            pkgs = ", ".join(f"`{p}`" for p in (a.get("packages") or [])) or "(nessuno)"
+            return f"installa nel venv persistente del gateway: {pkgs}."
+        if name == "packs.install_npm":
+            pkgs = ", ".join(f"`{p}`" for p in (a.get("packages") or [])) or "(nessuno)"
+            return f"installa nel prefix npm persistente del gateway: {pkgs}."
+        if name == "providers.pause":
+            return (f"mette in PAUSA il provider `{a.get('provider_id')}` — escluso "
+                    f"dalla selezione per TUTTI gli agenti finché non viene riattivato.")
+        if name == "providers.resume":
+            return f"riattiva il provider `{a.get('provider_id')}`."
+        if name == "topic.add_participant":
+            return (f"aggiunge @{a.get('agent')} ai partecipanti del topic "
+                    f"`{a.get('tier')}/{a.get('name')}`.")
+        if name == "topic.remove_participant":
+            return (f"rimuove @{a.get('agent')} dai partecipanti del topic "
+                    f"`{a.get('tier')}/{a.get('name')}`.")
+        if name == "topic.telegram_bind":
+            n_people = len((a.get("people") or {}))
+            return (f"collega il gruppo Telegram `{a.get('chat_id')}` al topic "
+                    f"`{a.get('tier')}/{a.get('name')}` (modo `{a.get('mode', 'notify')}`, "
+                    f"{n_people} persone mappate) — le menzioni di quelle persone "
+                    f"arriveranno lì.")
+        if name == "topic.telegram_unbind":
+            return (f"scollega il gruppo Telegram (mount `{a.get('mount') or 'telegram'}`) "
+                    f"dal topic `{a.get('tier')}/{a.get('name')}`.")
+        if name == "topic.drive_folder_add":
+            return (f"dichiara la cartella Drive `{a.get('folder')}` come perimetro "
+                    f"gdrive.* del topic `{a.get('tier')}/{a.get('name')}`.")
+        if name == "topic.drive_folder_remove":
+            return (f"toglie la dichiarazione Drive `{a.get('mount')}` dal topic "
+                    f"`{a.get('tier')}/{a.get('name')}` — gli accessi gdrive.* da qui "
+                    f"ricadono sulle radici account, più ampie del perimetro dichiarato.")
+        if name == "topic.save_agents_md":
+            testo = (a.get("text") or "").strip()
+            anteprima = (testo[:200] + "…") if len(testo) > 200 else testo
+            return (f"riscrive le istruzioni di scope (AGENTS.md) del topic "
+                    f"`{a.get('tier')}/{a.get('name')}` — entrano nel prompt di OGNI "
+                    f"agente della stanza, ogni turno."
+                    + (f" Anteprima: «{anteprima}»" if anteprima else " (testo vuoto: le rimuove)"))
+        if name == "github.push":
+            return (f"spinge i commit dalla scratch `{a.get('dir')}` al branch "
+                    f"`{a.get('branch')}` — destinazione FUORI dal perimetro già approvato.")
+        if name == "github.pull_request":
+            return (f"apre una pull request su `{a.get('repo')}` "
+                    f"({a.get('head')} → {a.get('base') or 'main'}): «{a.get('title')}».")
+        if name == "settings.backup_set":
+            campi = ", ".join(f"{k}={v!r}" for k, v in a.items()) or "(nessun campo)"
+            return f"aggiorna la configurazione di backup: {campi}."
+        if name == "settings.backup_run":
+            return "esegue SUBITO un backup completo della piattaforma."
+        if name == "settings.backup_restore_test":
+            return ("ripristina l'ultimo snapshot in area temporanea e lo verifica "
+                    "(nessun dato di produzione toccato).")
+    except Exception as e:  # noqa: BLE001 — una reason mancata non deve bloccare il gate
+        LOG.warning("gate effect reason non costruita per '%s': %s", name, e)
+        return ""
+    return ""
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     try:
@@ -3713,7 +3840,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                               f"Se lo usa spesso, dichiararlo nel profilo del suo pack "
                               f"toglie questa domanda; approvarlo qui vale una volta.")
                 else:
-                    reason = ""
+                    reason = _gate_effect_reason(name, arguments)
                 if is_on_behalf():
                     # La card la legge un umano e dice CHI chiede. Da quando il
                     # M-gate non è più esente per i non-admin (#148), qui passano

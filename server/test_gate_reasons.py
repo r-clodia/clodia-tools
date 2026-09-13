@@ -34,6 +34,14 @@ from unittest.mock import patch
 
 from . import egress, gate
 
+try:
+    from . import main as _main
+    _MAIN_IMPORT_ERROR: Exception | None = None
+except Exception as _e:  # noqa: BLE001 — `server.main` dipende da `mcp`, non
+    # installato in ogni ambiente (v. docstring di `TheShortCircuitIsGoneTests`)
+    _main = None
+    _MAIN_IMPORT_ERROR = _e
+
 
 def _perimetro(verb: str, arguments: dict, *regole: str) -> bool:
     """`destinations_already_allowed` con una whitelist finta: è la stessa
@@ -180,6 +188,77 @@ class TheShortCircuitIsGoneTests(unittest.TestCase):
         src = self._src()
         self.assertIn("_gate.needs_consent(", src)
         self.assertIn("_gate.perimeter_answers(", src)
+
+
+@unittest.skipUnless(_main is not None,
+                     f"server.main non importabile: {_MAIN_IMPORT_ERROR}")
+class GateEffectReasonTests(unittest.TestCase):
+    """L'owner deve leggere l'EFFETTO, non solo il nome del verbo (Davide, 13
+    set 2026): «content-creator potrà leggere da storage R», non «chiede di
+    usare `agents.grant_scoped`»."""
+
+    def test_grant_scoped_names_the_capability_and_the_scope(self):
+        reason = _main._gate_effect_reason("agents.grant_scoped", {
+            "agent": "tomato.content-creator",
+            "capabilities": ["business-pack/bookkeeping"],
+            "scope_kind": "topic", "scope_id": "SEAL-1/tomato-blogging",
+            "ttl_minutes": 20,
+        })
+        self.assertIn("tomato.content-creator", reason)
+        self.assertIn("business-pack/bookkeeping", reason)
+        self.assertIn("SEAL-1/tomato-blogging", reason)
+        self.assertIn("20", reason)
+        # Non deve riaprire «chiede di»: il chiamante lo ha già scritto una
+        # volta prima di appendere questa reason (v. docstring della funzione).
+        self.assertNotIn("chiede di", reason)
+
+    def test_grant_scoped_with_nothing_declared_says_so_instead_of_blank(self):
+        reason = _main._gate_effect_reason("agents.grant_scoped",
+                                           {"agent": "worker"})
+        self.assertIn("nessuna capacità aggiuntiva dichiarata", reason)
+
+    def test_grant_tool_names_agent_and_tool(self):
+        reason = _main._gate_effect_reason(
+            "agents.grant_tool", {"agent": "sales-rep", "tool": "email.send"})
+        self.assertIn("sales-rep", reason)
+        self.assertIn("email.send", reason)
+
+    def test_mcp_add_lists_the_servers_from_the_config(self):
+        reason = _main._gate_effect_reason("mcp.add", {
+            "config": {"mcpServers": {"leads": {}, "sedia": {}}}})
+        self.assertIn("leads", reason)
+        self.assertIn("sedia", reason)
+        self.assertIn("2", reason)
+
+    def test_packs_install_pip_lists_the_packages(self):
+        reason = _main._gate_effect_reason(
+            "packs.install_pip", {"packages": ["mcp>=1.2", "Pillow>=10.0"]})
+        self.assertIn("mcp>=1.2", reason)
+        self.assertIn("Pillow>=10.0", reason)
+
+    def test_topic_add_participant_names_agent_and_topic(self):
+        reason = _main._gate_effect_reason("topic.add_participant", {
+            "tier": "SEAL-1", "name": "tomato-blogging", "agent": "fact-checker"})
+        self.assertIn("fact-checker", reason)
+        self.assertIn("SEAL-1/tomato-blogging", reason)
+
+    def test_github_push_flags_the_destination_as_outside_the_perimeter(self):
+        reason = _main._gate_effect_reason(
+            "github.push", {"dir": "/scratch/x", "branch": "feat/y"})
+        self.assertIn("feat/y", reason)
+        self.assertIn("FUORI dal perimetro", reason)
+
+    def test_unmapped_verb_returns_empty_not_a_crash(self):
+        # Un verbo non ancora coperto qui non deve rompere il gate: il
+        # chiamante ricade su "chiede di usare `X`" senza continuazione.
+        self.assertEqual(_main._gate_effect_reason("verbo.mai.visto", {}), "")
+
+    def test_a_bad_argument_shape_degrades_to_empty_instead_of_raising(self):
+        # `capabilities` non è una lista iterabile di stringhe come atteso:
+        # la reason mancata non deve mai far fallire il gate stesso.
+        reason = _main._gate_effect_reason(
+            "agents.grant_scoped", {"agent": "x", "capabilities": 42})
+        self.assertEqual(reason, "")
 
 
 if __name__ == "__main__":
