@@ -13,6 +13,7 @@ from . import origin
 from . import instance_profile
 from . import proxy
 from . import datastores
+from . import rag_collections
 from . import taint as _taint
 from . import telemetry as _tlm
 from . import transfer_channel
@@ -4624,9 +4625,24 @@ def _rag_provisioners() -> set[str]:
     }
 
 
+def _rag_declared_members(collection: str) -> list[str] | None:
+    """Member list DICHIARATA dal pack per la collection, o `None` se nessun
+    pack installato si è pronunciato. Errore di lettura = accesso negato,
+    stessa scelta di `_rag_grants`: non sapere se una lista esiste non è la
+    stessa cosa che sapere che non esiste."""
+    try:
+        entry = rag_collections.find(collection)
+    except Exception as e:  # noqa: BLE001 — datadir illeggibile/malformata
+        raise PermissionError(
+            f"impossibile verificare la member list della collection "
+            f"'{collection}'") from e
+    return entry.get("seeds") if entry else None
+
+
 def _rag_authorize(collection: str, write: bool) -> None:
     """Reference monitor per-collection: grant read/write (arg-aware, dal
-    AgentSpec autorevole nel core) + tiering (clearance ≥ tier della collection).
+    AgentSpec autorevole nel core) + member list dichiarata dal pack che possiede
+    la collection + tiering (clearance ≥ tier della collection).
     Super-agent → bypass dei grant, MA il vincolo del profilo (rag off/single)
     è strutturale e vale per tutti. Solleva PermissionError su violazione."""
     instance_profile.rag_check_collection(collection)
@@ -4649,6 +4665,26 @@ def _rag_authorize(collection: str, write: bool) -> None:
         if collection not in _rag_readable(grants):
             raise PermissionError(
                 f"agent '{ag}' senza grant di LETTURA sulla collection '{collection}'")
+    # asse MEMBRI: la member list che la collection dichiara di sé nel manifest
+    # del pack (`rag_collections[].seeds`, clodia-platform#343). Congiuntiva al
+    # grant, mai alternativa: stare nella lista non concede la scrittura a chi
+    # ha solo `rag_read`, e il grant non basta più dove la lista esiste.
+    #
+    # Dichiarata → vincolante; NON dichiarata → si resta al regime dei soli
+    # grant. Negare in assenza avrebbe spento il RAG di ogni agente: nessun
+    # manifest dichiara ancora il campo, e ogni collection viva oggi si
+    # raggiunge per grant. Una dichiarazione può solo restringere.
+    #
+    # Sta DOPO i rami super/provisioner di proposito, e quindi non li tocca: il
+    # provisioner (sysadmin, pack_ops) crea e ingesta la collection PER CONTO
+    # del pack, e non è quasi mai nella member list del pack stesso —
+    # vincolarlo romperebbe il setup di ogni pack con un corpus. È lo stesso
+    # bypass che `_datastore_authorize` concede al super-agent sull'allowlist
+    # `seeds:` di un datastore.
+    members = _rag_declared_members(collection)
+    if members is not None and ag not in members:
+        raise PermissionError(
+            f"agent '{ag}' non è nella member list della collection '{collection}'")
     # asse livello: clearance(agent) ≥ tier(collection). Difesa in profondità.
     tier = eu_corpus.collection_tier(collection)
     if _rank(current_clearance()) < _rank(tier):
