@@ -4618,6 +4618,33 @@ def _rag_readable(grants: dict[str, set[str]]) -> set[str]:
     return set(grants.get("rag_read") or []) | set(grants.get("rag_write") or [])
 
 
+#: Wildcard dentro `rag_read`/`rag_write`: non è il NOME di una collection, è
+#: «tutte». Un seed non può dichiarare una collection che si chiama `*`.
+_RAG_ANY = "*"
+
+
+def _rag_covers(granted: set[str], collection: str) -> bool:
+    """UNICO punto in cui si decide se un insieme di grant RAG copre una
+    collection — e quindi l'unico punto in cui `*` ha un significato.
+
+    `*` concede TUTTE le collection, esattamente come in `_tool_allowed` per
+    `allowed_tools`. Prima era letterale: `rag_read: ["*"]` chiedeva una
+    collection di nome `*`, che non esiste, quindi la configurazione che sembra
+    concedere tutto concedeva ZERO (clodia-platform#354). È lo stesso
+    trabocchetto già corretto sull'asse dei verbi; averlo risolto in un verso
+    solo significava che la stessa sintassi voleva dire due cose diverse a
+    seconda dell'asse, e la member list a schermo (clodia-logic#413) raccontava
+    la versione che il gate non applicava.
+
+    La wildcard tocca UN asse solo, l'appartenenza. Il tiering resta a valle e
+    invariato: `*` non alza la clearance di nessuno, quindi chi lo dichiara
+    resta fuori dalle collection di tier superiore al proprio — l'allargamento
+    è «tutte le collection che potresti già leggere se ti fossero state
+    elencate», non «tutte».
+    """
+    return _RAG_ANY in granted or collection in granted
+
+
 def _rag_provisioners() -> set[str]:
     return {
         x.strip() for x in _os.environ.get("CLODIA_RAG_PROVISIONERS", "sysadmin").split(",")
@@ -4658,11 +4685,11 @@ def _rag_authorize(collection: str, write: bool) -> None:
         return
     grants = _rag_grants(ag)
     if write:
-        if collection not in grants["rag_write"]:
+        if not _rag_covers(set(grants.get("rag_write") or []), collection):
             raise PermissionError(
                 f"agent '{ag}' senza grant di SCRITTURA sulla collection '{collection}'")
     else:
-        if collection not in _rag_readable(grants):
+        if not _rag_covers(_rag_readable(grants), collection):
             raise PermissionError(
                 f"agent '{ag}' senza grant di LETTURA sulla collection '{collection}'")
     # asse MEMBRI: la member list che la collection dichiara di sé nel manifest
@@ -4787,9 +4814,19 @@ def _dispatch_rag(name: str, a: dict):
                     if _rank(current_clearance()) >= _rank(c.get("tier", "SEAL-0"))
                 ]}
             else:
+                # L'elenco deve coincidere con ciò che `_rag_authorize`
+                # concede, sui DUE assi: appartenenza (`_rag_covers`, quindi
+                # anche `*`) e clearance. Il filtro di livello mancava perché
+                # senza wildcard l'elenco era comunque scritto a mano, una
+                # collection alla volta; con `*` un agente vedrebbe i nomi
+                # delle collection di tier superiore al proprio pur restando
+                # respinto sul primo `search`.
                 allowed = _rag_readable(_rag_grants(agent_name()))
-                res = {"collections": [c for c in res.get("collections", [])
-                                       if c.get("collection") in allowed]}
+                res = {"collections": [
+                    c for c in res.get("collections", [])
+                    if _rag_covers(allowed, c.get("collection"))
+                    and _rank(current_clearance()) >= _rank(c.get("tier", "SEAL-0"))
+                ]}
         return res
     if verb == "create_collection":
         collection = a["collection"]
