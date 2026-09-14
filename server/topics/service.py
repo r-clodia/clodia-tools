@@ -1571,6 +1571,28 @@ class TopicService:
         self._write_meta(tier, name, meta, v)
         return {"owner": owner, "participants": meta.get("participants")}
 
+    def _entry_runtime_note(self, tier: str, name: str, agent: str) -> str:
+        """Coda deterministica dell'annuncio d'ingresso: provider/modello/SEAL
+        effettivi per un bot (Davide, 14 set 2026 — «deve essere
+        deterministico, no random»: un fatto scritto dalla piattaforma, non
+        un'istruzione lasciata al modello). Stringa vuota per un umano/proxy
+        o se `clodia-logic` non è raggiungibile — l'ingresso del partecipante
+        non deve mai dipendere da questa chiamata: best-effort, come
+        `announce_message` due righe più sotto in `post_message`."""
+        try:
+            from ..tools import runtime as _rt
+            fatti = _rt.runtime_facts(_normalize_tier(tier), name, agent)
+        except Exception as e:  # noqa: BLE001
+            LOG.debug("runtime-facts non recapitati per %s su %s/%s: %s",
+                      agent, tier, name, str(e)[:160])
+            return ""
+        if not fatti.get("is_bot"):
+            return ""
+        if not fatti.get("eligible"):
+            return " — ⚠️ nessun provider connesso regge questo tier"
+        return (f" — provider: {fatti.get('provider')} · "
+                f"modello: {fatti.get('model')} · SEAL: {fatti.get('seal')}")
+
     def add_participant(self, tier: str, name: str, agent: str,
                         role: str | None = None) -> dict:
         """Invita, con un ruolo. Default `contributor`: è ciò che «invitato»
@@ -1598,7 +1620,8 @@ class TopicService:
             if added:
                 self.post_message(
                     tier, name, "system",
-                    f"{agent} è entrato nel topic come {r}", kind="system")
+                    f"{agent} è entrato nel topic come {r}"
+                    + self._entry_runtime_note(tier, name, agent), kind="system")
         return {"participants": meta.get("participants"), "added": added, "role": r}
 
     def remove_participant(self, tier: str, name: str, agent: str) -> dict:

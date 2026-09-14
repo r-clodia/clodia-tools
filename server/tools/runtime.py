@@ -116,6 +116,21 @@ def channel_trigger(tier: str, name: str, text: str, by: str) -> dict:
 _ANNOUNCE_TIMEOUT = httpx.Timeout(connect=1.0, read=2.0, write=2.0, pool=1.0)
 
 
+def runtime_facts(tier: str, name: str, agent: str) -> dict:
+    """Provider/modello/SEAL EFFETTIVI di `agent` in questo scope, letti da
+    `clodia-logic` (l'unico posto che li risolve — stessa scelta del chip
+    "provider · modello" della webui, clodia-platform#310/#315).
+
+    Usato da `TopicService.add_participant` per l'annuncio di ingresso di un
+    bot: DETERMINISTICO, non un'istruzione lasciata al modello (Davide, 14 set
+    2026). `{"is_bot": False}` per un umano/proxy — niente da annunciare.
+    `{"is_bot": True, "eligible": False}` quando nessun provider connesso
+    regge il tier: va detto, non taciuto né mostrato come se fosse valido.
+    """
+    return _post("/clodia/channels/runtime-facts/internal",
+                 {"tier": tier, "name": name, "agent": agent}, secret=True)
+
+
 def announce_message(tier: str, name: str, message: dict) -> dict:
     """Annuncia sul bus SSE dell'agent-server un messaggio GIÀ persistito.
 
