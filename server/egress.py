@@ -364,7 +364,29 @@ EGRESS_SCHEMES = ("mailto", "tg", "http", "https", "gdrive", "gsheets")
 #: ripete il web aperto. L'appartenenza a un contenitore non è una proprietà
 #: del contenuto, e attribuirla spegnerebbe il taint sulla fonte più larga
 #: che esista, nella direzione d'errore che non si vede.
-SOURCE_SCHEMES = ("mailfrom", "http", "https", "gdrive", "gsheets", "mcp")
+#: `tg` anche fra le fonti (clodia-platform#363): con il relay conversazionale
+#: dell'epic #359 Telegram è un INGRESSO come la posta, non solo una
+#: destinazione. Una chat vagliata è una fonte fidata allo stesso titolo di un
+#: `mailfrom:`, e per lo stesso motivo va dichiarata una per una.
+SOURCE_SCHEMES = ("mailfrom", "tg", "http", "https", "gdrive", "gsheets", "mcp")
+
+#: Le due forme di `tg:`, e non ce n'è una terza. La distinzione fra un gruppo e
+#: una persona la porta la FORMA, non un parametro a parte: un parametro
+#: potrebbe contraddire l'uri, e allora ci sarebbero due dichiarazioni per una
+#: cosa sola.
+#:
+#: `tg:<chat_id>`  gruppo — l'id numerico, negativo per i supergruppi, ed è lo
+#:                 stesso valore che `_chat()` estrae da `telegram.send`.
+#: `tg:@<handle>`  persona — SOLO chi ha un handle. Un utente senza handle non è
+#:                 registrabile come fonte: limite deliberato dell'epic #359,
+#:                 non tecnico — l'id numerico di una persona non si legge in
+#:                 chat e nessuno potrebbe verificarlo rileggendo la lista.
+_TG_GROUP = re.compile(r"^-?\d+$")
+#: 5-32 caratteri fra lettere, cifre e underscore, come da regole Telegram. Non
+#: normalizziamo il caso qui: `_matches` confronta già in minuscolo da entrambi
+#: i lati, e riscrivere l'uri renderebbe `@TheRealDadabit` irriconoscibile a chi
+#: rilegge la lista cercando quello che ci aveva scritto.
+_TG_HANDLE = re.compile(r"^@[A-Za-z0-9_]{5,32}$")
 
 
 def is_vetted_source(uri: str) -> bool:
@@ -918,7 +940,7 @@ def check_grantable(direction: str, uri: str) -> str:
             "'*' aprirebbe qualunque destinazione: non si concede con un verbo, "
             "né dal manifest di un pack. Se serve davvero, va scritto nella "
             "config del gateway, dove si vede rileggendola.")
-    scheme = u.partition(":")[0]
+    scheme, _sep, rest = u.partition(":")
     if scheme not in schemes:
         raise ValueError(
             f"schema '{scheme}' non ammesso come {label}: ammessi {', '.join(schemes)}")
@@ -926,6 +948,19 @@ def check_grantable(direction: str, uri: str) -> str:
         raise ValueError(
             f"'{u}' non vincola nulla dentro il suo schema: aprirebbe l'intero "
             f"tipo. Indica la risorsa completa.")
+    # La forma di `tg:` si controlla nelle DUE direzioni, perché è una proprietà
+    # dello schema e non della direzione. In ingresso rifiuta il wildcard, che
+    # spegnerebbe il taint su tutto Telegram; in uscita rifiuta una voce che non
+    # potrebbe MAI combaciare — `_chat()` produce sempre `tg:<chat_id>`, quindi
+    # `tg:pippo` sarebbe approvata e inefficace, e il sintomo («l'ho messa in
+    # lista e chiede ancora») non nominerebbe la causa.
+    if scheme == "tg" and not (_TG_GROUP.match(rest) or _TG_HANDLE.match(rest)):
+        raise ValueError(
+            f"'{u}' non è una chat Telegram: si scrive 'tg:<chat_id>' per un "
+            f"gruppo (id numerico) o 'tg:@handle' per una persona (5-32 fra "
+            f"lettere, cifre e underscore). Niente wildcard e niente percorsi: "
+            f"un uid non è un percorso, e un utente senza handle non è "
+            f"registrabile.")
     return u
 
 

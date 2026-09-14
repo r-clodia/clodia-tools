@@ -1673,6 +1673,7 @@ _EGRESS_ADMIN_TOOLS: list[Tool] = [
     Tool(name="ingress.allow",
          description=("Aggiunge una FONTE FIDATA: leggere da lì non contaminerà "
                       "più il canale. Notazione URI: mailfrom:x@y.it · "
+                      "tg:<chat_id> (gruppo) · tg:@handle (persona) · "
                       "https://host/prefisso/ · gdrive://<folder-id> · "
                       "gsheets:<id>. Richiede approvazione umana, e il dialog "
                       "avverte che da quel momento le istruzioni nascoste in quella "

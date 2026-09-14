@@ -185,7 +185,9 @@ class SchemeGuardTests(unittest.TestCase):
         self.assertIn("mailfrom:tizio@x.it", "".join(cm.output))
 
     def test_an_egress_scheme_in_the_source_list_is_ignored_loudly(self):
-        cfg = _cfg(sources=["tg:123", "mailfrom:ok@x.it"])
+        # `mailto:` e non più `tg:`: da #363 Telegram sta in ENTRAMBE le liste,
+        # quindi non serve più come esempio di schema di sola uscita.
+        cfg = _cfg(sources=["mailto:x@y.it", "mailfrom:ok@x.it"])
         with _with(cfg), self.assertLogs("clodia-tools.egress", level="WARNING"):
             self.assertEqual(egress.source_uris(), ["mailfrom:ok@x.it"])
 
@@ -518,8 +520,10 @@ class AdminVerbTests(unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             egress.allow("egress", "mailfrom:x@y.it")
         self.assertIn("non ammesso", str(cm.exception))
+        # `mailto:` in ingresso: `tg:` non vale più come esempio di schema nella
+        # direzione sbagliata, da #363 è ammesso in entrambe.
         with self.assertRaises(ValueError):
-            egress.allow("ingress", "tg:123")
+            egress.allow("ingress", "mailto:x@y.it")
 
     def test_a_degenerate_uri_is_refused(self):
         with self.assertRaises(ValueError):
@@ -607,3 +611,82 @@ class ScopeAdminVerbTests(unittest.TestCase):
         egress.scope_allow("egress", "SEAL-1/acme", "mailto:global@x.it")
         egress.scope_revoke("egress", "SEAL-1/acme", "mailto:global@x.it")
         self.assertIn("mailto:global@x.it", egress.allowed_uris())
+
+
+class TelegramSourceTests(unittest.TestCase):
+    """`tg:` come FONTE, con due forme per lo stesso schema (#363).
+
+    Telegram entra dal lato ingresso con una distinzione che non ha un parametro
+    dedicato: **è la forma a dire di che cosa si parla**. `tg:-100…` è un
+    gruppo, `tg:@handle` è una persona, e non esiste un terzo modo di scriverlo.
+    Un utente senza handle non è registrabile: è un limite deciso nell'epic
+    #359, non un limite tecnico.
+
+    La convalida della forma sta in `check_grantable`, cioè nel punto che
+    attraversano tutti i verbi che concedono (globale e per scope) e la
+    preview dell'installazione di un pack: una regola `tg:` malformata non
+    fallirebbe rumorosamente, resterebbe in lista senza combaciare mai — e in
+    ingresso «non combacia mai» vuol dire un taint che nessuno ha chiesto di
+    spegnere ma nemmeno di accendere.
+    """
+
+    def setUp(self):
+        from . import whitelist as wl
+        self.cfg = {"agents": {}, "egress_allow": [], "source_allow": []}
+        for pt in (patch.object(wl, "CONFIG", self.cfg),
+                   patch.object(wl, "save_config", lambda: None)):
+            pt.start()
+            self.addCleanup(pt.stop)
+
+    def test_tg_is_a_source_scheme(self):
+        self.assertIn("tg", egress.SOURCE_SCHEMES)
+
+    def test_a_group_chat_id_is_grantable_as_a_source(self):
+        self.assertEqual(egress.check_grantable("ingress", "tg:-1001234567890"),
+                         "tg:-1001234567890")
+
+    def test_a_user_handle_is_grantable_as_a_source(self):
+        self.assertEqual(egress.check_grantable("ingress", "tg:@therealdadabit"),
+                         "tg:@therealdadabit")
+
+    def test_only_the_form_tells_a_user_from_a_group(self):
+        """`tg:123` è un gruppo perché è scritto come un gruppo. Chi intendeva
+        una persona ha sbagliato a scriverlo, e non c'è un parametro che possa
+        correggerlo dopo: la forma È la dichiarazione."""
+        self.assertEqual(egress.check_grantable("ingress", "tg:123"), "tg:123")
+        with self.assertRaises(ValueError):
+            egress.check_grantable("ingress", "tg:therealdadabit")
+
+    def test_a_handle_shorter_than_telegram_allows_is_refused(self):
+        with self.assertRaises(ValueError) as cm:
+            egress.check_grantable("ingress", "tg:@ab")
+        self.assertIn("tg:", str(cm.exception))
+
+    def test_a_wildcard_under_tg_is_refused(self):
+        """`tg:*` è l'intero Telegram. Come fonte spegnerebbe il taint su
+        qualunque messaggio arrivi da lì, che è il guadagno durevole che una
+        injection cercherebbe."""
+        for u in ("tg:*", "tg:@*", "tg:-100*"):
+            with self.subTest(u=u), self.assertRaises(ValueError):
+                egress.check_grantable("ingress", u)
+
+    def test_a_path_under_tg_is_refused(self):
+        """Come per `mailfrom:`, un uid non è un percorso."""
+        with self.assertRaises(ValueError):
+            egress.check_grantable("ingress", "tg:-100123/thread/7")
+
+    def test_the_same_form_is_required_in_the_egress_direction(self):
+        """Una destinazione `tg:` malformata sarebbe approvata e inefficace:
+        `_chat()` produce sempre `tg:<chat_id>`, quindi `tg:pippo` non
+        combacerebbe mai — e il sintomo sarebbe «l'ho messa in lista e chiede
+        ancora»."""
+        self.assertEqual(egress.check_grantable("egress", "tg:76632169"),
+                         "tg:76632169")
+        with self.assertRaises(ValueError):
+            egress.check_grantable("egress", "tg:pippo")
+
+    def test_a_granted_telegram_source_is_vetted(self):
+        egress.allow("ingress", "tg:@therealdadabit")
+        with _with(self.cfg):
+            self.assertTrue(egress.is_vetted_source("tg:@TheRealDadabit"))
+            self.assertFalse(egress.is_vetted_source("tg:@qualcunaltro"))
