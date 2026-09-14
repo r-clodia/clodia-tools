@@ -2155,6 +2155,24 @@ def _dispatch_telegram(name: str, a: dict):
         # listen: SEAL-cap (telegram cappa a SEAL-1) + una chat → un solo binding.
         meta = _topics().open(tier, tname).get("meta", {})
         _check_channel_cap({"type": "telegram"}, meta.get("tier", tier))
+        # La chat dev'essere già dichiarata FONTE del topic bersaglio
+        # (clodia-platform#364). Prima di questo controllo agganciare un gruppo a
+        # un topic non chiedeva niente a nessuno, mentre il meccanismo che questo
+        # sostituisce (`topic.telegram_bind`) era WALLS: il binding, da solo, era
+        # diventato l'atto di autorizzazione senza esserne mai stato incaricato.
+        #
+        # Lo scope si passa ESPLICITO perché il bersaglio sta negli argomenti e
+        # non è detto coincida col canale da cui il messaggero chiama: dedurlo
+        # dal chiamante vaglierebbe la lista della stanza sbagliata, e in modo
+        # permissivo. `telegram-bindings.json` resta quello che è sempre stato —
+        # quale istanza ascolta quale chat — e torna a non essere un permesso.
+        from . import egress as _eg
+        if not _eg.is_vetted_source(f"tg:{cid}", scope=f"{tier}/{tname}"):
+            raise ValueError(
+                f"chat {cid} non è una fonte dichiarata di {tier}/{tname}: "
+                f"fai prima topic.ingress_add(\"{tier}\", \"{tname}\", "
+                f"\"tg:{cid}\") — che chiede all'owner dello scope, il quale "
+                f"decide chi può parlare nella sua stanza.")
         ex = tb.get(cid)
         if ex and (ex.get("tier"), ex.get("topic")) != (tier, tname):
             raise ValueError(
@@ -5200,7 +5218,31 @@ def _dispatch_topic(name: str, a: dict):
     if verb in ("egress_remove", "ingress_remove"):
         from . import egress as eg
         direction = "egress" if verb == "egress_remove" else "ingress"
-        return eg.scope_revoke(direction, f"{a['tier']}/{a['name']}", a["uri"])
+        scope = f"{a['tier']}/{a['name']}"
+        out = eg.scope_revoke(direction, scope, a["uri"])
+        # Togliere una chat dalle fonti SCOLLEGA anche il binding che ne
+        # dipendeva (clodia-platform#364). Se restasse in piedi, la revoca non
+        # revocherebbe: i messaggi continuerebbero ad arrivare da un gruppo che
+        # l'owner ha appena de-autorizzato, e la lista direbbe una cosa mentre il
+        # relay ne fa un'altra. Fra le due, quella che si rilegge è la lista.
+        #
+        # È qui e non in `scope_revoke` perché il binding è un fatto del
+        # gateway, non della whitelist: `egress.py` non sa che esista Telegram.
+        # L'effetto torna nel risultato — un effetto collaterale che non si
+        # racconta si scopre solo quando qualcuno chiede perché ha smesso.
+        #
+        # Il confronto passa dal normalizzatore di `egress`, non da `==` sulle
+        # stringhe: `P1/acme` e `SEAL-1/acme` sono la stessa stanza, e un alias
+        # legacy farebbe fallire lo scollegamento in SILENZIO — la fonte via
+        # dalla lista, il relay che continua a riportare.
+        if direction == "ingress" and str(out.get("uri", "")).startswith("tg:"):
+            from .tools import telegram_bindings as tb
+            cid = str(out["uri"])[len("tg:"):]
+            b = tb.get(cid)
+            if b and eg._norm_scope_key(f"{b.get('tier')}/{b.get('topic')}") \
+                    == eg._norm_scope_key(scope):
+                out["unbound"] = tb.remove(cid)
+        return out
     raise ValueError(f"unknown topic verb: {name}")
 
 

@@ -690,3 +690,80 @@ class TelegramSourceTests(unittest.TestCase):
         with _with(self.cfg):
             self.assertTrue(egress.is_vetted_source("tg:@TheRealDadabit"))
             self.assertFalse(egress.is_vetted_source("tg:@qualcunaltro"))
+
+
+class VettedSourceScopeTests(unittest.TestCase):
+    """Il vaglio di una fonte sa guardare uno scope DIVERSO da quello del chiamante.
+
+    `is_vetted_source` ricavava lo scope solo da `_scope_of_call()`, cioè dal
+    claim FIRMATO del canale corrente. Va benissimo finché chi chiede e il
+    bersaglio coincidono — la posta in arrivo di questa stanza. Non basta più
+    quando il bersaglio è NEGLI ARGOMENTI: `telegram.listen(tier, name, chat_id)`
+    aggancia un topic che non è necessariamente quello da cui parte la chiamata
+    (clodia-platform#364), e senza scope esplicito il vaglio finirebbe sulla
+    lista della stanza sbagliata.
+
+    L'errore cadrebbe nella direzione permissiva — una chat dichiarata ingress
+    in una stanza qualsiasi autorizzerebbe l'aggancio a un'ALTRA — ed è quindi
+    della specie che non si vede: nessuno guarda i permessi che sono stati
+    concessi, solo quelli negati.
+    """
+
+    def setUp(self):
+        from . import whitelist as wl
+        self.cfg = {"agents": {}, "egress_allow": [], "source_allow": [],
+                    "scope_egress_allow": {}, "scope_source_allow": {}}
+        for pt in (patch.object(wl, "CONFIG", self.cfg),
+                   patch.object(wl, "save_config", lambda: None),
+                   # Nessun perimetro: qui si vaglia la LISTA, non l'appartenenza.
+                   patch.object(egress, "perimeter_addresses", lambda scope=None: set())):
+            pt.start()
+            self.addCleanup(pt.stop)
+
+    def _chiamante(self, scope):
+        """Il canale da cui parte la chiamata, come lo legge il claim firmato."""
+        return patch.object(egress, "_scope_of_call", lambda: scope)
+
+    def test_a_source_of_the_target_scope_is_vetted_even_from_elsewhere(self):
+        egress.scope_allow("ingress", "SEAL-1/bersaglio", "tg:-1001")
+        with self._chiamante("SEAL-1/altrove"):
+            self.assertTrue(
+                egress.is_vetted_source("tg:-1001", scope="SEAL-1/bersaglio"))
+
+    def test_a_source_of_ANOTHER_scope_does_not_vet_the_target(self):
+        """IL CASO. La chat è dichiarata dove sta il chiamante, non nel topic che
+        si sta agganciando: passare qui aprirebbe l'aggancio a una stanza in cui
+        nessuno ha approvato niente."""
+        egress.scope_allow("ingress", "SEAL-1/altrove", "tg:-1001")
+        with self._chiamante("SEAL-1/altrove"):
+            self.assertFalse(
+                egress.is_vetted_source("tg:-1001", scope="SEAL-1/bersaglio"))
+
+    def test_without_a_scope_the_behaviour_is_the_one_of_before(self):
+        """Compatibilità: chi non passa lo scope continua a vagliare contro il
+        canale corrente. È l'unico chiamante di produzione che esisteva."""
+        egress.scope_allow("ingress", "SEAL-1/altrove", "tg:-1001")
+        with self._chiamante("SEAL-1/altrove"):
+            self.assertTrue(egress.is_vetted_source("tg:-1001"))
+
+    def test_the_global_list_still_vets_any_scope(self):
+        """L'unione globale + scope non cambia: una fonte globale vale ovunque."""
+        egress.allow("ingress", "tg:-1002")
+        with self._chiamante(None):
+            self.assertTrue(
+                egress.is_vetted_source("tg:-1002", scope="SEAL-1/bersaglio"))
+
+    def test_the_perimeter_is_asked_about_the_TARGET_room(self):
+        """`is_perimeter_source` guarda «chi è nella stanza»: la stanza dev'essere
+        quella bersaglio, altrimenti un partecipante di un topic sarebbe fidato
+        come fonte di un altro."""
+        visti = []
+
+        def _perimetro(scope=None):
+            visti.append(scope)
+            return set()
+
+        with patch.object(egress, "perimeter_addresses", _perimetro), \
+                self._chiamante("SEAL-1/altrove"):
+            egress.is_vetted_source("mailfrom:a@b.it", scope="SEAL-1/bersaglio")
+        self.assertEqual(visti, ["SEAL-1/bersaglio"])
