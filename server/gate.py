@@ -70,11 +70,6 @@ _GATE_CLASS = {
     "providers.pause": GATE_SYSTEM, "providers.resume": GATE_SYSTEM,
     # WALLS — chi sta nello scope, o quanto è largo
     "topic.add_participant": GATE_WALLS,
-    # Collegare un gruppo Telegram porta la stanza FUORI: le menzioni, e con
-    # `excerpt` anche una riga di testo, arrivano a persone che nel topic non
-    # entrano. È un atto sui muri, come aggiungere un partecipante — e infatti
-    # è la stessa cosa vista dall'altro lato.
-    "topic.telegram_bind": GATE_WALLS, "topic.telegram_unbind": GATE_WALLS,
     "topic.remove_participant": GATE_WALLS,
     "topic.drive_folder_add": GATE_WALLS, "topic.drive_folder_remove": GATE_WALLS,
     # Whitelist egress/ingress LOCALE al topic (router-notebook R17, clodia-
@@ -142,7 +137,6 @@ _DEFAULT_GATED_EXACT = frozenset({
     "providers.pause", "providers.resume",
     # gestione partecipanti di un topic (auto-invito / confused-deputy)
     "topic.add_participant", "topic.remove_participant",
-    "topic.telegram_bind", "topic.telegram_unbind",
     # La cartella Drive dichiarata di un topic È il suo perimetro di accesso
     # per gdrive.* (decision-record #40, `gdrive_root.roots_for_call`). Quindi
     # dichiararla, cambiarla o TOGLIERLA non è una preferenza: è una
