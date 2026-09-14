@@ -75,7 +75,28 @@ async def profile(request: Request):
     q = (request.query_params.get("uri") or "").strip()
     if q:
         out["query"] = q
-        out["allowed"] = any(egress._matches(q, r) for r in egress.allowed_uris())
+        # `direction=ingress` gira la stessa domanda dall'altro lato: non «posso
+        # scrivere a X» ma «è fidato ciò che arriva da X», cioè `is_vetted_source`
+        # — la funzione che decide davvero, non una sua copia. Serve all'altro
+        # lato del confine: il relay Telegram vive nell'agent-server, che non
+        # monta il volume del gateway di proposito (clodia-platform#80), quindi
+        # senza questa risposta dovrebbe rifare il match (wildcard di schema,
+        # prefissi gerarchici, voci degeneri) in una seconda copia che diverge
+        # alla prima modifica (clodia-platform#365).
+        #
+        # `scope` nomina la stanza di cui vale la lista, e va passato quando il
+        # bersaglio NON è il chiamante — qui non lo è mai, perché la chiamata
+        # arriva da un server, non da dentro un canale. Omesso significa «solo la
+        # lista globale»: la direzione restrittiva, l'unica che si può sbagliare
+        # senza aprire niente.
+        if (request.query_params.get("direction") or "").strip().lower() in (
+                "ingress", "source"):
+            scope = (request.query_params.get("scope") or "").strip() or None
+            out["direction"] = "ingress"
+            out["scope"] = scope
+            out["vetted"] = egress.is_vetted_source(q, scope)
+        else:
+            out["allowed"] = any(egress._matches(q, r) for r in egress.allowed_uris())
     return JSONResponse(out)
 
 

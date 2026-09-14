@@ -13,9 +13,10 @@ from . import egress_api
 
 
 class _Req:
-    def __init__(self, secret=None, uri=None, path_params=None):
+    def __init__(self, secret=None, uri=None, path_params=None, **query):
         self.headers = {"x-orchestrator-secret": secret} if secret else {}
         self.query_params = {"uri": uri} if uri else {}
+        self.query_params.update({k: v for k, v in query.items() if v is not None})
         self.path_params = path_params or {}
 
 
@@ -121,6 +122,63 @@ class MembershipQueryTests(unittest.TestCase):
                 _with({"agents": {}}):
             b = json.loads(_call(_Req("s3cr3t")).body)
         self.assertNotIn("allowed", b)
+
+
+class SourceQueryTests(unittest.TestCase):
+    """`?uri=…&direction=ingress&scope=<tier>/<nome>` risponde `vetted: sì/no`.
+
+    Il consumatore è il relay Telegram dell'agent-server (clodia-platform#365),
+    che deve autorizzare un mittente con la stessa regola di tutti gli altri
+    ingressi. Non può importare `egress`: il volume del gateway non è montato di
+    proposito (#80). Senza questa risposta rifarebbe il match a mano, e due copie
+    della stessa regola divergono — in silenzio, perché un'autorizzazione
+    concessa per sbaglio non la rilegge nessuno.
+    """
+
+    def _q(self, uri, cfg, scope=None):
+        import json
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), _with(cfg):
+            r = _call(_Req("s3cr3t", uri=uri, direction="ingress", scope=scope))
+        self.assertEqual(r.status_code, 200)
+        return json.loads(r.body)
+
+    def test_a_granted_telegram_handle_is_vetted(self):
+        b = self._q("tg:@TheRealDadabit",
+                    {"source_allow": ["tg:@therealdadabit"], "agents": {}})
+        self.assertTrue(b["vetted"])
+
+    def test_an_unlisted_handle_is_not(self):
+        b = self._q("tg:@qualcunaltro",
+                    {"source_allow": ["tg:@therealdadabit"], "agents": {}})
+        self.assertFalse(b["vetted"])
+
+    def test_a_handle_vetted_in_one_room_is_not_vetted_in_another(self):
+        """La lista per-scope vale LÌ: è la ragione per cui lo scope si passa
+        esplicito invece di dedurlo (#364)."""
+        cfg = {"agents": {},
+               "scope_source_allow": {"SEAL-1/acme": ["tg:@tizio"]}}
+        self.assertTrue(self._q("tg:@tizio", cfg, scope="SEAL-1/acme")["vetted"])
+        self.assertFalse(self._q("tg:@tizio", cfg, scope="SEAL-1/altro")["vetted"])
+
+    def test_without_a_scope_only_the_global_list_counts(self):
+        """Uno scope omesso non deve valere «tutti gli scope»: la direzione
+        sbagliata qui è quella permissiva, e non si vede."""
+        cfg = {"agents": {}, "scope_source_allow": {"SEAL-1/acme": ["tg:@tizio"]}}
+        self.assertFalse(self._q("tg:@tizio", cfg)["vetted"])
+
+    def test_the_answer_does_not_carry_the_list(self):
+        b = self._q("tg:@estraneo", {"source_allow": ["tg:@segretissimo"], "agents": {}})
+        self.assertNotIn("segretissimo", str(b))
+
+    def test_the_egress_query_is_unchanged(self):
+        """L'estensione è un ramo in più, non una modifica della domanda che
+        c'era: senza `direction` si risponde ancora `allowed` sull'uscita."""
+        import json
+        cfg = {"egress_allow": ["gdrive:folder/1AbC"], "agents": {}}
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), _with(cfg):
+            b = json.loads(_call(_Req("s3cr3t", uri="gdrive:folder/1AbC")).body)
+        self.assertTrue(b["allowed"])
+        self.assertNotIn("vetted", b)
 
 
 class ScopeWhitelistViewTests(unittest.TestCase):
