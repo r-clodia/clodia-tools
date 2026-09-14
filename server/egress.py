@@ -389,12 +389,22 @@ _TG_GROUP = re.compile(r"^-?\d+$")
 _TG_HANDLE = re.compile(r"^@[A-Za-z0-9_]{5,32}$")
 
 
-def is_vetted_source(uri: str) -> bool:
+def is_vetted_source(uri: str, scope: str | None = None) -> bool:
     """True se `uri` è fra le fonti fidate dichiarate.
 
     Lista vuota per default → tutto contamina, che è la direzione giusta: una
     fonte non dichiarata non è una fonte fidata, e sbagliare qui è SILENZIOSO
     (un taint che non si accende non lo si vede).
+
+    `scope` nomina la stanza di cui si chiede la lista; `None` significa «quella
+    della chiamata corrente», dal claim FIRMATO, ed è il caso di sempre — la
+    posta che arriva qui si vaglia contro le fonti di qui. Serve esplicito
+    quando il bersaglio sta negli ARGOMENTI e non coincide con il chiamante:
+    `telegram.listen(tier, name, chat_id)` aggancia un topic che può non essere
+    quello da cui parte la chiamata (clodia-platform#364). Lì dedurre lo scope
+    dal chiamante sbaglierebbe nella direzione permissiva — una chat dichiarata
+    in una stanza qualsiasi varrebbe per un'altra — cioè nella direzione che non
+    si vede, perché nessuno rilegge i permessi concessi.
     """
     if not uri:
         return False
@@ -404,13 +414,17 @@ def is_vetted_source(uri: str) -> bool:
     # dal topic resterebbe fidato finché qualcuno non si ricorda di togliere
     # anche il suo indirizzo, e nessuno se ne accorgerebbe perché un taint che
     # non si accende non si vede.
-    if is_perimeter_source(uri):
+    #
+    # La stanza di cui si chiede il perimetro è la BERSAGLIO, la stessa di cui si
+    # legge la lista: se le due divergessero, un partecipante di un topic sarebbe
+    # fidato come fonte di un altro.
+    if is_perimeter_source(uri, scope):
         return True
     # Anche in ingresso vale l'unione globale + scope: una fonte approvata in una
     # stanza è fidata LÌ. Simmetrico all'uscita, e per la stessa ragione — la
     # lista globale ha un asse solo, quindi una fonte approvata per un topic
     # diventerebbe fidata per tutti.
-    return any(_matches(uri, r) for r in effective_uris("ingress"))
+    return any(_matches(uri, r) for r in effective_uris("ingress", scope))
 
 
 def perimeter_addresses(scope: str | None = None) -> set[str]:
@@ -449,19 +463,22 @@ def perimeter_addresses(scope: str | None = None) -> set[str]:
     return out
 
 
-def is_perimeter_source(uri: str) -> bool:
-    """True se `uri` identifica qualcuno che è NELLA stanza corrente.
+def is_perimeter_source(uri: str, scope: str | None = None) -> bool:
+    """True se `uri` identifica qualcuno che è NELLA stanza indicata.
 
     Oggi vale per la posta (`mailfrom:`), dove la domanda «di chi è questo
     messaggio» ha una risposta netta. Un URL o una cartella non appartengono a
     nessuno allo stesso modo, e allargare qui senza una risposta netta
     spegnerebbe il taint per motivi che non si possono spiegare.
+
+    `scope` come in `is_vetted_source`: `None` è la stanza della chiamata
+    corrente, e va nominata solo quando il bersaglio non è il chiamante.
     """
     u = (uri or "").strip().lower()
     if not u.startswith("mailfrom:"):
         return False
     addr = address_of(u[len("mailfrom:"):])
-    return bool(addr) and addr in perimeter_addresses()
+    return bool(addr) and addr in perimeter_addresses(scope)
 
 
 #: Chiavi delle liste PER SCOPE nella config del gateway. Vivono lì e non nel
