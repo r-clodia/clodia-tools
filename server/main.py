@@ -775,58 +775,11 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name"]},
     ),
     Tool(
-        name="topic.telegram_bind",
-        description=("Collega un GRUPPO Telegram a questo topic: le menzioni "
-                     "delle persone mappate vengono riportate lì, col link alla "
-                     "conversazione. `people` = {uid_telegram: nome_utente_clodia}. "
-                     "Atto sui muri dello scope: lo decide l'owner."),
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"},
-            "chat_id": {"type": "string", "description": "id del gruppo (negativo per i supergruppi)"},
-            "mode": {"type": "string", "enum": ["notify", "excerpt"],
-                     "description": "notify = solo il fatto · excerpt = anche la riga della menzione"},
-            "people": {"type": "object", "description": "{uid telegram: nome utente su Clodia}"},
-            "mount": {"type": "string", "description": "nome del mount (default: telegram)"},
-        }, "required": ["tier", "name", "chat_id", "people"]},
-    ),
-    Tool(
-        name="topic.telegram_unbind",
-        description="Scollega il gruppo Telegram. La voce di egress resta: toglierla è una decisione a parte.",
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"},
-            "mount": {"type": "string"}}, "required": ["tier", "name"]},
-    ),
-    Tool(
         name="telegram.roster",
         description=("Amministratori e membri noti di un gruppo, con uid e "
                      "username: serve a mappare le persone senza digitare numeri."),
         inputSchema={"type": "object", "properties": {
             "chat_id": {"type": "string"}}, "required": ["chat_id"]},
-    ),
-    Tool(
-        name="telegram.notify_pending",
-        description="Le notifiche di menzione da recapitare (testo già composto).",
-        inputSchema={"type": "object", "properties": {
-            "limit": {"type": "integer"}}},
-    ),
-    Tool(
-        name="telegram.notify_flush",
-        description=("Recapita le notifiche di menzione pendenti sul gruppo "
-                     "collegato. Meccanico: il testo è già composto, non c'è "
-                     "nulla da decidere. Pensato per un job logico."),
-        inputSchema={"type": "object", "properties": {
-            "limit": {"type": "integer"}}},
-    ),
-    Tool(
-        name="telegram.notify_ack",
-        description="Segna una notifica come recapitata, o come fallita con il motivo.",
-        inputSchema={"type": "object", "properties": {
-            "message_id": {"type": "string"}, "chat_id": {"type": "string"},
-            "principal": {"type": "string"}, "ok": {"type": "boolean"},
-            "error": {"type": "string"}},
-            "required": ["message_id", "chat_id", "principal"]},
     ),
     Tool(
         name="topic.list",
@@ -1167,8 +1120,11 @@ _TOPIC_TOOLS: list[Tool] = [
     Tool(
         name="topic.ingress_remove",
         description=("Toglie una fonte fidata locale a questo canale. Non tocca la "
-                     "whitelist globale. Richiede approvazione dell'owner dello "
-                     "scope."),
+                     "whitelist globale. Se la fonte è una chat Telegram agganciata "
+                     "a questo topic, ne scollega anche il binding e lo dice "
+                     "(`unbound` nel risultato): togliere la dichiarazione non deve "
+                     "lasciare in piedi il relay che ne dipendeva. Richiede "
+                     "approvazione dell'owner dello scope."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
@@ -1720,6 +1676,7 @@ _EGRESS_ADMIN_TOOLS: list[Tool] = [
     Tool(name="ingress.allow",
          description=("Aggiunge una FONTE FIDATA: leggere da lì non contaminerà "
                       "più il canale. Notazione URI: mailfrom:x@y.it · "
+                      "tg:<chat_id> (gruppo) · tg:@handle (persona) · "
                       "https://host/prefisso/ · gdrive://<folder-id> · "
                       "gsheets:<id>. Richiede approvazione umana, e il dialog "
                       "avverte che da quel momento le istruzioni nascoste in quella "
@@ -1787,8 +1744,11 @@ _TELEGRAM_TOOLS: list[Tool] = [
                       "riporta VERBATIM i messaggi nella chat del topic, con l'handle "
                       "autenticato del mittente. Il messaggero NON esegue né risponde "
                       "ai messaggi: riportano soltanto, decidono gli agenti del topic. "
-                      "Richiede che tu sia partecipante del topic. Binding a livello di "
-                      "istanza: puoi ascoltare più chat."),
+                      "Richiede che tu sia partecipante del topic E che la chat sia "
+                      "GIÀ una fonte dichiarata di QUEL topic: `tg:<chat_id>` passato "
+                      "a topic.ingress_add, che lo chiede all'owner dello scope. "
+                      "Non è il binding ad autorizzare l'ingresso, è la dichiarazione. "
+                      "Binding a livello di istanza: puoi ascoltare più chat."),
          inputSchema={"type": "object", "properties": {
              "tier": {"type": "string"}, "name": {"type": "string"},
              "chat_id": {"type": "string"}},
@@ -2157,18 +2117,6 @@ def _dispatch_telegram(name: str, a: dict):
                 "note": ("Telegram espone a un bot i soli amministratori. Gli "
                          "altri membri vanno mappati col loro uid, che compare "
                          "quando scrivono nel gruppo.")}
-    if sub0 == "notify_pending":
-        from .topics import telegram_notify as _tn
-        items = _tn.pending(int(a.get("limit") or 20))
-        return {"pending": [{**i, "text": _tn.render(i)} for i in items]}
-    if sub0 == "notify_flush":
-        from .topics import telegram_notify as _tn
-        return _tn.flush(int(a.get("limit") or 20))
-    if sub0 == "notify_ack":
-        from .topics import telegram_notify as _tn
-        return _tn.ack(a["message_id"], a["chat_id"], a["principal"],
-                       ok=bool(a.get("ok", True)), error=a.get("error", ""))
-
     from .tools import telegram as tg
     verb = name.split(NS_SEP_DOT, 1)[1]
     if verb == "inbox":
@@ -2213,6 +2161,24 @@ def _dispatch_telegram(name: str, a: dict):
         # listen: SEAL-cap (telegram cappa a SEAL-1) + una chat → un solo binding.
         meta = _topics().open(tier, tname).get("meta", {})
         _check_channel_cap({"type": "telegram"}, meta.get("tier", tier))
+        # La chat dev'essere già dichiarata FONTE del topic bersaglio
+        # (clodia-platform#364). Prima di questo controllo agganciare un gruppo a
+        # un topic non chiedeva niente a nessuno, mentre il meccanismo che questo
+        # sostituisce (`topic.telegram_bind`) era WALLS: il binding, da solo, era
+        # diventato l'atto di autorizzazione senza esserne mai stato incaricato.
+        #
+        # Lo scope si passa ESPLICITO perché il bersaglio sta negli argomenti e
+        # non è detto coincida col canale da cui il messaggero chiama: dedurlo
+        # dal chiamante vaglierebbe la lista della stanza sbagliata, e in modo
+        # permissivo. `telegram-bindings.json` resta quello che è sempre stato —
+        # quale istanza ascolta quale chat — e torna a non essere un permesso.
+        from . import egress as _eg
+        if not _eg.is_vetted_source(f"tg:{cid}", scope=f"{tier}/{tname}"):
+            raise ValueError(
+                f"chat {cid} non è una fonte dichiarata di {tier}/{tname}: "
+                f"fai prima topic.ingress_add(\"{tier}\", \"{tname}\", "
+                f"\"tg:{cid}\") — che chiede all'owner dello scope, il quale "
+                f"decide chi può parlare nella sua stanza.")
         ex = tb.get(cid)
         if ex and (ex.get("tier"), ex.get("topic")) != (tier, tname):
             raise ValueError(
@@ -3605,15 +3571,6 @@ def _gate_effect_reason(name: str, arguments: dict) -> str:
         if name == "topic.remove_participant":
             return (f"rimuove @{a.get('agent')} dai partecipanti del topic "
                     f"`{a.get('tier')}/{a.get('name')}`.")
-        if name == "topic.telegram_bind":
-            n_people = len((a.get("people") or {}))
-            return (f"collega il gruppo Telegram `{a.get('chat_id')}` al topic "
-                    f"`{a.get('tier')}/{a.get('name')}` (modo `{a.get('mode', 'notify')}`, "
-                    f"{n_people} persone mappate) — le menzioni di quelle persone "
-                    f"arriveranno lì.")
-        if name == "topic.telegram_unbind":
-            return (f"scollega il gruppo Telegram (mount `{a.get('mount') or 'telegram'}`) "
-                    f"dal topic `{a.get('tier')}/{a.get('name')}`.")
         if name == "topic.drive_folder_add":
             return (f"dichiara la cartella Drive `{a.get('folder')}` come perimetro "
                     f"gdrive.* del topic `{a.get('tier')}/{a.get('name')}`.")
@@ -4405,7 +4362,6 @@ def _safe_scratch_path(p: str) -> str:
 # sono gestiti a parte (creazione / risultati filtrati per membership).
 _TOPIC_SCOPED_VERBS = {
     "open", "save_summary", "save_agents_md", "add_minute", "archive",
-    "telegram_bind", "telegram_unbind",
     "files", "read_file",
     "read_document", "convert_document", "write_document", "write_file", "fetch",
     "put", "delete_file",
@@ -4439,7 +4395,6 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
 #: su un verbo che non esiste è una regola che non si applica mai».
 _TOPIC_MUTATING_VERBS = frozenset({
     "save_summary", "save_agents_md", "add_minute", "archive",
-    "telegram_bind", "telegram_unbind",
     "write_file", "convert_document", "write_document", "put", "delete_file",
     "drive_folder_add", "drive_folder_remove",
     "egress_add", "egress_remove", "ingress_add", "ingress_remove",
@@ -5061,13 +5016,6 @@ def _dispatch_topic(name: str, a: dict):
         return svc.add_minute(a["tier"], a["name"], a["text"])
     if verb == "archive":
         return svc.archive(a["tier"], a["name"])
-    if verb == "telegram_bind":
-        return svc.telegram_bind(a["tier"], a["name"], a["chat_id"],
-                                 mode=a.get("mode") or "excerpt",
-                                 people=a.get("people"),
-                                 mount_name=a.get("mount"))
-    if verb == "telegram_unbind":
-        return svc.telegram_unbind(a["tier"], a["name"], a.get("mount"))
     if verb in ("list", "search"):
         # `list` e `search` non passano da `_require_topic_member`: filtrano da
         # sé, per membership del chiamante. E il chiamante lo leggevano da
@@ -5276,7 +5224,31 @@ def _dispatch_topic(name: str, a: dict):
     if verb in ("egress_remove", "ingress_remove"):
         from . import egress as eg
         direction = "egress" if verb == "egress_remove" else "ingress"
-        return eg.scope_revoke(direction, f"{a['tier']}/{a['name']}", a["uri"])
+        scope = f"{a['tier']}/{a['name']}"
+        out = eg.scope_revoke(direction, scope, a["uri"])
+        # Togliere una chat dalle fonti SCOLLEGA anche il binding che ne
+        # dipendeva (clodia-platform#364). Se restasse in piedi, la revoca non
+        # revocherebbe: i messaggi continuerebbero ad arrivare da un gruppo che
+        # l'owner ha appena de-autorizzato, e la lista direbbe una cosa mentre il
+        # relay ne fa un'altra. Fra le due, quella che si rilegge è la lista.
+        #
+        # È qui e non in `scope_revoke` perché il binding è un fatto del
+        # gateway, non della whitelist: `egress.py` non sa che esista Telegram.
+        # L'effetto torna nel risultato — un effetto collaterale che non si
+        # racconta si scopre solo quando qualcuno chiede perché ha smesso.
+        #
+        # Il confronto passa dal normalizzatore di `egress`, non da `==` sulle
+        # stringhe: `P1/acme` e `SEAL-1/acme` sono la stessa stanza, e un alias
+        # legacy farebbe fallire lo scollegamento in SILENZIO — la fonte via
+        # dalla lista, il relay che continua a riportare.
+        if direction == "ingress" and str(out.get("uri", "")).startswith("tg:"):
+            from .tools import telegram_bindings as tb
+            cid = str(out["uri"])[len("tg:"):]
+            b = tb.get(cid)
+            if b and eg._norm_scope_key(f"{b.get('tier')}/{b.get('topic')}") \
+                    == eg._norm_scope_key(scope):
+                out["unbound"] = tb.remove(cid)
+        return out
     raise ValueError(f"unknown topic verb: {name}")
 
 

@@ -1,10 +1,11 @@
-"""Drive e Telegram hanno un campo proprio, non più un array condiviso.
+"""Drive ha un campo proprio, non più un array condiviso.
 
 Decision-record #40 (7 set 2026): il vecchio `meta["mounts"]` — drive, git e
 telegram nella stessa lista, per riuso di schema — sparisce. Drive diventa
 `meta["drive_folders"]` (whitelist + confinamento per `gdrive.*`, mai un
-filesystem); Telegram diventa `meta["telegram_binds"]`; git non ha nulla da
-preservare (nessun topic in produzione ne aveva uno, misurato il 7 set 2026).
+filesystem); git non ha nulla da preservare (nessun topic in produzione ne
+aveva uno, misurato il 7 set 2026), e da clodia-platform#360 nemmeno telegram:
+il meccanismo che leggeva quel campo non esiste più.
 
 I topic scritti prima di questa modifica hanno ancora il vecchio `mounts`: la
 migrazione one-shot (`_migrate_mounts_field`, dentro `_open`) li converte senza
@@ -20,17 +21,13 @@ import shutil
 from pathlib import Path
 
 from .local_fs import LocalFsStorage
-from .service import TopicService, drive_folders, telegram_binds, _unique_name
+from .service import TopicService, drive_folders, _unique_name
 
 
 class AccessorTests(unittest.TestCase):
     def test_drive_folders_is_always_a_list(self):
         self.assertEqual(drive_folders({}), [])
         self.assertEqual(drive_folders({"drive_folders": None}), [])
-
-    def test_telegram_binds_is_always_a_list(self):
-        self.assertEqual(telegram_binds({}), [])
-        self.assertEqual(telegram_binds({"telegram_binds": None}), [])
 
     def test_malformed_entries_are_dropped(self):
         self.assertEqual(drive_folders({"drive_folders": ["x", {"name": "a"}]}), [])
@@ -81,13 +78,21 @@ class MigrationTests(unittest.TestCase):
                          [{"name": "contratti", "folder": "1XyZ", "account": "a@b.it"}])
         self.assertNotIn("mounts", meta)
 
-    def test_a_telegram_mount_becomes_a_telegram_bind(self):
-        voce = {"name": "gruppo", "type": "telegram",
-                "config": {"chat_id": "-100999", "mode": "excerpt", "people": {}}}
-        self._seed_legacy_mounts([voce])
+    def test_a_telegram_mount_is_dropped_without_a_trace(self):
+        """Da clodia-platform#360 il meccanismo di notifica-su-menzione non
+        esiste più: nessun codice legge `telegram_binds`, quindi migrare quella
+        voce scriverebbe soltanto dato morto in ogni meta. Scartata come `git`.
+
+        Il relay conversazionale NON è toccato: il suo binding sta sull'istanza
+        del messaggero, non è mai passato dal meta del topic.
+        """
+        self._seed_legacy_mounts([
+            {"name": "gruppo", "type": "telegram",
+             "config": {"chat_id": "-100999", "mode": "excerpt", "people": {}}}])
         self.svc._migrate_mounts_field("SEAL-1", "acme")
         meta, _ = self.svc._read_meta("SEAL-1", "acme")
-        self.assertEqual(telegram_binds(meta), [voce])
+        self.assertNotIn("telegram_binds", meta)
+        self.assertNotIn("mounts", meta)
 
     def test_a_git_mount_is_dropped_without_a_trace(self):
         """Nessun topic in produzione ne aveva uno (misurato il 7 set 2026):
@@ -109,7 +114,7 @@ class MigrationTests(unittest.TestCase):
         self.svc._migrate_mounts_field("SEAL-1", "acme")
         meta, _ = self.svc._read_meta("SEAL-1", "acme")
         self.assertEqual([f["name"] for f in drive_folders(meta)], ["drive"])
-        self.assertEqual([b["name"] for b in telegram_binds(meta)], ["gruppo"])
+        self.assertNotIn("telegram_binds", meta)
 
     def test_a_topic_with_no_legacy_mounts_is_untouched(self):
         self.svc._migrate_mounts_field("SEAL-1", "acme")  # non deve sollevare

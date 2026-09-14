@@ -26,13 +26,10 @@ class AllowlistTests(unittest.TestCase):
             with self.subTest(verbo):
                 self.assertNotIn("*", verbo, "un wildcard non è una decisione")
 
-    def test_the_flush_is_admitted(self):
-        self.assertIn("telegram.notify_flush", logic_api._ALLOWED)
-
     def test_a_verb_outside_the_list_is_refused(self):
         """Il caso che la lista esiste per fermare: un verbo gated qualunque
         eseguito senza nessuno che guardi."""
-        for verbo in ("web.post", "email.send", "topic.telegram_bind",
+        for verbo in ("web.post", "email.send", "topic.add_participant",
                       "github.push", "agents.grant_tool"):
             with self.subTest(verbo):
                 self.assertNotIn(verbo, logic_api._ALLOWED)

@@ -92,7 +92,7 @@ class IssueTests(unittest.TestCase):
         della stanza. Elencato per NOME e non per prefisso: un `agents.*` che
         rientrasse un giorno passerebbe inosservato a un controllo generico."""
         for v in ("agents.spawn", "jobs.create", "settings.set", "mcp.add",
-                  "topic.remote_enable", "topic.telegram_bind",
+                  "topic.remote_enable", "topic.drive_folder_add",
                   "topic.add_participant", "topic.delete_file",
                   "topic.save_summary", "topic.archive", "email.send"):
             self.assertNotIn(v, human_mcp.VERBS)

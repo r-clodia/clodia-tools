@@ -251,14 +251,6 @@ def drive_folders(meta: dict) -> list:
     return [f for f in raw if isinstance(f, dict) and f.get("folder")] if isinstance(raw, list) else []
 
 
-def telegram_binds(meta: dict) -> list:
-    """I gruppi Telegram collegati a questo topic. Campo proprio, non più
-    condiviso con drive/git (decision-record #40): non è mai stato un
-    filesystem da navigare, solo metadata per il relay dei messaggi."""
-    raw = meta.get("telegram_binds")
-    return [b for b in raw if isinstance(b, dict)] if isinstance(raw, list) else []
-
-
 def _unique_name(voluto: str, presi: set) -> str:
     """Identificatore validato, unico nell'insieme dato, stabile: il tipo
     finché è libero, `-2`/`-3`… solo quando serve davvero."""
@@ -579,227 +571,6 @@ class TopicService:
                     "local): %s", tier, name, e)
         return meta
 
-    # ── Un gruppo Telegram come mount dello scope ────────────────────────────
-    #
-    # È una RISORSA che l'owner porta dentro lo scope, come un repository o una
-    # cartella Drive: la forma è la stessa (`{name, type, config}`), e per questo
-    # sta in `mounts` invece che in un campo suo. La differenza è che non è un
-    # filesystem — e non serve dirlo da nessuna parte, perché la vista dei file
-    # monta già solo i tipi che lo sono (`_remote_mount_name`): un mount `git`
-    # era escluso per la stessa ragione dal 7 agosto.
-    TELEGRAM_MOUNT = "telegram"
-    #: Cosa esce dal topic verso il gruppo.
-    #: `notify` = il fatto (chi ti ha menzionato, dove) · `excerpt` = anche la
-    #: riga della menzione, troncata. Entrambe portano SEMPRE il link.
-    TELEGRAM_MODES = ("notify", "excerpt")
-    _EXCERPT_MAX = 280
-
-    @staticmethod
-    def _webui_url() -> str:
-        from . import telegram_notify as _tn
-        return _tn.webui_url()
-
-    def telegram_bind(self, tier: str, name: str, chat_id: str,
-                      mode: str = "excerpt", people: dict | None = None,
-                      mount_name: str | None = None) -> dict:
-        """Collega un gruppo Telegram a questo topic.
-
-        Cinque verifiche prima di scrivere, e ognuna esiste per un caso che
-        altrimenti si scopre tardi:
-
-        1. **il cap SEAL.** Telegram è capped a SEAL-1 (server non-UE, gruppi
-           non-E2E). Il rifiuto arriva al collegamento, non alla prima notifica.
-        2. **l'URL della webui.** Ogni notifica porta un link alla conversazione:
-           senza `CLODIA_WEBUI_URL` il link sarebbe relativo, cioè un vicolo
-           cieco su un telefono. Meglio rifiutare di configurare che consegnare
-           link morti.
-        3. **il bot è nel gruppo.** È il presupposto della funzione, e un
-           presupposto non verificato diventa un errore il giorno in cui
-           qualcuno rimuove il bot.
-        4. **le persone sono mappate.** `people` lega uid Telegram → principal
-           della piattaforma. Senza mappa non si notifica nessuno, e un
-           collegamento che non notifica nessuno sembra funzionare.
-        5. **i nomi sono principal veri**, non stringhe libere: una mappa verso
-           un nome che non esiste è una notifica che non partirà mai, e lo si
-           scoprirebbe solo dal silenzio.
-
-        Il gruppo entra anche nella lista **egress dello scope** come
-        `tg:<chat_id>`: da lì in poi è una destinazione dichiarata, vagliata per
-        costruzione, non un'eccezione.
-        """
-        modo = (mode or "excerpt").strip().lower()
-        if modo not in self.TELEGRAM_MODES:
-            raise TopicError(
-                f"modo '{mode}' non ammesso: {' | '.join(self.TELEGRAM_MODES)}")
-        cid = str(chat_id or "").strip()
-        if not cid:
-            raise TopicError("chat_id del gruppo mancante")
-
-        cap = _CHANNEL_SEAL_CAP.get("telegram")
-        try:
-            tier_n = int(_normalize_tier(tier).replace("SEAL-", ""))
-        except (ValueError, AttributeError):
-            tier_n = 0
-        if cap is not None and tier_n > cap:
-            raise TopicError(
-                f"Telegram ha cap SEAL-{cap}: un topic {tier} non può collegare "
-                f"un gruppo (i server non sono UE e i gruppi non sono E2E)")
-
-        if not self._webui_url():
-            raise TopicError(
-                "CLODIA_WEBUI_URL non è impostata: ogni notifica porta un link "
-                "alla conversazione, e senza un indirizzo pubblico il link è "
-                "relativo — inutile dentro Telegram. Impostala e riprova")
-
-        mappa = self._clean_people(people)
-        if not mappa:
-            raise TopicError(
-                "nessuna persona mappata: `people` lega uid Telegram → nome "
-                "utente su Clodia. Senza, il collegamento non avviserebbe "
-                "nessuno. `telegram.roster(chat_id)` elenca i membri del gruppo")
-        self._require_known_principals(mappa.values())
-        self._require_bot_in_group(cid)
-
-        meta, ver = self._read_meta(tier, name)
-        existing = telegram_binds(meta)
-        bind_id = _unique_name(mount_name or self.TELEGRAM_MOUNT,
-                               {str(b.get("name") or "") for b in existing})
-        voce = {"name": bind_id, "type": self.TELEGRAM_MOUNT,
-                "config": {"chat_id": cid, "mode": modo, "people": mappa}}
-        meta["telegram_binds"] = [b for b in existing if b.get("name") != bind_id] + [voce]
-        self._write_meta(tier, name, meta, base_version=ver)
-        self._declare_egress(tier, name, f"tg:{cid}")
-        return {"ok": True, "mount": voce}
-
-    def telegram_unbind(self, tier: str, name: str,
-                        mount_name: str | None = None) -> dict:
-        """Scollega il gruppo. La voce di egress NON viene tolta in automatico.
-
-        Toglierla sembrerebbe pulizia ed è invece una decisione sul perimetro:
-        la stessa destinazione può essere stata autorizzata anche per altro. Chi
-        vuole restringere lo fa dalla lista, dove la cosa ha un nome.
-        """
-        meta, ver = self._read_meta(tier, name)
-        tg = telegram_binds(meta)
-        if not tg:
-            raise TopicError("questo topic non ha un gruppo Telegram collegato")
-        via = mount_name or tg[0].get("name")
-        if via not in {m.get("name") for m in tg}:
-            raise TopicError(
-                f"nessun gruppo Telegram '{via}' (ci sono: "
-                f"{', '.join(str(m.get('name')) for m in tg)})")
-        meta["telegram_binds"] = [m for m in tg if m.get("name") != via]
-        self._write_meta(tier, name, meta, base_version=ver)
-        return {"ok": True, "unbound": via}
-
-    def telegram_mounts(self, meta: dict) -> list:
-        """I gruppi Telegram collegati a questo topic."""
-        return telegram_binds(meta)
-
-    @staticmethod
-    def _clean_people(people: dict | None) -> dict:
-        """`{uid: {principal, username}}` normalizzato. Voci incomplete SCARTATE.
-
-        Scartare e non correggere: una mappa mezza scritta è una notifica verso
-        la persona sbagliata, che è l'unico esito peggiore del silenzio.
-
-        Tre cose, non due. Il `principal` è il nome nella piattaforma — è quello
-        che compare come `@giovanni` nel canale. Lo `username` è il suo handle
-        Telegram, `giocasu75`, ed è quello che deve comparire nel gruppo:
-        scriverci `@giovanni` non notifica nessuno su Telegram e non è nemmeno
-        il nome con cui quelle persone si chiamano fra loro là.
-
-        La forma piatta `{uid: "principal"}` resta accettata: è quella scritta
-        prima del 10 ago 2026, e rifiutarla farebbe smettere di funzionare i
-        collegamenti già fatti. Senza username la menzione resta il nome della
-        piattaforma — degradata, non rotta.
-        """
-        out: dict = {}
-        for uid, v in (people or {}).items():
-            u = str(uid).strip()
-            if not u:
-                continue
-            if isinstance(v, dict):
-                chi = str(v.get("principal") or "").strip().lower()
-                handle = str(v.get("username") or "").strip().lstrip("@")
-            else:
-                chi, handle = str(v or "").strip().lower(), ""
-            if not chi:
-                continue
-            # La CHIAVE può essere un uid numerico o un handle. Chiedere l'uid
-            # era corretto sul piano tecnico — è l'identificatore stabile, un
-            # username si cambia — e sbagliato sul piano umano: l'handle è
-            # quello che una persona conosce e sa copiare, l'uid no. Davide ha
-            # compilato la mappa con `@giocasu75`, che è la cosa naturale da
-            # fare, e il codice ha reso `@giovanni`.
-            #
-            # Si accettano entrambi: una chiave non numerica È l'handle. Meglio
-            # incontrare chi compila dove si trova che avere ragione su una
-            # mappa vuota.
-            if not u.lstrip("-").isdigit() and not handle:
-                handle = u.lstrip("@")
-            voce = {"principal": chi}
-            if handle:
-                voce["username"] = handle
-            out[u] = voce
-        return out
-
-    @staticmethod
-    def _require_known_principals(nomi) -> None:
-        from .. import human as _h
-        ignoti = []
-        for n in nomi:
-            try:
-                if not _h.is_human(n):
-                    ignoti.append(n)
-            except Exception:  # noqa: BLE001 — registro illeggibile: non si giudica
-                return
-        if ignoti:
-            raise TopicError(
-                f"nomi utente sconosciuti su Clodia: {', '.join(sorted(set(ignoti)))}. "
-                f"Una mappa verso un nome che non esiste è una notifica che non "
-                f"partirà mai, e lo scopriresti solo dal silenzio")
-
-    @staticmethod
-    def _require_bot_in_group(chat_id: str) -> None:
-        """Il bot dev'essere già nel gruppo. Verificato, non supposto.
-
-        `api_call` restituisce **il campo `result` già spacchettato** e solleva
-        sugli errori: leggere `.get("result")` sulla sua risposta dà `None`
-        sempre, anche quando è andata benissimo. È il contratto di un aiutante
-        che avevo dato per scontato invece di leggerlo, ed è costato un
-        collegamento rifiutato su un gruppo che esiste (10 ago 2026).
-        """
-        from ..tools import telegram as tg
-        try:
-            tok = tg._token_internal()
-            uid = (tg.api_call(tok, "getMe") or {}).get("id")
-            if not uid:
-                raise RuntimeError("getMe non ha restituito l'id del bot")
-            stato = ((tg.api_call(tok, "getChatMember",
-                                  {"chat_id": chat_id, "user_id": uid}) or {})
-                     .get("status") or "").lower()
-        except Exception as e:  # noqa: BLE001
-            # Il MOTIVO, non il tipo dell'eccezione. «RuntimeError» non dice se
-            # il gruppo non esiste, se il bot è fuori o se il token è di un
-            # altro bot — e sono tre rimedi diversi.
-            raise TopicError(
-                f"non riesco a verificare che il bot sia nel gruppo {chat_id}: "
-                f"{e}. Il collegamento si ferma qui invece di riuscire e non "
-                f"funzionare") from e
-        if stato in ("left", "kicked", ""):
-            raise TopicError(
-                f"il bot non è membro del gruppo {chat_id} (stato: "
-                f"{stato or 'sconosciuto'}). Aggiungilo al gruppo e riprova")
-
-    def _declare_egress(self, tier: str, name: str, uri: str) -> None:
-        """Aggiunge una destinazione alla lista egress DI QUESTO SCOPE."""
-        try:
-            from .. import egress as _eg
-            _eg.scope_allow("egress", f"{_normalize_tier(tier)}/{name}", uri)
-        except Exception as e:  # noqa: BLE001
-            LOG.warning("egress %s per %s/%s non dichiarata: %s", uri, tier, name, e)
-
     def set_channel(self, tier: str, name: str, channel: dict | None) -> dict:
         """Configura/rimuove il channel dei messaggi di un topic esistente.
         `channel=None` o `{}` → rimuove (torna a webui). Applica il cap SEAL."""
@@ -1085,13 +856,18 @@ class TopicService:
           quello che l'owner aveva scelto, senza che nessuno lo veda.
         - `git`  → scartato: nessun topic in produzione ne aveva uno (misurato,
           7 set 2026), ed è codice morto — nessuna UI lo ha mai creato.
-        - `telegram` → `telegram_binds`, stessa forma, solo un campo suo.
+        - `telegram` → scartato per la stessa ragione di `git` da quando il
+          meccanismo di notifica-su-menzione non esiste più (clodia-platform
+          #360): non c'è nessun campo che lo legga, quindi conservarlo
+          produrrebbe solo dato morto in ogni meta migrato. Il relay
+          conversazionale è un sistema separato e NON passa di qui — il suo
+          binding sta sull'istanza del messaggero, non nel meta del topic.
         """
         meta, ver = self._read_meta(tier, name)
         raw = meta.get("mounts")
         if not isinstance(raw, list) or not raw:
             return
-        drive_new, tg_new, moved = [], [], 0
+        drive_new, moved = [], 0
         for m in raw:
             if not isinstance(m, dict):
                 continue
@@ -1103,26 +879,17 @@ class TopicService:
                     drive_new.append({"name": m.get("name") or "drive",
                                       "folder": folder, "account": cfg.get("account")})
                     moved += 1
-            elif ty == "telegram":
-                tg_new.append(m)
-                moved += 1
-            # git (o qualunque altro tipo): scartato, nessun dato da preservare.
-        if not moved and "mounts" not in meta:
-            return
+            # telegram, git (o qualunque altro tipo): scartato, nessun dato da
+            # preservare.
         if drive_new:
             meta["drive_folders"] = drive_folders(meta) or []
             presi = {f.get("name") for f in meta["drive_folders"]}
             meta["drive_folders"] += [f for f in drive_new if f.get("name") not in presi]
-        if tg_new:
-            meta["telegram_binds"] = telegram_binds(meta) or []
-            presi = {b.get("name") for b in meta["telegram_binds"]}
-            meta["telegram_binds"] += [b for b in tg_new if b.get("name") not in presi]
         meta.pop("mounts", None)
         meta.pop("remote", None)
         self._write_meta(tier, name, meta, base_version=ver)
         LOG.warning("migrazione mounts→campi propri per %s/%s: %d voce/i spostate "
-                    "(drive_folders=%d, telegram_binds=%d)",
-                    tier, name, moved, len(drive_new), len(tg_new))
+                    "(drive_folders=%d)", tier, name, moved, len(drive_new))
 
     @staticmethod
     def _assert_content_available(meta: dict) -> None:
@@ -1162,7 +929,8 @@ class TopicService:
         if not allow_archived:
             self._assert_content_available(initial_meta)
         # Migrazione one-shot: il vecchio meta["mounts"] condiviso (decision-
-        # record #40) → drive_folders/telegram_binds, i loro campi propri.
+        # record #40) → `drive_folders`, il campo proprio dell'unico tipo che
+        # aveva qualcosa da preservare.
         try:
             self._migrate_mounts_field(tier, name)
         except Exception:  # noqa: BLE001
@@ -1712,18 +1480,6 @@ class TopicService:
                         f"proxy:{author}", author)
         self.s.write(f"{self._dir(tier, name)}/.messages/{msg['id']}.json",
                      json.dumps(msg, ensure_ascii=False).encode())
-        # Menzioni → coda per il gruppo Telegram collegato. Best-effort e DOPO
-        # la scrittura: un messaggio nel topic non deve dipendere dalla
-        # raggiungibilità di un servizio esterno, e un difetto qui non deve
-        # impedire a qualcuno di parlare nella propria stanza.
-        try:
-            tg = self.telegram_mounts(meta)
-            if tg:
-                from . import telegram_notify as _tn
-                _tn.enqueue_for_message(_normalize_tier(tier), name, meta, msg, tg)
-        except Exception as e:  # noqa: BLE001
-            LOG.warning("notifica telegram non accodata per %s/%s: %s",
-                        tier, name, str(e)[:160])
         # L'ANNUNCIO APPARTIENE ALL'ATTO DI POSTARE (clodia-platform#219). Qui
         # passano TUTTI gli scrittori — la webui via `/internal/topics`, il
         # verbo MCP del gateway (proxy, messaggero, client MCP di una persona),
@@ -1734,16 +1490,16 @@ class TopicService:
         # era invisibile solo per una proprietà del deployment di oggi — un solo
         # proxy, e l'umano che scrive dalla webui.
         #
-        # Best-effort e DOPO la scrittura, come la notifica Telegram qui sopra e
-        # per la stessa ragione già scritta lì: un messaggio nel topic non deve
-        # dipendere dalla raggiungibilità di un servizio esterno.
+        # Best-effort e DOPO la scrittura: un messaggio nel topic non deve
+        # dipendere dalla raggiungibilità di un servizio esterno, e un difetto
+        # qui non deve impedire a qualcuno di parlare nella propria stanza.
         #
         # SHORTCUT: chiamata HTTP SINCRONA sul percorso caldo di ogni post
         #           (pochi ms sulla rete interna, timeout corto in
         #           `announce_message`). Regge finché i post sono dell'ordine di
         #           uno per interazione. Se pesa — un import massivo, un job che
-        #           scrive in ciclo — la forma giusta è la stessa di Telegram,
-        #           una coda con flush, non un thread per post.
+        #           scrive in ciclo — la forma giusta è una coda con flush, non
+        #           un thread per post.
         try:
             from ..tools import runtime as _rt
             _rt.announce_message(_normalize_tier(tier), name, msg)
