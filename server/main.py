@@ -1120,8 +1120,11 @@ _TOPIC_TOOLS: list[Tool] = [
     Tool(
         name="topic.ingress_remove",
         description=("Toglie una fonte fidata locale a questo canale. Non tocca la "
-                     "whitelist globale. Richiede approvazione dell'owner dello "
-                     "scope."),
+                     "whitelist globale. Se la fonte è una chat Telegram agganciata "
+                     "a questo topic, ne scollega anche il binding e lo dice "
+                     "(`unbound` nel risultato): togliere la dichiarazione non deve "
+                     "lasciare in piedi il relay che ne dipendeva. Richiede "
+                     "approvazione dell'owner dello scope."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
@@ -1741,8 +1744,11 @@ _TELEGRAM_TOOLS: list[Tool] = [
                       "riporta VERBATIM i messaggi nella chat del topic, con l'handle "
                       "autenticato del mittente. Il messaggero NON esegue né risponde "
                       "ai messaggi: riportano soltanto, decidono gli agenti del topic. "
-                      "Richiede che tu sia partecipante del topic. Binding a livello di "
-                      "istanza: puoi ascoltare più chat."),
+                      "Richiede che tu sia partecipante del topic E che la chat sia "
+                      "GIÀ una fonte dichiarata di QUEL topic: `tg:<chat_id>` passato "
+                      "a topic.ingress_add, che lo chiede all'owner dello scope. "
+                      "Non è il binding ad autorizzare l'ingresso, è la dichiarazione. "
+                      "Binding a livello di istanza: puoi ascoltare più chat."),
          inputSchema={"type": "object", "properties": {
              "tier": {"type": "string"}, "name": {"type": "string"},
              "chat_id": {"type": "string"}},
