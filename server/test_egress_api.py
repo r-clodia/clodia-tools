@@ -13,11 +13,15 @@ from . import egress_api
 
 
 class _Req:
-    def __init__(self, secret=None, uri=None, path_params=None, **query):
+    def __init__(self, secret=None, uri=None, path_params=None, body=None, **query):
         self.headers = {"x-orchestrator-secret": secret} if secret else {}
         self.query_params = {"uri": uri} if uri else {}
         self.query_params.update({k: v for k, v in query.items() if v is not None})
         self.path_params = path_params or {}
+        self._body = body if body is not None else ({"uri": uri} if uri else {})
+
+    async def json(self):
+        return self._body
 
 
 def _call(req):
@@ -245,6 +249,84 @@ class ScopeWhitelistViewTests(unittest.TestCase):
             r = self._call("SEAL-1", "acme")
         b = json.loads(r.body)
         self.assertEqual(b["egress"], ["mailto:x@y.it"])
+
+
+class ScopeWhitelistEditTests(unittest.TestCase):
+    """`/internal/egress/whitelist/scope/{tier}/{name}/{direction}/{action}` —
+    aggiungere/togliere una voce LOCALE di un topic a mano (clodia-platform#375,
+    18 set 2026: «devo poter aggiungere manualmente un egress/ingress nella
+    sidebar di canale»).
+
+    Il controllo dei ruoli NON è qui (rotta interna: lo fa l'agent-server,
+    owner-only, prima di inoltrare — vedi `test_egress_admin_http.py` per la
+    stessa divisione sulla rotta globale gemella). Questi test fissano che
+    l'endpoint scriva nello STORAGE PER SCOPO giusto, non in quello globale, e
+    che richieda comunque il secret server-to-server.
+    """
+
+    def _call(self, tier, name, direction, action, uri=None, secret="s3cr3t", body=None):
+        return asyncio.run(egress_api.scope_whitelist_edit(_Req(
+            secret, path_params={"tier": tier, "name": name,
+                                 "direction": direction, "action": action},
+            body=body if body is not None else ({"uri": uri} if uri else {}))))
+
+    def test_without_the_secret_it_is_unauthorized(self):
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}):
+            r = self._call("SEAL-1", "acme", "egress", "allow",
+                           "gdrive:folder/1AbC", secret=None)
+        self.assertEqual(r.status_code, 401)
+
+    def test_allow_writes_to_the_scope_list_not_the_global_one(self):
+        import json
+        cfg = {"agents": {}, "scope_egress_allow": {}}
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), \
+                _with(cfg):
+            r = self._call("SEAL-1", "acme", "egress", "allow", "gdrive:folder/1AbC")
+            self.assertEqual(r.status_code, 200)
+            self.assertTrue(json.loads(r.body)["added"])
+            from . import whitelist as wl
+            self.assertEqual(wl.CONFIG.get("egress_allow"), None,
+                             "una voce di scope non deve finire nella lista globale")
+            self.assertIn("gdrive:folder/1AbC",
+                          wl.CONFIG["scope_egress_allow"]["SEAL-1/acme"])
+
+    def test_revoke_removes_only_from_this_scope(self):
+        import json
+        cfg = {"agents": {}, "scope_source_allow": {
+            "SEAL-1/acme": ["https://esempio.it/feed"],
+            "SEAL-1/altrove": ["https://esempio.it/feed"]}}
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), \
+                _with(cfg):
+            r = self._call("SEAL-1", "acme", "ingress", "revoke",
+                           "https://esempio.it/feed")
+            self.assertEqual(r.status_code, 200)
+            self.assertTrue(json.loads(r.body)["removed"])
+            from . import whitelist as wl
+            self.assertEqual(wl.CONFIG["scope_source_allow"]["SEAL-1/altrove"],
+                             ["https://esempio.it/feed"],
+                             "la revoca in un topic non deve toccare un altro scope")
+
+    def test_a_degenerate_uri_is_refused_with_a_reason(self):
+        import json
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), \
+                _with({"agents": {}}):
+            r = self._call("SEAL-1", "acme", "egress", "allow", "gdrive:folder/")
+        self.assertEqual(r.status_code, 400)
+        self.assertTrue(json.loads(r.body)["error"])
+
+    def test_an_unknown_action_is_refused(self):
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), \
+                _with({"agents": {}}):
+            r = self._call("SEAL-1", "acme", "egress", "delete",
+                           "gdrive:folder/1AbC")
+        self.assertEqual(r.status_code, 400)
+
+    def test_the_route_is_registered_as_a_post(self):
+        paths = {r.path: r for r in egress_api.routes}
+        route = paths.get(
+            "/internal/egress/whitelist/scope/{tier}/{name}/{direction}/{action}")
+        self.assertIsNotNone(route, "la rotta scoped di scrittura non esiste")
+        self.assertIn("POST", route.methods or [])
 
 
 if __name__ == "__main__":
