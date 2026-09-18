@@ -363,7 +363,7 @@ _GMAIL_SERVERS = {
 }
 
 
-def materialize_google_oauth(agent: str, credential: str, dest_dir: Path) -> str:
+def materialize_google_oauth(credential: str, dest_dir: Path) -> str:
     """Prepara in `dest_dir` un CLODIA_SECRETS_DIR effimero completo per
     `email_client` e ritorna il nome account. Scrive i 3 file che servono:
     `google_oauth_client.json`, `email_oauth_tokens.json` e un
@@ -371,11 +371,16 @@ def materialize_google_oauth(agent: str, credential: str, dest_dir: Path) -> str
     server Gmail. Il segreto vive solo per la durata della chiamata in una dir
     effimera (0700) dentro il container del gateway.
 
+    Lettura come infrastruttura (`read_internal`), non più grant-checkata su un
+    agente: quale casella un canale può usare lo decide la whitelist
+    `inbox:`/`outbox:` a monte di questa chiamata, non un grant sulla
+    credenziale (refactor whitelist-mailbox, 18 set 2026).
+
     Bundle atteso::
 
         {"client_id", "client_secret", "refresh_token", "email", "account"?}
     """
-    b = get_secret(agent, credential)
+    b = read_internal(credential)
     missing = [k for k in ("client_id", "client_secret", "refresh_token", "email")
                if not b.get(k)]
     if missing:

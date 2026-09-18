@@ -2638,24 +2638,12 @@ def _scoped_ceiling_ok(name: str) -> bool:
     return scoped_ceiling_allows(name)
 
 
-def _vault_grants(agent: str | None) -> set:
-    if not agent:
-        return set()
-    try:
-        from . import vault
-        return set(vault.grants_for(agent).keys())
-    except Exception:  # noqa: BLE001
-        return set()
-
-
 def _declared_tools(agent: str | None) -> set:
     """Verbi EFFETTIVI di un principal: propri, antenati e floor dell'archseed.
 
     Il fallback sul seed serve agli agenti non registrati — un clone per-topic,
     un responder appena materializzato — per i quali `agent_config` solleva
-    KeyError. Senza, l'intersezione qui sotto li ridurrebbe a zero verbi di
-    connettore, cioè romperebbe proprio il caso che `_connector_allows` esisteva
-    per servire.
+    KeyError.
 
     ``effective_tools`` è l'unico risolutore della matrice. La lista grezza in
     config resta la dichiarazione propria dell'agente, non una copia derivata
@@ -2680,70 +2668,15 @@ def _agent_tool_reachable(name: str, agent: str | None,
     """
     allowed = (resolved if resolved is not None
                else _declared_tools(agent) | set(current_scoped_tools()))
-    return _tool_allowed(name, allowed) or _connector_allows(name, agent)
-
-
-def _connector_intersect_on() -> bool:
-    """Interruttore d'emergenza. Acceso per default perché la misura lo sostiene —
-    nessuno dei verbi che l'intersezione toglie è mai stato usato secondo la
-    telemetria delle due istanze — ma una telemetria è una finestra, non la
-    storia completa, e se salta fuori un flusso legittimo va sbloccato in un
-    minuto senza un deploy."""
-    return (_os.environ.get("CLODIA_CONNECTOR_INTERSECT") or "on").strip().lower() != "off"
-
-
-def _connector_allows(name: str, agent: str | None) -> bool:
-    """Un grant sul vault apre la CREDENZIALE, non i verbi.
-
-    Com'era e perché è cambiato. Questa funzione ritornava True per l'intero
-    namespace di una credenziale concessa: chi aveva `google_<account>` otteneva
-    `email.*`, `gdrive.*`, `gdocs.*`, `gsheets.*` e `gcalendar.*` — 23 verbi —
-    **indipendentemente da ciò che il suo seed dichiara**. Il commento originale
-    lo giustificava così: «la delega non dipende da config.yaml (effimero al
-    rebuild)».
-
-    Due ragioni per cambiarlo. La prima è che quel presupposto non vale più:
-    `config.yaml` sta su un volume del gateway (`/gateway-state`, bind mount) e
-    sopravvive alla ricreazione del container — verificato. La seconda è che
-    rendeva la dichiarazione **decorativa** su cinque namespace: il refactoring
-    per classe di seed, i `profile_tools`, il modello del mestiere non decidevano
-    nulla là dove decideva il grant. E il modello di sicurezza afferma che la
-    matrice del principal delimita i suoi verbi: su quei namespace era falso.
-
-    Ora servono ENTRAMBI: il grant sulla credenziale **e** la dichiarazione del
-    verbo. Concedere l'account a un postino gli dà la posta che dichiara, non il
-    Drive che non dichiara. Per dargli il Drive si aggiunge il verbo al suo seed —
-    cioè lo si decide, invece di ottenerlo come effetto collaterale.
-    """
-    grants = _vault_grants(agent)
-    if not _grant_covers(name, grants):
-        return False
-    if not _connector_intersect_on():
-        return True          # interruttore spento: comportamento storico
-    # L'INTERSEZIONE. Il grant è necessario, non sufficiente.
-    return _tool_allowed(name, _declared_tools(agent))
-
-
-def _grant_covers(name: str, grants: set) -> bool:
-    """Il grant copre il namespace del verbo? (metà «credenziale» della regola)"""
-    # La credenziale Google UNIFICATA (google_<account>) abilita SIA email.* SIA
-    # gdrive.* (ha entrambi gli scope); i legacy gmail_/gworkspace_ restano validi.
-    if name.startswith("email.") and any(
-            c.startswith("google_") or c.startswith("gmail_") or c.startswith("mailbox_")
-            for c in grants):
-        return True
-    if name.startswith("telegram.") and "telegram_bot_token" in grants:
-        return True
-    _gws_grant = any(c.startswith("google_") or c.startswith("gworkspace_") for c in grants)
-    if name.startswith(("gdrive.", "gcalendar.", "gdocs.", "gsheets.")) and _gws_grant:
-        return True
-    return False
+    return _tool_allowed(name, allowed)
 
 
 def _email_account(arguments: dict) -> str:
     """Account per una chiamata email.*: quello richiesto esplicitamente,
-    altrimenti l'UNICO account operativo con grant vault. Con zero o più account
-    solleva un errore azionabile: nessun fallback verso mailbox inesistenti."""
+    altrimenti l'UNICO account esistente. Con zero o più account solleva un
+    errore azionabile: nessun fallback verso mailbox inesistenti. Chi può
+    davvero usare la casella lo decide la whitelist `inbox:`/`outbox:` al
+    momento della chiamata (`email._secrets_env`), non questa funzione."""
     agent = agent_name()
     accounts = email.available_accounts(agent)
     acct = (arguments.get("account") or "").strip()
@@ -2751,15 +2684,15 @@ def _email_account(arguments: dict) -> str:
         if acct in accounts:
             return acct
         raise ValueError(
-            f"email: account '{acct}' non disponibile per '{agent}'. "
+            f"email: account '{acct}' non esistente. "
             f"Passa il parametro 'account' con uno di questi valori: {accounts}"
         )
     if len(accounts) == 1:
         return accounts[0]
     if not accounts:
         raise ValueError(
-            f"email: nessun account operativo con grant per '{agent}'. "
-            "Configura una mailbox e assegna il relativo grant nel vault."
+            "email: nessun account configurato. Configura una mailbox da "
+            "Integrazioni → Email."
         )
     raise ValueError(
         "email: il parametro 'account' è obbligatorio quando sono disponibili "

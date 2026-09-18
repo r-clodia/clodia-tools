@@ -282,7 +282,7 @@ def canonical(uri: str) -> str:
     # Il dominio è case-insensitive per standard; la local part in teoria no, ma
     # nessun provider reale la distingue e soprattutto il confronto a valle è già
     # in minuscolo: la coerenza fra i due lati vale più della lettera dell'RFC.
-    if u.lower().startswith(("mailto:", "mailfrom:")):
+    if u.lower().startswith(("mailto:", "mailfrom:", "inbox:", "outbox:")):
         return u.lower()
     for rx, to in _CANON:
         m = rx.match(u)
@@ -352,7 +352,14 @@ _HIERARCHICAL = ("http", "https", "gdrive", "mcp")
 #: bloccato), sbagliare una fonte è SILENZIOSO — un taint che non si accende, e
 #: tutti i gate a valle che non scattano. Un `mailfrom:` nella lista di uscita è
 #: un errore di configurazione e va rifiutato, non ignorato.
-EGRESS_SCHEMES = ("mailto", "tg", "http", "https", "gdrive", "gsheets")
+#: `outbox:<email>` non è il DESTINATARIO di un messaggio (quello è `mailto:`),
+#: è la CASELLA con cui un verbo scrive — chi può spedire come
+#: studio@davidecarboni.it. Sostituisce il grant-per-agente sulla credenziale
+#: nel vault (clodia-platform#refactor whitelist-mailbox, 18 set 2026): prima
+#: "questo agente ha il grant sulla credenziale mailbox_studio", ora "questo
+#: canale ha outbox:studio@davidecarboni.it in whitelist" — la domanda diventa
+#: DOVE, non CHI, coerente con tutto il resto di questo modulo.
+EGRESS_SCHEMES = ("mailto", "tg", "http", "https", "gdrive", "gsheets", "outbox")
 #: `gdrive` fra le fonti: una cartella Drive vagliata è una fonte fidata, ed è il
 #: caso che rende operativa questa lista — un topic collegato a una cartella di cui
 #: l'owner risponde non deve contaminare a ogni lettura.
@@ -368,7 +375,13 @@ EGRESS_SCHEMES = ("mailto", "tg", "http", "https", "gdrive", "gsheets")
 #: dell'epic #359 Telegram è un INGRESSO come la posta, non solo una
 #: destinazione. Una chat vagliata è una fonte fidata allo stesso titolo di un
 #: `mailfrom:`, e per lo stesso motivo va dichiarata una per una.
-SOURCE_SCHEMES = ("mailfrom", "tg", "http", "https", "gdrive", "gsheets", "mcp")
+#: `inbox:<email>` è il simmetrico di `outbox:` in lettura: quale casella un
+#: verbo può SCARICARE, non da chi arriva il singolo messaggio (quello resta
+#: `mailfrom:`, e continua a governare il taint del contenuto). Le due
+#: domande sono indipendenti — un canale può leggere `mailbox_studio` e allo
+#: stesso tempo trattare come non fidato ogni messaggio che non venga da un
+#: mittente del perimetro.
+SOURCE_SCHEMES = ("mailfrom", "tg", "http", "https", "gdrive", "gsheets", "mcp", "inbox")
 
 #: Le due forme di `tg:`, e non ce n'è una terza. La distinzione fra un gruppo e
 #: una persona la porta la FORMA, non un parametro a parte: un parametro
@@ -479,6 +492,29 @@ def is_perimeter_source(uri: str, scope: str | None = None) -> bool:
         return False
     addr = address_of(u[len("mailfrom:"):])
     return bool(addr) and addr in perimeter_addresses(scope)
+
+
+def mailbox_allowed(direction: str, email: str, scope: str | None = None) -> bool:
+    """La casella `email` è nella whitelist `inbox:`/`outbox:` per questo scope?
+
+    Sostituisce il grant-per-agente sulla credenziale nel vault: prima "questo
+    agente può leggere mailbox_studio", ora "questo canale ha
+    `inbox:studio@davidecarboni.it` in whitelist" — chi può usare la casella lo
+    decide `tool_permissions` (`email.read`/`email.send`), DOVE lo decide
+    questa lista. Nessun gate interattivo qui: quale casella un canale usa è
+    una scelta di configurazione, non un dato letto da un messaggio non
+    fidato — la stessa ragione per cui gdrive/telegram non hanno bisogno di una
+    lista nuova, qui serve perché "quale casella" non coincide col perimetro
+    cartella/chat già controllato altrove.
+
+    `direction`: "inbox" per leggere, "outbox" per scrivere/rispondere.
+    """
+    addr = (email or "").strip().lower()
+    if not addr:
+        return False
+    uri = f"{direction}:{addr}"
+    rules = effective_uris("ingress" if direction == "inbox" else "egress", scope)
+    return any(_matches(uri, r) for r in rules)
 
 
 #: Chiavi delle liste PER SCOPE nella config del gateway. Vivono lì e non nel

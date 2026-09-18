@@ -274,52 +274,5 @@ class ProfileAclKeepsWorkingTests(unittest.TestCase):
                 self.assertIn("profile_dairio", vault.grants_for("ophelia"))
 
 
-class TheGrantEndpointCanNarrowTests(unittest.TestCase):
-    """`POST /internal/connectors/grant` accetta le due chiavi, e **solo se le
-    riceve**: il body di oggi concede come oggi, così la UI attuale non cambia."""
-
-    @contextmanager
-    def _client(self):
-        from starlette.applications import Starlette
-        from starlette.testclient import TestClient
-        from . import connectors_api as ca
-        with _vault_dir() as d:
-            with patch.object(ca, "_authorize", lambda _r: ("owner", None)), \
-                 patch.object(ca.vault, "email_connectors", lambda: ["studio"]):
-                yield TestClient(Starlette(routes=ca.routes)), d
-
-    def test_the_restrictions_reach_the_policy(self):
-        with self._client() as (c, d):
-            r = c.post("/internal/connectors/grant",
-                       json={"agent": "messaggero", "account": "studio",
-                             "granted": True, "principals": ["davide"],
-                             "topics": ["SEAL-1/studio"]})
-            self.assertEqual(r.status_code, 200)
-            self.assertEqual(r.json()["scope"]["principals"], ["davide"])
-            g = yaml.safe_load((d / "vault-policy.yaml").read_text())
-        voce = g["credentials"]["gmail_studio"]["grants"][0]
-        self.assertEqual(voce["topics"], ["SEAL-1/studio"])
-
-    def test_the_body_of_today_still_grants_to_everyone(self):
-        with self._client() as (c, d):
-            r = c.post("/internal/connectors/grant",
-                       json={"agent": "messaggero", "account": "studio",
-                             "granted": True})
-            self.assertEqual(r.status_code, 200)
-            g = yaml.safe_load((d / "vault-policy.yaml").read_text())
-        voce = g["credentials"]["gmail_studio"]["grants"][0]
-        self.assertNotIn("principals", voce)
-        self.assertNotIn("topics", voce)
-
-    def test_a_malformed_restriction_is_refused_not_ignored(self):
-        """Silenziare un `principals: "davide"` scritto male concederebbe a tutti
-        credendo di restringere: il modo peggiore di sbagliare, qui."""
-        with self._client() as (c, _d):
-            r = c.post("/internal/connectors/grant",
-                       json={"agent": "messaggero", "account": "studio",
-                             "granted": True, "principals": "davide"})
-        self.assertEqual(r.status_code, 400)
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -4,14 +4,15 @@ Riusa la credenziale OAuth Workspace UNIFICATA già nel vault (`google_<account>
 scope Drive+Docs+Calendar+Gmail) e la risoluzione account/credenziale di
 `gdrive.py`, così Docs e Calendar NON duplicano la logica di credenziali. L'access
 token è rinfrescato dalla libreria Google dal refresh_token; non tocca il modello.
-Il grant sull'agente chiamante è verificato da `vault.get_secret` (VaultDenied).
+Letta come infrastruttura (`vault.read_internal`), non più grant-checkata
+sull'agente: il perimetro è la cartella/risorsa Drive del topic, già
+controllata a monte (refactor whitelist-mailbox, 18 set 2026).
 """
 from __future__ import annotations
 
 from typing import Optional
 
 from .. import vault
-from ..whitelist import agent_name
 
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
 
@@ -29,7 +30,7 @@ def build_service(api: str, version: str, account: Optional[str] = None):
     from .gdrive import _resolve_account, _drive_cred
 
     acct = _resolve_account(account)
-    b = vault.get_secret(agent_name(), _drive_cred(acct))  # VaultDenied se no grant
+    b = vault.read_internal(_drive_cred(acct))
     creds = Credentials(
         token=None,
         refresh_token=b["refresh_token"],

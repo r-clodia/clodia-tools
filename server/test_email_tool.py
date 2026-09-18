@@ -90,7 +90,7 @@ class EmailAccountSelectionTest(TestCase):
         with patch.object(main, "agent_name", return_value="clodia"), \
              patch.object(main.email, "available_accounts", return_value=["studio"]):
             with self.assertRaisesRegex(
-                ValueError, "account 'demo' non disponibile.*studio"
+                ValueError, "account 'demo' non esistente.*studio"
             ):
                 main._email_account({"account": "demo"})
 
@@ -139,8 +139,10 @@ class EmailVaultMaterializationTest(TestCase):
         with patch.object(email, "tool_allowed"), \
              patch.object(email, "agent_name", return_value="clodia"), \
              patch.object(email, "available_accounts", return_value=["studio"]), \
+             patch.object(email, "accounts_not_allowed", return_value=[]), \
              patch.object(email.vault, "has_credential", side_effect=has_credential), \
-             patch.object(email.vault, "get_secret", return_value=bundle), \
+             patch.object(email.vault, "read_internal", return_value=bundle), \
+             patch("server.egress.mailbox_allowed", return_value=True), \
              patch.object(email, "known_accounts", return_value={"studio"}), \
              patch.object(email.subprocess, "run", side_effect=run):
             result = email.folders("studio")

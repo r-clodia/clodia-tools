@@ -92,8 +92,8 @@ class NoPlumbingTests(unittest.TestCase):
         cui verbi non esistono più: si connette, e poi non succede niente."""
         import inspect
 
-        from . import connectors_api, tools_api
-        for mod in (tools_api, connectors_api):
+        from . import tools_api
+        for mod in (tools_api,):
             with self.subTest(mod.__name__):
                 self.assertNotIn("trello", inspect.getsource(mod).lower())
 

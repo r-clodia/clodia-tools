@@ -264,8 +264,7 @@ class OneAnswerTests(unittest.TestCase):
 
     def test_the_three_paths_agree(self):
         with _cfg(), patch.object(M, "_is_super", lambda n: False), \
-             patch.object(w, "_SUPER_AGENTS", set()), \
-             patch.object(M, "_connector_allows", lambda v, a: False):
+             patch.object(w, "_SUPER_AGENTS", set()):
             for agente in ("clodia", "segretario", "avvocato"):
                 for verbo in self.VERBI:
                     with self.subTest(agente=agente, verbo=verbo):
@@ -280,8 +279,7 @@ class OneAnswerTests(unittest.TestCase):
         `denied_tools`: rispondeva «consentito» su un verbo che gli altri due
         negavano."""
         with _cfg(), patch.object(M, "_is_super", lambda n: False), \
-             patch.object(w, "_SUPER_AGENTS", set()), \
-             patch.object(M, "_connector_allows", lambda v, a: False):
+             patch.object(w, "_SUPER_AGENTS", set()):
             m, o, e = self._tre_esiti("segretario", "topic.post_message")
             self.assertEqual((m, o, e), (False, False, False))
 
@@ -297,7 +295,6 @@ class OneAnswerTests(unittest.TestCase):
              patch.object(M, "is_on_behalf", lambda: False), \
              patch.object(M, "_is_super", lambda _n: False), \
              patch.object(M, "current_scoped_tools", lambda: ()), \
-             patch.object(M, "_connector_allows", lambda _v, _a: False), \
              patch.object(M, "_all_native_tools", lambda: native), \
              patch.object(M.proxy, "list_proxied_tools", return_value=[]):
             names = {tool.name for tool in asyncio.run(M.list_tools())}
@@ -311,7 +308,6 @@ class OneAnswerTests(unittest.TestCase):
              patch.object(M, "is_on_behalf", lambda: False), \
              patch.object(M, "_is_super", lambda _n: False), \
              patch.object(M, "current_scoped_tools", lambda: ()), \
-             patch.object(M, "_connector_allows", lambda _v, _a: False), \
              patch.object(M, "_unattended_denial", lambda _n: None), \
              patch.object(M.origin, "evaluate", return_value={"action": "allow"}), \
              patch.object(M, "_dispatch_memory", return_value={"files": []}) as dispatch, \
