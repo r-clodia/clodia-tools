@@ -126,85 +126,102 @@ def known_accounts() -> set[str]:
 
 
 def available_accounts(agent: str) -> list[str]:
-    """Account operativi che l'agente può davvero materializzare dal vault."""
-    granted = set(vault.grants_for(agent))
-    accounts = {
-        row["account"]
-        for row in credential_diagnostics()
-        if row["operational"] and row["credential"] in granted
-    }
-    # Il legacy è autorizzato dalla whitelist e non ha grant per-account.
-    accounts.update(_legacy_accounts())
-    return sorted(accounts)
+    """Account operativi ESISTENTI (indipendente dall'agente: non c'è più un
+    grant per-agente sulla credenziale). Il filtro reale — quale casella un
+    canale può davvero leggere o scrivere — è la whitelist `inbox:`/`outbox:`
+    per-scope, verificata al momento della chiamata (`_secrets_env`), non qui:
+    qui si elenca cosa esiste, non cosa è permesso."""
+    return sorted(known_accounts())
 
 
-def accounts_not_granted(agent: str) -> list[str]:
-    """Account che ESISTONO e funzionano, ma che questo agente non può usare.
+def _account_address(credential: str, account: str) -> str:
+    try:
+        bundle = vault.read_internal(credential)
+    except Exception:  # noqa: BLE001 — diagnostica, non deve bloccare l'elenco
+        return account
+    return (bundle.get("email") or account).strip().lower()
 
-    Sembra un dettaglio ed è il difetto: un account aggiunto dalla UI risultava
-    **invisibile** all'agente, che concludeva «non esiste» e si fermava. La UI
-    diceva il vero — la credenziale c'era ed era operativa — ma mancava il
-    passo che nessuno compie: concedere quella credenziale all'agente.
 
-    Nominarlo esplicitamente produce già un rifiuto ottimo, che dice cosa manca
-    e a chi chiederlo. Il buco era l'ELENCO: chi non sa che una cosa esiste non
-    può chiederla. Assenza e divieto sono due stati diversi, e confonderli manda
-    a cercare il problema dalla parte sbagliata — nel nome dell'account invece
-    che nei permessi.
+def accounts_not_allowed(direction: str, scope: str | None = None) -> list[str]:
+    """Account che ESISTONO e funzionano, ma la cui casella non è nella
+    whitelist `inbox:`/`outbox:` di questo canale.
+
+    Sostituisce `accounts_not_granted`: prima la domanda era «questo agente ha
+    il grant sulla credenziale», ora è «questo canale ha la casella in
+    whitelist» — la stessa distinzione fra assenza e divieto, spostata da CHI a
+    DOVE. Il legacy (email_config.json) resta esente, come lo era dal grant.
     """
-    granted = set(vault.grants_for(agent))
-    return sorted({
-        row["account"]
-        for row in credential_diagnostics()
-        if row["operational"] and row["credential"] not in granted
-    } - set(available_accounts(agent)))
+    from .. import egress
+    out = []
+    for row in credential_diagnostics():
+        if not row["operational"]:
+            continue
+        addr = _account_address(row["credential"], row["account"])
+        if not egress.mailbox_allowed(direction, addr, scope):
+            out.append(row["account"])
+    return sorted(set(out) - _legacy_accounts())
 
 
 @contextlib.contextmanager
-def _secrets_env(account: str):
+def _secrets_env(account: str, direction: str):
     """Ambiente per eseguire il CLI per `account`, con credenziali materializzate
-    dalla vault (grant-checkate sull'agente) in un dir effimero 0700:
-    - Gmail OAuth (gmail_<account>) → token OAuth;
+    dalla vault (lette come infrastruttura, non più grant-checkate sull'agente)
+    in un dir effimero 0700:
+    - Gmail OAuth (gmail_<account>/google_<account>) → token OAuth;
     - casella generica (mailbox_<account>) → email_config.json IMAP/SMTP;
     - altrimenti env corrente (legacy secrets/). Il segreto non raggiunge mai
-      il motore: vive solo su disco del gateway per la durata del subprocess."""
+      il motore: vive solo su disco del gateway per la durata del subprocess.
+
+    `direction` ("inbox" per leggere, "outbox" per inviare/rispondere) decide
+    QUALE casella questo canale può usare: sostituisce il grant sulla
+    credenziale con la whitelist `inbox:`/`outbox:` per-scope (refactor
+    whitelist-mailbox, 18 set 2026) — il verbo resta governato da
+    `tool_allowed`, questo controllo riguarda solo l'identità della casella.
+    """
     gcred, mcred = _gmail_cred(account), _mailbox_cred(account)
-    if vault.has_credential(gcred):
-        tmp = tempfile.mkdtemp(prefix="email_sec_")
-        try:
-            vault.materialize_google_oauth(agent_name(), gcred, Path(tmp))
-            env = dict(os.environ)
-            env["CLODIA_SECRETS_DIR"] = tmp
-            yield env
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-    elif vault.has_credential(mcred):
-        bundle = vault.get_secret(agent_name(), mcred)  # grant-checked
-        tmp = tempfile.mkdtemp(prefix="email_sec_")
-        try:
+    cred = gcred if vault.has_credential(gcred) else (
+        mcred if vault.has_credential(mcred) else None)
+    if cred is None:
+        yield dict(os.environ)
+        return
+    bundle = vault.read_internal(cred)
+    addr = (bundle.get("email") or account).strip().lower()
+    from .. import egress
+    if not egress.mailbox_allowed(direction, addr):
+        raise PermissionError(
+            f"la casella '{addr}' non è nella whitelist {direction} di questo "
+            f"canale. Chiedi all'owner di aggiungere {direction}:{addr} agli "
+            "ingress/egress del topic (o globalmente, da Integrazioni)."
+        )
+    tmp = tempfile.mkdtemp(prefix="email_sec_")
+    try:
+        if cred == gcred:
+            vault.materialize_google_oauth(gcred, Path(tmp))
+        else:
             cfg = {"default": account, "accounts": {account: bundle}}
             cfg_path = Path(tmp) / "email_config.json"
             cfg_path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
             os.chmod(cfg_path, 0o600)
-            env = dict(os.environ)
-            env["CLODIA_SECRETS_DIR"] = tmp
-            yield env
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-    else:
-        yield dict(os.environ)
+        env = dict(os.environ)
+        env["CLODIA_SECRETS_DIR"] = tmp
+        yield env
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _run_cli(account: str, cli_args: list[str], *, want_json: bool,
-             timeout: int = 60) -> Union[dict, list]:
+             direction: str, timeout: int = 60) -> Union[dict, list]:
     """Esegue il CLI email_client per `account`, instradando le credenziali
     dalla vault se presente. Ritorna il JSON parsato (read tools) o un dict di
-    esito (send/reply)."""
+    esito (send/reply).
+
+    `direction`: "inbox" per i verbi di lettura, "outbox" per invio/risposta —
+    quale whitelist per-casella verificare (vedi `_secrets_env`)."""
     if account not in known_accounts():
         raise ValueError(
             f"unknown account '{account}'; available: {sorted(known_accounts())}"
         )
-    with _secrets_env(account) as env:
+    with _secrets_env(account, direction) as env:
         cmd = [_EMAIL_PY, _EMAIL_SCRIPT, "--account", account, *cli_args]
         result = subprocess.run(cmd, capture_output=True, text=True,
                                 timeout=timeout, env=env)
@@ -224,16 +241,19 @@ def _run_cli(account: str, cli_args: list[str], *, want_json: bool,
         return {"raw": out}
 
 
-def _run_json(account: str, cli_args: list[str], *, timeout: int = 60) -> Union[dict, list]:
+def _run_json(account: str, cli_args: list[str], *, timeout: int = 60,
+              direction: str = "inbox") -> Union[dict, list]:
     """Compat: esegue un comando di lettura/risposta e ritorna il JSON.
 
     Un punto solo per la guardia «questa casella si legge?»: qui passano tutti i
     verbi che leggono, e **solo** `send` non passa da qui. Metterla in ognuno dei
     sei verbi sarebbe la stessa regola in sei copie, e la settima nascerebbe
-    senza.
+    senza. `reply` passa da qui con `direction="outbox"`: legge per il threading
+    ma la casella la usa per SPEDIRE, ed è quella whitelist che conta.
     """
-    _assert_readable(account)
-    return _run_cli(account, cli_args, want_json=True, timeout=timeout)
+    if direction == "inbox":
+        _assert_readable(account)
+    return _run_cli(account, cli_args, want_json=True, direction=direction, timeout=timeout)
 
 
 def _assert_readable(account: str) -> None:
@@ -290,16 +310,17 @@ def folders(account: str = "demo") -> dict:
                   if r.get("send_only") and r["account"] in out["available_accounts"]]
     if solo_invio:
         out["send_only_accounts"] = solo_invio
-    # Se esistono caselle che questo agente non può usare, lo si DICE. Senza,
+    # Se esistono caselle che questo canale non può leggere, lo si DICE. Senza,
     # l'unica cosa che l'agente osserva è un'assenza, e un'assenza si spiega col
-    # nome sbagliato molto prima che con un permesso mancante.
-    negati = accounts_not_granted(ag)
+    # nome sbagliato molto prima che con una whitelist mancante.
+    negati = accounts_not_allowed("inbox")
     if negati:
-        out["accounts_not_granted"] = negati
+        out["accounts_not_allowed"] = negati
         out["note"] = (
-            f"esistono e funzionano anche: {', '.join(negati)} — ma non ti sono "
-            "concesse. Non è un errore di nome: chiedi all'owner di concederti "
-            "l'account da Integrazioni → Email."
+            f"esistono e funzionano anche: {', '.join(negati)} — ma la loro "
+            "casella non è nella whitelist di questo canale. Chiedi all'owner "
+            "di aggiungere inbox:<email> agli ingress del topic (o "
+            "globalmente)."
         )
     return out
 

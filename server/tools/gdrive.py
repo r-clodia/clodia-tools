@@ -17,7 +17,7 @@ import io
 from typing import Optional
 
 from .. import vault
-from ..whitelist import agent_name, tool_allowed
+from ..whitelist import tool_allowed
 from . import gdrive_root
 
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
@@ -70,14 +70,16 @@ def _resolve_account(account: Optional[str]) -> str:
 
 def _service(account: Optional[str] = None):
     """Costruisce il client Drive v3 per `account`, con credenziali dal vault
-    (grant-checked sull'agente chiamante). L'access token è rinfrescato dalla
-    libreria Google a partire dal refresh_token."""
+    lette come infrastruttura (non più grant-checked sull'agente: il
+    perimetro è la cartella Drive del topic, già controllata a monte —
+    refactor whitelist-mailbox, 18 set 2026). L'access token è rinfrescato
+    dalla libreria Google a partire dal refresh_token."""
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request as GoogleRequest
     from googleapiclient.discovery import build
 
     acct = _resolve_account(account)
-    b = vault.get_secret(agent_name(), _drive_cred(acct))  # VaultDenied se no grant
+    b = vault.read_internal(_drive_cred(acct))
     creds = Credentials(
         token=None,
         refresh_token=b["refresh_token"],

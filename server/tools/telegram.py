@@ -88,12 +88,11 @@ def _lease_active(chat: dict) -> Optional[dict]:
 
 
 def _token() -> str:
-    """Token del bot dal vault (grant-checked sull'agente chiamante)."""
-    bundle = vault.get_secret(agent_name(), TELEGRAM_CRED)  # VaultDenied se no grant
-    tok = (bundle or {}).get("token", "")
-    if not tok:
-        raise RuntimeError("telegram: bundle nel vault senza campo 'token'")
-    return tok
+    """Token del bot dal vault, letto come infrastruttura: non più
+    grant-checkato sull'agente (il perimetro è la chat `tg:`, già controllata
+    a monte — refactor whitelist-mailbox, 18 set 2026). Stessa lettura di
+    `_token_internal`, qui esposta al path diretto-agente."""
+    return _token_internal()
 
 
 def api_call(token: str, method: str, params: Optional[dict] = None, timeout: int = 15) -> dict:

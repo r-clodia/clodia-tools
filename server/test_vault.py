@@ -54,7 +54,7 @@ def main() -> int:
 
         # materializzazione google oauth (3 file: oauth client, tokens, config)
         dest = Path(d) / "tmpmat"
-        acct = vault.materialize_google_oauth("clodia", "gmail_demo", dest)
+        acct = vault.materialize_google_oauth("gmail_demo", dest)
         assert acct == "demo"
         client = json.loads((dest / "google_oauth_client.json").read_text())
         assert set(client) == {"client_id", "client_secret"}, "client = solo id+secret"

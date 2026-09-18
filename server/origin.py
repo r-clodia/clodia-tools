@@ -77,8 +77,7 @@ def _agent_may(name: str, verb: str) -> bool:
     if _m._is_super(name):
         return True
     from .whitelist import effective_tools
-    return (_m._tool_allowed(verb, effective_tools(name))
-            or _m._connector_allows(verb, name))
+    return _m._tool_allowed(verb, effective_tools(name))
 
 
 def agent_may(name: str, verb: str) -> bool:

@@ -54,7 +54,6 @@ class _Agente:
             patch.object(tool_api.whitelist, "agent_name", lambda: "sysadmin"),
             patch.object(main, "_is_super", lambda _n: False),
             patch.object(main, "_declared_tools", lambda _ag: set(self._dichiarati)),
-            patch.object(main, "_vault_grants", lambda _ag: set()),
             patch.object(whitelist, "agent_denies",
                          lambda verb, name=None: verb in self._denies),
         ]

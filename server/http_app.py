@@ -166,8 +166,6 @@ def build_app() -> Starlette:
     from .imagegen_api import routes as imagegen_routes
     # Topic v2 (lettura per la webui): endpoint interni ckt1.
     from .topics_api import routes as topics_routes
-    # Connettori delegabili (email per-account) — grant per-agent.
-    from .connectors_api import routes as connectors_routes
     from .profile_api import routes as profile_routes
     # Telegram channel-runner (server-side): endpoint interni ckt1 per drenare/inviare.
     from .telegram_api import routes as telegram_routes
@@ -195,7 +193,7 @@ def build_app() -> Starlette:
     from .rag_api import routes as rag_routes
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
-                *imagegen_routes, *topics_routes, *connectors_routes, *profile_routes,
+                *imagegen_routes, *topics_routes, *profile_routes,
                 *telegram_routes, *agents_routes, *vault_routes,
                 *tool_routes, *mint_routes, *gate_routes, *logic_routes,
                 *egress_routes, *proxy_auth_routes, *rag_routes],
