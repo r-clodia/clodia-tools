@@ -767,3 +767,65 @@ class VettedSourceScopeTests(unittest.TestCase):
                 self._chiamante("SEAL-1/altrove"):
             egress.is_vetted_source("mailfrom:a@b.it", scope="SEAL-1/bersaglio")
         self.assertEqual(visti, ["SEAL-1/bersaglio"])
+
+
+class ListingIncludesTheCallersScopeTests(unittest.TestCase):
+    """clodia-platform#376: `egress.list`/`ingress.list` mostravano SOLO il
+    globale. Un agente dentro `SEAL-1/hedge-iot-new` chiedeva se una cartella
+    Drive era ammessa, la lista non la conteneva, e concludeva «manca» —
+    mentre `decide()` (l'enforcement REALE) usa `effective_uris`, che include
+    lo scope, e quella chiamata sarebbe già passata. Due letture della stessa
+    domanda con risposte diverse: la prima persona ad accorgersene proponeva
+    di allargare la lista GLOBALE per un bisogno già coperto localmente — lo
+    stesso malinteso di #374/#375, sul lato lettura invece che scrittura.
+    """
+
+    def setUp(self):
+        self.cfg = {"agents": {}, "egress_allow": ["mailto:globale@tomato.blue"],
+                   "source_allow": [],
+                   "scope_egress_allow": {"SEAL-1/hedge-iot-new":
+                                          ["gdrive:folder/1QBzBmKKdnOTWTPkGz9NErAb3_IuvtYkO"]},
+                   "scope_source_allow": {}}
+        from . import whitelist as wl
+        for pt in (patch.object(wl, "CONFIG", self.cfg),
+                   patch.object(wl, "save_config", lambda: None)):
+            pt.start()
+            self.addCleanup(pt.stop)
+
+    def _dentro(self, scope):
+        return patch.object(egress, "_scope_of_call", lambda: scope)
+
+    def test_uris_includes_the_scope_s_own_entries_from_inside_the_room(self):
+        with self._dentro("SEAL-1/hedge-iot-new"):
+            out = egress.listing("egress")
+        self.assertIn("gdrive:folder/1QBzBmKKdnOTWTPkGz9NErAb3_IuvtYkO", out["uris"])
+        self.assertIn("mailto:globale@tomato.blue", out["uris"])
+
+    def test_global_uris_isolates_what_is_valid_everywhere(self):
+        """Chi vuole distinguere «vale ovunque» da «vale qui» non deve
+        rifare l'unione a mano: il campo a parte esiste apposta."""
+        with self._dentro("SEAL-1/hedge-iot-new"):
+            out = egress.listing("egress")
+        self.assertEqual(out["global_uris"], ["mailto:globale@tomato.blue"])
+        self.assertNotIn("gdrive:folder/1QBzBmKKdnOTWTPkGz9NErAb3_IuvtYkO",
+                         out["global_uris"])
+
+    def test_a_different_room_does_not_see_this_scope_s_entries(self):
+        with self._dentro("SEAL-1/altrove"):
+            out = egress.listing("egress")
+        self.assertNotIn("gdrive:folder/1QBzBmKKdnOTWTPkGz9NErAb3_IuvtYkO", out["uris"])
+
+    def test_outside_any_room_only_the_global_list_counts(self):
+        """Un job, o una chiamata senza claim di canale: nessuno scope da cui
+        ereditare, e `uris` collassa sul globale — non deve esplodere."""
+        with self._dentro(None):
+            out = egress.listing("egress")
+        self.assertEqual(out["uris"], ["mailto:globale@tomato.blue"])
+        self.assertEqual(out["global_uris"], ["mailto:globale@tomato.blue"])
+
+    def test_ingress_gets_the_same_treatment(self):
+        self.cfg["scope_source_allow"] = {"SEAL-1/hedge-iot-new":
+                                          ["gdrive:folder/1QBzBmKKdnOTWTPkGz9NErAb3_IuvtYkO"]}
+        with self._dentro("SEAL-1/hedge-iot-new"):
+            out = egress.listing("ingress")
+        self.assertIn("gdrive:folder/1QBzBmKKdnOTWTPkGz9NErAb3_IuvtYkO", out["uris"])
