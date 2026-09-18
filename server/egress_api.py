@@ -173,6 +173,51 @@ async def scope_whitelist_view(request: Request):
     })
 
 
+async def scope_whitelist_edit(request):
+    """Aggiunge o rimuove una voce dalle liste LOCALI di un topic, a mano.
+
+    Richiesta di Davide, 18 set 2026: «devo poter aggiungere manualmente un
+    egress/ingress nella sidebar di canale» — gemella scoped di `whitelist_edit`
+    sopra, con la stessa divisione di responsabilità: il gateway esegue e non
+    conosce i ruoli umani, l'agent-server verifica che il chiamante sia OWNER
+    dello scope (non basta un admin qualunque: qui il perimetro che si sposta è
+    di una stanza precisa) prima di inoltrare.
+
+    Stesso storage di `scope_allow`/`scope_revoke` (`egress.py`, nato con
+    l'epic Telegram #359/#364): niente logica nuova qui, solo la porta HTTP che
+    mancava — i verbi MCP `topic.egress_add`/`ingress_add` esistevano già per
+    gli AGENTI, ma un umano dalla webui non passa da un turno per compilare un
+    form.
+    """
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    direzione = request.path_params["direction"]
+    if direzione not in ("egress", "ingress"):
+        return JSONResponse({"error": "direction_invalid"}, status_code=400)
+    tier = request.path_params["tier"]
+    name = request.path_params["name"]
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    uri = str((body or {}).get("uri") or "").strip()
+    if not uri:
+        return JSONResponse({"error": "uri_required"}, status_code=400)
+    azione = request.path_params["action"]
+    from . import egress as eg
+    scope = f"{tier}/{name}"
+    try:
+        if azione == "allow":
+            out = eg.scope_allow(direzione, scope, uri)
+        elif azione == "revoke":
+            out = eg.scope_revoke(direzione, scope, uri)
+        else:
+            return JSONResponse({"error": "action_invalid"}, status_code=400)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"ok": True, **out})
+
+
 async def whitelist_edit(request):
     """Aggiunge o rimuove una voce dalle liste globali, per conto dell'OWNER.
 
@@ -223,4 +268,6 @@ routes = [Route("/internal/egress", profile, methods=["GET"]),
                 methods=["GET"]),
           Route("/internal/egress/whitelist/{direction}/{action}", whitelist_edit,
                 methods=["POST"]),
+          Route("/internal/egress/whitelist/scope/{tier}/{name}/{direction}/{action}",
+                scope_whitelist_edit, methods=["POST"]),
           Route("/internal/observations", observations, methods=["GET"])]
