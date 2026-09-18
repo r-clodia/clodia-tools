@@ -1671,7 +1671,10 @@ _EGRESS_ADMIN_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {"uri": {"type": "string"}},
                       "required": ["uri"]}),
     Tool(name="egress.list",
-         description="Destinazioni ammesse in uscita e modo del confinamento.",
+         description=("Destinazioni ammesse in uscita QUI (globali + quelle locali "
+                      "a questa stanza, se chiamato dentro un topic) e modo del "
+                      "confinamento. `uris` è ciò che una chiamata vera vedrebbe; "
+                      "`global_uris` isola le sole voci valide ovunque."),
          inputSchema={"type": "object", "properties": {}}),
     Tool(name="ingress.allow",
          description=("Aggiunge una FONTE FIDATA: leggere da lì non contaminerà "
@@ -1688,7 +1691,10 @@ _EGRESS_ADMIN_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {"uri": {"type": "string"}},
                       "required": ["uri"]}),
     Tool(name="ingress.list",
-         description="Fonti fidate dichiarate.",
+         description=("Fonti fidate dichiarate QUI (globali + quelle locali a "
+                      "questa stanza, se chiamato dentro un topic). `uris` è ciò "
+                      "che una chiamata vera vedrebbe; `global_uris` isola le "
+                      "sole voci valide ovunque."),
          inputSchema={"type": "object", "properties": {}}),
 ]
 

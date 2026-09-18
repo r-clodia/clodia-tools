@@ -1088,10 +1088,27 @@ def revoke(direction: str, uri: str) -> dict:
 
 
 def listing(direction: str) -> dict:
+    """Regole in vigore per CHI CHIAMA, non solo la lista globale.
+
+    clodia-platform#376, 18 set 2026: un agente dentro `SEAL-1/hedge-iot-new`
+    chiedeva `egress.list` per sapere se una cartella Drive era ammessa,
+    vedeva solo il globale (non la conteneva) e concludeva «manca» — mentre
+    `decide()` (l'enforcement REALE di una chiamata `gdrive.*`) usa
+    `effective_uris`, che include lo scope, e quella stessa chiamata sarebbe
+    passata. Due letture della stessa domanda che davano risposte diverse: la
+    prima persona ad accorgersene proponeva di allargare la lista GLOBALE per
+    un bisogno che era già coperto localmente — lo stesso malinteso di #374/
+    #375, sul lato lettura invece che scrittura.
+
+    `uris` ora è l'unione (ciò che `decide()` vede davvero); `global_uris` resta
+    a parte per chi vuole distinguere «vale ovunque» da «vale qui», senza dover
+    rifare l'unione a mano.
+    """
     key, schemes, label = _direction(direction)
-    uris = allowed_uris() if direction == "egress" else source_uris()
+    globali = allowed_uris() if direction == "egress" else source_uris()
+    uris = effective_uris(direction)
     return {"direction": direction, "label": label, "mode": mode(),
-            "schemes": list(schemes), "uris": uris}
+            "schemes": list(schemes), "uris": uris, "global_uris": globali}
 
 
 def _direction(direction: str):
