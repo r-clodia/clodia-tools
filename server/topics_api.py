@@ -391,6 +391,35 @@ async def drive_folder(request: Request):
         return JSONResponse({"error": str(e)[:200]}, status_code=502)
 
 
+async def local_folder(request: Request):
+    """POST /internal/topics/{tier}/{name}/local-folder {action, mount}.
+
+    Cartella condivisa Mac↔container, BIND reale su una radice unica montata
+    una volta sola nel gateway (`TopicService.LOCAL_SHARED_ROOT`) — a
+    differenza di drive-folder, qui il collegamento È un filesystem vero.
+    action: add|remove."""
+    _, err = _authorize(request)
+    if err:
+        return err
+    tier = request.path_params["tier"]; name = request.path_params["name"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    svc = _service()
+    action = body.get("action")
+    try:
+        if action == "add":
+            return JSONResponse(svc.local_folder_add(tier, name, body.get("mount")))
+        if action == "remove":
+            return JSONResponse(svc.local_folder_remove(tier, name, body.get("mount")))
+        return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
+    except TopicError as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=400)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)[:200]}, status_code=502)
+
+
 async def participants(request: Request):
     _, err = _authorize(request)
     if err:
@@ -714,6 +743,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/participants", participants, methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/local-folder", local_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/mcp-clients", mcp_clients,
           methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/logo", topic_logo,

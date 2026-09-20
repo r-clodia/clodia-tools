@@ -88,6 +88,37 @@ class LocalFsStorage(Storage):
         elif p.is_file():
             p.unlink()
 
+    def symlink(self, path: str, target_rel: str) -> None:
+        """Crea un symlink a `path` verso `target_rel`, entrambi relativi a
+        questa root: `_abs()` valida ANCHE il target, così un errore di path
+        (o un tentativo di uscire dalla root) fallisce qui, non silenziosamente
+        a runtime alla prima lettura. Solo directory: `local_folder_add` è
+        l'unico chiamante e collega sempre cartelle."""
+        p = self._abs(path)
+        target_abs = self._abs(target_rel)
+        if p.exists() or p.is_symlink():
+            raise StorageError(f"esiste già: {path}")
+        if not target_abs.is_dir():
+            raise StorageError(f"target inesistente o non è una cartella: {target_rel}")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(target_abs, p, target_is_directory=True)
+
+    def unlink_symlink(self, path: str) -> None:
+        """Rimuove `path` SOLO se è un symlink (`os.lstat`, non segue il
+        link). Path NON risolto — a differenza di `_abs()`/`delete()`, che
+        seguirebbero il link fino al target reale e agirebbero su quello.
+        Verifica il confinamento sulla forma LESSICALE del path (nessun
+        `resolve()`, di proposito) prima ancora di controllare cosa c'è."""
+        p = (self.root / str(path).lstrip("/"))
+        p_norm = Path(os.path.normpath(p))
+        if not (p_norm == self.root or self.root in p_norm.parents):
+            raise StorageError(f"path fuori dalla root: {path}")
+        if not p.is_symlink():
+            if not p.exists():
+                raise NotFound(f"non trovato: {path}")
+            raise StorageError(f"non è un symlink, rifiuto di toccarlo: {path}")
+        p.unlink()
+
     def stat(self, path: str) -> Stat | None:
         p = self._abs(path)
         if not p.exists():
