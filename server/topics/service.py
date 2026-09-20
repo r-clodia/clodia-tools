@@ -251,6 +251,27 @@ def drive_folders(meta: dict) -> list:
     return [f for f in raw if isinstance(f, dict) and f.get("folder")] if isinstance(raw, list) else []
 
 
+#: Sottocartella riservata della root storage su cui è bind-mountata la
+#: cartella condivisa Mac↔container (docker-compose, un volume solo — mai
+#: per-topic, mai un path assoluto scelto a runtime). Fuori dallo spazio dei
+#: tier: `VALID_TIER` non la contiene, quindi `list()` (che itera solo i tier
+#: veri) non può mai scambiarla per un topic.
+LOCAL_SHARED_ROOT = "_shared-local"
+
+
+def local_folders(meta: dict) -> list:
+    """Le sottocartelle della cartella condivisa agganciate a questo topic.
+
+    A differenza di `drive_folders`, qui il file È il mount: `local/<name>/`
+    è un vero symlink verso `LOCAL_SHARED_ROOT/<name>`, letto e scritto dal
+    normale storage locale del topic — nessun perimetro nuovo da dichiarare
+    per i verbi `topic.*`, perché non è una destinazione esterna, è
+    filesystem del topic come un file caricato a mano.
+    """
+    raw = meta.get("local_folders")
+    return [f for f in raw if isinstance(f, dict) and f.get("name")] if isinstance(raw, list) else []
+
+
 def _unique_name(voluto: str, presi: set) -> str:
     """Identificatore validato, unico nell'insieme dato, stabile: il tipo
     finché è libero, `-2`/`-3`… solo quando serve davvero."""
@@ -842,6 +863,69 @@ class TopicService:
                 f"nessuna cartella Drive '{mount_name}' dichiarata su {tier}/{name}"
                 + (f" (ci sono: {disponibili})" if disponibili else ""))
         meta["drive_folders"] = [f for f in existing if f.get("name") != mount_name]
+        self._write_meta(tier, name, meta, base_version=ver)
+        return {"ok": True, "removed": mount_name}
+
+    def local_folder_add(self, tier: str, name: str, mount_name: str) -> dict:
+        """Aggancia una sottocartella della cartella condivisa Mac↔container a
+        questo topic: `local/<mount_name>/` diventa un BIND filesystem reale,
+        non uno specchio come Drive — chi scrive dal Mac lo vede nel topic
+        all'istante, e viceversa (discussione con Davide, 19-20 set 2026:
+        scartato SMB per la privacy di un condiviso di sistema, scelta una
+        radice unica bind-mountata una volta sola nel gateway, con un
+        sottopercorso per-topic anziché un path assoluto arbitrario).
+
+        `mount_name` è insieme il nome del mount (`local/<mount_name>/`) e il
+        nome della sottocartella su `LOCAL_SHARED_ROOT`: un solo nome, non due
+        mappe che possono divergere. Nessun perimetro nuovo da dichiarare (a
+        differenza di `drive_folder_add`): una volta agganciata, la cartella È
+        filesystem del topic, governato dagli stessi verbi/permessi di
+        qualunque file caricato a mano — non una destinazione esterna.
+        """
+        if not self.s.exists(LOCAL_SHARED_ROOT):
+            raise TopicError(
+                f"cartella condivisa non montata su questa istanza: "
+                f"'{LOCAL_SHARED_ROOT}' non esiste nella root storage. Serve il "
+                "bind mount Mac→container in docker-compose.yml, poi riavviare "
+                "il gateway.")
+        meta, ver = self._read_meta(tier, name)
+        existing = local_folders(meta)
+        presi = {str(f.get("name") or "") for f in existing} | {"files", self.MOUNT_LOCAL}
+        slug = _unique_name(mount_name, presi)
+        sub_path = f"{LOCAL_SHARED_ROOT}/{slug}"
+        self.s.mkdir(sub_path)
+        link_path = f"{self._dir(tier, name)}/files/{slug}"
+        try:
+            self.s.symlink(link_path, sub_path)
+        except StorageError as e:
+            raise TopicError(str(e)) from e
+        voce = {"name": slug}
+        meta["local_folders"] = existing + [voce]
+        self._write_meta(tier, name, meta, base_version=ver)
+        return {"ok": True, "local_folder": voce}
+
+    def local_folder_remove(self, tier: str, name: str, mount_name: str) -> dict:
+        """Sgancia una sottocartella condivisa da questo topic: rimuove SOLO
+        il symlink dentro `files/` (`unlink_symlink`, mai `delete` — vedi il
+        motivo nel docstring di `Storage.unlink_symlink`). Il contenuto reale
+        su `LOCAL_SHARED_ROOT` NON viene toccato: resta lì, raggiungibile da
+        un altro topic o riagganciabile in futuro — sganciare non è cancellare.
+        """
+        meta, ver = self._read_meta(tier, name)
+        existing = local_folders(meta)
+        if mount_name not in {f.get("name") for f in existing}:
+            disponibili = ", ".join(sorted(str(f.get("name")) for f in existing))
+            raise TopicError(
+                f"nessuna cartella locale '{mount_name}' agganciata a {tier}/{name}"
+                + (f" (ci sono: {disponibili})" if disponibili else ""))
+        link_path = f"{self._dir(tier, name)}/files/{mount_name}"
+        try:
+            self.s.unlink_symlink(link_path)
+        except NotFound:
+            pass  # symlink già assente: non bloccare la pulizia del meta
+        except StorageError as e:
+            raise TopicError(str(e)) from e
+        meta["local_folders"] = [f for f in existing if f.get("name") != mount_name]
         self._write_meta(tier, name, meta, base_version=ver)
         return {"ok": True, "removed": mount_name}
 

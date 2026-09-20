@@ -93,3 +93,21 @@ class Storage(abc.ABC):
 
     def exists(self, path: str) -> bool:
         return self.stat(path) is not None
+
+    def symlink(self, path: str, target_rel: str) -> None:
+        """Crea un symlink a `path` verso `target_rel` — ENTRAMBI relativi
+        alla stessa root, mai un path esterno: il confinamento lo garantisce
+        la root unica, non chi chiama. Concreto e non astratto — a differenza
+        degli altri metodi non generalizza a un backend senza filesystem
+        reale (Drive, Dropbox): quei backend ereditano questo default e
+        rifiutano, invece di dover implementare un concetto che non hanno."""
+        raise StorageError(f"symlink non supportato da {self.capability().name}")
+
+    def unlink_symlink(self, path: str) -> None:
+        """Rimuove `path` SOLO se è un symlink — mai un file o una directory
+        vera. Distinto da `delete()` apposta: `delete()` risolve i symlink
+        prima di agire (stessa `.resolve()` di ogni altra operazione), quindi
+        userebbe un symlink come tramite per cancellare il TARGET reale
+        invece del link stesso — l'esatto errore che questo metodo esiste per
+        rendere impossibile."""
+        raise StorageError(f"symlink non supportato da {self.capability().name}")

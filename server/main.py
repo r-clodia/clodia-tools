@@ -1079,6 +1079,36 @@ _TOPIC_TOOLS: list[Tool] = [
             "mount": {"type": "string", "description": "nome della dichiarazione da togliere"}},
             "required": ["tier", "name", "mount"]},
     ),
+    # ── Cartella condivisa Mac↔container: BIND reale (non uno specchio come
+    # Drive), su una radice unica montata una volta sola nel gateway
+    # (`LOCAL_SHARED_ROOT`). Aggancia una sua sottocartella dentro `local/` di
+    # questo topic — da lì in poi è filesystem del topic come un file
+    # caricato a mano, letto/scritto con topic.read_file/write_file.
+    Tool(
+        name="topic.local_folder_add",
+        description=("Aggancia una sottocartella della cartella condivisa "
+                     "Mac↔container a questo topic: appare come "
+                     "local/<mount>/ e ci si legge/scrive con "
+                     "topic.read_file/write_file come un file qualunque. È un "
+                     "BIND reale: scrivere da fuori (Mac) o da dentro (topic) "
+                     "si vede immediatamente dall'altra parte."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "mount": {"type": "string", "description": "nome del mount E della sottocartella condivisa"},
+        }, "required": ["tier", "name", "mount"]},
+    ),
+    Tool(
+        name="topic.local_folder_remove",
+        description=("Sgancia una cartella condivisa dal topic. Rimuove solo "
+                     "il collegamento: il contenuto reale sulla cartella "
+                     "condivisa resta intatto, riagganciabile in futuro."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "mount": {"type": "string", "description": "nome del mount da sganciare"}},
+            "required": ["tier", "name", "mount"]},
+    ),
     # Whitelist egress/ingress LOCALE a questo canale (router-notebook R17,
     # clodia-platform#334): a differenza di egress.allow/ingress.allow (GLOBALI,
     # per tutti gli agenti, per sempre) queste voci valgono solo dentro questo
@@ -3517,6 +3547,15 @@ def _gate_effect_reason(name: str, arguments: dict) -> str:
             return (f"toglie la dichiarazione Drive `{a.get('mount')}` dal topic "
                     f"`{a.get('tier')}/{a.get('name')}` — gli accessi gdrive.* da qui "
                     f"ricadono sulle radici account, più ampie del perimetro dichiarato.")
+        if name == "topic.local_folder_add":
+            return (f"aggancia la cartella condivisa Mac↔container `{a.get('mount')}` "
+                    f"come `local/{a.get('mount')}/` nel topic "
+                    f"`{a.get('tier')}/{a.get('name')}` — bind reale, non uno specchio: "
+                    f"chi scrive lì dal Mac lo rende visibile a ogni agente del topic.")
+        if name == "topic.local_folder_remove":
+            return (f"sgancia la cartella condivisa `{a.get('mount')}` dal topic "
+                    f"`{a.get('tier')}/{a.get('name')}` — il contenuto reale resta "
+                    f"sul Mac, solo il collegamento viene tolto.")
         if name == "topic.save_agents_md":
             testo = (a.get("text") or "").strip()
             anteprima = (testo[:200] + "…") if len(testo) > 200 else testo
@@ -4306,6 +4345,7 @@ _TOPIC_SCOPED_VERBS = {
     "put", "delete_file",
     "post_message", "messages", "my_mentions", "mark_seen",
     "drive_folder_add", "drive_folder_remove",
+    "local_folder_add", "local_folder_remove",
     "egress_add", "egress_remove", "ingress_add", "ingress_remove",
 }
 
@@ -4336,6 +4376,7 @@ _TOPIC_MUTATING_VERBS = frozenset({
     "save_summary", "save_agents_md", "add_minute", "archive",
     "write_file", "convert_document", "write_document", "put", "delete_file",
     "drive_folder_add", "drive_folder_remove",
+    "local_folder_add", "local_folder_remove",
     "egress_add", "egress_remove", "ingress_add", "ingress_remove",
 })
 
@@ -5151,6 +5192,12 @@ def _dispatch_topic(name: str, a: dict):
                                     mount_name=a.get("mount"), account=a.get("account"))
     if verb == "drive_folder_remove":
         return svc.drive_folder_remove(a["tier"], a["name"], a["mount"])
+    # Cartella condivisa Mac↔container: bind reale su una radice unica, mai
+    # un path assoluto scelto a runtime — vedi TopicService.local_folder_add.
+    if verb == "local_folder_add":
+        return svc.local_folder_add(a["tier"], a["name"], a["mount"])
+    if verb == "local_folder_remove":
+        return svc.local_folder_remove(a["tier"], a["name"], a["mount"])
     # Whitelist egress/ingress locale al canale (router-notebook R17,
     # clodia-platform#334): stesso storage di egress.allow/revoke, chiave
     # scoped `<tier>/<name>` invece che globale. Il gate WALLS (owner dello

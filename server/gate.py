@@ -72,6 +72,12 @@ _GATE_CLASS = {
     "topic.add_participant": GATE_WALLS,
     "topic.remove_participant": GATE_WALLS,
     "topic.drive_folder_add": GATE_WALLS, "topic.drive_folder_remove": GATE_WALLS,
+    # Cartella condivisa Mac↔container (19-20 set 2026): stesso principio di
+    # drive_folder_add/remove due righe sopra — collegare o scollegare una
+    # cartella allarga o restringe cosa un agente del topic può leggere/
+    # scrivere oltre ai propri file, quindi lo decide l'owner dello scope, in
+    # entrambe le direzioni.
+    "topic.local_folder_add": GATE_WALLS, "topic.local_folder_remove": GATE_WALLS,
     # Whitelist egress/ingress LOCALE al topic (router-notebook R17, clodia-
     # platform#334): stessa forma di drive_folder_add/remove due righe sopra —
     # un agent può chiedere, solo l'owner dello scope allarga o restringe il
@@ -147,6 +153,10 @@ _DEFAULT_GATED_EXACT = frozenset({
     # fa ricadere gli accessi sulle radici d'ACCOUNT, che possono essere più
     # larghe. Togliere il perimetro è un allargamento.
     "topic.drive_folder_add", "topic.drive_folder_remove",
+    # Cartella condivisa Mac↔container: stessa ragione due voci sopra —
+    # collegarla/scollegarla è la dichiarazione di autorità, in entrambe le
+    # direzioni (simmetrico come drive_folder_add/remove).
+    "topic.local_folder_add", "topic.local_folder_remove",
     # Whitelist egress/ingress LOCALE a un topic (router-notebook R17,
     # clodia-platform#334): stessa ragione di drive_folder_add/remove due
     # righe sopra — è il perimetro DI QUESTA STANZA, quindi simmetrico
