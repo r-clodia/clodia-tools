@@ -64,6 +64,17 @@ class LocalFolderAddTests(Base):
         self.assertEqual(link.resolve(),
                          (self.root / LOCAL_SHARED_ROOT / "tomato-amministrazione").resolve())
 
+    def test_the_shared_subfolder_is_group_writable(self):
+        """Trovato da Davide il 23 set 2026: la cartella esisteva ma il suo
+        stesso account Mac (utente diverso da chi monta il volume) non
+        poteva scriverci — solo il proprietario poteva. Un bind fra utenti
+        macOS diversi è inutile se solo un lato può scrivere."""
+        tier, name = self.crea_topic()
+        self.monta_radice_condivisa()
+        self.svc.local_folder_add(tier, name, "condivisa")
+        mode = (self.root / LOCAL_SHARED_ROOT / "condivisa").stat().st_mode
+        self.assertTrue(mode & 0o020, "il gruppo deve poter scrivere (0o775)")
+
     def test_a_file_dropped_on_the_mac_side_is_visible_from_the_topic(self):
         """Il punto della feature: è un bind, non una sincronizzazione."""
         tier, name = self.crea_topic()
@@ -146,7 +157,13 @@ class LocalFolderRemoveTests(Base):
 
 
 class StoragePrimitiveTests(Base):
-    """Le due primitive nuove, isolate da `TopicService`."""
+    """Le tre primitive nuove, isolate da `TopicService`."""
+
+    def test_chmod_shared_adds_group_write(self):
+        d = self.root / LOCAL_SHARED_ROOT / "x"
+        d.mkdir(parents=True, mode=0o755)
+        self.storage.chmod_shared(f"{LOCAL_SHARED_ROOT}/x")
+        self.assertTrue(d.stat().st_mode & 0o020)
 
     def test_symlink_refuses_a_missing_target(self):
         with self.assertRaises(StorageError):
