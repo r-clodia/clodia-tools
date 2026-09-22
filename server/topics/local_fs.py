@@ -103,6 +103,10 @@ class LocalFsStorage(Storage):
         p.parent.mkdir(parents=True, exist_ok=True)
         os.symlink(target_abs, p, target_is_directory=True)
 
+    def chmod_shared(self, path: str) -> None:
+        p = self._abs(path)
+        os.chmod(p, 0o775)
+
     def unlink_symlink(self, path: str) -> None:
         """Rimuove `path` SOLO se è un symlink (`os.lstat`, non segue il
         link). Path NON risolto — a differenza di `_abs()`/`delete()`, che

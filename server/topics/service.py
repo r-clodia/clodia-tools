@@ -894,6 +894,11 @@ class TopicService:
         slug = _unique_name(mount_name, presi)
         sub_path = f"{LOCAL_SHARED_ROOT}/{slug}"
         self.s.mkdir(sub_path)
+        # Scrivibile anche dal gruppo: il bind mount attraversa utenti macOS
+        # diversi (il container scrive come chi monta il volume, l'owner
+        # umano è un altro account) — senza, la cartella esiste ma l'owner
+        # non può scriverci dal lato Mac. Vedi Storage.chmod_shared.
+        self.s.chmod_shared(sub_path)
         link_path = f"{self._dir(tier, name)}/files/{slug}"
         try:
             self.s.symlink(link_path, sub_path)

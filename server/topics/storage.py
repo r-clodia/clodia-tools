@@ -103,6 +103,17 @@ class Storage(abc.ABC):
         rifiutano, invece di dover implementare un concetto che non hanno."""
         raise StorageError(f"symlink non supportato da {self.capability().name}")
 
+    def chmod_shared(self, path: str) -> None:
+        """Rende `path` scrivibile anche dal GRUPPO (0o775), non solo dal
+        proprietario. Concreto e no-op di default: solo `local-fs` ha permessi
+        Unix da aggiustare. Serve a `local_folder_add` — la cartella condivisa
+        vive su un bind mount fra utenti macOS diversi (il container scrive
+        come l'utente che monta il volume, l'owner umano del Mac è un altro),
+        e senza questo la cartella risulta creata ma NON scrivibile da chi
+        dovrebbe usarla dal lato Mac — scoperto da Davide il 23 set 2026 dopo
+        il primo deploy, con `write ok` lato container ma `Permission denied`
+        provando a scrivere lì dal proprio account."""
+
     def unlink_symlink(self, path: str) -> None:
         """Rimuove `path` SOLO se è un symlink — mai un file o una directory
         vera. Distinto da `delete()` apposta: `delete()` risolve i symlink
