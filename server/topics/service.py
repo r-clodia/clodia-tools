@@ -890,7 +890,16 @@ class TopicService:
                 "il gateway.")
         meta, ver = self._read_meta(tier, name)
         existing = local_folders(meta)
-        presi = {str(f.get("name") or "") for f in existing} | {"files", self.MOUNT_LOCAL}
+        # `presi` include le sottocartelle GIÀ ESISTENTI su LOCAL_SHARED_ROOT,
+        # non solo quelle di QUESTO topic: senza, due topic che scelgono lo
+        # stesso mount_name finirebbero per condividere silenziosamente la
+        # STESSA cartella reale — la segregazione che questa funzione promette
+        # (ogni topic vede solo la propria) verrebbe rotta proprio dal
+        # meccanismo che dovrebbe garantirla. Trovato da Davide il 23 set
+        # 2026 su un topic con dati finanziari riservati.
+        su_disco = {e.name for e in self.s.list(LOCAL_SHARED_ROOT) if e.kind == "dir"}
+        presi = ({str(f.get("name") or "") for f in existing}
+                | {"files", self.MOUNT_LOCAL} | su_disco)
         slug = _unique_name(mount_name, presi)
         sub_path = f"{LOCAL_SHARED_ROOT}/{slug}"
         self.s.mkdir(sub_path)
