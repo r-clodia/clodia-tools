@@ -1757,23 +1757,29 @@ _TELEGRAM_TOOLS: list[Tool] = [
          description=("Invia un messaggio a una chat/gruppo (lease-free: sei l'unico "
                       "mittente). Vincolo Telegram: la chat deve aver già contattato il "
                       "bot, o il bot dev'essere membro del gruppo. `chat_id` accetta anche "
-                      "il NOME del gruppo."),
+                      "il NOME del gruppo. `chat_id` OMESSO → la chat collegata al topic "
+                      "da cui stai chiamando (telegram.listen): PREFERISCI omettere, non "
+                      "indovinare/ricordare un nome — due gruppi con nomi quasi identici "
+                      "hanno già causato invii al gruppo sbagliato."),
          inputSchema={"type": "object", "properties": {
-             "chat_id": {"type": "string"}, "text": {"type": "string"}},
-             "required": ["chat_id", "text"]}),
+             "chat_id": {"type": "string", "description": "opzionale: default la chat del topic corrente"},
+             "text": {"type": "string"}},
+             "required": ["text"]}),
     Tool(name="telegram.send_file",
          description=("Invia un FILE del topic a una chat/gruppo Telegram come allegato "
                       "(o come foto se è un'immagine). Solo tu (messaggero) puoi spedire. "
                       "Passa `chat_id` (id o NOME del gruppo) e `path` (il file dentro il "
                       "topic, es. `files/foo.png`): il TOPIC si ricava dal gruppo. `tier`/"
-                      "`name` solo se il file è in un topic diverso da quello del gruppo."),
+                      "`name` solo se il file è in un topic diverso da quello del gruppo. "
+                      "`chat_id` OMESSO → la chat E il topic sono quelli da cui stai "
+                      "chiamando: preferiscilo, per lo stesso motivo di telegram.send."),
          inputSchema={"type": "object", "properties": {
-             "chat_id": {"type": "string", "description": "chat_id o nome del gruppo"},
+             "chat_id": {"type": "string", "description": "opzionale: default la chat del topic corrente"},
              "path": {"type": "string", "description": "path del file nel topic, es. files/foo.png"},
              "tier": {"type": "string", "description": "opzionale (override topic)"},
              "name": {"type": "string", "description": "opzionale: nome del topic (override)"},
              "caption": {"type": "string"}},
-             "required": ["chat_id", "path"]}),
+             "required": ["path"]}),
     Tool(name="telegram.lease_release",
          description="Rilascia anticipatamente il lease su una chat (no-op se non lo detieni).",
          inputSchema={"type": "object", "properties": {
@@ -2165,21 +2171,42 @@ def _dispatch_telegram(name: str, a: dict):
     if verb == "poll":
         return tg.poll(a["chat_id"])
     if verb == "send":
-        return tg.send(a["chat_id"], a["text"])
+        return tg.send(a.get("chat_id"), a["text"])
     if verb == "send_file":
         # Legge il file dal topic (compartimento: dev'essere participant) e lo invia.
-        # Il TOPIC si ricava dal gruppo (binding chat→topic), così basta chat + path;
-        # `tier`/`name` sono override opzionali per topic diversi da quello del gruppo.
+        # `chat_id` ESPLICITO: il TOPIC si ricava dal gruppo (binding chat→topic),
+        # `tier`/`name` sono override opzionali per topic diversi da quello del
+        # gruppo. `chat_id` OMESSO: si parte dal topic CORRENTE per entrambi —
+        # stessa correzione di `telegram.send` (clodia-platform#381 seguito, 23
+        # set 2026): indovinare/ricordare un chat_id o un nome di gruppo ha
+        # prodotto invii ripetuti al gruppo sbagliato fra due nomi quasi
+        # identici. Il topic corrente è l'unica fonte che non può sbagliare.
         import base64
         import os as _os
         from .tools import telegram_bindings as _tb
-        cid = tg._resolve_chat(a["chat_id"])
         tier, tname = a.get("tier"), a.get("name")
-        if not (tier and tname):
-            b = _tb.get(cid)
-            if not b:
-                raise ValueError(f"chat {cid} non legata a un topic: passa tier+name del topic")
-            tier, tname = b["tier"], b["topic"]
+        chat_arg = a.get("chat_id")
+        if chat_arg:
+            cid = tg._resolve_chat(chat_arg)
+            if not (tier and tname):
+                b = _tb.get(cid)
+                if not b:
+                    raise ValueError(f"chat {cid} non legata a un topic: passa tier+name del topic")
+                tier, tname = b["tier"], b["topic"]
+        else:
+            if not (tier and tname):
+                scope = current_channel()
+                if not scope:
+                    raise ValueError(
+                        "nessun chat_id indicato e la chiamata non arriva da un "
+                        "topic: passa chat_id oppure tier+name")
+                tier, tname = scope.split("/", 1)
+            cid = _tb.get_for_topic(tier, tname)
+            if not cid:
+                raise ValueError(
+                    f"nessuna chat Telegram collegata al topic {tier}/{tname}: "
+                    f"fai prima telegram.listen(tier=\"{tier}\", name=\"{tname}\", "
+                    "chat_id=<chat_id>) — o passa chat_id esplicito.")
         _require_topic_member(_topics(), tier, tname)
         data = _topics().read_file(tier, tname, a["path"])
         return tg.send_file(cid, _os.path.basename(a["path"]),

@@ -44,6 +44,22 @@ def get(chat_id: str) -> dict | None:
     return load().get(str(chat_id))
 
 
+def get_for_topic(tier: str, topic: str) -> str | None:
+    """L'inverso di `get`: il chat_id legato a QUESTO topic, o None.
+
+    Un vincolo del modello (`set_binding`: una chat → un solo topic) rende
+    la ricerca inequivocabile — al più un risultato. Serve a `telegram.send`
+    per risolvere «manda un messaggio qui» senza che il chiamante debba
+    conoscere/indovinare il chat_id o il titolo esatto del gruppo — la causa
+    del 23 set 2026: due gruppi con nomi quasi identici ("Davide & Clodia" e
+    "Davide & Clodia Colony Blogging") e nessun modo di dire "quello di
+    questo topic" hanno prodotto ripetuti invii al gruppo sbagliato."""
+    for cid, b in load().items():
+        if (b.get("tier"), b.get("topic")) == (tier, topic):
+            return cid
+    return None
+
+
 def set_binding(chat_id: str, instance: str, tier: str, topic: str) -> dict:
     d = load()
     d[str(chat_id)] = {"instance": instance, "tier": tier, "topic": topic}
