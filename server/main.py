@@ -2970,9 +2970,27 @@ async def _require_gate_consent(
         _obs.note("gate", gate_key, agent, detail=reason[:120])
         return None
     inst = "-"
+    if gate_key == "crosstopic":
+        # Il grant `crosstopic` vale per lo SPAWN che l'ha chiesto, non per il
+        # seed (decisione di Davide, 23 set 2026): senza questo, un consenso
+        # dato a `clodia-1` varrebbe per ogni altro spawn di `clodia`, cioè per
+        # il seed — esattamente il difetto misurato il 7 ago 2026 su
+        # `_topic_is_member` (vedi `test_spawn_compartment.py`), riprodotto qui
+        # un livello più in alto se non si scopa anche il CONSENSO.
+        from .whitelist import current_spawn as _current_spawn
+        spawn = _current_spawn()
+        if not spawn:
+            raise PermissionError(
+                "gate 'crosstopic': nessuna identità di spawn firmata "
+                "(execution_id) in questo token — il grant non è scopabile, "
+                "quindi resta negato (fail-closed).")
+        inst = spawn
     # DELEGA PERMANENTE (async·A): se esiste una delega firmata dall'utente il cui
     # scope copre questa azione (verb == gate_key), è già autorizzata → unlock senza
     # richiesta né blocco. Modello: delega → verifica firma (CA) → covers → unlock.
+    # `crosstopic` ne è escluso a monte dal chiamante (allow_delegation=False):
+    # una delega non porta lo spawn, quindi coprirebbe ogni spawn del seed —
+    # lo stesso buco che lo scoping sopra chiude.
     if allow_delegation:
         try:
             from . import delegation as _deleg
@@ -3012,9 +3030,13 @@ async def _require_gate_consent(
                 # Il testo è la traccia durevole; il marcatore resta per i
                 # bottoni finché la richiesta è viva.
                 _perche = f" — {reason}" if reason else ""
-                _cosa = (f"di accedere al topic {gate_key.split(':', 1)[1]}"
-                         if gate_key.startswith("topic-access:")
-                         else f"di usare `{gate_key}`")
+                _cosa = ("di ottenere il grant **crosstopic** — esplorare topic "
+                         "fuori dalla propria stanza, entro la propria "
+                         "clearance, per QUESTO spawn soltanto"
+                         if gate_key == "crosstopic"
+                         else (f"di accedere al topic {gate_key.split(':', 1)[1]}"
+                               if gate_key.startswith("topic-access:")
+                               else f"di usare `{gate_key}`"))
                 # kind=ai (non system): i system sono filtrati dal render del webui.
                 _topics().post_message(
                     _tier, _name, author="gate",
@@ -3064,6 +3086,15 @@ def _spawn_compartment_mode() -> str:
     return m if m in ("off", "report", "on") else "report"
 
 
+#: Chi può ANCHE solo chiedere il grant cross-topic (decisione di Davide, 23 set
+#: 2026, in risposta al leak strutturale di `runtime.topics()` su
+#: `tomato-blogging`): nessuno spawn fa cross-topic per default, e l'UNICA
+#: eccezione è `clodia`/`sysadmin` tramite il grant `crosstopic` (§sotto). Per
+#: ogni altro agente non esiste più una via di gate: è un rifiuto immediato, non
+#: una card che nessuno potrà mai approvare per lui.
+_CROSSTOPIC_ELIGIBLE = frozenset({"clodia", "sysadmin"})
+
+
 def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
     """Chiave di gate per l'accesso CROSS-TOPIC.
 
@@ -3089,6 +3120,13 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
 
     La membership resta rilevante, ma cambia ruolo: non toglie il gate, decide a
     CHI è rivolto — l'owner della stanza bersaglio può approvare la propria.
+
+    *Aggiornato il 23 set 2026*: la chiave non è più per-target
+    (`topic-access:<tier>/<name>`), è il grant unico **`crosstopic`** — un solo
+    consenso copre l'esplorazione di qualunque topic entro la clearance dello
+    spawn, non uno per bersaglio. E non è più aperto a chiunque: solo
+    `_CROSSTOPIC_ELIGIBLE` può ottenerlo; per chiunque altro qui si NEGA subito,
+    niente card da mostrare.
     """
     if NS_SEP_DOT not in name:
         return None
@@ -3103,8 +3141,18 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
     except Exception:  # noqa: BLE001 — topic inesistente → lascia decidere al dispatch
         return None
     target = f"{meta.get('tier', tier)}/{tname}"
+
+    def _gate_or_deny() -> str:
+        if agent not in _CROSSTOPIC_ELIGIBLE:
+            raise PermissionError(
+                f"'{agent}': cross-topic negato per default (verso {target}). "
+                "Solo clodia e sysadmin possono chiederne il grant 'crosstopic', "
+                "e solo con un consenso esplicito dell'operatore — nessun'altra "
+                "via di gate esiste per questo agente.")
+        return "crosstopic"
+
     if _spawn_compartment_mode() == "off":
-        return None if _topic_is_member(meta, agent) else f"topic-access:{target}"
+        return None if _topic_is_member(meta, agent) else _gate_or_deny()
 
     from .whitelist import current_channel
     qui = current_channel()
@@ -3118,8 +3166,8 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
                 "solo perche' participant del seed (con enforcement: GATE)",
                 agent, target, qui or "nessuna stanza")
             return None
-        return f"topic-access:{target}"
-    return f"topic-access:{target}"
+        return _gate_or_deny()
+    return _gate_or_deny()
 
 
 def _norm_scope(x: str) -> str:
@@ -3832,7 +3880,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 )
             _ck = _cross_topic_gate_key(name, arguments, _ag)
             if _ck:
-                await _require_gate_consent(_ag, _ck, consume=False)
+                # Niente delega permanente su 'crosstopic': una delega copre
+                # l'agente (seed), non lo spawn — accettarla qui riaprirebbe
+                # esattamente il buco che lo scoping per spawn chiude.
+                await _require_gate_consent(_ag, _ck, consume=False,
+                                            allow_delegation=False)
         # WHITELIST DI DESTINAZIONE (clodia-platform#104 §7, passo 5). Uscita da
         # capacità binaria a capacità circoscritta: «può inviare mail» diventa
         # «può inviare mail a queste destinazioni». Dopo il gate, non prima: se
@@ -4495,15 +4547,23 @@ def _require_topic_member(svc, tier, name, mutating: bool = False) -> None:
         _require_person_of_this_room(meta, tier, name, tier_t, mutating)
         return
     agent_ok = _topic_is_member(meta, caller)
-    # cross-topic: consentito con un CONSENSO GATE attivo per questo topic
-    # (topic-access:<tier>/<name>), concesso via popup (M-gate). Sostituisce sudo.
+    # cross-topic: consentito SOLO con il grant 'crosstopic' attivo per QUESTO
+    # spawn — non per il seed (decisione di Davide, 23 set 2026). Eleggibile
+    # solo clodia/sysadmin: per chiunque altro `cross_ok` resta sempre falso,
+    # senza nemmeno interrogare il gate.
     from . import gate as _gate
-    cross_ok = _gate.active(caller, "-", f"topic-access:{tier_t}/{name}")
+    from .whitelist import current_spawn as _current_spawn
+    cross_ok = (
+        caller in _CROSSTOPIC_ELIGIBLE
+        and bool(_current_spawn())
+        and _gate.active(caller, _current_spawn(), "crosstopic")
+    )
     if not (agent_ok or cross_ok):
         raise PermissionError(
             f"accesso negato al topic {tier}/{name}: l'agente '{caller}' non è "
-            "partecipante (compartimento need-to-know; "
-            f"il cross-topic richiede un consenso gate)")
+            "partecipante (compartimento need-to-know; il cross-topic richiede "
+            "il grant 'crosstopic', concedibile solo a clodia/sysadmin e solo "
+            "per lo spawn a cui viene approvato)")
     # asse RUOLO: un reader non muta. Fino al 7 ago 2026 il ruolo era applicato
     # solo sul percorso UMANO (gli endpoint della webui); un agente passa da qui,
     # quindi metterlo a `reader` non aveva alcun effetto — poteva comunque

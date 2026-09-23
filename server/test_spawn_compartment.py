@@ -22,6 +22,11 @@ La regola, con `qui` preso dal claim FIRMATO:
 dal TOPIC → consentito» (decision-record #28/#29). Abrogata (decision-record
 #39, clodia-platform#313): nessun topic bypassa più il gate dichiarandosi
 tale, non resta nessuna terza via oltre "sei nella tua stanza" o "gate".
+
+*Aggiornato il 23 set 2026*: la chiave di gate non è più per-target
+(`topic-access:<tier>/<name>`), è il grant unico `crosstopic` — vedi
+`test_topic_access.py` per l'eleggibilità (solo clodia/sysadmin) e lo scoping
+per spawn del consenso stesso.
 """
 from __future__ import annotations
 
@@ -85,13 +90,13 @@ class EnforcedTests(Base):
         topic-b: prima passava, ora chiede."""
         def go():
             with _Chat("chan:SEAL-1:topic-b:clodia"):
-                self.assertEqual(self.key(), "topic-access:SEAL-1/topic-a")
+                self.assertEqual(self.key(), "crosstopic")
         self.run_with(_env(), go)
 
     def test_a_non_member_still_gates(self):
         def go():
             with _Chat("chan:SEAL-1:topic-b:clodia"):
-                self.assertEqual(self.key(), "topic-access:SEAL-1/topic-a")
+                self.assertEqual(self.key(), "crosstopic")
         self.run_with(_env(meta={"tier": "SEAL-1", "owner": "x", "participants": []}), go)
 
     def test_outside_any_room_everything_gates(self):
@@ -100,7 +105,16 @@ class EnforcedTests(Base):
         si gata sempre — che per una sessione non presidiata significa negare."""
         def go():
             with _Chat("job:42"):
-                self.assertEqual(self.key(), "topic-access:SEAL-1/topic-a")
+                self.assertEqual(self.key(), "crosstopic")
+        self.run_with(_env(), go)
+
+    def test_ineligible_agent_is_denied_not_gated(self):
+        """23 set 2026: solo clodia/sysadmin possono chiedere 'crosstopic'.
+        Un agente diverso non riceve una card, riceve un rifiuto subito."""
+        def go():
+            with _Chat("chan:SEAL-1:topic-b:esperto-bandi"):
+                with self.assertRaises(PermissionError):
+                    M._cross_topic_gate_key("topic.read_file", ARGS_A, "esperto-bandi")
         self.run_with(_env(), go)
 
 

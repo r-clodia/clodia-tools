@@ -87,6 +87,17 @@ class TheMessageSaysWhatWasAskedTests(unittest.TestCase):
         self.assertIn("accedere al topic SEAL-1/acme", t)
         self.assertNotIn("topic-access:", t.split("<!--")[0])
 
+    def test_a_crosstopic_gate_reads_as_the_named_grant(self):
+        """23 set 2026: la chiave `crosstopic` (grant unico, non più per-target)
+        si legge in chat come una richiesta di grant nominata, non come `usare
+        crosstopic`. Serve un'identità di spawn firmata perché il grant è
+        scoped-per-spawn: senza, `_require_gate_consent` nega prima ancora di
+        postare la card (fail-closed)."""
+        with patch("server.whitelist.current_spawn", lambda: "clodia-1"):
+            t = _posta(gate_key="crosstopic", reason="", agent="clodia")[0]["text"]
+        self.assertIn("grant **crosstopic**", t)
+        self.assertNotIn("di usare `crosstopic`", t)
+
     def test_a_channel_gate_also_notifies_the_principal_outside_the_room(self):
         notified = []
         svc = _Svc()
