@@ -866,7 +866,7 @@ class TopicService:
         self._write_meta(tier, name, meta, base_version=ver)
         return {"ok": True, "removed": mount_name}
 
-    def local_folder_add(self, tier: str, name: str, mount_name: str) -> dict:
+    def local_folder_add(self, tier: str, name: str, mount_name: str | None = None) -> dict:
         """Aggancia una sottocartella della cartella condivisa Mac↔container a
         questo topic: `local/<mount_name>/` diventa un BIND filesystem reale,
         non uno specchio come Drive — chi scrive dal Mac lo vede nel topic
@@ -875,6 +875,13 @@ class TopicService:
         radice unica bind-mountata una volta sola nel gateway, con un
         sottopercorso per-topic anziché un path assoluto arbitrario).
 
+        `mount_name` OMESSO → usa il CODENAME del topic (`name`): scoperto il
+        23 set 2026 che un nome scelto a mano (es. "clodiashared", uguale
+        all'inizio della radice condivisa) rende ambiguo su `~/ClodiaShared/`
+        di quale topic sia quella cartella. Il codename è l'identificatore
+        che l'owner già riconosce, e di norma è unico per costruzione (nome
+        del topic) — di proposito il default, non solo un'opzione.
+
         `mount_name` è insieme il nome del mount (`local/<mount_name>/`) e il
         nome della sottocartella su `LOCAL_SHARED_ROOT`: un solo nome, non due
         mappe che possono divergere. Nessun perimetro nuovo da dichiarare (a
@@ -882,6 +889,7 @@ class TopicService:
         filesystem del topic, governato dagli stessi verbi/permessi di
         qualunque file caricato a mano — non una destinazione esterna.
         """
+        mount_name = (mount_name or "").strip() or name
         if not self.s.exists(LOCAL_SHARED_ROOT):
             raise TopicError(
                 f"cartella condivisa non montata su questa istanza: "

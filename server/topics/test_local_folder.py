@@ -93,6 +93,15 @@ class LocalFolderAddTests(Base):
             (self.root / LOCAL_SHARED_ROOT / "condivisa" / "report.md").read_bytes(),
             b"# report")
 
+    def test_a_missing_mount_name_defaults_to_the_topic_codename(self):
+        """Davide, 23 set 2026: un nome scelto a mano ("clodiashared") rendeva
+        ambiguo su ClodiaShared/ di quale topic fosse la cartella. Il default
+        è il codename del topic, non una stringa vuota o un errore."""
+        tier, name = self.crea_topic("SEAL-1", "bilancio-tomato-2026")
+        self.monta_radice_condivisa()
+        out = self.svc.local_folder_add(tier, name)
+        self.assertEqual(out["local_folder"]["name"], "bilancio-tomato-2026")
+
     def test_the_mount_name_becomes_the_subfolder_name(self):
         """Un solo nome, non due mappe che possono divergere (vedi docstring
         di `local_folder_add`)."""
