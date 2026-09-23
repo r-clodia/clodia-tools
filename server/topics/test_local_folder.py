@@ -93,6 +93,28 @@ class LocalFolderAddTests(Base):
             (self.root / LOCAL_SHARED_ROOT / "condivisa" / "report.md").read_bytes(),
             b"# report")
 
+    def test_a_file_written_into_the_shared_folder_is_group_readable_and_writable(self):
+        """Trovato da Davide il 23 set 2026, dopo il fix sulle DIRECTORY: i
+        FILE scritti dal topic nascevano `0o600` (solo il proprietario, cioè
+        il container) — illeggibili dal Mac, stesso difetto una cartella più
+        in profondità. Fuori da LOCAL_SHARED_ROOT il resto dello storage
+        resta 0o600 di proposito (dati privati dei topic)."""
+        tier, name = self.crea_topic()
+        self.monta_radice_condivisa()
+        self.svc.local_folder_add(tier, name, "condivisa")
+        self.storage.write(f"{tier}/{name}/files/condivisa/report.md", b"# report")
+        mode = (self.root / LOCAL_SHARED_ROOT / "condivisa" / "report.md").stat().st_mode
+        self.assertTrue(mode & 0o060, "il gruppo deve poter leggere e scrivere (0o664)")
+
+    def test_a_file_written_outside_the_shared_folder_stays_owner_only(self):
+        """Il confronto: il resto dello storage dei topic NON deve rilassarsi
+        — sarebbe una regressione di privacy per ogni topic senza cartella
+        condivisa."""
+        tier, name = self.crea_topic()
+        self.storage.write(f"{tier}/{name}/files/privato.md", b"solo il gateway")
+        mode = (self.root / tier / name / "files" / "privato.md").stat().st_mode
+        self.assertFalse(mode & 0o077, "fuori dalla cartella condivisa resta 0o600")
+
     def test_a_missing_mount_name_defaults_to_the_topic_codename(self):
         """Davide, 23 set 2026: un nome scelto a mano ("clodiashared") rendeva
         ambiguo su ClodiaShared/ di quale topic fosse la cartella. Il default
