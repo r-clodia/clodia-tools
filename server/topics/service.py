@@ -127,6 +127,35 @@ def _iso(mtime: float) -> str:
     return datetime.fromtimestamp(mtime, timezone.utc).isoformat(timespec="seconds")
 
 
+def _unescape_leaked_json_string(text: str) -> str:
+    """Ripara un testo che è finito su disco ANCORA JSON-escaped (clodia-
+    platform#381 seguito, 23 set 2026): il segretario, su un turno OpenCode/
+    gemma-4-26b-a4b-it interrotto per timeout, ha scritto un summary con
+    `\\n`/`\\"` letterali al posto di newline e virgolette reali — zero
+    newline VERI in 19KB di testo strutturato è la firma inequivocabile di
+    un `json.dumps()` mai ridecodificato con `json.loads()` prima della
+    scrittura (bug nel client OpenCode/modello, non in questo servizio: qui
+    solo la riparazione difensiva).
+
+    Innesca SOLO se il testo contiene `\\n` letterale E non contiene NESSUN
+    newline reale: un testo multi-paragrafo autentico ne ha sempre almeno
+    uno, quindi il falso positivo su un summary legittimo è impossibile per
+    costruzione — non un euristica probabilistica.
+    """
+    if not text or "\n" in text or "\\n" not in text:
+        return text
+    try:
+        decoded = json.loads('"' + text + '"')
+    except (json.JSONDecodeError, ValueError):
+        return text
+    if not isinstance(decoded, str) or "\n" not in decoded:
+        return text
+    LOG.warning("save_summary: testo JSON-escaped riparato automaticamente "
+               "(%d byte → %d byte, %d newline recuperati)",
+               len(text), len(decoded), decoded.count("\n"))
+    return decoded
+
+
 def _tldr(summary_text: str) -> str:
     for line in (summary_text or "").splitlines():
         line = line.strip().lstrip("#").strip()
@@ -1129,6 +1158,7 @@ class TopicService:
                      base_version: str | None) -> dict:
         """Scrive il summary in optimistic lock. base_version = la versione letta
         con open(); se è cambiata → VersionConflict (il chiamante escala)."""
+        text = _unescape_leaked_json_string(text or "")
         meta, _ = self._read_meta(tier, name)
         self._assert_content_available(meta)
         # Se non c'è ancora storia ma esiste un summary, registra il recap PRECEDENTE
