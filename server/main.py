@@ -1091,12 +1091,15 @@ _TOPIC_TOOLS: list[Tool] = [
                      "local/<mount>/ e ci si legge/scrive con "
                      "topic.read_file/write_file come un file qualunque. È un "
                      "BIND reale: scrivere da fuori (Mac) o da dentro (topic) "
-                     "si vede immediatamente dall'altra parte."),
+                     "si vede immediatamente dall'altra parte. `mount` "
+                     "omesso → usa il codename del topic (default "
+                     "consigliato: si riconosce a colpo d'occhio su "
+                     "ClodiaShared/ quale topic sia quella cartella)."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
-            "mount": {"type": "string", "description": "nome del mount E della sottocartella condivisa"},
-        }, "required": ["tier", "name", "mount"]},
+            "mount": {"type": "string", "description": "nome del mount E della sottocartella condivisa (default: il codename del topic)"},
+        }, "required": ["tier", "name"]},
     ),
     Tool(
         name="topic.local_folder_remove",
@@ -3548,8 +3551,9 @@ def _gate_effect_reason(name: str, arguments: dict) -> str:
                     f"`{a.get('tier')}/{a.get('name')}` — gli accessi gdrive.* da qui "
                     f"ricadono sulle radici account, più ampie del perimetro dichiarato.")
         if name == "topic.local_folder_add":
-            return (f"aggancia la cartella condivisa Mac↔container `{a.get('mount')}` "
-                    f"come `local/{a.get('mount')}/` nel topic "
+            mount = a.get("mount") or a.get("name")
+            return (f"aggancia la cartella condivisa Mac↔container `{mount}` "
+                    f"come `local/{mount}/` nel topic "
                     f"`{a.get('tier')}/{a.get('name')}` — bind reale, non uno specchio: "
                     f"chi scrive lì dal Mac lo rende visibile a ogni agente del topic.")
         if name == "topic.local_folder_remove":
@@ -5195,7 +5199,7 @@ def _dispatch_topic(name: str, a: dict):
     # Cartella condivisa Mac↔container: bind reale su una radice unica, mai
     # un path assoluto scelto a runtime — vedi TopicService.local_folder_add.
     if verb == "local_folder_add":
-        return svc.local_folder_add(a["tier"], a["name"], a["mount"])
+        return svc.local_folder_add(a["tier"], a["name"], a.get("mount"))
     if verb == "local_folder_remove":
         return svc.local_folder_remove(a["tier"], a["name"], a["mount"])
     # Whitelist egress/ingress locale al canale (router-notebook R17,
