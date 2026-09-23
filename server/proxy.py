@@ -16,6 +16,7 @@ Vincolo: i nomi dei backend NON devono collidere coi prefissi nativi
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from contextlib import asynccontextmanager
@@ -118,6 +119,31 @@ def is_proxied(name: str) -> bool:
     if NS_SEP not in name:
         return False
     return name.split(NS_SEP, 1)[0] in _backends()
+
+
+#: Quanto aspettare un backend MCP prima di dichiararlo irraggiungibile.
+#: Stesso ordine di grandezza dei test HTTP dei connettori nativi in
+#: tools_api.py (15s): un backend di terzi lento non deve bloccare la UI.
+TEST_TIMEOUT_S = 15
+
+
+async def test_backend(name: str) -> dict:
+    """Verifica REALE di un backend MCP montato: apre una sessione (i secret
+    ${VAULT:cred} sono risolti qui, come per ogni chiamata proxied) e lista i
+    tool esposti. Mai il segreto nel risultato — solo ok/detail."""
+    b = _backends().get(name)
+    if b is None:
+        return {"ok": None, "detail": "backend non montato"}
+    try:
+        async def _probe():
+            async with _session(b) as s:
+                return await s.list_tools()
+        res = await asyncio.wait_for(_probe(), timeout=TEST_TIMEOUT_S)
+        return {"ok": True, "detail": f"{len(res.tools)} tool esposti"}
+    except TimeoutError:
+        return {"ok": False, "detail": f"nessuna risposta entro {TEST_TIMEOUT_S}s"}
+    except Exception as e:  # noqa: BLE001 — qualunque guasto del backend è un esito, non un crash della API
+        return {"ok": False, "detail": str(e)[:200]}
 
 
 async def list_proxied_tools() -> list[Tool]:
