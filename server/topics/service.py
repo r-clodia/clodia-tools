@@ -26,7 +26,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from . import mentions
-from .storage import NotFound, Storage, StorageError, VersionConflict
+from .storage import (LOCAL_SHARED_ROOT, NotFound, Storage, StorageError,
+                      VersionConflict)
 
 LOG = logging.getLogger("clodia-tools.topics")
 
@@ -251,12 +252,10 @@ def drive_folders(meta: dict) -> list:
     return [f for f in raw if isinstance(f, dict) and f.get("folder")] if isinstance(raw, list) else []
 
 
-#: Sottocartella riservata della root storage su cui è bind-mountata la
-#: cartella condivisa Mac↔container (docker-compose, un volume solo — mai
-#: per-topic, mai un path assoluto scelto a runtime). Fuori dallo spazio dei
-#: tier: `VALID_TIER` non la contiene, quindi `list()` (che itera solo i tier
-#: veri) non può mai scambiarla per un topic.
-LOCAL_SHARED_ROOT = "_shared-local"
+#: Fuori dallo spazio dei tier: `VALID_TIER` non la contiene, quindi `list()`
+#: (che itera solo i tier veri) non può mai scambiarla per un topic. Definita
+#: in `storage.py` (importata sopra) perché `LocalFsStorage.write()` ne ha
+#: bisogno anche lei — vedi il commento lì.
 
 
 def local_folders(meta: dict) -> list:

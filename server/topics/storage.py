@@ -60,6 +60,14 @@ class Capability:
     max_size: int = field(default=64 * 1024 * 1024)
 
 
+#: Sottocartella riservata della root storage su cui è bind-mountata la
+#: cartella condivisa Mac↔container (docker-compose, un volume solo — mai
+#: per-topic, mai un path assoluto scelto a runtime). Vive qui (non in
+#: `service.py`) perché `LocalFsStorage.write()` ne ha bisogno per decidere i
+#: permessi del file scritto — vedi il commento lì.
+LOCAL_SHARED_ROOT = "_shared-local"
+
+
 class Storage(abc.ABC):
     """Interfaccia che ogni adapter di storage deve implementare. I path sono
     relativi alla root dell'area topic del backend (mai assoluti)."""

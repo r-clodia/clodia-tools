@@ -12,8 +12,8 @@ import os
 import shutil
 from pathlib import Path
 
-from .storage import (Capability, Entry, NotFound, ReadResult, Stat, Storage,
-                      StorageError, VersionConflict)
+from .storage import (LOCAL_SHARED_ROOT, Capability, Entry, NotFound,
+                      ReadResult, Stat, Storage, StorageError, VersionConflict)
 
 
 def _version(data: bytes) -> str:
@@ -33,6 +33,22 @@ class LocalFsStorage(Storage):
         if not (p == self.root or self.root in p.parents):
             raise StorageError(f"path fuori dalla root: {path}")
         return p
+
+    def _is_shared(self, p: Path) -> bool:
+        """`p` (già risolto, quindi ATTRAVERSO un eventuale symlink) sta sotto
+        `LOCAL_SHARED_ROOT`? Un file scritto lì è letto/scritto anche
+        dall'OWNER umano dal lato Mac — un altro account Unix — quindi non
+        può nascere `0o600` (solo il proprietario, cioè il container) come il
+        resto dello storage dei topic: sarebbe illeggibile dal Mac, lo stesso
+        difetto scoperto da Davide il 23 set 2026 sulle directory, qui sui
+        file. Il resto dello storage (dati privati del topic dietro il
+        gateway) resta `0o600` — la relax vale SOLO per questa sottocartella,
+        di proposito."""
+        try:
+            p.relative_to(self.root / LOCAL_SHARED_ROOT)
+            return True
+        except ValueError:
+            return False
 
     def list(self, path: str) -> list[Entry]:
         d = self._abs(path)
@@ -65,7 +81,7 @@ class LocalFsStorage(Storage):
         tmp.write_bytes(data)
         os.replace(tmp, f)
         try:
-            os.chmod(f, 0o600)
+            os.chmod(f, 0o664 if self._is_shared(f) else 0o600)
         except OSError:
             pass
         return _version(data)
