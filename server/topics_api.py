@@ -420,6 +420,80 @@ async def local_folder(request: Request):
         return JSONResponse({"error": str(e)[:200]}, status_code=502)
 
 
+def _telegram_binding_for(tier: str, name: str) -> tuple[str | None, dict | None]:
+    """(chat_id, binding) legati a questo topic, o (None, None). Una chat →
+    un solo topic, ma questo cerca l'inverso: qual è LA chat di questo topic —
+    ce n'è al più una, per lo stesso vincolo."""
+    from .tools import telegram_bindings as tb
+    for cid, b in tb.load().items():
+        if (b.get("tier"), b.get("topic")) == (tier, name):
+            return cid, b
+    return None, None
+
+
+async def telegram_link(request: Request):
+    """GET/POST /internal/topics/{tier}/{name}/telegram-link.
+
+    A differenza delle icone rapide Telegram/Drive (solo whitelist), qui
+    l'azione fa ENTRAMBI i passi che prima erano scollegati e confusi
+    (Davide, 23 set 2026): whitelist egress/ingress `tg:<chat_id>` PIÙ il
+    binding vero (`telegram_bindings`, l'equivalente HTTP-owner di
+    `telegram.listen`/`unlisten`) — senza il secondo, il messaggero non
+    riporta nulla anche con la whitelist già scritta, ed è esattamente il
+    sintomo che ha riportato.
+
+    GET → stato corrente: {connected, chat_id}.
+    POST {action: connect|disconnect, chat_id (richiesto su connect)}.
+    """
+    _, err = _authorize(request)
+    if err:
+        return err
+    tier = request.path_params["tier"]; name = request.path_params["name"]
+    if request.method == "GET":
+        cid, _b = _telegram_binding_for(tier, name)
+        return JSONResponse({"connected": cid is not None, "chat_id": cid})
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    body = body or {}
+    action = body.get("action")
+    from . import egress as eg
+    from .tools import telegram_bindings as tb
+    from .topics.service import _check_channel_cap
+    if action == "connect":
+        cid = str(body.get("chat_id") or "").strip()
+        if not cid:
+            return JSONResponse({"error": "richiesto 'chat_id'"}, status_code=400)
+        ex = tb.get(cid)
+        if ex and (ex.get("tier"), ex.get("topic")) != (tier, name):
+            return JSONResponse(
+                {"error": f"chat {cid} già collegata a {ex.get('tier')}/{ex.get('topic')}: "
+                          "disconnettila lì prima (una chat → un solo topic)"},
+                status_code=400)
+        svc = _service()
+        try:
+            meta = svc.open(tier, name).get("meta", {})
+            _check_channel_cap({"type": "telegram"}, meta.get("tier", tier))
+            scope = f"{tier}/{name}"
+            eg.scope_allow("egress", scope, f"tg:{cid}")
+            eg.scope_allow("ingress", scope, f"tg:{cid}")
+            tb.set_binding(cid, "messaggero", tier, name)
+        except TopicError as e:
+            return JSONResponse({"error": str(e)[:200]}, status_code=400)
+        return JSONResponse({"connected": True, "chat_id": cid})
+    if action == "disconnect":
+        cid, _b = _telegram_binding_for(tier, name)
+        if cid is None:
+            return JSONResponse({"connected": False, "chat_id": None})
+        tb.remove(cid)
+        scope = f"{tier}/{name}"
+        eg.scope_revoke("egress", scope, f"tg:{cid}")
+        eg.scope_revoke("ingress", scope, f"tg:{cid}")
+        return JSONResponse({"connected": False, "chat_id": None})
+    return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
+
+
 async def participants(request: Request):
     _, err = _authorize(request)
     if err:
@@ -744,6 +818,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/local-folder", local_folder, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/telegram-link", telegram_link, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/mcp-clients", mcp_clients,
           methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/logo", topic_logo,
