@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Optional
 
 from .. import vault
-from ..whitelist import agent_name, tool_allowed
+from ..whitelist import agent_name, current_channel, tool_allowed
 
 TELEGRAM_CRED = "telegram_bot_token"
 _API_BASE = "https://api.telegram.org/bot{token}/{method}"
@@ -266,6 +266,36 @@ def _resolve_chat(chat: str) -> str:
     raise ValueError(f"chat '{chat}' non trovata (né chat_id numerico né titolo noto)")
 
 
+def _resolve_chat_or_current(chat: str | None) -> str:
+    """`chat` esplicito → `_resolve_chat` come sempre. `chat` omesso → la chat
+    legata AL TOPIC da cui si sta chiamando (`telegram.listen`), non un
+    default per nome.
+
+    Trovato il 23 set 2026: due gruppi con nomi quasi identici — "Davide &
+    Clodia" e "Davide & Clodia Colony Blogging" — hanno prodotto invii
+    ripetuti al gruppo SBAGLIATO perché chi chiamava (umano o agente)
+    indovinava/ricordava un nome invece di usare il binding del topic
+    corrente, l'unica fonte che non può sbagliare per costruzione (una chat
+    → un solo topic). Questo è il percorso che elimina la scelta a mano.
+    """
+    if chat:
+        return _resolve_chat(chat)
+    scope = current_channel()
+    if not scope:
+        raise ValueError(
+            "nessuna 'chat' indicata e la chiamata non arriva da un topic: "
+            "passa un chat_id o un titolo esplicito.")
+    tier, _, name = scope.partition("/")
+    from . import telegram_bindings as tb
+    cid = tb.get_for_topic(tier, name)
+    if not cid:
+        raise ValueError(
+            f"nessuna chat Telegram collegata al topic {scope}: fai prima "
+            f"telegram.listen(tier=\"{tier}\", name=\"{name}\", chat_id=<chat_id>) "
+            "— o passa un chat_id/titolo esplicito per uscire dal topic corrente.")
+    return cid
+
+
 def _refresh(st: dict, token: str) -> int:
     """getUpdates lazy: accoda i nuovi messaggi nelle code per-chat, avanza
     l'offset. Ritorna il numero di messaggi accodati. Best-effort: un errore di
@@ -395,15 +425,18 @@ def poll(chat_id: str) -> dict:
             "lease_expiry": lease["expiry"]}
 
 
-def send(chat_id: str, text: str) -> dict:
+def send(chat_id: str | None = None, text: str = "") -> dict:
     """Invia un messaggio a una chat. LEASE-FREE (modello telegram-proxy, 18 lug):
     il messaggero è l'UNICO mittente della colonia, quindi non serve il lease
     esclusivo — sarebbe solo attrito. Vale il vincolo di Telegram: si può scrivere
-    solo a chi ha già contattato il bot (o a un gruppo di cui il bot è membro)."""
+    solo a chi ha già contattato il bot (o a un gruppo di cui il bot è membro).
+
+    `chat_id` OMESSO → la chat legata al topic da cui si chiama, non un
+    default indovinato per nome (vedi `_resolve_chat_or_current`)."""
     tool_allowed("telegram.send")
     if not text:
         raise ValueError("'text' non può essere vuoto")
-    cid = _resolve_chat(chat_id)           # accetta chat_id numerico o nome gruppo
+    cid = _resolve_chat_or_current(chat_id)  # esplicito: id/nome; omesso: binding del topic
     with _LOCK:
         token = _token()
     res = api_call(token, "sendMessage", {"chat_id": int(cid), "text": text})
@@ -437,14 +470,16 @@ def _post_multipart(token: str, method: str, fields: dict,
     return payload["result"]
 
 
-def send_file(chat_id: str, filename: str, content_b64: str, caption: str = "") -> dict:
+def send_file(chat_id: str | None = None, filename: str = "", content_b64: str = "",
+             caption: str = "") -> dict:
     """Invia un file a una chat/gruppo come allegato (sendDocument) o, se è
-    un'immagine, come foto (sendPhoto). LEASE-FREE. `chat_id` accetta id o nome."""
+    un'immagine, come foto (sendPhoto). LEASE-FREE. `chat_id` accetta id o
+    nome; OMESSO → la chat legata al topic corrente (vedi `telegram.send`)."""
     import base64
     import mimetypes
     tool_allowed("telegram.send")
     data = base64.b64decode(content_b64)
-    cid = _resolve_chat(chat_id)
+    cid = _resolve_chat_or_current(chat_id)
     mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     as_photo = mime.startswith("image/") and not filename.lower().endswith((".svg", ".gif"))
     method, field = ("sendPhoto", "photo") if as_photo else ("sendDocument", "document")
