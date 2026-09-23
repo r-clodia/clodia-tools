@@ -101,6 +101,22 @@ class LocalFolderAddTests(Base):
         self.svc.local_folder_add(tier, name, "verbale-2026")
         self.assertTrue((self.root / LOCAL_SHARED_ROOT / "verbale-2026").is_dir())
 
+    def test_two_different_topics_never_share_the_same_real_subfolder(self):
+        """Trovato da Davide il 23 set 2026 su un topic con dati finanziari
+        riservati: senza il controllo globale, un secondo topic che sceglie
+        lo stesso mount_name di un primo finirebbe silenziosamente per
+        condividere la STESSA cartella reale — la segregazione promessa
+        romperebbe esattamente nel meccanismo che dovrebbe garantirla."""
+        self.monta_radice_condivisa()
+        self.crea_topic("SEAL-1", "acme")
+        self.crea_topic("SEAL-1", "beta")
+        out_a = self.svc.local_folder_add("SEAL-1", "acme", "documenti")
+        out_b = self.svc.local_folder_add("SEAL-1", "beta", "documenti")
+        self.assertNotEqual(out_a["local_folder"]["name"], out_b["local_folder"]["name"])
+        link_a = (self.root / "SEAL-1" / "acme" / "files" / out_a["local_folder"]["name"]).resolve()
+        link_b = (self.root / "SEAL-1" / "beta" / "files" / out_b["local_folder"]["name"]).resolve()
+        self.assertNotEqual(link_a, link_b)
+
     def test_a_colliding_name_gets_disambiguated_not_overwritten(self):
         tier, name = self.crea_topic()
         self.monta_radice_condivisa()
