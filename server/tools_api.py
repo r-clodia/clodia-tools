@@ -1373,7 +1373,11 @@ async def test_connector(request: Request):
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     cid = request.path_params["id"]
-    return JSONResponse(_test_connector(cid))
+    r = _test_connector(cid)
+    if r["ok"] is None and cid in {b.get("name") for b in (whitelist.CONFIG.get("mcp_backends") or [])}:
+        # non è uno dei provider nativi sopra: prova come backend MCP montato
+        r = await proxy.test_backend(cid)
+    return JSONResponse(r)
 
 
 routes = [
