@@ -11,8 +11,9 @@ from .service import TopicService
 
 
 class ExtractMentionsTests(unittest.TestCase):
-    def test_basic_sigils(self) -> None:
-        self.assertEqual(extract_mentions("ciao @davide, senti $mario"), ["davide", "mario"])
+    def test_only_the_at_sigil_is_a_mention(self) -> None:
+        # #391: `$` appartiene agli alias del composer, non è una menzione.
+        self.assertEqual(extract_mentions("ciao @davide, senti $mario"), ["davide"])
 
     def test_dedup_and_lowercase_first_occurrence_order(self) -> None:
         self.assertEqual(extract_mentions("@Davide poi @mario e ancora @davide"), ["davide", "mario"])
@@ -34,7 +35,7 @@ class ExtractMentionsTests(unittest.TestCase):
         self.assertEqual(extract_mentions("scrivi a d.carboni@gmail.com, log in /var/@web/x"), [])
 
     def test_open_punctuation_boundary_counts(self) -> None:
-        self.assertEqual(extract_mentions("(vedi @davide) e [cc $anna]"), ["davide", "anna"])
+        self.assertEqual(extract_mentions("(vedi @davide) e [cc @anna]"), ["davide", "anna"])
 
     def test_empty_and_none_like(self) -> None:
         self.assertEqual(extract_mentions(""), [])
@@ -75,22 +76,15 @@ class GoldenCasesTests(unittest.TestCase):
     """
 
     def test_extract_mentions_matches_the_shared_rule_set(self) -> None:
-        for testo, men, _hard, _soft in GOLDEN_CASES:
+        for testo, attesi in GOLDEN_CASES:
             with self.subTest(testo=testo):
-                self.assertEqual(men, extract_mentions(testo))
+                self.assertEqual(attesi, extract_mentions(testo))
 
-    def test_extract_tags_separates_the_two_sigils(self) -> None:
-        for testo, _men, hard, soft in GOLDEN_CASES:
+    def test_extract_tags_matches_the_shared_rule_set(self) -> None:
+        """Dal #391 un solo sigillo: le convocazioni sono le menzioni."""
+        for testo, attesi in GOLDEN_CASES:
             with self.subTest(testo=testo):
-                self.assertEqual((hard, soft), extract_tags(testo))
-
-    def test_the_mentions_are_the_ordered_union_of_the_two_sigils(self) -> None:
-        """`extract_mentions` non è `hard + soft`: è l'ordine del documento.
-        Un badge elenca i destinatari come sono scritti, non per sigillo."""
-        self.assertEqual(["mario", "davide"],
-                         extract_mentions("$mario avvisa, poi @davide decide"))
-        self.assertEqual((["davide"], ["mario"]),
-                         extract_tags("$mario avvisa, poi @davide decide"))
+                self.assertEqual(attesi, extract_tags(testo))
 
 
 class PostMessageMentionsTests(unittest.TestCase):
@@ -100,7 +94,7 @@ class PostMessageMentionsTests(unittest.TestCase):
             self.svc.new("SEAL-1", "ch", {"title": "Canale", "owner": "owner"})
 
     def test_message_carries_structured_mentions(self) -> None:
-        msg = self.svc.post_message("SEAL-1", "ch", "owner", "ping @davide e $$anna")
+        msg = self.svc.post_message("SEAL-1", "ch", "owner", "ping @davide e $anna")
         self.assertEqual(msg["mentions"], ["davide"])
         stored = self.svc.list_messages("SEAL-1", "ch")[-1]
         self.assertEqual(stored["mentions"], ["davide"])
