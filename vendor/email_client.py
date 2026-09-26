@@ -357,6 +357,38 @@ def search_emails(account, query, folder="INBOX", limit=20):
     return result
 
 
+def _part_bytes(part):
+    """Byte di una parte MIME, contenitori message/rfc822 inclusi.
+
+    `get_payload(decode=True)` torna `None` per un contenitore (un `.eml`
+    allegato): il suo payload è una LISTA con dentro il sotto-messaggio, non
+    bytes con un Content-Transfer-Encoding da sciogliere. Scartare quel `None`
+    faceva sparire l'allegato pur essendo elencato da `read_email`, che il nome
+    lo legge senza mai decodificare (issue #400). L'unico modo di ottenere i
+    byte del .eml è riserializzare il sotto-messaggio.
+
+    Ritorna `None` solo quando la parte non ha davvero contenuto: chi chiama
+    distingue ancora «non estraibile» da «vuoto».
+    """
+    payload = part.get_payload(decode=True)
+    if payload is not None:
+        return payload
+    raw = part.get_payload(decode=False)
+    if isinstance(raw, list):
+        # Un message/rfc822 ne contiene esattamente uno; il join copre senza
+        # perdite il caso teorico di più sotto-messaggi.
+        serialized = b"\n".join(
+            sub.as_bytes() if hasattr(sub, "as_bytes") else str(sub).encode("utf-8")
+            for sub in raw
+        )
+        return serialized or None
+    if isinstance(raw, str):
+        return raw.encode("utf-8")
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw)
+    return None
+
+
 def download_attachments(account, email_id, output_dir=".", folder="INBOX"):
     imap = connect_imap(account)
     imap.select(folder, readonly=True)
@@ -377,15 +409,9 @@ def download_attachments(account, email_id, output_dir=".", folder="INBOX"):
                 if filename:
                     decoded_filename = decode_mime_header(filename)
                     filepath = Path(output_dir) / decoded_filename
-                    payload = part.get_payload(decode=True)
+                    payload = _part_bytes(part)
                     if payload is None:
-                        payload = part.get_payload(decode=False)
-                        if isinstance(payload, str):
-                            payload = payload.encode("utf-8")
-                        elif isinstance(payload, list):
-                            continue
-                        else:
-                            continue
+                        continue
                     with open(filepath, "wb") as f:
                         f.write(payload)
                     downloaded.append({
@@ -416,7 +442,7 @@ def get_attachment(account, email_id, filename, folder="INBOX"):
                     continue
                 fn = part.get_filename()
                 if fn and decode_mime_header(fn) == filename:
-                    payload = part.get_payload(decode=True)
+                    payload = _part_bytes(part)
                     if payload is None:
                         continue
                     target = {
