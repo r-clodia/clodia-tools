@@ -273,13 +273,40 @@ def note_run_refusal(*, chat_id: str, verb: str, why: str = "") -> dict:
 
 
 def jobs() -> dict:
-    """I job schedulati (cron/intervallo) e il loro stato."""
-    data = _get("/clodia/jobs")
+    """I job schedulati (cron/intervallo) e il loro stato — TUTTI.
+
+    `include_topic_triggers=true` non è un di più: senza, l'agent-server filtra
+    i job `mode: topic_trigger` e questa lista risponde «non c'è» su un job che
+    c'è. È successo il 26/09/2026 col job 6, che nel frattempo riemetteva un
+    ordine ogni 15 minuti (clodia-platform#399): chi interrogava concludeva in
+    buona fede che il job fosse stato rimosso.
+
+    Per la stessa ragione `mode` e il topic sono fra i campi riportati: un
+    trigger in mezzo ai job cron, senza il campo che dice cos'è e a quale stanza
+    appartiene, si legge come un job qualunque che non si trova più nel pannello.
+    """
+    data = _get("/clodia/jobs?include_topic_triggers=true")
     rows = data if isinstance(data, list) else data.get("jobs", [])
-    out = [_pick(j, ("id", "job_id", "name", "agent", "kind", "schedule",
-                     "cron", "enabled", "next_run", "last_run"))
+    out = [_pick(j, ("id", "job_id", "name", "agent", "kind", "mode", "schedule",
+                     "cron", "cron_expr", "interval_minutes", "repeat_count",
+                     "fired_count", "topic_tier", "topic_name", "owner",
+                     "enabled", "next_run", "last_run"))
            for j in rows]
     return {"count": len(out), "jobs": out}
+
+
+def set_job_enabled(job_id: int, enabled: bool, *, by: str = "",
+                    reason: str = "") -> dict:
+    """Proxy: ACCENDE o SPEGNE un job già schedulato, trigger di topic compresi.
+
+    È l'unico verbo che ferma un'esecuzione autonoma ricorrente già in corso.
+    Fino al 26/09/2026 non esisteva: un trigger che ripeteva un ordine obsoleto
+    si poteva solo scalare a una persona, e quel giorno entrambi i canali verso
+    l'owner erano rotti (clodia-platform#399). Non crea né cancella nulla — la
+    creazione resta `jobs.propose`, la cancellazione non è di un agente."""
+    return _post(f"/clodia/jobs/{int(job_id)}/set-enabled/internal", {
+        "enabled": bool(enabled), "by": by or "", "reason": reason or "",
+    })
 
 
 def chats() -> dict:

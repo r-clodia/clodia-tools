@@ -70,6 +70,11 @@ _GATE_CLASS = {
     "packs.import_url": GATE_SYSTEM, "packs.remove": GATE_SYSTEM,
     "packs.install_pip": GATE_SYSTEM, "packs.install_npm": GATE_SYSTEM,
     "providers.pause": GATE_SYSTEM, "providers.resume": GATE_SYSTEM,
+    # Un job schedulato è esecuzione autonoma RICORRENTE: accenderlo o spegnerlo
+    # cambia cosa la macchina fa da sola quando nessuno guarda, non una risorsa
+    # dentro uno scope. Stessa classe di `providers.pause` — e stessa ragione per
+    # cui `jobs.propose` passa dall'owner (clodia-platform#399).
+    "jobs.set_enabled": GATE_SYSTEM,
     # WALLS — chi sta nello scope, o quanto è largo
     "topic.add_participant": GATE_WALLS,
     "topic.remove_participant": GATE_WALLS,
@@ -149,6 +154,12 @@ _DEFAULT_GATED_EXACT = frozenset({
     "packs.install_pip", "packs.install_npm",
     # providers: pausa/ripresa (egress dati); providers.list NON gated
     "providers.pause", "providers.resume",
+    # jobs: fermare o riaccendere un'esecuzione autonoma ricorrente.
+    # `jobs.list`/`jobs.report_status` NON gated (leggere, e dichiarare l'esito
+    # del proprio run, non sono mutazioni). È gated in ENTRAMBE le direzioni,
+    # come `providers.pause`/`resume`: riaccendere un job che qualcuno aveva
+    # fermato apposta è l'atto più privilegiato dei due, non il meno.
+    "jobs.set_enabled",
     # gestione partecipanti di un topic (auto-invito / confused-deputy)
     "topic.add_participant", "topic.remove_participant",
     # La cartella Drive dichiarata di un topic È il suo perimetro di accesso
