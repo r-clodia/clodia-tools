@@ -2466,7 +2466,17 @@ def _dispatch_runtime(name: str, arguments: dict, caller: str | None = None):
     if sub == "chats":
         return runtime.chats()
     if sub == "topics":
-        return runtime.topics(include_restricted=bool(arguments.get("include_restricted")))
+        # Stessa porta di `topic.list`/`topic.search`, altra maniglia: anche qui
+        # il filtro è sulla membership del SEED. Compartimentarne uno solo
+        # lascerebbe il verbo accanto a rifare quello che si è appena chiuso —
+        # ed è proprio da `runtime.topics()` che nasce la decisione del 23 set
+        # sul grant `crosstopic` (clodia-platform#401, residuo di #382).
+        out = runtime.topics(include_restricted=bool(arguments.get("include_restricted")))
+        righe = _scope_rows_to_this_room(
+            (out or {}).get("topics") or [], caller or agent_name() or "")
+        # `count` segue le righe: un numero che non corrisponde racconterebbe
+        # comunque quante stanze esistono, e il numero è già informazione.
+        return {**(out or {}), "count": len(righe), "topics": righe}
     if sub == "mcp_servers":
         return runtime.mcp_servers()
     if sub == "providers":
@@ -4590,6 +4600,27 @@ def _require_person_of_this_room(meta, tier, name, tier_t, mutating: bool) -> No
             f"{tier}/{name} (accesso negato: livello)")
 
 
+def _crosstopic_grant_active(caller: str) -> bool:
+    """Il grant `crosstopic` vivo per QUESTO spawn — non per il seed.
+
+    Decisione di Davide, 23 set 2026: il consenso copre lo spawn a cui è stato
+    approvato, e l'eleggibilità è un asse A MONTE del gate. Per un agente fuori
+    da `_CROSSTOPIC_ELIGIBLE` il gate non viene nemmeno interrogato: se anche
+    qualcosa risultasse attivo, non sarebbe una via d'accesso.
+
+    Sta in una funzione sola perché i chiamanti sono due — il dispatch dei verbi
+    con bersaglio (`_require_topic_member`) e l'elenco dei topic
+    (`_scope_rows_to_this_room`) — e due copie di questa condizione sono due
+    posti in cui dimenticare la metà che conta.
+    """
+    from . import gate as _gate
+    from .whitelist import current_spawn as _current_spawn
+    spawn = _current_spawn()
+    return (caller in _CROSSTOPIC_ELIGIBLE
+            and bool(spawn)
+            and _gate.active(caller, spawn, "crosstopic"))
+
+
 def _require_topic_member(svc, tier, name, mutating: bool = False) -> None:
     """ACL compartimento (need-to-know).
 
@@ -4632,17 +4663,7 @@ def _require_topic_member(svc, tier, name, mutating: bool = False) -> None:
         _require_person_of_this_room(meta, tier, name, tier_t, mutating)
         return
     agent_ok = _topic_is_member(meta, caller)
-    # cross-topic: consentito SOLO con il grant 'crosstopic' attivo per QUESTO
-    # spawn — non per il seed (decisione di Davide, 23 set 2026). Eleggibile
-    # solo clodia/sysadmin: per chiunque altro `cross_ok` resta sempre falso,
-    # senza nemmeno interrogare il gate.
-    from . import gate as _gate
-    from .whitelist import current_spawn as _current_spawn
-    cross_ok = (
-        caller in _CROSSTOPIC_ELIGIBLE
-        and bool(_current_spawn())
-        and _gate.active(caller, _current_spawn(), "crosstopic")
-    )
+    cross_ok = _crosstopic_grant_active(caller)
     if not (agent_ok or cross_ok):
         raise PermissionError(
             f"accesso negato al topic {tier}/{name}: l'agente '{caller}' non è "
@@ -4711,6 +4732,53 @@ def _filter_member_rows(rows: list, caller: str) -> list:
             continue
         out.append(r)
     return out
+
+
+def _scope_rows_to_this_room(rows: list, caller: str) -> list:
+    """L'elenco dei topic è compartimentato per SPAWN, non per seed (#401).
+
+    `_filter_member_rows` decide sulla membership del SEED, e nessuno guardava
+    da quale stanza partisse la chiamata: uno spawn fermo nella stanza X
+    riceveva una riga per ogni topic del seed — con `search`, titolo E `tldr`,
+    cioè la prima riga del summary. È il residuo del punto 4 di
+    clodia-platform#382: gli altri verbi `topic.*` hanno un bersaglio
+    `tier`/`name` e passano da `_cross_topic_gate_key`; `list` e `search` no.
+
+    Il `qui` viene dal claim FIRMATO (`current_channel()`), mai da un argomento:
+    la stanza dichiarata dall'agente sarebbe la sua parola su dove si trova.
+
+    Fuori da una stanza NON si restringe, ed è una scelta: il difetto è portare
+    dentro X ciò che appartiene a Y, e senza un «qui» non c'è nessun X. Lì
+    c'è una sessione presidiata della webui — un umano che chiede quali topic
+    esistono — e svuotarle l'elenco toglierebbe una funzione senza chiudere
+    niente. Una sessione NON presidiata non arriva fin qui: `list`/`search` le
+    sono negati a monte (`_UNATTENDED_TOPIC_ALLOW`).
+
+    Con il grant `crosstopic` attivo l'elenco torna intero: chi deve davvero
+    guardare fuori non perde il verbo, lo usa con un consenso esplicito.
+
+    Stessa maniglia di rollout del resto del compartimento
+    (`_spawn_compartment_mode`), così `report`/`off` valgono per l'intera regola
+    e non si crea una seconda leva da ricordare.
+    """
+    modo = _spawn_compartment_mode()
+    if modo == "off":
+        return rows
+    from .whitelist import current_channel
+    qui = current_channel()
+    if not qui or _crosstopic_grant_active(caller):
+        return rows
+    dentro = [r for r in rows
+              if _norm_scope(f"{r.get('tier')}/{r.get('name')}") == _norm_scope(qui)]
+    if modo == "report":
+        if len(dentro) != len(rows):
+            import logging as _lg
+            _lg.getLogger("clodia-tools").warning(
+                "compartimento spawn · %s elenca %d topic stando in %s: con "
+                "enforcement ne vedrebbe %d (gli altri sono del seed, non della "
+                "stanza)", caller, len(rows), qui, len(dentro))
+        return rows
+    return dentro
 
 
 def _rag_grants(agent: str) -> dict[str, set[str]]:
@@ -5189,11 +5257,19 @@ def _dispatch_topic(name: str, a: dict):
                 return righe
             return [r for r in righe
                     if str(r.get("tier")) == solo[0] and str(r.get("name")) == solo[1]]
+        # Per uno SPAWN lo stesso confinamento vale sulla stanza da cui parte la
+        # chiamata, non solo sulla membership del seed: `_scope_rows_to_this_room`
+        # (clodia-platform#401). I due filtri si compongono nell'ordine in cui
+        # stringono — prima need-to-know del seed, poi la stanza — e nessuno dei
+        # due sostituisce l'altro.
+        chi = agent_name()
         if verb == "list":
-            return _filter_member_rows(
-                svc.list(a.get("tier"), a.get("include_archived", False)), agent_name())
+            return _scope_rows_to_this_room(_filter_member_rows(
+                svc.list(a.get("tier"), a.get("include_archived", False)), chi), chi)
         res = svc.search(a["query"], a.get("mode", "lexical"))
-        return _filter_member_rows(res, agent_name()) if isinstance(res, list) else res
+        if not isinstance(res, list):
+            return res
+        return _scope_rows_to_this_room(_filter_member_rows(res, chi), chi)
     if verb == "files":
         return svc.list_files(a["tier"], a["name"], a.get("subpath", ""))
     if verb == "read_file":
