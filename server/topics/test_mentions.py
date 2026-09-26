@@ -87,6 +87,37 @@ class GoldenCasesTests(unittest.TestCase):
                 self.assertEqual(attesi, extract_tags(testo))
 
 
+class EmphasisBoundaryTests(unittest.TestCase):
+    """clodia-logic#457 · l'enfasi markdown è un confine, non un nascondiglio.
+
+    `**@sysadmin**` valeva `[]`: l'asterisco non era fra i caratteri ammessi
+    prima del sigillo. Lato gateway il danno è il campo `mentions` vuoto —
+    nessun badge azionabile, nessuna notifica a chi è stato chiamato; lato
+    router (l'altra copia) è l'ordine che non parte. Una regola sola, due
+    effetti, ed è per questo che il fix va in entrambe le copie.
+
+    I casi vivono in `GOLDEN_CASES` (li esegue anche `clodia-logic`); qui si
+    misura l'effetto dove conta per questo repository: il campo strutturato
+    scritto da `post_message`.
+    """
+
+    def test_bold_and_italic_mentions_are_mentions(self) -> None:
+        self.assertEqual(["sysadmin"], extract_mentions("**@sysadmin** guarda"))
+        self.assertEqual(["clodia"], extract_mentions("*@clodia* nota"))
+        self.assertEqual(["davide"], extract_mentions("***@davide*** decide"))
+
+    def test_the_other_rules_still_hold_inside_emphasis(self) -> None:
+        self.assertEqual([], extract_mentions("**scrivi a foo@bar.com**"))
+        self.assertEqual([], extract_mentions("**$clodia**"))
+        self.assertEqual([], extract_mentions("usa `**@clodia**` come placeholder"))
+        self.assertEqual([], extract_mentions("> **@clodia** aveva scritto così"))
+
+    def test_the_dollar_amount_is_not_a_mention(self) -> None:
+        """Il caso preesistente citato dalla issue: non cambia."""
+        self.assertEqual([], extract_mentions("costa $100 in tutto"))
+        self.assertEqual([], extract_mentions("**costa $100 in tutto**"))
+
+
 class PostMessageMentionsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.svc = TopicService(LocalFsStorage(tempfile.mkdtemp()))
@@ -102,6 +133,14 @@ class PostMessageMentionsTests(unittest.TestCase):
     def test_message_without_mentions_has_empty_list(self) -> None:
         msg = self.svc.post_message("SEAL-1", "ch", "owner", "solo testo ordinario")
         self.assertEqual(msg["mentions"], [])
+
+    def test_a_bold_mention_reaches_the_structured_field(self) -> None:
+        """#457 dal lato di questo repository: senza il fix il messaggio veniva
+        archiviato con `mentions: []` e il destinatario non riceveva il badge."""
+        msg = self.svc.post_message("SEAL-1", "ch", "owner", "**@davide** guarda")
+        self.assertEqual(msg["mentions"], ["davide"])
+        stored = self.svc.list_messages("SEAL-1", "ch")[-1]
+        self.assertEqual(stored["mentions"], ["davide"])
 
 
 if __name__ == "__main__":
