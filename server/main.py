@@ -2643,6 +2643,32 @@ def _current_spawn_safe() -> str:
     return _cs() or "-"
 
 
+def _telegram_chat_id_or_raise(arguments: dict) -> None:
+    """`chat_id` di `telegram.send` in una delle due forme di `tg:` — l'id
+    numerico di un gruppo o `@handle` — altrimenti ValueError con la via giusta.
+
+    Il messaggio nomina la chat legata al canale corrente, se esiste: è quasi
+    sempre quella che si intendeva, e dirlo evita un secondo tentativo a vuoto.
+    """
+    from . import egress as _eg
+    cid = str(arguments.get("chat_id") or "").strip()
+    if _eg._TG_GROUP.match(cid) or _eg._TG_HANDLE.match(cid):
+        return
+    legato = None
+    canale = current_channel()
+    if canale and "/" in canale:
+        try:
+            from .topics_api import _telegram_binding_for
+            legato, _b = _telegram_binding_for(*canale.split("/", 1))
+        except Exception:  # noqa: BLE001 — il suggerimento è un aiuto, non un requisito
+            legato = None
+    via = (f" In questo canale il gruppo legato è chat_id='{legato}': usa quello."
+           if legato else " Usa l'id numerico del gruppo (negativo per i supergruppi).")
+    raise ValueError(
+        f"telegram.send: chat_id '{cid}' non è una chat Telegram — serve l'id numerico "
+        f"di un gruppo o '@handle' di una persona, non il nome del gruppo." + via)
+
+
 def _is_super(name: str | None) -> bool:
     return (name or "") in _SUPER_AGENTS
 
@@ -3998,6 +4024,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             _eargs = arguments
             if name == "email.reply" and not (arguments.get("to") or ""):
                 _eargs = {**arguments, "to": _reply_recipient(arguments)}
+            elif name == "telegram.send":
+                # Un `chat_id` che non è una chat Telegram (il TITOLO del gruppo,
+                # «Clodia Sviluppo») diventava `tg:Clodia Sviluppo`, che nessuna
+                # lista contiene: il gateway apriva un gate per approvare un
+                # indirizzo che non esiste, mentre il gruppo vero era già in
+                # whitelist (clodia-platform#402). Si rifiuta PRIMA del verdetto,
+                # dicendo l'id giusto quando il canale ne ha uno legato.
+                _telegram_chat_id_or_raise(arguments)
             elif name == "github.push":
                 # Senza questa riga il PDP vede un verbo con destinazione ignota
                 # e nega: è ciò che è successo il 17 ago 2026 appena `push` è
