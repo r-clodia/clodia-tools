@@ -103,11 +103,11 @@ _GATE_CLASS = {
 _PREFIX_CLASS = {
     "settings.": GATE_SYSTEM, "pki.": GATE_SYSTEM, "ca.": GATE_SYSTEM,
     # `copybrain:<seed>` (clodia-platform#393): uno spawn prende in prestito i
-    # verbi di un altro seed. Lo decide l'utente IN CONTESTO (decisione di
-    # Davide), cioè l'owner della stanza in cui lo spawn lavora — la regola dei
-    # `walls`: allarga ciò che si può fare dentro quello scope. Fuori da una
-    # stanza decide un admin, come per ogni gate senza scope.
-    COPYBRAIN_PREFIX: GATE_WALLS,
+    # verbi di un altro seed. È `system`: decide un ADMIN, non l'owner della
+    # stanza (correzione di Davide, 26 set 2026). Prestare un intero mestiere
+    # cambia chi può fare cosa sulla macchina, non quanto è largo uno scope —
+    # la stessa ragione per cui `agents.grant_tool` è `system`.
+    COPYBRAIN_PREFIX: GATE_SYSTEM,
     # `egress:<tipo>:<destinazione>` — la chiave di un gate per DESTINAZIONE, non
     # per verbo (`egress.gate_key`). Non era classificata, e il 10 ago 2026 la
     # card l'ha detto: «attraversa un confine che il gateway non ha

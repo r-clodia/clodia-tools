@@ -14,8 +14,9 @@ concede verbi nuovi»), e i suoi confini sono ciò che la rende accettabile:
 - **fino a fine spawn**: non si consuma all'uso; lo chiude la revoca che
   l'agent-server manda alla pulizia del workspace (`gate.revoke_instance`), con
   il tetto di 24 ore della capability come rete;
-- **deciso dall'utente in contesto**: classe `walls` (`gate._PREFIX_CLASS`),
-  cioè l'owner della stanza in cui lo spawn lavora; fuori stanza un admin;
+- **deciso da un admin**: classe `system` (`gate._PREFIX_CLASS`). Non basta
+  essere owner della stanza: prestare un mestiere cambia chi può fare cosa
+  sulla macchina (correzione di Davide, 26 set 2026);
 - **mai ricordato**: nessuna delega permanente, nessun «approva sempre» — un
   consenso ricordato coprirebbe gli spawn futuri, cioè il seed;
 - **nessuna scorciatoia**: i verbi in prestito entrano in `effective_tools`
@@ -45,7 +46,7 @@ TOOLS: list[Tool] = [
         name="copybrain.assume",
         description=(
             "Assume i verbi di un altro seed per QUESTO spawn, fino alla sua fine. "
-            "Chiede un gate: decide l'owner della stanza (fuori stanza un admin). "
+            "Chiede un gate: decide un admin della piattaforma. "
             "Approvato, restituisce i verbi presi in prestito con i loro schemi: "
             "si invocano con copybrain.call. Usalo quando il compito richiede il "
             "mestiere di un altro agente e farlo tu è più sensato che delegarlo."

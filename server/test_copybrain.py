@@ -8,7 +8,8 @@ usando. Le proprietà che contano, una per test:
 - i verbi in prestito valgono per il CHIAMANTE e per il suo SPAWN, non per il
   seed né per chi calcola i verbi di un altro agente;
 - il prestito non si concatena;
-- il consenso è `walls`, legato allo spawn, non consumato e mai delegato;
+- il consenso è `system` (lo decide un admin), legato allo spawn, non
+  consumato e mai delegato;
 - `copybrain.call` rifiuta ciò che non è in prestito;
 - la capability di copybrain ha un tetto lungo, le altre no;
 - la fine dello spawn revoca il prestito.
@@ -93,8 +94,9 @@ class BorrowedToolsTests(unittest.TestCase):
 
 
 class GateShapeTests(unittest.TestCase):
-    def test_copybrain_is_decided_by_the_owner_of_the_room(self):
-        self.assertEqual(gate.GATE_WALLS, gate.gate_class("copybrain:commercialista"))
+    def test_copybrain_is_decided_by_an_admin_not_by_the_owner_of_the_room(self):
+        """Correzione di Davide (26 set 2026): prestare un mestiere è `system`."""
+        self.assertEqual(gate.GATE_SYSTEM, gate.gate_class("copybrain:commercialista"))
 
     def test_only_the_copybrain_capability_has_the_long_ceiling(self):
         self.assertEqual(24 * 60, pki_mint.capability_ceiling_minutes("gate:copybrain:avvocato"))
