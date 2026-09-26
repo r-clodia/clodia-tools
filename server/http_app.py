@@ -19,6 +19,7 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.routing import Mount
 
+from .claims import ClaimsContext
 from . import inflight, whitelist
 from .main import app as mcp_server
 from .pki_verify import verify_session_token
@@ -38,7 +39,7 @@ async def _send_401(send, reason: str) -> None:
 
 
 class _AuthMiddleware:
-    """Verifica il Bearer ckt1 e imposta l'agente nel contextvar whitelist."""
+    """Verifica il Bearer ckt1 e imposta i claim nei contextvar (`ClaimsContext`)."""
 
     def __init__(self, handler):
         self.handler = handler
@@ -69,39 +70,10 @@ class _AuthMiddleware:
                 return
         except Exception as e:  # noqa: BLE001 — un difetto qui non deve chiudere il gateway
             LOG.error("verifica revoca fallita: %s", e)
-        tok = whitelist.set_current_agent(str(payload.get("agent") or ""))
-        # claim `principal` (utente umano della chat) → contextvar per runtime.current_user
-        ptok = whitelist.set_current_principal(payload.get("principal") or None)
-        # token grezzo verificato → inoltrabile al backend (agents.* → caps)
-        ttok = whitelist.set_current_token(token or None)
-        # clearance firmata → enforcement clearance≥tier sui topic
-        ctok = whitelist.set_current_clearance(payload.get("clearance") or None)
-        # RBAC umana (PDP unico): claim firmati dall'agent-server per le chiamate
-        # ON-BEHALF di un umano → autorizzazione per ruolo, non per carrier-agent.
-        obtok = whitelist.set_current_on_behalf(bool(payload.get("on_behalf")))
-        # Natura del principal: una persona o un sistema terzo. Serve a scrivere
-        # `kind` giusto all'ingresso (clodia-platform#248); assente = persona,
-        # perché il claim lo scrive solo chi conia qui.
-        pktok = whitelist.set_current_principal_kind(payload.get("principal_kind"))
-        hrtok = whitelist.set_current_human_role(payload.get("human_role") or None)
-        chtok = whitelist.set_current_chat(payload.get("chat") or None)
-        ogtok = whitelist.set_current_origin(payload.get("origin") or None)
-        untok = whitelist.set_current_unattended(bool(payload.get("unattended")))
-        stok = whitelist.set_current_scoped_tools(payload.get("scoped_tools") or None)
-        try:
+        # Gli stessi claim, dalla stessa tabella, di ogni altra porta del gateway
+        # (clodia-platform#398): qui mancavano lo spawn e lo `scope_tier`.
+        with ClaimsContext(payload, token):
             await self.handler(scope, receive, send)
-        finally:
-            whitelist.reset_current_scoped_tools(stok)
-            whitelist.reset_current_chat(chtok)
-            whitelist.reset_current_origin(ogtok)
-            whitelist.reset_current_unattended(untok)
-            whitelist.reset_current_human_role(hrtok)
-            whitelist.reset_current_on_behalf(obtok)
-            whitelist.reset_current_principal_kind(pktok)
-            whitelist.reset_current_clearance(ctok)
-            whitelist.reset_current_token(ttok)
-            whitelist.reset_current_principal(ptok)
-            whitelist.reset_current_agent(tok)
 
 
 @asynccontextmanager
