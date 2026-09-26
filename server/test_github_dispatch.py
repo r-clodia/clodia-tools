@@ -77,6 +77,52 @@ class TheCredentialIsScopeLevelTests(unittest.TestCase):
         self.assertEqual(chiamate, [("SEAL-1", "acme")])
 
 
+class AShallowCloneCanBeAskedForTests(unittest.TestCase):
+    """clodia-platform#371 — uno schema che dichiara un parametro e un dispatch
+    che lo lascia cadere è il difetto peggiore della famiglia: l'agente lo passa,
+    il gateway risponde ok, e il clone resta intero. Nessun errore, nessun
+    sintomo, solo il turno ucciso come prima."""
+
+    def _clona(self, args: dict) -> dict:
+        visti = {}
+
+        class FintoSvc:
+            @staticmethod
+            def _require_approved_repo(url, tier, name):
+                pass
+
+        def finto_clone(repo, dest, **kw):
+            visti.update(kw)
+            return {"ok": True}
+
+        with patch.object(M, "_current_topic", lambda: ("SEAL-1", "acme")), \
+             patch.object(M, "_topics", lambda: FintoSvc()), \
+             patch.object(M, "_safe_scratch_path", lambda p: "/datadir/spawns/s/lavoro"), \
+             patch.object(M, "_repo_credential", lambda *a: None), \
+             patch("server.tools.github_repo.clone", finto_clone):
+            M._dispatch_github("github.clone", args)
+        return visti
+
+    def test_depth_reaches_git(self):
+        visti = self._clona({"repo": "acme/tool", "dest": "lavoro", "depth": 1})
+        self.assertEqual(visti.get("depth"), 1)
+
+    def test_without_depth_nothing_changes(self):
+        """Il default resta il clone intero: chi ha bisogno della storia non
+        deve scoprire di averla persa."""
+        visti = self._clona({"repo": "acme/tool", "dest": "lavoro"})
+        self.assertIsNone(visti.get("depth"))
+
+    def test_the_tool_description_warns_before_the_wall(self):
+        """Il costo misurato nel ticket è di un limite scopribile solo
+        sbattendoci contro: se la descrizione non lo nomina, il prossimo spawn
+        lo impara allo stesso prezzo."""
+        strumento = next(t for t in M._GITHUB_TOOLS if t.name == "github.clone")
+        self.assertIn("depth", strumento.inputSchema["properties"])
+        testo = strumento.description + str(strumento.inputSchema)
+        self.assertIn("180", testo)
+
+
 class GateClassTests(unittest.TestCase):
     """Portare fuori e portare dentro non sono lo stesso atto."""
 

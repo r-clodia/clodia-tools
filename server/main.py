@@ -661,13 +661,20 @@ _GITHUB_TOOLS: list[Tool] = [
         name="github.clone",
         description=("Clona un repository APPROVATO per questo topic nella tua "
                      "scratch. La credenziale la fornisce l'owner al mount e non "
-                     "entra mai nel tuo processo."),
+                     "entra mai nel tuo processo. Un clone non emette eventi per "
+                     "tutta la durata del download: se supera i 180s il watchdog "
+                     "chiude il turno — su un repository grande passa `depth: 1`."),
         inputSchema={"type": "object", "properties": {
             "repo": {"type": "string", "description": (
                 "https://github.com/<owner>/<repo> — vale anche la forma breve "
                 "<owner>/<repo>, che assume github.com")},
             "dest": {"type": "string", "description": "cartella di destinazione nella tua scratch"},
             "branch": {"type": "string"},
+            "depth": {"type": "integer", "minimum": 1, "description": (
+                "clone superficiale: gli ultimi N commit del solo ramo clonato "
+                "invece di tutta la storia. `1` basta quando ti serve il working "
+                "tree e non la history, ed è la differenza fra secondi e minuti "
+                "su un repository grande. Omettilo per avere la storia intera.")},
         }, "required": ["repo", "dest"]},
     ),
     Tool(
@@ -2020,7 +2027,8 @@ def _dispatch_github(name: str, a: dict):
         token = _repo_credential(svc, tier, tname, canonico)
     if verb == "clone":
         dest = _safe_scratch_path(a["dest"])
-        return gh.clone(canonico, dest, token=token, branch=a.get("branch"))
+        return gh.clone(canonico, dest, token=token, branch=a.get("branch"),
+                        depth=a.get("depth"))
     if verb in ("pull", "push"):
         workdir = _safe_scratch_path(a["dir"])
         # Il repository di questo working tree non lo dice il chiamante: lo dice
