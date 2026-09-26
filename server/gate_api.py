@@ -85,6 +85,32 @@ async def deny(request: Request):
     return JSONResponse({"ok": True, "denied": removed})
 
 
+async def revoke_instance(request: Request):
+    """POST /internal/gate/revoke_instance {agent, instance} — ritira i consensi
+    `copybrain:*` di uno spawn che termina (clodia-platform#393).
+
+    Lo chiama l'agent-server alla pulizia del workspace dello spawn: il consenso
+    vale «fino a fine spawn», e la fine la conosce lui. Solo il prefisso
+    `copybrain:` è revocabile da qui, e solo per QUELLA istanza: è una riduzione
+    di autorità, il peggio che può fare un chiamante è togliere un prestito."""
+    principal, err = _authorize(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    agent = (body.get("agent") or "").strip()
+    instance = (body.get("instance") or "").strip()
+    if not agent or not instance or instance == "-":
+        return JSONResponse({"error": "agent/instance richiesti"}, status_code=400)
+    revoked = gate.revoke_instance(agent, instance, gate.COPYBRAIN_PREFIX)
+    if revoked:
+        LOG.info("COPYBRAIN revocato a fine spawn %s@%s: %s (da %s)", agent, instance,
+                 revoked, principal)
+    return JSONResponse({"ok": True, "revoked": revoked})
+
+
 async def pending(request: Request):
     """GET /internal/gate/pending — richieste di gate in attesa (per il popup)."""
     _principal, err = _authorize(request)
@@ -144,4 +170,5 @@ routes = [
     Route("/internal/gate/grant", grant, methods=["POST"]),
     Route("/internal/gate/deny", deny, methods=["POST"]),
     Route("/internal/gate/pending", pending, methods=["GET"]),
+    Route("/internal/gate/revoke_instance", revoke_instance, methods=["POST"]),
 ]

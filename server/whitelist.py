@@ -720,7 +720,49 @@ def parents_of(name: str) -> list:
 
 
 def effective_tools(name: str | None) -> set:
-    """Verbi EFFETTIVI di un principal: i propri PIÙ quelli ereditati.
+    """Verbi EFFETTIVI di un principal: i propri, quelli ereditati e, per lo
+    spawn chiamante, quelli presi in prestito con `copybrain`.
+
+    Il prestito sta QUI perché questo è l'unico risolutore della matrice
+    (vedi `_resolved_tools`): se i verbi in prestito passassero da un percorso a
+    parte, i tre lettori tornerebbero a dare tre risposte diverse.
+    """
+    return _resolved_tools(name) | borrowed_tools(name)
+
+
+def borrowed_tools(name: str | None) -> set:
+    """Verbi presi in prestito con `copybrain` (clodia-platform#393).
+
+    Solo per il CHIAMANTE e solo per il suo spawn: `name` deve essere l'agente
+    del token, e lo spawn viene dal claim `execution_id` firmato. Chi calcola i
+    verbi di un ALTRO agente (la scheda, `agent_may` per un terzo) non vede i
+    prestiti di nessuno, e il consenso dato a `clodia-3` non vale per
+    `clodia-4` né per il seed `clodia`.
+
+    Si prende la matrice RISOLTA del seed copiato — i suoi verbi e quelli che
+    eredita — ma mai i prestiti di quel seed: il prestito non si concatena.
+    """
+    n = str(name or "")
+    if not n:
+        return set()
+    try:
+        chiamante = _CURRENT_AGENT.get()
+    except LookupError:
+        chiamante = None
+    spawn = current_spawn()
+    if not chiamante or str(chiamante) != n or not spawn:
+        return set()
+    from . import gate as _gate
+    fuori: set = set()
+    for chiave in _gate.active_with_prefix(n, spawn, _gate.COPYBRAIN_PREFIX):
+        seed = chiave[len(_gate.COPYBRAIN_PREFIX):]
+        if seed and seed != n:
+            fuori |= (_resolved_tools(seed) or set())
+    return fuori
+
+
+def _resolved_tools(name: str | None) -> set:
+    """Verbi propri PIÙ quelli ereditati — la matrice dichiarata, senza prestiti.
 
     Un punto solo, e questa è la ragione per cui esiste. La matrice era letta in
     **tre** posti — `main._declared_tools`, `origin._agent_may` e
