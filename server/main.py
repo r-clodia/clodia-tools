@@ -1316,8 +1316,34 @@ _RUNTIME_TOOLS: list[Tool] = [
 # superficie di privilegio, deve passare dall'umano).
 _JOBS_TOOLS: list[Tool] = [
     Tool(name="jobs.list",
-         description="Elenca i job schedulati dell'istanza (cron + stato). Sola lettura.",
+         description=("Elenca i job schedulati dell'istanza — cron, intervallo E "
+                      "trigger di topic — con stato, cadenza e ripetizioni "
+                      "consumate. Sola lettura."),
          inputSchema={"type": "object", "properties": {}}),
+    Tool(name="jobs.set_enabled",
+         description=("FERMA (o riaccende) un job già schedulato. GATED: la "
+                      "esegue l'owner approvando, non tu.\n\n"
+                      "Usalo quando un job o un trigger di topic continua a "
+                      "partire e non dovrebbe più: un ordine ricorrente su un "
+                      "lavoro già chiuso, un trigger che ripete un messaggio "
+                      "obsoleto, un job che fallisce a ogni fire. Prendi l'id da "
+                      "`jobs.list` e spiega in `reason` perché va fermato: quel "
+                      "testo è ciò che l'owner legge per decidere.\n\n"
+                      "Non cancella nulla ed è reversibile: il file del job viene "
+                      "copiato prima della modifica. Per CREARE un job resta "
+                      "`jobs.propose`."),
+         inputSchema={"type": "object", "properties": {
+             "job_id": {"type": "integer", "description": "id del job (da jobs.list)"},
+             "enabled": {"type": "boolean",
+                         "description": "false = fermalo, true = riaccendilo"},
+             "reason": {"type": "string",
+                        "description": ("perché va fermato, in una frase, "
+                                        "NOMINANDO il job (l'owner nel popup "
+                                        "vede l'id, non sa cos'è il #6): "
+                                        "es. «trigger topic-trigger:SEAL-1/"
+                                        "software-house: ripete un ordine su "
+                                        "un'epic chiusa dal 14/09»")},
+         }, "required": ["job_id", "enabled"]}),
     Tool(name="jobs.propose",
          description=("PROPONE un nuovo job schedulato: NON lo crea. Registra una "
                       "proposta; il job nasce solo se l'owner approva. Il risultato "
@@ -2459,6 +2485,24 @@ def _dispatch_jobs(name: str, a: dict, caller: str | None):
     sub = name.split(NS_SEP_DOT, 1)[1]
     if sub == "list":
         return runtime.jobs()
+    if sub == "set_enabled":
+        # FERMARE un job non si propone: si chiede, e l'owner conferma subito nel
+        # popup del gate (`jobs.set_enabled` è in `_DEFAULT_GATED_EXACT`). La
+        # differenza con `propose` non è di forma — una proposta nasce da una
+        # conversazione e può aspettare; qui c'è qualcosa che sta già girando e
+        # va spento adesso (clodia-platform#399).
+        if "job_id" not in (a or {}):
+            raise ValueError("jobs.set_enabled richiede `job_id` (da jobs.list)")
+        if "enabled" not in (a or {}):
+            # Nessun default: «spegni» e «riaccendi» sono l'opposto l'uno
+            # dell'altro, e indovinare quale intendesse chi chiama è il modo di
+            # riaccendere un job che qualcuno aveva fermato apposta.
+            raise ValueError(
+                "jobs.set_enabled richiede `enabled`: false per fermare il job, "
+                "true per riaccenderlo")
+        return runtime.set_job_enabled(
+            a["job_id"], bool(a["enabled"]),
+            by=caller or "agente", reason=str(a.get("reason") or ""))
     if sub == "propose":
         # l'agente PROPONE un job → l'owner approva via gate. `requested_by` è
         # l'identità del chiamante, impostata qui (non fidarsi dell'input).
@@ -3623,6 +3667,16 @@ def _gate_effect_reason(name: str, arguments: dict) -> str:
         if name == "packs.install_npm":
             pkgs = ", ".join(f"`{p}`" for p in (a.get("packages") or [])) or "(nessuno)"
             return f"installa nel prefix npm persistente del gateway: {pkgs}."
+        if name == "jobs.set_enabled":
+            motivo = str(a.get("reason") or "").strip()
+            if a.get("enabled"):
+                return (f"RIACCENDE il job schedulato #{a.get('job_id')} — "
+                        f"tornerà a partire da solo alla sua cadenza."
+                        + (f" Motivo: «{motivo}»" if motivo else ""))
+            return (f"FERMA il job schedulato #{a.get('job_id')} — non partirà "
+                    f"più finché qualcuno non lo riaccende. Il file del job "
+                    f"viene copiato prima della modifica, quindi è reversibile."
+                    + (f" Motivo: «{motivo}»" if motivo else ""))
         if name == "providers.pause":
             return (f"mette in PAUSA il provider `{a.get('provider_id')}` — escluso "
                     f"dalla selezione per TUTTI gli agenti finché non viene riattivato.")
