@@ -399,8 +399,12 @@ def register_mcp_core(config, secrets: dict | None = None) -> dict:
     secrets_in = secrets or {}
 
     backends = list(whitelist.CONFIG.get("mcp_backends") or [])
-    agents = whitelist.CONFIG.setdefault("agents", {})
-    clodia_tools = agents.setdefault("clodia", {}).setdefault("allowed_tools", [])
+    # Nessun grant automatico (clodia-platform#393). Fino al 26 set 2026 ogni
+    # mount aggiungeva `<slug>.*` agli `allowed_tools` di clodia — residuo di
+    # quando era super — e così clodia si è trovata `sedia.*`, `normattiva.*`,
+    # `contabilita.*`, `leads.*` senza che il suo seed li dichiarasse. Un backend
+    # montato ora non è concesso a nessuno: lo ha chi lo dichiara nel proprio
+    # seed, e clodia, se le serve, lo prende in prestito con `copybrain`.
     registered = []
     for name, spec in servers.items():
         slug = _slugify(name)
@@ -432,8 +436,6 @@ def register_mcp_core(config, secrets: dict | None = None) -> dict:
             backend = _replace_placeholder(backend, sname, f"${{VAULT:{cred}}}")
         backends = [b for b in backends if b.get("name") != slug]  # dedup
         backends.append(backend)
-        if f"{slug}.*" not in clodia_tools:
-            clodia_tools.append(f"{slug}.*")
         registered.append(slug)
 
     whitelist.CONFIG["mcp_backends"] = backends
@@ -444,12 +446,12 @@ def register_mcp_core(config, secrets: dict | None = None) -> dict:
 
 
 def unregister_mcp_core(name: str) -> dict:
-    """Core della rimozione MCP (config + grant clodia). Riutilizzato da mcp.remove."""
+    """Core della rimozione MCP. Riutilizzato da mcp.remove.
+
+    Non tocca più gli `allowed_tools` di nessuno: il mount non ne concede
+    (clodia-platform#393), quindi non c'è grant da ritirare."""
     cfg = whitelist.CONFIG
     cfg["mcp_backends"] = [b for b in (cfg.get("mcp_backends") or []) if b.get("name") != name]
-    at = cfg.get("agents", {}).get("clodia", {}).get("allowed_tools", [])
-    if f"{name}.*" in at:
-        at.remove(f"{name}.*")
     whitelist.save_config()
     whitelist.reload_config()
     proxy.clear_cache()

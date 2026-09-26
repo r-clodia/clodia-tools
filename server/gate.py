@@ -55,6 +55,8 @@ LOG = logging.getLogger("clodia-tools.gate")
 # quando l'ho misurata, e deve restarlo. Se un verbo finisse lì, sarebbe un gate
 # sul lavoro dentro la stanza — cioè la cosa che la voce 23 dice di non fare.
 GATE_SYSTEM = "system"
+#: Chiave di gate di `copybrain.assume` (clodia-platform#393): `copybrain:<seed>`.
+COPYBRAIN_PREFIX = "copybrain:"
 GATE_WALLS = "walls"
 GATE_OUTWARD = "outward"
 
@@ -100,6 +102,12 @@ _GATE_CLASS = {
 
 _PREFIX_CLASS = {
     "settings.": GATE_SYSTEM, "pki.": GATE_SYSTEM, "ca.": GATE_SYSTEM,
+    # `copybrain:<seed>` (clodia-platform#393): uno spawn prende in prestito i
+    # verbi di un altro seed. Lo decide l'utente IN CONTESTO (decisione di
+    # Davide), cioè l'owner della stanza in cui lo spawn lavora — la regola dei
+    # `walls`: allarga ciò che si può fare dentro quello scope. Fuori da una
+    # stanza decide un admin, come per ogni gate senza scope.
+    COPYBRAIN_PREFIX: GATE_WALLS,
     # `egress:<tipo>:<destinazione>` — la chiave di un gate per DESTINAZIONE, non
     # per verbo (`egress.gate_key`). Non era classificata, e il 10 ago 2026 la
     # card l'ha detto: «attraversa un confine che il gateway non ha
@@ -404,6 +412,42 @@ def consume(agent: str, instance: str, verb: str) -> None:
     if v:
         _revoke_jti(str(v.get("jti") or ""))
         _save(_store_path(), d)
+
+
+def active_with_prefix(agent: str, instance: str, prefix: str) -> list[str]:
+    """Le chiavi di gate ATTIVE di (agent, instance) che iniziano con `prefix`.
+
+    Serve a `copybrain`: quali seed ha preso in prestito QUESTO spawn. Ogni voce
+    passa da `details`, cioè dalla verifica della firma, della scadenza e della
+    revoca — una voce nello store non è un consenso finché la capability non
+    verifica."""
+    if not (agent and instance and instance != "-"):
+        return []
+    testa = f"{agent}|{instance}|{prefix}"
+    out = []
+    for k in list(_load(_store_path())):
+        if k.startswith(testa):
+            verb = k.split("|", 2)[2]
+            if details(agent, instance, verb) is not None:
+                out.append(verb)
+    return sorted(out)
+
+
+def revoke_instance(agent: str, instance: str, prefix: str) -> list[str]:
+    """Revoca TUTTI i consensi di (agent, instance) con chiave `prefix*`.
+
+    Chiamata quando uno spawn termina: `copybrain` vale «fino a fine spawn», e
+    la fine la conosce l'agent-server, non il gateway. Idempotente."""
+    if not (agent and instance and instance != "-"):
+        return []
+    testa = f"{agent}|{instance}|{prefix}"
+    revocati = []
+    for k in list(_load(_store_path())):
+        if k.startswith(testa):
+            verb = k.split("|", 2)[2]
+            consume(agent, instance, verb)
+            revocati.append(verb)
+    return sorted(revocati)
 
 
 # ── Richieste di gate (qualunque agente → approva l'umano in-contesto) ───────

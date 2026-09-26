@@ -30,6 +30,7 @@ from .tools import datastore_sql, web_fetch, web_post
 #: presenza di un altro guasto.
 LOG = logging.getLogger("clodia-tools.main")
 from .tools import eu_corpus
+from . import copybrain as _copybrain
 from .whitelist import (agent_config, agent_denies, agent_gates, agent_name,
                         outside_profile,
                         current_chat, current_clearance, current_human_role,
@@ -2345,7 +2346,8 @@ def _native_tool_namespaces() -> list[str]:
              + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS
              + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
              + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS
-             + _PACKS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
+             + _PACKS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS
+             + _copybrain.TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
     ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in tools})
@@ -2577,6 +2579,16 @@ def _dispatch_mcp(name: str, a: dict):
 #: L'insieme resta, vuoto, ed estendibile via env: rimetterci un nome è ancora
 #: possibile, ma deve essere un atto esplicito di chi amministra l'istanza.
 _SUPER_AGENTS: set = set()
+
+
+def _copybrain_prefix() -> str:
+    from .gate import COPYBRAIN_PREFIX
+    return COPYBRAIN_PREFIX
+
+
+def _current_spawn_safe() -> str:
+    from .whitelist import current_spawn as _cs
+    return _cs() or "-"
 
 
 def _is_super(name: str | None) -> bool:
@@ -2834,7 +2846,8 @@ def _all_native_tools() -> list:
                   + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS
                   + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
                   + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS + _PACKS_TOOLS
-                  + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS)
+                  + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS
+                  + _copybrain.TOOLS)
     if instance_profile.rag_enabled():
         native += list(_EU_CORPUS_TOOLS + _RAG_TOOLS)
     return native
@@ -2970,7 +2983,7 @@ async def _require_gate_consent(
         _obs.note("gate", gate_key, agent, detail=reason[:120])
         return None
     inst = "-"
-    if gate_key == "crosstopic":
+    if gate_key == "crosstopic" or gate_key.startswith(_copybrain_prefix()):
         # Il grant `crosstopic` vale per lo SPAWN che l'ha chiesto, non per il
         # seed (decisione di Davide, 23 set 2026): senza questo, un consenso
         # dato a `clodia-1` varrebbe per ogni altro spawn di `clodia`, cioè per
@@ -2981,7 +2994,7 @@ async def _require_gate_consent(
         spawn = _current_spawn()
         if not spawn:
             raise PermissionError(
-                "gate 'crosstopic': nessuna identità di spawn firmata "
+                f"gate '{gate_key}': nessuna identità di spawn firmata "
                 "(execution_id) in questo token — il grant non è scopabile, "
                 "quindi resta negato (fail-closed).")
         inst = spawn
@@ -3034,6 +3047,9 @@ async def _require_gate_consent(
                          "fuori dalla propria stanza, entro la propria "
                          "clearance, per QUESTO spawn soltanto"
                          if gate_key == "crosstopic"
+                         else (f"di **assumere i verbi di @{gate_key[len(_copybrain_prefix()):]}** "
+                               f"per lo spawn {inst}, fino alla sua fine (copybrain)")
+                         if gate_key.startswith(_copybrain_prefix())
                          else (f"di accedere al topic {gate_key.split(':', 1)[1]}"
                                if gate_key.startswith("topic-access:")
                                else f"di usare `{gate_key}`"))
@@ -4150,6 +4166,21 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name.startswith("agents."):
             result = await asyncio.to_thread(
                 _dispatch_agents, name, arguments, _ag, gate_approval)
+        elif name == "copybrain.assume":
+            try:
+                _catalogo = list(_all_native_tools()) + list(await proxy.list_proxied_tools())
+            except Exception:  # noqa: BLE001 — senza backend montati resta il catalogo nativo
+                _catalogo = list(_all_native_tools())
+            result = await _copybrain.assume(arguments, _catalogo)
+        elif name == "copybrain.call":
+            # Rientra in `call_tool`: il verbo in prestito attraversa TUTTI i
+            # controlli (reachability via `effective_tools`, deny, gate, egress,
+            # taint) come se fosse stato chiamato direttamente.
+            _verbo, _args = _copybrain.check_call(arguments)
+            LOG.info("COPYBRAIN call %s@%s → %s", _ag, _current_spawn_safe(), _verbo)
+            return await call_tool(_verbo, _args)
+        elif name == "copybrain.release":
+            result = _copybrain.release(arguments)
         elif name == "eu_corpus.search":
             # alias morbido: eu_corpus.* == rag.* sulla collection eu-normativa.
             _rag_authorize("eu-normativa", write=False)

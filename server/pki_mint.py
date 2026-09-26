@@ -125,6 +125,23 @@ def mint_session_token(agent: str, execution_id: str = "",
     return f"{TOKEN_PREFIX}.{body}.{sig}"
 
 
+#: Tetto di una capability, in minuti. Due ore per tutte, tranne `copybrain`
+#: (clodia-platform#393): il suo consenso vale «fino a fine spawn», e uno spawn
+#: vive più di due ore. Il tetto lungo vale SOLO per quella capability, e la
+#: durata vera la chiude la revoca che l'agent-server manda quando lo spawn
+#: termina (`gate.revoke_instance`); le 24 ore sono la rete se quella revoca
+#: non arriva.
+CAPABILITY_CEILING_MIN = 120
+COPYBRAIN_CEILING_MIN = 24 * 60
+COPYBRAIN_CAP_PREFIX = "gate:copybrain:"
+
+
+def capability_ceiling_minutes(cap: str | None) -> int:
+    if str(cap or "").startswith(COPYBRAIN_CAP_PREFIX):
+        return COPYBRAIN_CEILING_MIN
+    return CAPABILITY_CEILING_MIN
+
+
 def mint_capability(agent: str, instance: str, minutes: int, by: str,
                     cap: str = "sudo") -> dict:
     """Conia un capability sudo ccap1 firmato con la CA (prova dell'approvazione
@@ -132,7 +149,7 @@ def mint_capability(agent: str, instance: str, minutes: int, by: str,
     import secrets as _secrets
     ca_key = _load_private(_ca_key_path())
     now = int(time.time())
-    minutes = max(1, min(int(minutes or 15), 120))
+    minutes = max(1, min(int(minutes or 15), capability_ceiling_minutes(cap)))
     jti = _secrets.token_hex(8)
     payload = {
         "cap": cap, "agent": agent, "instance": instance or "-",
