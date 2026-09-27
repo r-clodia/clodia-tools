@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -393,6 +394,33 @@ def read_message(email_id: str, account: str = "demo", folder: str = "INBOX") ->
     tool_allowed("email.read")
     return _run_json(account, ["read", str(email_id), "--folder", folder])
 
+
+
+def safe_attachment_name(filename: str, fallback: str = "allegato") -> str:
+    """Il nome di un allegato ridotto a UN nome di file.
+
+    Il nome arriva dal mittente — per un `.eml` inoltrato è il subject della mail
+    che contiene — e finiva as-is come path relativo di scrittura nel topic: un
+    `/` veniva letto come separatore di directory e l'allegato spariva dentro (o
+    accanto a) una cartella che nessuno aveva chiesto, mentre il verbo dichiarava
+    successo (clodia-platform#420). Qui il `/` torna a essere un carattere del
+    nome, che è quello che era.
+
+    Sanifica, non rifiuta: chi archivia la posta in arrivo non ha nessuno a cui
+    chiedere un nome migliore, e l'alternativa a un file da rinominare sarebbe
+    perdere il contenuto. Il path lo sceglie invece l'agente — lì un path
+    illeggibile è un errore, non una rinomina a sorpresa (`_resolve_write_target`).
+    """
+    name = re.sub(r"[\\/]+", "-", filename or "")
+    # Whitespace collassato: i subject decodificati da MIME portano a capo e tab,
+    # e uno spazio ai bordi di un segmento rende il file non più elencabile.
+    # Il punto iniziale se ne va con gli altri bordi: un dotfile è invisibile al
+    # navigator del topic, cioè un altro modo di sparire in silenzio.
+    # Fra i caratteri di bordo c'è anche il `-` che abbiamo appena introdotto:
+    # un nome fatto di soli separatori deve cadere sul fallback, non diventare
+    # un file chiamato "-".
+    name = re.sub(r"\s+", " ", name).strip(" .-")
+    return name or fallback
 
 
 def get_attachment(email_id: str, filename: str, account: str = "demo",

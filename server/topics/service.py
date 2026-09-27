@@ -1918,6 +1918,20 @@ class TopicService:
         parts = rel.split("/")
         if any(p in ("", ".", "..") or p.startswith(".") for p in parts):
             raise TopicError(f"nome file non valido: {filename}")
+        # Un segmento con lo spazio ai bordi si SCRIVE ma non si RILEGGE: i path
+        # in lettura passano tutti da `_resolve_data_path`, che fa `.strip()`
+        # sull'espressione, quindi `local/cartella ` diventa `local/cartella` e
+        # la cartella risulta VUOTA anche quando il file c'è dentro
+        # (clodia-platform#420: 2 allegati su 24 spariti così, senza errore).
+        # Rifiutare è l'unica risposta onesta — scrivere qualcosa che il topic
+        # non sa più mostrare è una perdita silenziosa travestita da successo.
+        if any(p != p.strip() for p in parts):
+            raise TopicError(
+                f"nome file non valido: {filename} — un segmento del path "
+                "inizia o finisce con uno spazio, e un path così non è più "
+                "rileggibile (la cartella risulterebbe vuota). Togli gli spazi "
+                "ai bordi. Se il nome arriva da fuori (un allegato, un subject) "
+                "non è un path: passalo come nome singolo.")
         # `files/AGENTS.md` NON è più un file: è il control-plane dello scope.
         # Il rifiuto è qui e non a valle perché questa è la riga che rendeva la
         # vulnerabilità reale — chiunque partecipi a un topic poteva caricare il
