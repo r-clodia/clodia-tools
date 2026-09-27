@@ -2283,7 +2283,11 @@ def _dispatch_telegram(name: str, a: dict):
             return {"ok": True, "chat_id": cid, "removed": tb.remove(cid)}
         # listen: SEAL-cap (telegram cappa a SEAL-1) + una chat → un solo binding.
         meta = _topics().open(tier, tname).get("meta", {})
-        _check_channel_cap({"type": "telegram"}, meta.get("tier", tier))
+        # `meta` porta anche l'eventuale presa d'atto dell'owner sul cap
+        # (clodia-platform#405). La si LEGGE e basta: un agente non ha modo di
+        # scriverla — nasce solo dalla rotta interna dove il principal è l'umano
+        # owner del topic. Senza, il rifiuto è quello di sempre.
+        _check_channel_cap({"type": "telegram"}, meta.get("tier", tier), meta)
         # La chat dev'essere già dichiarata FONTE del topic bersaglio
         # (clodia-platform#364). Prima di questo controllo agganciare un gruppo a
         # un topic non chiedeva niente a nessuno, mentre il meccanismo che questo
