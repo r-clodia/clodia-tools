@@ -431,6 +431,31 @@ def _telegram_binding_for(tier: str, name: str) -> tuple[str | None, dict | None
     return None, None
 
 
+def _telegram_seal_state(tier: str, name: str) -> dict:
+    """Dove sta il cap SEAL del channel Telegram su QUESTO topic (#405).
+
+    Va nella risposta sempre, anche quando non morde: la UI deve sapere se
+    chiedere la presa d'atto senza riscrivere la regola: una policy duplicata nel
+    frontend è una policy che prima o poi dirà il contrario del backend, e a
+    quel punto quella che conta non è quella che l'owner ha letto.
+    """
+    from .topics.service import channel_cap_acked, channel_seal_cap, CHANNEL_SEAL_ACK
+    try:
+        meta = _service().open(tier, name).get("meta", {})
+    except TopicError:
+        meta = {}
+    cap = channel_seal_cap("telegram")
+    t = meta.get("tier", tier)
+    from .topics.service import _tier_rank
+    morde = cap is not None and _tier_rank(t) > cap
+    return {
+        "tier": t,
+        "cap": f"SEAL-{cap}" if cap is not None else None,
+        "requires_ack": bool(morde and not channel_cap_acked(meta, "telegram", t)),
+        "ack": meta.get(CHANNEL_SEAL_ACK),
+    }
+
+
 async def telegram_link(request: Request):
     """GET/POST /internal/topics/{tier}/{name}/telegram-link.
 
@@ -442,16 +467,18 @@ async def telegram_link(request: Request):
     riporta nulla anche con la whitelist già scritta, ed è esattamente il
     sintomo che ha riportato.
 
-    GET → stato corrente: {connected, chat_id}.
-    POST {action: connect|disconnect, chat_id (richiesto su connect)}.
+    GET → stato corrente: {connected, chat_id, seal}.
+    POST {action: connect|disconnect, chat_id (richiesto su connect),
+          accept_seal_downgrade (solo se `seal.requires_ack`)}.
     """
-    _, err = _authorize(request)
+    principal, err = _authorize(request)
     if err:
         return err
     tier = request.path_params["tier"]; name = request.path_params["name"]
     if request.method == "GET":
         cid, _b = _telegram_binding_for(tier, name)
-        return JSONResponse({"connected": cid is not None, "chat_id": cid})
+        return JSONResponse({"connected": cid is not None, "chat_id": cid,
+                             "seal": _telegram_seal_state(tier, name)})
     try:
         body = await request.json()
     except Exception:
@@ -473,24 +500,43 @@ async def telegram_link(request: Request):
                 status_code=400)
         svc = _service()
         try:
+            # Presa d'atto dell'owner sul cap SEAL del channel
+            # (clodia-platform#405): PRIMA della verifica, perché è ciò che la
+            # rende superabile. Qui il principal è l'umano owner del topic — la
+            # rotta è owner-only lato agent-server e ckt1-only qui — quindi è
+            # l'unico punto della piattaforma in cui quel consenso può nascere.
+            if body.get("accept_seal_downgrade"):
+                svc.accept_channel_cap(tier, name, "telegram", by=principal or "")
             meta = svc.open(tier, name).get("meta", {})
-            _check_channel_cap({"type": "telegram"}, meta.get("tier", tier))
+            _check_channel_cap({"type": "telegram"}, meta.get("tier", tier), meta)
             scope = f"{tier}/{name}"
             eg.scope_allow("egress", scope, f"tg:{cid}")
             eg.scope_allow("ingress", scope, f"tg:{cid}")
             tb.set_binding(cid, "messaggero", tier, name)
         except TopicError as e:
-            return JSONResponse({"error": str(e)[:200]}, status_code=400)
-        return JSONResponse({"connected": True, "chat_id": cid})
+            return JSONResponse({"error": str(e)[:400],
+                                 "seal": _telegram_seal_state(tier, name)},
+                                status_code=400)
+        return JSONResponse({"connected": True, "chat_id": cid,
+                             "seal": _telegram_seal_state(tier, name)})
     if action == "disconnect":
         cid, _b = _telegram_binding_for(tier, name)
+        # La presa d'atto muore col collegamento anche quando il binding non
+        # c'era più: è il gesto «questo canale non parla con Telegram», e
+        # lasciarla in piedi farebbe passare il prossimo aggancio in silenzio.
+        try:
+            _service().revoke_channel_cap_ack(tier, name)
+        except TopicError:
+            pass
         if cid is None:
-            return JSONResponse({"connected": False, "chat_id": None})
+            return JSONResponse({"connected": False, "chat_id": None,
+                                 "seal": _telegram_seal_state(tier, name)})
         tb.remove(cid)
         scope = f"{tier}/{name}"
         eg.scope_revoke("egress", scope, f"tg:{cid}")
         eg.scope_revoke("ingress", scope, f"tg:{cid}")
-        return JSONResponse({"connected": False, "chat_id": None})
+        return JSONResponse({"connected": False, "chat_id": None,
+                             "seal": _telegram_seal_state(tier, name)})
     return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
 
 

@@ -271,9 +271,16 @@ def _connector_guard(cid: str):
         return JSONResponse({"error": str(e)}, status_code=403)
 
 
-async def list_tools(request: Request):
-    if not _authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+def connectors_snapshot() -> list[dict]:
+    """Stato dei connettori del gateway, senza HTTP e senza Request.
+
+    È la sorgente UNICA: la serve `GET /tools` alla webui e la legge in-process
+    il verbo `integrations.list` (clodia-platform#410). Prima quel verbo faceva
+    il giro lungo gateway → agent-server `/api/connectors` → gateway
+    `/internal/connectors`, rotta che non è mai esistita: 502 garantito. Lo
+    stato dei connettori vive qui, dove vive la vault: non c'è niente da
+    chiedere a nessuno.
+    """
     # Integrazione Google UNIFICATA: un solo consenso (Gmail + Drive + Docs +
     # Calendar) → una sola credenziale google_<account> = un solo refresh token,
     # niente cross-invalidation dei due consensi separati (gmail_/gworkspace_).
@@ -372,7 +379,13 @@ async def list_tools(request: Request):
         keep = set(allowed) | {"topic-storage"}
         connectors = [c for c in connectors
                       if c.get("provider") == "mcp" or c.get("id") in keep]
-    return JSONResponse({"connectors": connectors})
+    return connectors
+
+
+async def list_tools(request: Request):
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return JSONResponse({"connectors": connectors_snapshot()})
 
 
 class McpRegisterError(ValueError):
