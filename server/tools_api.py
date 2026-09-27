@@ -877,12 +877,33 @@ async def email_mailbox_add(request: Request):
 
 
 async def email_mailbox_remove(request: Request):
-    """DELETE → rimuove una casella generica dal vault."""
+    """DELETE → rimuove una casella generica dal vault E le sue autorizzazioni.
+
+    Le due cose sono un'operazione sola (clodia-platform#411): la credenziale
+    vive nel vault, ma il permesso di usarla vive nelle liste `inbox:`/`outbox:`
+    — globale e per scope — e toglierne una sola lasciava voci che nominano una
+    casella inesistente. L'indirizzo si legge PRIMA di svuotare il vault: dopo
+    non c'è più nessun modo di sapere quali voci fossero sue.
+
+    La risposta dice quante stanze sono cambiate: un connettore Mailbox (#406)
+    si collega con un click su ogni canale, quindi una rimozione può toccarne
+    parecchi, e l'owner deve vederlo qui invece di scoprirlo dal pannello.
+    """
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     account = request.path_params["account"]
+    indirizzo = email_tool.mailbox_address(account)
     removed = vault.remove(f"mailbox_{account}")
-    return JSONResponse({"account": account, "removed": removed})
+    from . import egress as eg
+    pulizia = eg.forget_mailbox(indirizzo or "")
+    if pulizia["scopes"] or pulizia["global"]:
+        LOG.info("email_mailbox_remove: '%s' (%s) · voci ritirate: %d globali, "
+                 "stanze %s", account, indirizzo, len(pulizia["global"]),
+                 ", ".join(pulizia["scopes"]) or "nessuna")
+    return JSONResponse({"account": account, "removed": removed,
+                         "email": indirizzo, "scopes": pulizia["scopes"],
+                         "topics_cleaned": len(pulizia["scopes"]),
+                         "global_revoked": pulizia["global"]})
 
 
 async def telegram_status(request: Request):

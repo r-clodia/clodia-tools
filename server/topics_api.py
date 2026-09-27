@@ -494,6 +494,104 @@ async def telegram_link(request: Request):
     return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
 
 
+def _mailbox_state(scope: str) -> dict:
+    """Caselle di sistema + il loro stato di autorizzazione in QUESTO scope.
+
+    `inbox`/`outbox` rispondono alla domanda vera — «questo canale può usare la
+    casella?» — e quindi tengono conto anche della lista globale, che è ciò che
+    `egress.mailbox_allowed` verificherà al momento della chiamata. `local` dice
+    invece se la voce sta nella lista DI QUESTA STANZA: è l'unica che si può
+    togliere da qui, e senza distinguerla un bottone «scollega» su una casella
+    autorizzata globalmente sembrerebbe rotto.
+    """
+    from . import egress as eg
+    from .tools import email as email_tool
+    locali = {
+        "inbox": set(eg.scope_uris("ingress", scope)),
+        "outbox": set(eg.scope_uris("egress", scope)),
+    }
+    out = []
+    for row in email_tool.system_mailboxes():
+        addr = row["email"]
+        out.append({
+            **row,
+            "inbox": eg.mailbox_allowed("inbox", addr, scope),
+            "outbox": eg.mailbox_allowed("outbox", addr, scope),
+            "local": (f"inbox:{addr}" in locali["inbox"]
+                      or f"outbox:{addr}" in locali["outbox"]),
+        })
+    return {"mailboxes": out}
+
+
+async def mailbox_link(request: Request):
+    """GET/POST /internal/topics/{tier}/{name}/mailbox-link.
+
+    Connettore «Mailbox» del canale (clodia-platform#406): si sceglie una delle
+    caselle GIÀ configurate nel sistema e quella diventa in un colpo solo
+    ingress ED egress di questo topic — `inbox:<addr>` fra le fonti,
+    `outbox:<addr>` fra le destinazioni. Le due voci sono quelle che
+    `egress.mailbox_allowed` legge quando un verbo email materializza le
+    credenziali (`tools/email._secrets_env`): senza, la casella esiste ma il
+    canale non la può usare, ed è il gate ad-hoc che questa rotta sostituisce.
+
+    A differenza di `telegram_link` non c'è nessun binding da creare: qui si
+    autorizza soltanto. Leggere la posta e portarla nel topic resta compito dei
+    verbi email del messaggero — il connettore decide DOVE, non chi né quando.
+
+    GET → {mailboxes: [{account, email, send_only, inbox, outbox, local}]}.
+    POST {action: connect|disconnect, account} → stesso corpo, aggiornato.
+    """
+    _, err = _authorize(request)
+    if err:
+        return err
+    tier = request.path_params["tier"]; name = request.path_params["name"]
+    # Il topic deve ESISTERE (review di #310): le liste per scope sono chiavi di
+    # config, e una voce scritta per un topic non ancora creato sarebbe
+    # ereditata da chi un giorno lo creerà con quel nome. Stesso controllo di
+    # `telegram_link`.
+    try:
+        _service().open(tier, name)
+    except TopicError as e:
+        return JSONResponse({"error": f"topic {tier}/{name} inesistente: {str(e)[:160]}"},
+                            status_code=404)
+    scope = f"{tier}/{name}"
+    if request.method == "GET":
+        return JSONResponse(_mailbox_state(scope))
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    body = body or {}
+    action = body.get("action")
+    if action not in ("connect", "disconnect"):
+        return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
+    conto = str(body.get("account") or "").strip().lower()
+    if not conto:
+        return JSONResponse({"error": "richiesto 'account'"}, status_code=400)
+    from . import egress as eg
+    from .tools import email as email_tool
+    # L'indirizzo lo decide il SISTEMA, non il corpo della richiesta: accettare
+    # un `email` dal client farebbe autorizzare una casella che non esiste —
+    # una whitelist scritta da chi ne è soggetto non è una whitelist.
+    riga = next((r for r in email_tool.system_mailboxes() if r["account"] == conto), None)
+    if riga is None:
+        return JSONResponse(
+            {"error": f"casella '{conto}' non configurata nel sistema: "
+                      "si sceglie fra quelle esistenti, non se ne creano da qui"},
+            status_code=400)
+    addr = riga["email"]
+    try:
+        if action == "connect":
+            eg.scope_allow("ingress", scope, f"inbox:{addr}")
+            eg.scope_allow("egress", scope, f"outbox:{addr}")
+        else:
+            eg.scope_revoke("ingress", scope, f"inbox:{addr}")
+            eg.scope_revoke("egress", scope, f"outbox:{addr}")
+    except ValueError as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=400)
+    return JSONResponse(_mailbox_state(scope))
+
+
 async def participants(request: Request):
     _, err = _authorize(request)
     if err:
@@ -819,6 +917,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/local-folder", local_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/telegram-link", telegram_link, methods=["GET", "POST"]),
+    Route("/internal/topics/{tier}/{name}/mailbox-link", mailbox_link, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/mcp-clients", mcp_clients,
           methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/logo", topic_logo,
