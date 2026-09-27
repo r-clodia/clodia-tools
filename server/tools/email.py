@@ -142,6 +142,37 @@ def _account_address(credential: str, account: str) -> str:
     return (bundle.get("email") or account).strip().lower()
 
 
+def system_mailboxes() -> list[dict]:
+    """Caselle di sistema selezionabili come connettore di un canale.
+
+    Gli account operativi che hanno una credenziale nella vault, con il loro
+    INDIRIZZO: è l'indirizzo, non il nome dell'account, la cosa che finisce
+    nella whitelist `inbox:`/`outbox:` (vedi `_secrets_env`), quindi chi deve
+    autorizzare una casella per un canale ha bisogno di entrambi.
+
+    I legacy di `email_config.json` restano fuori: non hanno una credenziale da
+    cui leggere l'indirizzo, e sono già esenti dalla whitelist
+    (`accounts_not_allowed`) — offrirli in un elenco di «caselle da
+    autorizzare» prometterebbe un'autorizzazione che non serve e non si può
+    scrivere.
+    """
+    return sorted(
+        (
+            {
+                "account": row["account"],
+                "email": _account_address(row["credential"], row["account"]),
+                # Dichiarato e non dedotto, come nella diagnostica: un alias di
+                # solo invio non leggerà mai nulla, e chi lo collega deve
+                # saperlo PRIMA di aspettarsi la posta in arrivo.
+                "send_only": bool(row.get("send_only")),
+            }
+            for row in credential_diagnostics()
+            if row["operational"]
+        ),
+        key=lambda r: r["account"],
+    )
+
+
 def accounts_not_allowed(direction: str, scope: str | None = None) -> list[str]:
     """Account che ESISTONO e funzionano, ma la cui casella non è nella
     whitelist `inbox:`/`outbox:` di questo canale.
