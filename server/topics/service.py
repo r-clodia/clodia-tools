@@ -103,16 +103,55 @@ def _clean_channel(ch: dict) -> dict:
     return out
 
 
-def _check_channel_cap(channel: dict, tier: str) -> None:
-    """Verifica che il tier del topic rispetti il cap SEAL del channel."""
+# Chiave del meta che registra la presa d'atto dell'owner sul cap del channel
+# (clodia-platform#405). Nasce SOLO da `accept_channel_cap`, cioè dalla rotta
+# interna autenticata come owner: è un permesso, e un permesso scrivibile da chi
+# ne è soggetto non è un permesso. Per questo `new()` lo toglie dal meta in
+# ingresso — `topic.new` accetta un meta arbitrario da un agente.
+CHANNEL_SEAL_ACK = "channel_seal_ack"
+
+
+def channel_seal_cap(ctype: str | None) -> int | None:
+    """Rango SEAL massimo ammesso per quel tipo di channel, o None se ignoto."""
+    return _CHANNEL_SEAL_CAP.get(ctype)
+
+
+def channel_cap_acked(meta: dict | None, ctype: str, tier: str | None = None) -> bool:
+    """La presa d'atto registrata copre QUESTO channel a QUESTO tier?
+
+    Il confronto sul tier non è pignoleria: la presa d'atto è il consenso
+    informato a un downgrade preciso («questa stanza SEAL-2 parla con Telegram»).
+    Se il topic viene poi portato a SEAL-3, quel consenso non riguarda più ciò
+    che sta succedendo, e riusarlo sarebbe far dire all'owner una cosa che non
+    ha detto. Si torna a chiedere.
+    """
+    ack = (meta or {}).get(CHANNEL_SEAL_ACK) or {}
+    if not isinstance(ack, dict) or ack.get("channel") != ctype:
+        return False
+    effettivo = _normalize_tier(tier if tier is not None else (meta or {}).get("tier"))
+    return _normalize_tier(ack.get("tier")) == effettivo
+
+
+def _check_channel_cap(channel: dict, tier: str, meta: dict | None = None) -> None:
+    """Verifica che il tier del topic rispetti il cap SEAL del channel.
+
+    Il cap resta la regola: sopra il suo rango il channel non si aggancia. Ciò
+    che l'owner può fare (clodia-platform#405) è prendersene atto per iscritto —
+    `meta[CHANNEL_SEAL_ACK]`, scritto solo da `accept_channel_cap` — e allora il
+    collegamento passa. `meta` non viene passato: nessuna presa d'atto, rifiuto
+    identico a prima.
+    """
     ctype = (channel or {}).get("type")
     cap = _CHANNEL_SEAL_CAP.get(ctype)
     if cap is None:
         raise TopicError(f"channel type non supportato: {ctype}")
-    if _tier_rank(tier) > cap:
+    if _tier_rank(tier) > cap and not channel_cap_acked(meta, ctype, tier):
         raise TopicError(
             f"channel '{ctype}' cappa il tier a SEAL-{cap}: topic {tier} non ammesso "
-            f"(anello più debole: min(dati, provider, storage, channel))")
+            f"(anello più debole: min(dati, provider, storage, channel)). "
+            f"L'owner del topic può collegarlo lo stesso prendendo atto del "
+            f"downgrade (accept_seal_downgrade): la stanza resta {tier} per gli "
+            f"agenti, ma i messaggi passano da un provider SEAL-{cap}.")
 
 
 class TopicError(RuntimeError):
@@ -549,6 +588,10 @@ class TopicService:
         # somiglia a una scelta di chi ha creato la stanza e non abilita niente.
         # Un permesso apparente è peggio di un permesso assente.
         meta.pop("hook_enabled", None)
+        # La presa d'atto sul cap del channel (#405) è un permesso dell'owner,
+        # non un campo del meta: `topic.new` lo riceverebbe da un agente, che se
+        # lo concederebbe da sé. Si scrive solo da `accept_channel_cap`.
+        meta.pop(CHANNEL_SEAL_ACK, None)
         meta.setdefault("title", name)
         meta.setdefault("type", "progetto")
         # tier = unica classe del topic + livello di privacy per l'enforcement.
@@ -564,6 +607,9 @@ class TopicService:
         # telegram) → cap del tier all'anello più debole (SEAL-cap del channel).
         ch = meta.get("channel")
         if ch:
+            # Nessun `meta` alla verifica: alla nascita la presa d'atto non può
+            # esistere (è appena stata tolta qui sopra), e passarlo lascerebbe
+            # credere il contrario a chi legge.
             _check_channel_cap(ch, tier)
             meta["channel"] = _clean_channel(ch)
         meta.setdefault("tags", [])
@@ -627,8 +673,47 @@ class TopicService:
         if not channel:
             meta.pop("channel", None)
         else:
-            _check_channel_cap(channel, meta.get("tier", tier))
+            _check_channel_cap(channel, meta.get("tier", tier), meta)
             meta["channel"] = _clean_channel(channel)
+        self._write_meta(tier, name, meta, base_version=ver)
+        return meta
+
+    def accept_channel_cap(self, tier: str, name: str, ctype: str,
+                           by: str = "") -> dict:
+        """Registra la presa d'atto dell'owner sul cap SEAL di un channel (#405).
+
+        Chiamata SOLO dalla rotta interna, dove il principal è l'umano owner del
+        topic: è l'unico punto in cui `CHANNEL_SEAL_ACK` entra nel meta. Resta
+        scritto chi, quando e per quale tier — un downgrade che non si rilegge è
+        un downgrade che nessuno può revocare.
+
+        Idempotente, e su un topic che il cap non tocca non scrive nulla: una
+        riga che dice «accettato un rischio che non c'era» è rumore che un domani
+        verrebbe letto come un precedente.
+        """
+        meta, ver = self._read_meta(tier, name)
+        cap = _CHANNEL_SEAL_CAP.get(ctype)
+        if cap is None:
+            raise TopicError(f"channel type non supportato: {ctype}")
+        t = _normalize_tier(meta.get("tier", tier))
+        if _tier_rank(t) <= cap:
+            return meta
+        meta[CHANNEL_SEAL_ACK] = {
+            "channel": ctype, "tier": t, "cap": f"SEAL-{cap}",
+            "by": by or meta.get("owner", ""),
+            "at": _now().isoformat(timespec="seconds"),
+        }
+        self._write_meta(tier, name, meta, base_version=ver)
+        return meta
+
+    def revoke_channel_cap_ack(self, tier: str, name: str) -> dict:
+        """Toglie la presa d'atto (#405). La chiama il `disconnect`: finito il
+        collegamento finisce il consenso, così il prossimo torna a chiedere
+        invece di ereditare un sì dato a un'altra occasione."""
+        meta, ver = self._read_meta(tier, name)
+        if CHANNEL_SEAL_ACK not in meta:
+            return meta
+        meta.pop(CHANNEL_SEAL_ACK)
         self._write_meta(tier, name, meta, base_version=ver)
         return meta
 
@@ -665,7 +750,7 @@ class TopicService:
             ch = {"type": "telegram"}
         if ch.get("type") != "telegram":
             raise TopicError(f"channel del topic {tier}/{name} non è telegram")
-        _check_channel_cap(ch, meta.get("tier", tier))
+        _check_channel_cap(ch, meta.get("tier", tier), meta)
         cur = list(ch.get("listens") or [])
         if listen:
             if cid not in cur:
