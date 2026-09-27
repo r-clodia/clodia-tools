@@ -192,6 +192,19 @@ class DisconnectTests(Base):
 
 
 class ScopeTests(Base):
+    def test_a_topic_that_does_not_exist_gets_no_entries(self):
+        """Review di #310: una voce per `SEAL-1/futuro` la erediterebbe chi un
+        giorno creasse quel topic."""
+        from . import whitelist as w
+        cfg = {}
+        with patch.object(w, "CONFIG", cfg), patch.object(w, "save_config"):
+            r = self.client.post("/internal/topics/SEAL-1/futuro/mailbox-link",
+                                 json={"action": "connect", "account": "studio"}, headers=_H)
+            g = self.client.get("/internal/topics/SEAL-1/futuro/mailbox-link", headers=_H)
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(g.status_code, 404)
+        self.assertFalse(cfg.get("scope_source_allow") or cfg.get("scope_egress_allow"))
+
     def test_another_topic_is_not_authorized_by_this_one(self):
         """L'asse della lista è la STANZA: collegare la casella qui non la
         apre altrove, che è la ragione per cui le liste per scope esistono."""

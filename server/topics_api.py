@@ -545,6 +545,15 @@ async def mailbox_link(request: Request):
     if err:
         return err
     tier = request.path_params["tier"]; name = request.path_params["name"]
+    # Il topic deve ESISTERE (review di #310): le liste per scope sono chiavi di
+    # config, e una voce scritta per un topic non ancora creato sarebbe
+    # ereditata da chi un giorno lo creerà con quel nome. Stesso controllo di
+    # `telegram_link`.
+    try:
+        _service().open(tier, name)
+    except TopicError as e:
+        return JSONResponse({"error": f"topic {tier}/{name} inesistente: {str(e)[:160]}"},
+                            status_code=404)
     scope = f"{tier}/{name}"
     if request.method == "GET":
         return JSONResponse(_mailbox_state(scope))
