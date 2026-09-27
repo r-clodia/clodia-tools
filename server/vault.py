@@ -526,11 +526,6 @@ def agents_with_grant(credential: str) -> list[str]:
     return sorted({(g or {}).get("agent") for g in spec.get("grants", []) if (g or {}).get("agent")})
 
 
-def email_connectors() -> list[str]:
-    """Account email disponibili = credenziali gmail_<account> nello store."""
-    return sorted(n[len("gmail_"):] for n in store_names() if n.startswith("gmail_"))
-
-
 def remove(credential: str) -> bool:
     """Rimuove un bundle dallo store e la sua voce in vault-policy.yaml.
 
