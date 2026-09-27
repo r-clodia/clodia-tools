@@ -4320,7 +4320,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if _tier and _tname:
                 svc = _topics()
                 _require_topic_member(svc, _tier, _tname)
-                fn = arguments["filename"]
+                # Il nome dell'allegato è un NOME, non un path: lo sceglie il
+                # mittente. Passarlo as-is faceva interpretare un `/` come
+                # separatore di directory e l'allegato finiva in una cartella che
+                # nessuno aveva chiesto — o spariva del tutto — mentre il verbo
+                # rispondeva successo (clodia-platform#420).
+                fn = email.safe_attachment_name(arguments["filename"])
                 # Provenienza `untrusted` d'ufficio: un file introdotto da un verbo
                 # non ha nessuno da interrogare (#104 §3), e la posta in arrivo è
                 # la definizione di sorgente non controllata.
