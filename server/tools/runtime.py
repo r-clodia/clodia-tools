@@ -104,9 +104,24 @@ def inspect_topic(tier: str, name: str, by: str) -> dict:
 def channel_trigger(tier: str, name: str, text: str, by: str) -> dict:
     """Proxy: innesca il risponditore del topic su un messaggio appena iniettato
     (di norma con @menzione → il responder è l'agente taggato). Fire-and-forget
-    lato agent-server."""
+    lato agent-server.
+
+    `auth=True` (clodia-platform#413). `by` è dichiarato nel body e da solo non
+    prova niente: senza il Bearer l'agent-server classifica la provenienza
+    `external` per costruzione, qualunque cosa il body dichiari — è il
+    fail-closed della #221, e faceva finire lì OGNI trigger della colonia. Con
+    il token, un agente è `ai` e una persona dietro un client MCP è `human`, che
+    è la differenza fra ricevere una risposta e non riceverne nessuna: senza
+    @menzione, `run_topic_turn` sceglie un responder per rilevanza solo se il
+    trigger è umano.
+
+    Il parametro esisteva già qui sotto, documentato per questo caso, e non lo
+    usava nessuno: mancava il pezzo dall'altra parte, dove il claim `agent` di
+    un token on-behalf è il CARRIER e non la persona — questa chiamata prende il
+    403 da impersonazione finché l'agent-server non legge l'attore firmato.
+    Richiede clodia-logic ≥ 6.245.0."""
     return _post(f"/clodia/channels/{tier}/{name}/trigger/internal",
-                 {"text": text, "by": by})
+                 {"text": text, "by": by}, auth=True)
 
 
 # Timeout PIÙ CORTO del default: questa chiamata sta sul percorso caldo di ogni
