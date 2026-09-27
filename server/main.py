@@ -3228,6 +3228,60 @@ def _spawn_compartment_mode() -> str:
     return m if m in ("off", "report", "on") else "on"
 
 
+def spawn_compartment_declaration() -> tuple[int, str]:
+    """Livello e testo con cui l'avvio DICHIARA la modalità del compartimento.
+
+    Residuo del punto 1 di clodia-platform#382 — «verificare la variabile nel
+    deploy» — che il passaggio del default a `on` non chiude: un deploy che
+    dichiari `report` o `off` rende quel default inerte, e oggi non c'è modo di
+    accorgersene. La modalità si legge solo dentro `_cross_topic_gate_key`, e
+    solo il caso «participant del seed» lascia una riga: finché nessuno prova a
+    fare cross-topic, un perimetro aperto e uno chiuso hanno lo stesso log —
+    cioè nessuno. Si scoprirebbe al prossimo incidente, che è la storia da cui
+    questa issue nasce. Una riga all'avvio costa una riga e rende la domanda
+    «in che modalità gira questa istanza?» rispondibile dall'interno, in
+    qualunque momento, con `logs.tail(source="gateway")`.
+
+    Si dichiara anche l'ORIGINE, non solo l'esito: chi ha scritto `Report ` o
+    `no` nella variabile crede di aver disattivato qualcosa, mentre
+    `_spawn_compartment_mode` ripiega su `on` in silenzio. «Non riconosciuta»
+    è l'unica forma che gli fa vedere l'errore.
+
+    Il livello segue la modalità e non è estetica: `logs.tail` filtra cercando
+    ` WARNING ` nella riga, quindi `report`/`off` — un perimetro aperto — devono
+    restare pescabili col filtro anche dentro un log lungo, mentre `on` è
+    l'esercizio normale e resta INFO.
+    """
+    import logging as _lg
+    modo = _spawn_compartment_mode()
+    dichiarata = (_os.environ.get("CLODIA_SPAWN_COMPARTMENT") or "").strip()
+    if not dichiarata:
+        origine = "variabile assente, default del codice"
+    elif dichiarata.lower() == modo:
+        origine = f"CLODIA_SPAWN_COMPARTMENT={dichiarata.lower()}"
+    else:
+        origine = (f"CLODIA_SPAWN_COMPARTMENT={dichiarata!r} non riconosciuta, "
+                   "default del codice")
+    effetto = {"on": "rifiuta il cross-topic senza consenso",
+               "report": "OSSERVA soltanto, il cross-topic passa",
+               "off": "compartimento non applicato"}[modo]
+    livello = _lg.INFO if modo == "on" else _lg.WARNING
+    return livello, (f"compartimento spawn · modalita' effettiva '{modo}' "
+                     f"({effetto}) · origine: {origine}")
+
+
+def log_spawn_compartment_mode() -> str:
+    """Emette la dichiarazione sul logger del reference monitor — l'unico che
+    `attach_gateway_file_log` porta sul file letto da `logs.tail(source=
+    "gateway")` — e restituisce il testo. Va chiamata DOPO quell'attach, se no
+    la riga esce solo su stdout, cioè nel buco cieco che #382 ha chiuso."""
+    import logging as _lg
+    from .tools.logs import REFMON_LOGGER
+    livello, msg = spawn_compartment_declaration()
+    _lg.getLogger(REFMON_LOGGER).log(livello, msg)
+    return msg
+
+
 #: Chi può ANCHE solo chiedere il grant cross-topic (decisione di Davide, 23 set
 #: 2026, in risposta al leak strutturale di `runtime.topics()` su
 #: `tomato-blogging`): nessuno spawn fa cross-topic per default, e l'UNICA
