@@ -30,6 +30,7 @@ per spawn del consenso stesso.
 """
 from __future__ import annotations
 
+import logging
 import os
 import unittest
 from unittest.mock import patch
@@ -396,6 +397,94 @@ class SignedSourceTests(unittest.TestCase):
         src = inspect.getsource(M._cross_topic_gate_key)
         self.assertIn("current_channel()", src)
         self.assertNotIn('arguments.get("chat"', src)
+
+
+class DichiarazioneAllAvvioTests(unittest.TestCase):
+    """La modalità effettiva si DICHIARA all'avvio, anche quando è quella giusta.
+
+    Residuo del punto 1 di clodia-platform#382 — «verificare la variabile nel
+    deploy». Il default del codice è `on`, ma un deploy che dichiari `report` o
+    `off` lo rende inerte, e oggi la cosa non si vede da nessuna parte: la
+    modalità è letta solo dentro `_cross_topic_gate_key`, e solo il caso
+    «participant del seed» lascia una riga. Cioè si scoprirebbe al prossimo
+    incidente — che è esattamente la storia che ha prodotto questa issue.
+    """
+
+    def _senza_variabile(self):
+        p = patch.dict("os.environ", {})
+        p.start()
+        os.environ.pop("CLODIA_SPAWN_COMPARTMENT", None)
+        self.addCleanup(p.stop)
+
+    def test_variabile_assente_dichiara_il_default_del_codice(self):
+        self._senza_variabile()
+        livello, msg = M.spawn_compartment_declaration()
+        self.assertEqual(livello, logging.INFO)
+        self.assertIn("'on'", msg)
+        self.assertIn("assente", msg)
+
+    def test_modalita_dichiarata_nel_deploy_e_riportata_come_tale(self):
+        with patch.dict("os.environ", {"CLODIA_SPAWN_COMPARTMENT": "on"}):
+            livello, msg = M.spawn_compartment_declaration()
+        self.assertEqual(livello, logging.INFO)
+        self.assertIn("CLODIA_SPAWN_COMPARTMENT=on", msg)
+
+    def test_report_e_off_sono_un_perimetro_aperto_quindi_WARNING(self):
+        """Il livello non è estetica: `logs.tail` filtra cercando ' WARNING '
+        nella riga. Una modalità che non rifiuta deve restare pescabile con
+        `logs.tail(source="gateway", level="WARNING")` anche dentro un log
+        lungo; `on` è l'esercizio normale e resta INFO."""
+        for modo in ("report", "off"):
+            with self.subTest(modo=modo):
+                with patch.dict("os.environ", {"CLODIA_SPAWN_COMPARTMENT": modo}):
+                    livello, msg = M.spawn_compartment_declaration()
+                self.assertEqual(livello, logging.WARNING)
+                self.assertIn(f"'{modo}'", msg)
+
+    def test_variabile_scritta_male_dice_che_e_stata_ignorata(self):
+        """`_spawn_compartment_mode` ripiega su `on` in silenzio: chi ha scritto
+        `Report ` o `no` crede di aver disattivato qualcosa. La dichiarazione
+        deve dire che quel valore non è stato riconosciuto, non solo il
+        risultato."""
+        with patch.dict("os.environ", {"CLODIA_SPAWN_COMPARTMENT": "no"}):
+            livello, msg = M.spawn_compartment_declaration()
+        self.assertEqual(livello, logging.INFO)
+        self.assertIn("'on'", msg)
+        self.assertIn("non riconosciuta", msg)
+
+    def test_la_riga_esce_sul_logger_che_logs_tail_legge(self):
+        """Sul logger del reference monitor, non su un altro: è quello — e solo
+        quello — che `attach_gateway_file_log` porta sul file di
+        `logs.tail(source="gateway")`."""
+        from .tools.logs import REFMON_LOGGER
+        with patch.dict("os.environ", {"CLODIA_SPAWN_COMPARTMENT": "report"}):
+            with self.assertLogs(REFMON_LOGGER, level="WARNING") as cm:
+                testo = M.log_spawn_compartment_mode()
+        self.assertEqual(len(cm.records), 1)
+        self.assertEqual(cm.records[0].levelno, logging.WARNING)
+        self.assertIn("compartimento spawn", cm.records[0].getMessage())
+        self.assertIn("'report'", testo)
+
+    def test_l_avvio_del_gateway_la_emette_davvero_e_dopo_il_file_di_log(self):
+        """Cablaggio, letto dall'AST e non dal testo: una dichiarazione che
+        nessuno chiama non dichiara niente. L'ordine conta — prima del
+        `attach_gateway_file_log` la riga uscirebbe solo su stdout, cioè nel
+        buco cieco che #382 ha appena chiuso."""
+        import ast
+        import textwrap
+        import inspect
+        from . import http_app
+
+        albero = ast.parse(textwrap.dedent(inspect.getsource(http_app.run_http)))
+        righe = {}
+        for n in ast.walk(albero):
+            if isinstance(n, ast.Call) and isinstance(n.func, (ast.Name, ast.Attribute)):
+                nome = n.func.attr if isinstance(n.func, ast.Attribute) else n.func.id
+                righe.setdefault(nome, n.lineno)
+        self.assertIn("log_spawn_compartment_mode", righe)
+        self.assertIn("attach_gateway_file_log", righe)
+        self.assertLess(righe["attach_gateway_file_log"],
+                        righe["log_spawn_compartment_mode"])
 
 
 if __name__ == "__main__":
