@@ -114,5 +114,17 @@ def providers_resume(pid: str):
 
 def integrations_list():
     """Osserva le integration/connettori e il loro stato di connessione. Non legge
-    i dati che veicolano: solo id/nome/provider/connected."""
-    return _get("/api/connectors")
+    i dati che veicolano: solo id/nome/provider/connected.
+
+    Unica eccezione al «proxy sottile» di questo modulo: lo stato dei connettori
+    è del GATEWAY, che ha la vault. Chiederlo all'agent-server era un giro a
+    vuoto che tornava sempre qui e finiva su una rotta inesistente
+    (clodia-platform#410), quindi si legge in-process. Import locale perché
+    `tools_api` importa a sua volta `server.tools.*`.
+    """
+    from ..tools_api import connectors_snapshot
+    return {"connectors": [
+        {"id": c.get("id"), "label": c.get("label"),
+         "provider": c.get("provider"), "connected": bool(c.get("connected"))}
+        for c in connectors_snapshot()
+    ]}
