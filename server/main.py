@@ -3269,7 +3269,8 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
         a `on` queste righe sono l'elenco di ciò che si è stretto, cioè
         l'evidenza con cui si conferma o si ritira la decisione."""
         import logging as _lg
-        _lg.getLogger("clodia-tools").warning(
+        from .tools.logs import REFMON_LOGGER
+        _lg.getLogger(REFMON_LOGGER).warning(
             "compartimento spawn · %s tocca %s (%s) da %s, participant del seed: %s",
             agent, target, name, current_chat() or "nessuna sessione", esito)
 

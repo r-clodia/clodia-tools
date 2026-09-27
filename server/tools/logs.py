@@ -55,8 +55,16 @@ def _log_file(source: str = "agent-server") -> Path:
     return Path(os.environ.get("CLODIA_DATA", "/datadir")) / "logs" / nome
 
 
+#: Il solo logger che finisce sul file letto da `logs.tail(source="gateway")`:
+#: le decisioni del reference monitor sul compartimento per-spawn. Non il padre
+#: `clodia-tools`, che porta tutti i 44 logger figli a INFO — richieste, topic,
+#: destinazioni — su un file che `logs.tail` rende leggibile a chi ha il verbo,
+#: indipendentemente dalla sua clearance.
+REFMON_LOGGER = "clodia-tools.refmon"
+
+
 def attach_gateway_file_log(level: int = logging.INFO) -> Path | None:
-    """Fa scrivere il logger `clodia-tools` anche su file, oltre che su stdout.
+    """Fa scrivere il logger `REFMON_LOGGER` anche su file, oltre che su stdout.
 
     Idempotente (un secondo giro non duplica le righe) e **fail-open**: se il
     volume non è scrivibile il gateway parte lo stesso e continua a loggare su
@@ -65,7 +73,7 @@ def attach_gateway_file_log(level: int = logging.INFO) -> Path | None:
     try:
         path = _log_file("gateway")
         path.parent.mkdir(parents=True, exist_ok=True)
-        lg = logging.getLogger("clodia-tools")
+        lg = logging.getLogger(REFMON_LOGGER)
         for h in lg.handlers:
             if Path(getattr(h, "baseFilename", "")) == path:
                 return path

@@ -41,7 +41,7 @@ class _Datadir:
 
 
 def _stacca() -> None:
-    lg = logging.getLogger("clodia-tools")
+    lg = logging.getLogger(logs.REFMON_LOGGER)
     for h in list(lg.handlers):
         lg.removeHandler(h)
         h.close()
@@ -92,7 +92,7 @@ class HandlerTests(unittest.TestCase):
         e che nessuno poteva vedere — ora si legge con un verbo."""
         with _Datadir():
             logs.attach_gateway_file_log()
-            logging.getLogger("clodia-tools").warning(
+            logging.getLogger(logs.REFMON_LOGGER).warning(
                 "compartimento spawn · clodia leggerebbe SEAL-2/segreto")
             out = logs.tail(50, source="gateway")
         self.assertTrue(any("compartimento spawn" in r for r in out["lines"]),
@@ -104,18 +104,31 @@ class HandlerTests(unittest.TestCase):
         che ne è pieno — e sembra che non sia successo niente."""
         with _Datadir():
             logs.attach_gateway_file_log()
-            lg = logging.getLogger("clodia-tools")
+            lg = logging.getLogger(logs.REFMON_LOGGER)
             lg.info("rumore di fondo")
             lg.warning("compartimento spawn · eccomi")
             out = logs.tail(50, level="WARNING", source="gateway")
         self.assertEqual(len(out["lines"]), 1, out["lines"])
         self.assertIn("eccomi", out["lines"][0])
 
+    def test_gli_altri_logger_del_gateway_non_finiscono_nel_file(self) -> None:
+        """Solo le decisioni del compartimento: il padre `clodia-tools` porta
+        richieste, topic e destinazioni di tutti i moduli, e `logs.tail` rende
+        il file leggibile a prescindere dalla clearance di chi lo legge."""
+        with _Datadir():
+            logs.attach_gateway_file_log()
+            logging.getLogger("clodia-tools.egress").warning("egress ok · mailto:x@y.it")
+            logging.getLogger("clodia-tools").warning("richiesta topic SEAL-3/riservato")
+            logging.getLogger(logs.REFMON_LOGGER).warning("compartimento spawn · ok")
+            out = logs.tail(50, source="gateway")
+        self.assertEqual(len(out["lines"]), 1, out["lines"])
+        self.assertIn("compartimento spawn", out["lines"][0])
+
     def test_chiamarlo_due_volte_non_duplica_le_righe(self) -> None:
         with _Datadir():
             logs.attach_gateway_file_log()
             logs.attach_gateway_file_log()
-            logging.getLogger("clodia-tools").warning("una volta sola")
+            logging.getLogger(logs.REFMON_LOGGER).warning("una volta sola")
             out = logs.tail(50, source="gateway")
         self.assertEqual(sum("una volta sola" in r for r in out["lines"]), 1,
                          out["lines"])
