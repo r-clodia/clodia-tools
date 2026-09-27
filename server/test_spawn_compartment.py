@@ -30,6 +30,7 @@ per spawn del consenso stesso.
 """
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import patch
 
@@ -55,14 +56,53 @@ class _Chat:
         return False
 
 
-def _env(modo="on", meta=None):
+class _NonPresidiata:
+    """Sessione di job: il claim `unattended` è firmato, l'agente non lo sceglie."""
+
+    def __enter__(self):
+        from . import whitelist as w
+        self.t = w.set_current_unattended(True)
+        return self
+
+    def __exit__(self, *a):
+        from . import whitelist as w
+        w.reset_current_unattended(self.t)
+        return False
+
+
+class _SenzaVariabile:
+    """L'ambiente del deploy che NON dichiara `CLODIA_SPAWN_COMPARTMENT`.
+
+    È il caso che conta davvero: la modalità la sceglie il default del codice, e
+    per settimane quel default è stato `report` — cioè «osserva e lascia
+    passare» (clodia-platform#382)."""
+
+    def start(self):
+        self._p = patch.dict("os.environ", {})
+        self._p.start()
+        os.environ.pop("CLODIA_SPAWN_COMPARTMENT", None)
+
+    def stop(self):
+        self._p.stop()
+
+
+def _svc_patch(meta=None):
     base = meta if meta is not None else META_A
 
     class _Svc:
         def open(self, tier, name):
             return {"meta": base}
+    return patch.object(M, "_topics", lambda: _Svc())
+
+
+def _env(modo="on", meta=None):
     return (patch.dict("os.environ", {"CLODIA_SPAWN_COMPARTMENT": modo}),
-            patch.object(M, "_topics", lambda: _Svc()))
+            _svc_patch(meta))
+
+
+def _env_default(meta=None):
+    """Nessuna variabile: decide il default del codice."""
+    return (_SenzaVariabile(), _svc_patch(meta))
 
 
 class Base(unittest.TestCase):
@@ -74,8 +114,8 @@ class Base(unittest.TestCase):
         finally:
             [c.stop() for c in ctx]
 
-    def key(self, **kw):
-        return M._cross_topic_gate_key("topic.read_file", ARGS_A, "clodia")
+    def key(self, verbo="topic.read_file", agente="clodia", **kw):
+        return M._cross_topic_gate_key(verbo, ARGS_A, agente)
 
 
 class EnforcedTests(Base):
@@ -99,14 +139,23 @@ class EnforcedTests(Base):
                 self.assertEqual(self.key(), "crosstopic")
         self.run_with(_env(meta={"tier": "SEAL-1", "owner": "x", "participants": []}), go)
 
-    def test_outside_any_room_everything_gates(self):
-        """In un job non esiste un «qui», e non c'è più nessuna eccezione
-        dichiarata dal topic (decision-record #39): fuori dalla propria stanza
-        si gata sempre — che per una sessione non presidiata significa negare."""
+    def test_outside_any_room_a_non_member_still_gates(self):
+        """Fuori da una stanza non esiste un «qui», e non c'è più nessuna
+        eccezione dichiarata dal topic (decision-record #39): chi non è
+        partecipante passa dal gate come ovunque.
+
+        *Rivisto il 26 set 2026 (clodia-platform#382)*: qui prima si asseriva
+        che fuori da una stanza gatasse TUTTO, membership compresa. Quella
+        regola non è mai stata in esercizio — il default era `report` — e
+        accenderla così com'era avrebbe gatato ogni verbo `topic.*` di ogni
+        chat normale della webui, che non ha un `chan:` (il suo `chat_id` è un
+        timestamp). Avrebbe rotto l'esercizio senza chiudere il leak, che vive
+        nelle stanze: vedi `RoomlessSessionTests`."""
         def go():
             with _Chat("job:42"):
                 self.assertEqual(self.key(), "crosstopic")
-        self.run_with(_env(), go)
+        self.run_with(_env(meta={"tier": "SEAL-1", "owner": "x",
+                                 "participants": []}), go)
 
     def test_ineligible_agent_is_denied_not_gated(self):
         """23 set 2026: solo clodia/sysadmin possono chiedere 'crosstopic'.
@@ -147,6 +196,196 @@ class ReportModeTests(Base):
             with _Chat("chan:SEAL-1:topic-b:clodia"):
                 self.assertIsNone(self.key())
         self.run_with(_env(modo="off"), go)
+
+
+class DefaultModeTests(Base):
+    """clodia-platform#382. Il leak osservato da Davide il 21/09 non è passato
+    da un buco della regola: la regola c'era e **non era accesa**. Il default di
+    `_spawn_compartment_mode()` era `report`, e in `report` un agente che è
+    participant del bersaglio legge senza card — che è precisamente il caso di
+    clodia, participant di quasi tutto.
+
+    Finché il default è insicuro, «questa istanza è configurata bene?» è una
+    domanda che va posta a ogni deploy, e la risposta non è verificabile da
+    dentro. Un default sicuro la rende una domanda inutile."""
+
+    def test_senza_variabile_il_default_e_on(self):
+        def go():
+            self.assertEqual(M._spawn_compartment_mode(), "on")
+        self.run_with(_env_default(), go)
+
+    def test_senza_variabile_la_membership_non_grazia_piu(self):
+        """Lo scenario dell'issue, con l'ambiente del deploy reale: clodia è
+        participant di `topic-a` ma sta in `topic-b`."""
+        def go():
+            with _Chat("chan:SEAL-1:topic-b:clodia"):
+                self.assertEqual(self.key("topic.messages"), "crosstopic")
+        self.run_with(_env_default(), go)
+
+    def test_cio_che_si_e_stretto_lascia_una_riga_leggibile(self):
+        """Dopo il flip serve sapere COSA si è stretto, o la decisione non si
+        può né confermare né ritirare su evidenza. Si registra solo il caso che
+        la modalità cambia — l'agente è participant del bersaglio — perché chi
+        non lo è era gatato anche prima e non dice niente di nuovo.
+        Si rilegge con `logs.tail(source="gateway")`."""
+        def go():
+            with _Chat("chan:SEAL-1:topic-b:clodia"):
+                with self.assertLogs("clodia-tools", level="WARNING") as log:
+                    self.key("topic.messages")
+                self.assertTrue(any("GATE" in r for r in log.output), log.output)
+        self.run_with(_env_default(), go)
+
+    def test_chi_non_e_partecipante_non_fa_rumore(self):
+        def go():
+            with _Chat("chan:SEAL-1:topic-b:clodia"):
+                with self.assertNoLogs("clodia-tools", level="WARNING"):
+                    self.key("topic.messages")
+        self.run_with(_env_default(meta={"tier": "SEAL-1", "owner": "x",
+                                         "participants": []}), go)
+
+    def test_una_variabile_vuota_non_e_una_ritirata(self):
+        """`CLODIA_SPAWN_COMPARTMENT=` (vuota) è una variabile dimenticata, non
+        una decisione: cade sul default, che ora enforce."""
+        def go():
+            with _Chat("chan:SEAL-1:topic-b:clodia"):
+                self.assertEqual(self.key(), "crosstopic")
+        self.run_with(_env(modo=""), go)
+
+    def test_la_ritirata_esplicita_resta(self):
+        """`off`/`report` restano raggiungibili senza un deploy: cambia chi deve
+        dichiararsi, non quante vie ci sono."""
+        def go():
+            self.assertEqual(M._spawn_compartment_mode(), "off")
+        self.run_with(_env(modo="off"), go)
+
+
+class RoomlessSessionTests(Base):
+    """Una sessione senza `chan:` non è una stanza in cui riversare.
+
+    Il compartimento che questa regola difende È la stanza: il danno di #382 è
+    portare in una stanza contenuti che la sua platea non ha titolo di vedere.
+    Una chat 1:1 della webui non ha platea — e non ha nemmeno un `chan:`, perché
+    il suo `chat_id` è un timestamp (`_new_chat_id()` in clodia-logic). Gatarla
+    significherebbe chiedere una card per ogni verbo `topic.*` di ogni
+    conversazione normale: si romperebbe l'esercizio senza chiudere il leak.
+
+    Quello che resta in piedi non è niente: `_require_topic_member` esige
+    comunque la membership (o il grant `crosstopic`) e la clearance ≥ tier.
+    Cambia solo che qui non si aggiunge un gate."""
+
+    def test_una_chat_della_webui_lavora_sui_suoi_topic(self):
+        def go():
+            with _Chat("20260926-201500-ab12cd"):
+                self.assertIsNone(self.key("topic.read_file"))
+        self.run_with(_env_default(), go)
+
+    def test_e_lo_dice_in_un_log_che_qualcuno_puo_leggere(self):
+        """L'osservazione non è decorativa: è l'unico modo di sapere quanto
+        questa via è usata davvero, e ora si rilegge con
+        `logs.tail(source="gateway")`."""
+        def go():
+            with _Chat("20260926-201500-ab12cd"):
+                with self.assertLogs("clodia-tools", level="WARNING") as log:
+                    self.key("topic.read_file")
+                self.assertTrue(any("compartimento spawn" in r for r in log.output))
+        self.run_with(_env_default(), go)
+
+    def test_una_chat_della_webui_non_apre_i_topic_altrui(self):
+        def go():
+            with _Chat("20260926-201500-ab12cd"):
+                self.assertEqual(self.key("topic.read_file"), "crosstopic")
+        self.run_with(_env_default(meta={"tier": "SEAL-1", "owner": "x",
+                                         "participants": []}), go)
+
+    def test_dentro_una_stanza_la_regola_resta_stretta(self):
+        """Il contrasto che rende la distinzione una regola e non uno sconto."""
+        def go():
+            with _Chat("chan:SEAL-1:topic-b:clodia"):
+                self.assertEqual(self.key("topic.read_file"), "crosstopic")
+        self.run_with(_env_default(), go)
+
+
+class UnattendedDepositTests(Base):
+    """Il deposito di un job non presidiato sopravvive all'enforcement.
+
+    Un job nasce con `run_id="job:<id>"` (clodia-logic, `scheduler.py`): niente
+    `chan:`, quindi `current_channel()` è `None` e la regola «T == qui» non può
+    mai essere soddisfatta. Con l'enforcement acceso e nessuna eccezione, ogni
+    job che deposita in un topic — la mail in arrivo del messaggero, un handoff
+    — verrebbe gatato, e gatare una sessione non presidiata significa negarla.
+
+    L'eccezione è la più stretta che copre quel caso: **solo** `post_message`,
+    **solo** senza stanza, **solo** verso un topic di cui l'agente è già
+    partecipante. È la direzione che deposita, non quella che porta fuori: non
+    apre nessuna lettura, ed è l'unico verbo che una sessione non presidiata
+    può comunque chiamare (`_UNATTENDED_TOPIC_ALLOW`)."""
+
+    def test_un_job_deposita_ancora_nel_suo_topic(self):
+        def go():
+            with _Chat("job:42"), _NonPresidiata():
+                self.assertIsNone(self.key("topic.post_message"))
+        self.run_with(_env_default(), go)
+
+    def test_lo_stesso_job_non_puo_leggere_quel_topic(self):
+        """L'eccezione è per verbo, non per sessione: depositare sì, leggere no."""
+        def go():
+            with _Chat("job:42"), _NonPresidiata():
+                self.assertEqual(self.key("topic.read_file"), "crosstopic")
+                self.assertEqual(self.key("topic.messages"), "crosstopic")
+        self.run_with(_env_default(), go)
+
+    def test_un_job_non_deposita_dove_non_e_partecipante(self):
+        def go():
+            with _Chat("job:42"), _NonPresidiata():
+                self.assertEqual(self.key("topic.post_message"), "crosstopic")
+        self.run_with(_env_default(meta={"tier": "SEAL-1", "owner": "x",
+                                         "participants": []}), go)
+
+    def test_un_agente_non_eleggibile_e_comunque_negato_fuori_dai_suoi_topic(self):
+        def go():
+            with _Chat("job:42"), _NonPresidiata():
+                with self.assertRaises(PermissionError):
+                    self.key("topic.post_message", agente="messaggero")
+        self.run_with(_env_default(meta={"tier": "SEAL-1", "owner": "x",
+                                         "participants": []}), go)
+
+    def test_il_messaggero_deposita_nei_topic_di_cui_fa_parte(self):
+        """Il caso d'esercizio: la mail in arrivo finisce nel topic giusto anche
+        se chi la consegna non è eleggibile al grant cross-topic."""
+        def go():
+            with _Chat("job:42"), _NonPresidiata():
+                self.assertIsNone(self.key("topic.post_message",
+                                           agente="messaggero"))
+        self.run_with(_env_default(meta={"tier": "SEAL-1", "owner": "davide",
+                                         "participants": ["messaggero"]}), go)
+
+    def test_non_presidiata_e_piu_stretta_di_presidiata(self):
+        """Il claim `unattended` è FIRMATO e stringe, non allarga: senza umano
+        che legga il risultato resta solo il deposito. La stessa lettura, in una
+        sessione presidiata senza stanza, passa (`RoomlessSessionTests`)."""
+        def leggi():
+            return self.key("topic.read_file")
+
+        def go():
+            with _Chat("20260926-201500-ab12cd"):
+                self.assertIsNone(leggi())
+                with _NonPresidiata():
+                    self.assertEqual(leggi(), "crosstopic")
+        self.run_with(_env_default(), go)
+
+    def test_un_job_legato_a_una_stanza_non_ha_l_eccezione(self):
+        """Un trigger di topic gira in `chan:`: ha una stanza, quindi scrivere
+        in un'ALTRA è cross-topic pieno, e passa dal gate come tutto il resto."""
+        def go():
+            with _Chat("chan:SEAL-1:topic-b:clodia"), _NonPresidiata():
+                self.assertEqual(self.key("topic.post_message"), "crosstopic")
+        self.run_with(_env_default(), go)
+
+    def test_nella_propria_stanza_un_job_non_chiede_niente(self):
+        def go():
+            with _Chat("chan:SEAL-1:topic-a:clodia"), _NonPresidiata():
+                self.assertIsNone(self.key("topic.post_message"))
+        self.run_with(_env_default(), go)
 
 
 class SignedSourceTests(unittest.TestCase):

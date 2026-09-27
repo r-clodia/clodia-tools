@@ -49,6 +49,10 @@ class CrossTopicGateTests(unittest.TestCase):
                 )
 
     def test_agent_membership_needs_no_gate(self) -> None:
+        """Fuori da una stanza la membership decide ancora: non c'è una platea
+        in cui riversare, e gatare qui chiederebbe una card per ogni verbo
+        `topic.*` di ogni chat normale (clodia-platform#382, `RoomlessSession
+        Tests` in `test_spawn_compartment.py`)."""
         self.meta["participants"].append("esperto-bandi")
         with patch.object(main, "_topics", return_value=_service(self.meta)):
             key = main._cross_topic_gate_key(
@@ -56,6 +60,42 @@ class CrossTopicGateTests(unittest.TestCase):
                 {"tier": "SEAL-2", "name": "confidential"},
                 "esperto-bandi",
             )
+        self.assertIsNone(key)
+
+    def test_agent_membership_inside_another_room_no_longer_waives(self) -> None:
+        """Dentro una stanza sì: è il caso di clodia-platform#382 — leggere un
+        topic stando in un altro, dove la platea della stanza non ha titolo. Per
+        un agente non eleggibile al grant `crosstopic` il rifiuto è immediato:
+        per lui non esiste nemmeno una card da approvare."""
+        from . import whitelist as w
+        self.meta["participants"].append("esperto-bandi")
+        tok = w.set_current_chat("chan:SEAL-1:un-altro-topic:esperto-bandi")
+        try:
+            with patch.object(main, "_topics", return_value=_service(self.meta)):
+                with self.assertRaises(PermissionError):
+                    main._cross_topic_gate_key(
+                        "topic.read_document",
+                        {"tier": "SEAL-2", "name": "confidential"},
+                        "esperto-bandi",
+                    )
+        finally:
+            w.reset_current_chat(tok)
+
+    def test_inside_its_own_room_an_agent_needs_no_gate(self) -> None:
+        """Ciò che resta libero dopo #382: la propria stanza — presa dal claim
+        `chat` firmato, non dalla lista participants."""
+        from . import whitelist as w
+        self.meta["participants"].append("esperto-bandi")
+        tok = w.set_current_chat("chan:SEAL-2:confidential:esperto-bandi")
+        try:
+            with patch.object(main, "_topics", return_value=_service(self.meta)):
+                key = main._cross_topic_gate_key(
+                    "topic.read_document",
+                    {"tier": "SEAL-2", "name": "confidential"},
+                    "esperto-bandi",
+                )
+        finally:
+            w.reset_current_chat(tok)
         self.assertIsNone(key)
 
     def test_dispatch_denies_ineligible_agent_even_with_an_active_consent(self) -> None:
