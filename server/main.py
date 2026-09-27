@@ -666,13 +666,20 @@ _GITHUB_TOOLS: list[Tool] = [
         name="github.clone",
         description=("Clona un repository APPROVATO per questo topic nella tua "
                      "scratch. La credenziale la fornisce l'owner al mount e non "
-                     "entra mai nel tuo processo."),
+                     "entra mai nel tuo processo. Un clone non emette eventi per "
+                     "tutta la durata del download: se supera i 180s il watchdog "
+                     "chiude il turno — su un repository grande passa `depth: 1`."),
         inputSchema={"type": "object", "properties": {
             "repo": {"type": "string", "description": (
                 "https://github.com/<owner>/<repo> — vale anche la forma breve "
                 "<owner>/<repo>, che assume github.com")},
             "dest": {"type": "string", "description": "cartella di destinazione nella tua scratch"},
             "branch": {"type": "string"},
+            "depth": {"type": "integer", "minimum": 1, "description": (
+                "clone superficiale: gli ultimi N commit del solo ramo clonato "
+                "invece di tutta la storia. `1` basta quando ti serve il working "
+                "tree e non la history, ed è la differenza fra secondi e minuti "
+                "su un repository grande. Omettilo per avere la storia intera.")},
         }, "required": ["repo", "dest"]},
     ),
     Tool(
@@ -2025,7 +2032,8 @@ def _dispatch_github(name: str, a: dict):
         token = _repo_credential(svc, tier, tname, canonico)
     if verb == "clone":
         dest = _safe_scratch_path(a["dest"])
-        return gh.clone(canonico, dest, token=token, branch=a.get("branch"))
+        return gh.clone(canonico, dest, token=token, branch=a.get("branch"),
+                        depth=a.get("depth"))
     if verb in ("pull", "push"):
         workdir = _safe_scratch_path(a["dir"])
         # Il repository di questo working tree non lo dice il chiamante: lo dice
@@ -2638,6 +2646,32 @@ def _copybrain_prefix() -> str:
 def _current_spawn_safe() -> str:
     from .whitelist import current_spawn as _cs
     return _cs() or "-"
+
+
+def _telegram_chat_id_or_raise(arguments: dict) -> None:
+    """`chat_id` di `telegram.send` in una delle due forme di `tg:` — l'id
+    numerico di un gruppo o `@handle` — altrimenti ValueError con la via giusta.
+
+    Il messaggio nomina la chat legata al canale corrente, se esiste: è quasi
+    sempre quella che si intendeva, e dirlo evita un secondo tentativo a vuoto.
+    """
+    from . import egress as _eg
+    cid = str(arguments.get("chat_id") or "").strip()
+    if _eg._TG_GROUP.match(cid) or _eg._TG_HANDLE.match(cid):
+        return
+    legato = None
+    canale = current_channel()
+    if canale and "/" in canale:
+        try:
+            from .topics_api import _telegram_binding_for
+            legato, _b = _telegram_binding_for(*canale.split("/", 1))
+        except Exception:  # noqa: BLE001 — il suggerimento è un aiuto, non un requisito
+            legato = None
+    via = (f" In questo canale il gruppo legato è chat_id='{legato}': usa quello."
+           if legato else " Usa l'id numerico del gruppo (negativo per i supergruppi).")
+    raise ValueError(
+        f"telegram.send: chat_id '{cid}' non è una chat Telegram — serve l'id numerico "
+        f"di un gruppo o '@handle' di una persona, non il nome del gruppo." + via)
 
 
 def _is_super(name: str | None) -> bool:
@@ -4047,6 +4081,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             _eargs = arguments
             if name == "email.reply" and not (arguments.get("to") or ""):
                 _eargs = {**arguments, "to": _reply_recipient(arguments)}
+            elif name == "telegram.send":
+                # Un `chat_id` che non è una chat Telegram (il TITOLO del gruppo,
+                # «Clodia Sviluppo») diventava `tg:Clodia Sviluppo`, che nessuna
+                # lista contiene: il gateway apriva un gate per approvare un
+                # indirizzo che non esiste, mentre il gruppo vero era già in
+                # whitelist (clodia-platform#402). Si rifiuta PRIMA del verdetto,
+                # dicendo l'id giusto quando il canale ne ha uno legato.
+                _telegram_chat_id_or_raise(arguments)
             elif name == "github.push":
                 # Senza questa riga il PDP vede un verbo con destinazione ignota
                 # e nega: è ciò che è successo il 17 ago 2026 appena `push` è
