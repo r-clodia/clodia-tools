@@ -246,6 +246,88 @@ class PullTests(Base):
         self.assertTrue((d / "terzo.md").exists())
 
 
+class ALongSilentCloneTests(Base):
+    """clodia-platform#371 — un clone lungo e muto perde sempre contro il
+    watchdog di turno (180s di silenzio SDK, clodia-logic).
+
+    I tre fatti che questi test tengono fermi sono quelli misurati nel ticket:
+    non si può chiedere un clone leggero, l'errore non arriva mai a chi lo
+    leggerebbe, e il retry sbatte su un secondo messaggio fuorviante.
+    """
+
+    def setUp(self):
+        super().setUp()
+        semina = self.root / "semina"
+        (semina / "secondo.md").write_text("due\n")
+        _git("add", "-A", cwd=semina)
+        _git("commit", "-q", "-m", "secondo", cwd=semina)
+        _git("push", "-q", str(self.origine), "main", cwd=semina)
+
+    def test_the_network_timeout_stays_under_the_watchdog(self):
+        """Se i due numeri coincidono la corsa è persa in partenza: il turno
+        muore prima che l'errore di git risalga fino all'agente, e il limite
+        resta scopribile solo sbattendoci contro."""
+        self.assertLess(gh.NET_TIMEOUT, gh.WATCHDOG_SILENCE)
+
+    def test_a_shallow_clone_can_be_asked_for(self):
+        """Il caso comune è «serve l'ultimo commit di un branch», non la storia:
+        senza questo parametro nemmeno l'aggiramento leggero è disponibile."""
+        d = self.root / "leggero"
+        gh.clone(self.url, str(d), depth=1)
+        conta = _git("rev-list", "--count", "HEAD", cwd=d).stdout.strip()
+        self.assertEqual(conta, "1")
+        self.assertTrue((d / "secondo.md").exists())
+
+    def test_a_full_clone_keeps_the_whole_history(self):
+        """Il default non cambia: chi non chiede depth ha ancora la storia."""
+        d = self.root / "intero"
+        gh.clone(self.url, str(d))
+        self.assertEqual(_git("rev-list", "--count", "HEAD", cwd=d).stdout.strip(), "2")
+
+    def _clone_che_va_in_timeout(self, dest: Path):
+        """git che non finisce: lascia una destinazione a metà, poi scade."""
+        vero = gh.subprocess.run
+
+        def finto(cmd, *a, **kw):
+            if "clone" in cmd:
+                dest.mkdir(parents=True, exist_ok=True)
+                (dest / ".git").mkdir(exist_ok=True)
+                raise subprocess.TimeoutExpired(cmd, gh.NET_TIMEOUT)
+            return vero(cmd, *a, **kw)
+
+        return unittest.mock.patch.object(gh.subprocess, "run", side_effect=finto)
+
+    def test_a_clone_that_runs_out_of_time_says_how_to_get_through(self):
+        """Un timeout che dice solo «timed out» costa un altro spawn: il
+        messaggio deve nominare il limite e la via d'uscita."""
+        d = self.root / "lento"
+        with self._clone_che_va_in_timeout(d):
+            with self.assertRaises(gh.GitHubError) as ctx:
+                gh.clone(self.url, str(d))
+        msg = str(ctx.exception)
+        self.assertIn("depth", msg)
+        self.assertIn("180", msg)
+
+    def test_after_a_timeout_the_destination_can_be_reused(self):
+        """Il clone ucciso lascia la destinazione non vuota, e il retry viene
+        respinto con «la destinazione non è vuota»: un secondo messaggio
+        fuorviante sopra il primo. Chi interrompe, pulisce."""
+        d = self.root / "ritentabile"
+        with self._clone_che_va_in_timeout(d):
+            with self.assertRaises(gh.GitHubError):
+                gh.clone(self.url, str(d))
+        gh.clone(self.url, str(d), depth=1)      # il retry deve passare
+        self.assertTrue((d / "README.md").exists())
+
+    def test_a_timeout_never_carries_the_token(self):
+        """Il messaggio nuovo è una nuova via d'uscita per il segreto."""
+        d = self.root / "lento-con-token"
+        with self._clone_che_va_in_timeout(d):
+            with self.assertRaises(gh.GitHubError) as ctx:
+                gh.clone(self.url, str(d), token="ghp_SEGRETISSIMO")
+        self.assertNotIn("ghp_SEGRETISSIMO", str(ctx.exception))
+
+
 class PullRequestTests(unittest.TestCase):
     def test_without_a_credential_it_says_who_supplies_it(self):
         """Un rifiuto che non indica la strada insegna solo che il sistema dice

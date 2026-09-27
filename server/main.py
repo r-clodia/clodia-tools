@@ -498,14 +498,19 @@ _LOGS_TOOLS: list[Tool] = [
     Tool(
         name="logs.tail",
         description=(
-            "Read-only: le ultime righe del log del server (agent-server) per la "
-            "diagnosi. Segreti redatti. Solo log di piattaforma, MAI contenuti dei topic."
+            "Read-only: le ultime righe di un log di piattaforma per la diagnosi. "
+            "`source`: 'agent-server' (turni, sessioni, job — default) oppure "
+            "'gateway' (decisioni del gateway: gate, compartimento per-spawn, "
+            "whitelist di destinazione). Segreti redatti. Solo log di "
+            "piattaforma, MAI contenuti dei topic."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "lines": {"type": "integer", "description": "Numero di righe (default 100, max 500)."},
                 "level": {"type": "string", "description": "Filtro livello opzionale: INFO|WARNING|ERROR."},
+                "source": {"type": "string", "enum": ["agent-server", "gateway"],
+                           "description": "Quale log leggere (default: agent-server)."},
             },
         },
     ),
@@ -661,13 +666,20 @@ _GITHUB_TOOLS: list[Tool] = [
         name="github.clone",
         description=("Clona un repository APPROVATO per questo topic nella tua "
                      "scratch. La credenziale la fornisce l'owner al mount e non "
-                     "entra mai nel tuo processo."),
+                     "entra mai nel tuo processo. Un clone non emette eventi per "
+                     "tutta la durata del download: se supera i 180s il watchdog "
+                     "chiude il turno — su un repository grande passa `depth: 1`."),
         inputSchema={"type": "object", "properties": {
             "repo": {"type": "string", "description": (
                 "https://github.com/<owner>/<repo> — vale anche la forma breve "
                 "<owner>/<repo>, che assume github.com")},
             "dest": {"type": "string", "description": "cartella di destinazione nella tua scratch"},
             "branch": {"type": "string"},
+            "depth": {"type": "integer", "minimum": 1, "description": (
+                "clone superficiale: gli ultimi N commit del solo ramo clonato "
+                "invece di tutta la storia. `1` basta quando ti serve il working "
+                "tree e non la history, ed è la differenza fra secondi e minuti "
+                "su un repository grande. Omettilo per avere la storia intera.")},
         }, "required": ["repo", "dest"]},
     ),
     Tool(
@@ -2020,7 +2032,8 @@ def _dispatch_github(name: str, a: dict):
         token = _repo_credential(svc, tier, tname, canonico)
     if verb == "clone":
         dest = _safe_scratch_path(a["dest"])
-        return gh.clone(canonico, dest, token=token, branch=a.get("branch"))
+        return gh.clone(canonico, dest, token=token, branch=a.get("branch"),
+                        depth=a.get("depth"))
     if verb in ("pull", "push"):
         workdir = _safe_scratch_path(a["dir"])
         # Il repository di questo working tree non lo dice il chiamante: lo dice
@@ -2645,6 +2658,32 @@ def _current_spawn_safe() -> str:
     return _cs() or "-"
 
 
+def _telegram_chat_id_or_raise(arguments: dict) -> None:
+    """`chat_id` di `telegram.send` in una delle due forme di `tg:` — l'id
+    numerico di un gruppo o `@handle` — altrimenti ValueError con la via giusta.
+
+    Il messaggio nomina la chat legata al canale corrente, se esiste: è quasi
+    sempre quella che si intendeva, e dirlo evita un secondo tentativo a vuoto.
+    """
+    from . import egress as _eg
+    cid = str(arguments.get("chat_id") or "").strip()
+    if _eg._TG_GROUP.match(cid) or _eg._TG_HANDLE.match(cid):
+        return
+    legato = None
+    canale = current_channel()
+    if canale and "/" in canale:
+        try:
+            from .topics_api import _telegram_binding_for
+            legato, _b = _telegram_binding_for(*canale.split("/", 1))
+        except Exception:  # noqa: BLE001 — il suggerimento è un aiuto, non un requisito
+            legato = None
+    via = (f" In questo canale il gruppo legato è chat_id='{legato}': usa quello."
+           if legato else " Usa l'id numerico del gruppo (negativo per i supergruppi).")
+    raise ValueError(
+        f"telegram.send: chat_id '{cid}' non è una chat Telegram — serve l'id numerico "
+        f"di un gruppo o '@handle' di una persona, non il nome del gruppo." + via)
+
+
 def _is_super(name: str | None) -> bool:
     return (name or "") in _SUPER_AGENTS
 
@@ -3146,14 +3185,30 @@ async def _require_gate_consent(
 
 
 def _spawn_compartment_mode() -> str:
-    """`off` | `report` | `on`. Default `report`: si osserva prima di rifiutare.
+    """`off` | `report` | `on`. Default **`on`**: si rifiuta.
 
-    Stessa forma della catena origin, e per la stessa ragione — questa regola
-    stringe un permesso che oggi è larghissimo, e stringerlo alla cieca
-    romperebbe l'orchestrazione senza che nessuno sappia dove.
+    Il default è stato `report` — osserva e lascia passare — per tutta la durata
+    del rollout, con la ragione della catena origin: questa regola stringe un
+    permesso larghissimo, e stringerlo alla cieca romperebbe l'orchestrazione
+    senza che nessuno sappia dove.
+
+    *Cambiato il 26 set 2026* (clodia-platform#382). Il rollout non è finito
+    perché nessuno poteva finirlo: l'osservazione usciva sul logger
+    `clodia-tools`, che va su stdout e non è leggibile da dentro — `logs.tail`
+    vedeva solo l'agent-server. Un rollout la cui evidenza nessuno può leggere
+    non converge mai, e intanto il default insicuro è in esercizio: il 21 set
+    uno spawn di clodia ha letto un topic SEAL-2 stando in un altro e l'ha
+    riversato lì, senza card, **esattamente** perché in `report` la membership
+    del seed grazia il gate.
+
+    Due cose cambiano insieme, ed è la ragione per cui stanno nella stessa PR:
+    il default diventa `on` e l'osservazione diventa leggibile
+    (`logs.tail(source="gateway")`). `off`/`report` restano come ritirata di
+    esercizio — ma ora vanno dichiarate, e una variabile dimenticata o vuota
+    cade sul lato sicuro invece che su quello aperto.
     """
-    m = (_os.environ.get("CLODIA_SPAWN_COMPARTMENT") or "report").strip().lower()
-    return m if m in ("off", "report", "on") else "report"
+    m = (_os.environ.get("CLODIA_SPAWN_COMPARTMENT") or "on").strip().lower()
+    return m if m in ("off", "report", "on") else "on"
 
 
 #: Chi può ANCHE solo chiedere il grant cross-topic (decisione di Davide, 23 set
@@ -3211,8 +3266,27 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
     except Exception:  # noqa: BLE001 — topic inesistente → lascia decidere al dispatch
         return None
     target = f"{meta.get('tier', tier)}/{tname}"
+    modo = _spawn_compartment_mode()
+    membro = _topic_is_member(meta, agent)
+
+    def _osserva(esito: str) -> None:
+        """Una riga per ogni decisione che dipende dalla modalità, leggibile con
+        `logs.tail(source="gateway")` (clodia-platform#382).
+
+        Si registra solo il caso che la modalità cambia — l'agente È
+        partecipante del bersaglio — perché è l'unico su cui c'è qualcosa da
+        sapere: chi non è partecipante era gatato anche prima. Dopo il passaggio
+        a `on` queste righe sono l'elenco di ciò che si è stretto, cioè
+        l'evidenza con cui si conferma o si ritira la decisione."""
+        import logging as _lg
+        from .tools.logs import REFMON_LOGGER
+        _lg.getLogger(REFMON_LOGGER).warning(
+            "compartimento spawn · %s tocca %s (%s) da %s, participant del seed: %s",
+            agent, target, name, current_chat() or "nessuna sessione", esito)
 
     def _gate_or_deny() -> str:
+        if membro:
+            _osserva("GATE (in modalita' 'report' passava)")
         if agent not in _CROSSTOPIC_ELIGIBLE:
             raise PermissionError(
                 f"'{agent}': cross-topic negato per default (verso {target}). "
@@ -3221,22 +3295,40 @@ def _cross_topic_gate_key(name: str, arguments: dict, agent: str) -> str | None:
                 "via di gate esiste per questo agente.")
         return "crosstopic"
 
-    if _spawn_compartment_mode() == "off":
-        return None if _topic_is_member(meta, agent) else _gate_or_deny()
+    if modo == "off":
+        return None if membro else _gate_or_deny()
 
-    from .whitelist import current_channel
+    from .whitelist import current_channel, is_unattended
     qui = current_channel()
     if qui and _norm_scope(qui) == _norm_scope(target):
         return None                      # la propria stanza
-    if _spawn_compartment_mode() == "report":
-        if _topic_is_member(meta, agent):
-            import logging as _lg
-            _lg.getLogger("clodia-tools").warning(
-                "compartimento spawn · %s leggerebbe %s stando in %s: consentito "
-                "solo perche' participant del seed (con enforcement: GATE)",
-                agent, target, qui or "nessuna stanza")
+    if modo == "on" and not qui:
+        # NESSUNA STANZA. Il compartimento che questa regola difende è la
+        # STANZA: il danno di #382 è portare in una stanza contenuti che la sua
+        # platea non ha titolo di vedere. Una sessione senza `chan:` non ha una
+        # platea in cui riversare — è una chat 1:1 della webui (`chat_id` è un
+        # timestamp, non `chan:…`) o un job — e trattarla come cross-topic
+        # significherebbe gatare OGNI verbo `topic.*` di OGNI conversazione
+        # normale: si romperebbe tutto l'esercizio senza chiudere il leak, che
+        # vive nelle stanze. Resta in piedi l'ACL vera, che è altrove e non è
+        # toccata da qui: `_require_topic_member` esige comunque la membership
+        # (o il grant `crosstopic`) e la clearance ≥ tier.
+        if is_unattended():
+            # Tranne che NON PRESIDIATA, dove non c'è nemmeno un umano che legge
+            # il risultato: lì si concede il minimo che tiene vivo il caso che
+            # il disegno vuole vivo — «un job deve poter *depositare*
+            # informazione» (`_UNATTENDED_TOPIC_ALLOW`), cioè la mail in arrivo
+            # del messaggero e gli handoff. Solo `post_message`, che porta
+            # DENTRO il topic invece di portarne fuori, e solo verso un topic di
+            # cui l'agente è già partecipante: nessuna lettura, mai.
+            return None if (verb == "post_message" and membro) else _gate_or_deny()
+        if membro:
+            _osserva("consentito (sessione senza stanza in cui riversare)")
             return None
         return _gate_or_deny()
+    if modo == "report" and membro:
+        _osserva("consentito (modalita' 'report': con enforcement sarebbe GATE)")
+        return None
     return _gate_or_deny()
 
 
@@ -4000,6 +4092,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             _eargs = arguments
             if name == "email.reply" and not (arguments.get("to") or ""):
                 _eargs = {**arguments, "to": _reply_recipient(arguments)}
+            elif name == "telegram.send":
+                # Un `chat_id` che non è una chat Telegram (il TITOLO del gruppo,
+                # «Clodia Sviluppo») diventava `tg:Clodia Sviluppo`, che nessuna
+                # lista contiene: il gateway apriva un gate per approvare un
+                # indirizzo che non esiste, mentre il gruppo vero era già in
+                # whitelist (clodia-platform#402). Si rifiuta PRIMA del verdetto,
+                # dicendo l'id giusto quando il canale ne ha uno legato.
+                _telegram_chat_id_or_raise(arguments)
             elif name == "github.push":
                 # Senza questa riga il PDP vede un verbo con destinazione ignota
                 # e nega: è ciò che è successo il 17 ago 2026 appena `push` è
@@ -4073,7 +4173,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name == "web.post":
             result = await asyncio.to_thread(web_post.post, arguments, agent=_ag or "")
         elif name == "logs.tail":
-            result = logs.tail(arguments.get("lines", 100), arguments.get("level", ""))
+            result = logs.tail(arguments.get("lines", 100), arguments.get("level", ""),
+                               source=arguments.get("source") or "agent-server")
         elif name == "email.send":
             # ALLEGATI PER RIFERIMENTO (#104 §8, requisito derivato della riga
             # `messaggero`). Il gateway legge i file dal topic e li allega: il

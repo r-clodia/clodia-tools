@@ -179,6 +179,13 @@ def build_app() -> Starlette:
 
 def run_http(host: str = "0.0.0.0", port: int = 7849) -> None:
     import uvicorn
+    from .tools import logs as _logs
     logging.basicConfig(level=logging.INFO)
-    LOG.info("clodia-tools MCP HTTP in ascolto su %s:%s/mcp", host, port)
+    # Le decisioni del reference monitor (gate, compartimento per-spawn,
+    # whitelist di destinazione) escono sul logger `clodia-tools`. Su stdout
+    # sono fuori portata di chiunque debba diagnosticarle da dentro la colonia:
+    # `logs.tail` legge file, non il container (clodia-platform#382).
+    _dove = _logs.attach_gateway_file_log()
+    LOG.info("clodia-tools MCP HTTP in ascolto su %s:%s/mcp (log: %s)",
+             host, port, _dove or "solo stdout")
     uvicorn.run(build_app(), host=host, port=port, log_level="info")

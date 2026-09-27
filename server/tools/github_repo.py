@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -48,9 +49,46 @@ _CRED_HELPER = (
 )
 _TIMEOUT = 180
 
+#: Il watchdog di turno dell'agent-server (`clodia-logic`,
+#: `sdk_runtime/session.py`) uccide il turno dopo questi secondi SENZA nessun
+#: evento SDK. Un `git clone` di un repo grande non emette niente per tutta la
+#: durata del download: è muto per costruzione, quindi qualunque clone più lungo
+#: di così viene ucciso — sempre, indipendentemente da repo e canale
+#: (clodia-platform#371, misurato: 4 spawn bruciati di fila).
+#:
+#: Qui serve come CONFINE, non come timeout nostro: è il tempo che abbiamo prima
+#: che non ci sia più nessuno ad ascoltare la risposta.
+WATCHDOG_SILENCE = int(os.environ.get("CLODIA_TURN_WATCHDOG_SILENCE", "180"))
+
+#: E questo è il motivo per cui `_TIMEOUT = 180` non poteva funzionare: era lo
+#: STESSO numero del watchdog. Git scadeva e sollevava, ma l'errore doveva
+#: ancora risalire il gateway e l'MCP — mentre il watchdog scattava al primo
+#: tick utile (187-192s misurati in clodia-platform#358) e chiudeva il
+#: subprocess. Risultato: l'agente non leggeva mai il messaggio, e il limite
+#: restava scopribile solo sbattendoci contro, una volta per spawn.
+#:
+#: Trenta secondi di margine sono il prezzo per trasformare una morte muta in un
+#: errore che si può leggere e su cui si può agire. Chi vuole spendere quei
+#: secondi in download invece che in diagnosi alza l'env — ma non può portarlo
+#: sopra il watchdog, perché sopra il watchdog non c'è più nessuno in ascolto.
+NET_TIMEOUT = min(
+    WATCHDOG_SILENCE - 30,
+    int(os.environ.get("CLODIA_GIT_NET_TIMEOUT", str(WATCHDOG_SILENCE - 30))),
+)
+
 
 class GitHubError(RuntimeError):
     """Un rifiuto o un fallimento di un verbo `github.*`."""
+
+
+class GitHubTimeout(GitHubError):
+    """L'operazione non è finita nel tempo che avevamo (clodia-platform#371).
+
+    È una sottoclasse perché chi cattura `GitHubError` — il dispatch, i test
+    esistenti — non deve cambiare: resta un fallimento del verbo. Ma chi vuole
+    aggiungere la via d'uscita giusta per la propria operazione può distinguerlo
+    da un errore di git, che è un'altra cosa e si risolve in un altro modo.
+    """
 
 
 #: `file://` è rifiutato: il git del gateway vede il filesystem del gateway, e
@@ -123,7 +161,15 @@ def _run(args: list, cwd: str | None, token: str | None) -> subprocess.Completed
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     if token:
         env["GIT_PAT"] = token
-    r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=_TIMEOUT)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                           timeout=NET_TIMEOUT)
+    except subprocess.TimeoutExpired as e:
+        # Il timeout NON è un fallimento di git: è la fine del tempo utile. Chi
+        # chiama può volerci aggiungere la via d'uscita del suo verbo, quindi ha
+        # un tipo suo invece di essere indistinguibile da un errore di rete.
+        raise GitHubTimeout(
+            f"git {args[0]} non è finito entro {NET_TIMEOUT}s") from e
     if r.returncode != 0:
         # L'errore di git può contenere l'URL con le credenziali se qualcuno le
         # ha messe lì: si riporta ripulito, altrimenti il segreto esce dal
@@ -178,13 +224,20 @@ def remote_url(workdir: str) -> str:
 
 
 def clone(repo: str, dest: str, token: str | None = None,
-          branch: str | None = None) -> dict:
+          branch: str | None = None, depth: int | None = None) -> dict:
     """Clona un repository APPROVATO nella scratch dello spawn chiamante.
 
     `dest` è già validato da chi chiama (`_safe_scratch_path`): qui non si
     ricontrolla, perché due controlli sullo stesso path in due file divergono —
     ed è il difetto ricorrente di questa settimana. Qui si controlla ciò che
     solo qui si sa: che l'URL sia un repository e che il segreto non resti.
+
+    `depth` chiede un clone superficiale: gli ultimi N commit del solo ramo
+    clonato invece dell'intera storia. Esiste perché il caso comune («mi serve
+    il working tree dell'ultimo commit») pagava il prezzo di tutta la storia, e
+    su un repo grande quel prezzo supera il tempo di vita del turno
+    (clodia-platform#371). Chi ha davvero bisogno della history non lo passa e
+    non cambia niente per lui.
     """
     url = normalize_repo(repo)
     d = Path(dest)
@@ -192,10 +245,34 @@ def clone(repo: str, dest: str, token: str | None = None,
         raise GitHubError(f"la destinazione non è vuota: {dest}")
     d.parent.mkdir(parents=True, exist_ok=True)
     args = ["clone", "--quiet"]
+    if depth is not None:
+        n = int(depth)
+        if n < 1:
+            raise GitHubError(f"depth dev'essere almeno 1: ricevuto {depth}")
+        args += ["--depth", str(n)]
     if branch:
         args += ["--branch", branch]
     args += [url, str(d)]
-    _run(args, cwd=None, token=token)
+    try:
+        _run(args, cwd=None, token=token)
+    except GitHubTimeout as e:
+        # Un clone ucciso a metà lascia la destinazione NON vuota, e il retry
+        # viene respinto dal controllo qui sopra con «la destinazione non è
+        # vuota»: un secondo messaggio fuorviante sopra il primo. Chi
+        # interrompe, pulisce — il retry deve trovare il terreno come prima.
+        c_era = d.exists()
+        shutil.rmtree(d, ignore_errors=True)
+        if c_era:
+            d.mkdir(parents=True, exist_ok=True)
+        raise GitHubTimeout(
+            f"{e}: oltre {WATCHDOG_SILENCE}s senza eventi il watchdog chiude il "
+            f"turno, quindi il clone è stato interrotto prima per lasciarti "
+            f"questo messaggio invece di una morte muta. Riprova con "
+            f"depth=1 (solo l'ultimo commit"
+            + (f" di {branch}" if branch else " del ramo di default")
+            + "), che su un repository grande è la differenza fra secondi e "
+              "minuti. La destinazione è stata ripulita: il retry parte pulito."
+        ) from None
     # L'origin torna all'URL pulito: il clone lo scrive già senza credenziali
     # (viaggiano nell'helper), ma riscriverlo rende la proprietà indipendente da
     # come git decide di salvare l'URL — che è una scelta di git, non nostra.
