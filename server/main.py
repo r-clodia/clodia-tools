@@ -1064,6 +1064,23 @@ _TOPIC_TOOLS: list[Tool] = [
             "path": {"type": "string", "description": "path da eliminare, dentro files/"},
         }, "required": ["tier", "name", "path"]},
     ),
+    Tool(
+        name="topic.move_file",
+        description=("Sposta o RINOMINA un file (o una cartella) già dentro il topic, "
+                     "preservandone la provenienza. È il verbo da usare per riordinare i "
+                     "file: il giro fetch+put+delete_file NON è equivalente, perché il "
+                     "put ri-etichetta il file come prodotto da te e cancella il flag "
+                     "'non attendibile' dei documenti arrivati da fuori (email, allegati). "
+                     "path e to = path come da topic.files (es. 'local/x.pdf' → "
+                     "'local/preventivi/x.pdf'). Non sovrascrive: se la destinazione "
+                     "esiste, il verbo rifiuta."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "path": {"type": "string", "description": "file o cartella da spostare, dentro local/"},
+            "to": {"type": "string", "description": "nuovo path, dentro local/ (le cartelle intermedie vengono create)"},
+        }, "required": ["tier", "name", "path", "to"]},
+    ),
     # ── Cartelle Drive dichiarate: whitelist + confinamento, MAI un mount da
     # navigare (decision-record #40). Un agente che deve lavorare su un file
     # Drive lo raggiunge coi verbi `gdrive.*` nel proprio scratch.
@@ -3215,6 +3232,60 @@ def _spawn_compartment_mode() -> str:
     return m if m in ("off", "report", "on") else "on"
 
 
+def spawn_compartment_declaration() -> tuple[int, str]:
+    """Livello e testo con cui l'avvio DICHIARA la modalità del compartimento.
+
+    Residuo del punto 1 di clodia-platform#382 — «verificare la variabile nel
+    deploy» — che il passaggio del default a `on` non chiude: un deploy che
+    dichiari `report` o `off` rende quel default inerte, e oggi non c'è modo di
+    accorgersene. La modalità si legge solo dentro `_cross_topic_gate_key`, e
+    solo il caso «participant del seed» lascia una riga: finché nessuno prova a
+    fare cross-topic, un perimetro aperto e uno chiuso hanno lo stesso log —
+    cioè nessuno. Si scoprirebbe al prossimo incidente, che è la storia da cui
+    questa issue nasce. Una riga all'avvio costa una riga e rende la domanda
+    «in che modalità gira questa istanza?» rispondibile dall'interno, in
+    qualunque momento, con `logs.tail(source="gateway")`.
+
+    Si dichiara anche l'ORIGINE, non solo l'esito: chi ha scritto `Report ` o
+    `no` nella variabile crede di aver disattivato qualcosa, mentre
+    `_spawn_compartment_mode` ripiega su `on` in silenzio. «Non riconosciuta»
+    è l'unica forma che gli fa vedere l'errore.
+
+    Il livello segue la modalità e non è estetica: `logs.tail` filtra cercando
+    ` WARNING ` nella riga, quindi `report`/`off` — un perimetro aperto — devono
+    restare pescabili col filtro anche dentro un log lungo, mentre `on` è
+    l'esercizio normale e resta INFO.
+    """
+    import logging as _lg
+    modo = _spawn_compartment_mode()
+    dichiarata = (_os.environ.get("CLODIA_SPAWN_COMPARTMENT") or "").strip()
+    if not dichiarata:
+        origine = "variabile assente, default del codice"
+    elif dichiarata.lower() == modo:
+        origine = f"CLODIA_SPAWN_COMPARTMENT={dichiarata.lower()}"
+    else:
+        origine = (f"CLODIA_SPAWN_COMPARTMENT={dichiarata!r} non riconosciuta, "
+                   "default del codice")
+    effetto = {"on": "rifiuta il cross-topic senza consenso",
+               "report": "OSSERVA soltanto, il cross-topic passa",
+               "off": "compartimento non applicato"}[modo]
+    livello = _lg.INFO if modo == "on" else _lg.WARNING
+    return livello, (f"compartimento spawn · modalita' effettiva '{modo}' "
+                     f"({effetto}) · origine: {origine}")
+
+
+def log_spawn_compartment_mode() -> str:
+    """Emette la dichiarazione sul logger del reference monitor — l'unico che
+    `attach_gateway_file_log` porta sul file letto da `logs.tail(source=
+    "gateway")` — e restituisce il testo. Va chiamata DOPO quell'attach, se no
+    la riga esce solo su stdout, cioè nel buco cieco che #382 ha chiuso."""
+    import logging as _lg
+    from .tools.logs import REFMON_LOGGER
+    livello, msg = spawn_compartment_declaration()
+    _lg.getLogger(REFMON_LOGGER).log(livello, msg)
+    return msg
+
+
 #: Chi può ANCHE solo chiedere il grant cross-topic (decisione di Davide, 23 set
 #: 2026, in risposta al leak strutturale di `runtime.topics()` su
 #: `tomato-blogging`): nessuno spawn fa cross-topic per default, e l'UNICA
@@ -4625,7 +4696,7 @@ _TOPIC_SCOPED_VERBS = {
     "open", "save_summary", "save_agents_md", "add_minute", "archive",
     "files", "read_file",
     "read_document", "convert_document", "write_document", "write_file", "fetch",
-    "put", "delete_file",
+    "put", "delete_file", "move_file",
     "post_message", "messages", "my_mentions", "mark_seen",
     "drive_folder_add", "drive_folder_remove",
     "local_folder_add", "local_folder_remove",
@@ -4658,6 +4729,7 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
 _TOPIC_MUTATING_VERBS = frozenset({
     "save_summary", "save_agents_md", "add_minute", "archive",
     "write_file", "convert_document", "write_document", "put", "delete_file",
+    "move_file",
     "drive_folder_add", "drive_folder_remove",
     "local_folder_add", "local_folder_remove",
     "egress_add", "egress_remove", "ingress_add", "ingress_remove",
@@ -5543,6 +5615,8 @@ def _dispatch_topic(name: str, a: dict):
                             "agent", agent_name())
     if verb == "delete_file":
         return svc.delete_file(a["tier"], a["name"], a["path"])
+    if verb == "move_file":
+        return svc.move_file(a["tier"], a["name"], a["path"], a["to"])
     # Cartelle Drive dichiarate: whitelist + confinamento, mai un mount (#40).
     if verb == "drive_folder_add":
         return svc.drive_folder_add(a["tier"], a["name"], a["folder"],

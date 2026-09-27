@@ -1093,18 +1093,29 @@ def scope_revoke(direction: str, scope: str, uri: str) -> dict:
     cur: list = []
     for k in [k for k in per_scope if _norm_scope_key(str(k)) == chiave]:
         cur.extend(per_scope.pop(k) or [])
-    if u not in cur:
+    if not _nomina(cur, u):
         per_scope[chiave] = cur
         _wl.CONFIG[key] = per_scope
         return {"direction": direction, "scope": chiave, "uri": u,
                 "removed": False, "total": len(cur)}
-    cur = [x for x in cur if x != u]
+    cur = [x for x in cur if canonical(str(x).strip()) != u]
     per_scope[chiave] = cur
     _wl.CONFIG[key] = per_scope
     _wl.save_config()
     LOG.warning("%s[%s] · -= %s", key, chiave, u)
     return {"direction": direction, "scope": chiave, "uri": u,
             "removed": True, "total": len(cur)}
+
+
+def _nomina(voci: list, uri: str) -> bool:
+    """La lista contiene `uri`, a meno della forma canonica.
+
+    Il confronto letterale bastava finché le liste le scriveva solo `allow`, che
+    canonicalizza; da quando l'owner edita `config.yaml` a mano no — e una voce
+    con una maiuscola è la stessa autorizzazione, ma resisteva a ogni revoca
+    (sintomo: «l'ho tolta e c'è ancora», gemello di quello che `canonical` già
+    risolve in scrittura)."""
+    return any(canonical(str(v).strip()) == uri for v in (voci or []))
 
 
 def revoke(direction: str, uri: str) -> dict:
@@ -1114,13 +1125,57 @@ def revoke(direction: str, uri: str) -> dict:
     u = canonical(uri)
     from . import whitelist as _wl
     cur = list(_wl.CONFIG.get(key) or [])
-    if u not in cur:
+    if not _nomina(cur, u):
         return {"direction": direction, "uri": u, "removed": False, "total": len(cur)}
-    cur = [x for x in cur if x != u]
+    cur = [x for x in cur if canonical(str(x).strip()) != u]
     _wl.CONFIG[key] = cur
     _wl.save_config()
     LOG.warning("%s · -= %s", key, u)
     return {"direction": direction, "uri": u, "removed": True, "total": len(cur)}
+
+
+def forget_mailbox(address: str) -> dict:
+    """Ritira `inbox:<addr>` e `outbox:<addr>` da OGNI lista che li nomina.
+
+    clodia-platform#411: togliere la casella dal vault non toglieva le sue
+    autorizzazioni, e restavano voci che nominano un indirizzo inesistente —
+    rumore nel pannello e, peggio, un'autorizzazione già scritta che tornerebbe
+    valida se un domani quell'indirizzo venisse riconfigurato per un altro uso.
+    Finché il collegamento si faceva a mano era un caso raro; con il connettore
+    Mailbox di #406 — un click, `scope_allow` in due direzioni — se ne accumula
+    una coppia per canale.
+
+    Sta qui e non nella rotta perché qui vivono le liste: chiunque rimuova una
+    casella, da qualunque strada, deve poter ritirare le sue voci senza
+    riscrivere questa logica. Passa dai `revoke`/`scope_revoke` esistenti invece
+    di operare sulle liste: un solo punto che scrive, un solo formato di log.
+
+    Il confronto è sulla forma CANONICA, non letterale: una voce editata a mano
+    con le maiuscole è la stessa casella, e lasciarla indietro significherebbe
+    fallire proprio nel caso in cui l'owner ha messo mano a `config.yaml`.
+
+    Ritorna `{address, scopes, global}` — `scopes` sono le stanze davvero
+    toccate, perché chi rimuove la casella ha diritto di sapere quali canali
+    sono cambiati sotto i suoi piedi, non solo che «è stato fatto».
+    """
+    addr = canonical(f"inbox:{(address or '').strip()}")[len("inbox:"):]
+    if "@" not in addr:
+        # Nessun indirizzo, nessuna pulizia: con la stringa vuota qualunque
+        # confronto meno stretto svuoterebbe le liste.
+        return {"address": "", "scopes": [], "global": []}
+    from . import whitelist as _wl
+    toccati: set[str] = set()
+    globali: list[str] = []
+    for direzione, uri in (("ingress", f"inbox:{addr}"), ("egress", f"outbox:{addr}")):
+        if revoke(direzione, uri)["removed"]:
+            globali.append(uri)
+        per_scope = dict(_wl.CONFIG.get(_SCOPE_KEYS[direzione]) or {})
+        for chiave, voci in per_scope.items():
+            if not _nomina(voci, uri):
+                continue
+            if scope_revoke(direzione, str(chiave), uri)["removed"]:
+                toccati.add(_norm_scope_key(str(chiave)))
+    return {"address": addr, "scopes": sorted(toccati), "global": globali}
 
 
 def listing(direction: str) -> dict:

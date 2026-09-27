@@ -186,6 +186,12 @@ def run_http(host: str = "0.0.0.0", port: int = 7849) -> None:
     # sono fuori portata di chiunque debba diagnosticarle da dentro la colonia:
     # `logs.tail` legge file, non il container (clodia-platform#382).
     _dove = _logs.attach_gateway_file_log()
+    # …e la modalità del compartimento per-spawn si dichiara all'avvio, anche
+    # quando è quella giusta: il default del codice è `on`, ma un deploy che
+    # dichiari `report`/`off` lo rende inerte e finora non lo diceva nessuno.
+    # Dopo l'attach, se no la riga finisce nel buco cieco (clodia-platform#382).
+    from .main import log_spawn_compartment_mode
+    log_spawn_compartment_mode()
     LOG.info("clodia-tools MCP HTTP in ascolto su %s:%s/mcp (log: %s)",
              host, port, _dove or "solo stdout")
     uvicorn.run(build_app(), host=host, port=port, log_level="info")

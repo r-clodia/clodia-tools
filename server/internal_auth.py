@@ -41,7 +41,7 @@ Ordine dei controlli, dal più economico al più costoso, e tutti fail-closed:
 
 Un token senza `scoped_tools` non ha tetto e passa come prima: i chiamanti reali
 (`git_client`, `provider_store`, `topics_client`, `telegram_client`,
-`connectors_client`, `imagegen_client`, `gateway_admin`, `pack_deprovision` in
+`imagegen_client`, `gateway_admin`, `pack_deprovision` in
 clodia-logic) coniano tutti `pki.mint_session_token(_PRINCIPAL, ttl)` — senza
 `scoped_tools`, senza `on_behalf`, senza `execution_id`. Un insieme di verbi
 indovinato al posto di questo censimento spegnerebbe un servizio in produzione.
