@@ -1876,6 +1876,28 @@ class TopicService:
         """
         meta, _ = self._read_meta(tier, name)
         self._assert_content_available(meta)
+        store, base, sub, mount, parts = self._resolve_write_target(tier, name, filename)
+        store.write(f"{base}/{sub}".strip("/"), data)
+        prov = (provenance or "untrusted").strip().lower()
+        if prov not in ("trusted", "untrusted", "agent"):
+            prov = "untrusted"
+        # La provenienza è etichettata SOLO sul mount locale: sul remote il file
+        # non l'ha messo lì il nostro upload, e attribuirgliene una sarebbe una
+        # classificazione inventata.
+        if mount == self.MOUNT_LOCAL:
+            self.set_provenance(tier, name, sub, prov, by=by)
+        return {"name": parts[-1], "path": f"{mount}/{sub}", "provenance": prov}
+
+    def _resolve_write_target(self, tier: str, name: str, filename: str):
+        """`(store, base, sub, mount, parts)` per il path di DESTINAZIONE di una
+        scrittura nell'albero dati.
+
+        Unico posto in cui vivono le guardie della scrittura — prefissi ammessi,
+        anti-traversal per segmento, dotfile, `AGENTS.md` di radice. `put_file` e
+        `move_file` scrivono nello stesso albero: due copie delle stesse guardie
+        sono due copie che prima o poi divergono, e la seconda è quella che
+        nessuno guarda.
+        """
         rel = (filename or "").strip().strip("/")
         # Normalizza il prefisso 'files/' ridondante: gli agenti spesso passano il
         # path completo che vedono (es. 'files/x.pdf') invece del nome relativo a
@@ -1910,16 +1932,91 @@ class TopicService:
                 "scrivibile da qualunque partecipante.")
         store, base, sub, mount = self._resolve_data_path(
             tier, name, f"{mount_prefix}/{rel}".strip("/") if mount_prefix else rel)
-        store.write(f"{base}/{sub}".strip("/"), data)
-        prov = (provenance or "untrusted").strip().lower()
-        if prov not in ("trusted", "untrusted", "agent"):
-            prov = "untrusted"
-        # La provenienza è etichettata SOLO sul mount locale: sul remote il file
-        # non l'ha messo lì il nostro upload, e attribuirgliene una sarebbe una
-        # classificazione inventata.
-        if mount == self.MOUNT_LOCAL:
-            self.set_provenance(tier, name, sub, prov, by=by)
-        return {"name": parts[-1], "path": f"{mount}/{sub}", "provenance": prov}
+        return store, base, sub, mount, parts
+
+    def move_file(self, tier: str, name: str, relpath: str, dest: str) -> dict:
+        """Sposta/RINOMINA un file o una cartella dentro l'albero dati del topic
+        preservando la provenienza. Anti-traversal per segmento su entrambi i
+        path; la destinazione non viene MAI sovrascritta.
+
+        Esiste perché il giro equivalente — `fetch` + `put` + `delete_file` — non
+        è equivalente (clodia-platform#419): `put_file` etichetta il file come
+        prodotto dall'agente che lo ricarica, quindi riordinare una cartella di
+        allegati email cancellava in silenzio il flag `untrusted` su cui si regge
+        la difesa dalle istruzioni nascoste nei documenti di terzi. Qui il
+        contenuto non viene riscritto: si rinomina il path e la voce del sidecar
+        si sposta con lui.
+        """
+        meta, _ = self._read_meta(tier, name)
+        self._assert_content_available(meta)
+        # Sorgente: le guardie sono quelle di `delete_file` — anche un move è un
+        # modo di togliere un file da dov'è, e ciò che non si può cancellare da
+        # qui non si può nemmeno spostare da qui.
+        rel = (relpath or "").strip().strip("/")
+        parts = rel.split("/")
+        if not rel or "\\" in rel or any(p in ("", ".", "..") for p in parts):
+            raise TopicError(f"path non valido: {relpath}")
+        if not self._is_data_path(meta, rel):
+            raise TopicError(
+                "puoi spostare solo file dentro i mount del topic — "
+                f"`{self.MOUNT_LOCAL}/…` (meta, summary e AGENTS.md sono "
+                "control-plane: l'AGENTS.md si scrive con `topic.save_agents_md`)")
+        store, base, sub, mount = self._resolve_data_path(tier, name, rel)
+        if not sub:
+            raise TopicError("un mount non si sposta: indica un file dentro di esso")
+        src_abs = f"{base}/{sub}".strip("/")
+        if not store.exists(src_abs):
+            raise TopicError(f"non trovato: {relpath}")
+        # Destinazione: le guardie sono quelle di `put_file`, stesso helper.
+        d_store, d_base, d_sub, d_mount, d_parts = self._resolve_write_target(
+            tier, name, dest)
+        dst_abs = f"{d_base}/{d_sub}".strip("/")
+        if dst_abs == src_abs:
+            raise TopicError("origine e destinazione coincidono")
+        if d_store.exists(dst_abs):
+            raise TopicError(
+                f"destinazione già esistente: {dest} — un move non sovrascrive. "
+                "Scegli un altro nome, oppure cancella prima la destinazione con "
+                "`topic.delete_file` (che la mette nel cestino, non la perde).")
+        # Una cartella dentro sé stessa: `shutil.move` lo farebbe davvero e
+        # l'albero diventerebbe irraggiungibile dal suo stesso path.
+        if d_sub == sub or d_sub.startswith(sub.rstrip("/") + "/"):
+            raise TopicError("non puoi spostare una cartella dentro sé stessa")
+        store.move(src_abs, dst_abs)
+        moved_labels = self._move_provenance(tier, name, sub, d_sub)
+        return {"moved": f"{mount}/{sub}", "path": f"{d_mount}/{d_sub}",
+                "name": d_parts[-1], "provenance_entries_moved": moved_labels}
+
+    def _move_provenance(self, tier: str, name: str, src_sub: str,
+                         dest_sub: str) -> int:
+        """Sposta le etichette di provenienza da `src_sub` a `dest_sub`, PER
+        PREFISSO: una cartella spostata porta con sé la provenienza di ogni file
+        che contiene.
+
+        Il sidecar è indicizzato per path (`_PROV_FILE`), quindi senza questo
+        remap dopo un move le voci restano appese a path che non esistono più —
+        orfane — e i file, che sono gli stessi di prima, tornano `unknown`.
+        Esattamente il sintomo per cui il giro copia+ricarica era pericoloso.
+        """
+        m = self.provenance_map(tier, name)
+        if not m:
+            return 0
+        pref = src_sub.rstrip("/") + "/"
+        out: dict = {}
+        moved = 0
+        for k, v in m.items():
+            if k == src_sub:
+                out[dest_sub] = v
+                moved += 1
+            elif k.startswith(pref):
+                out[f"{dest_sub}/{k[len(pref):]}"] = v
+                moved += 1
+            else:
+                out[k] = v
+        if moved:
+            self.s.write(self._prov_path(tier, name),
+                         json.dumps(out, ensure_ascii=False, indent=1).encode())
+        return moved
 
     def delete_file(self, tier: str, name: str, relpath: str) -> dict:
         """SOFT-DELETE: NON cancella mai davvero. Sposta un file o una cartella
