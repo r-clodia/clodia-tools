@@ -398,5 +398,61 @@ class SignedSourceTests(unittest.TestCase):
         self.assertNotIn('arguments.get("chat"', src)
 
 
+class StartupDeclarationTests(unittest.TestCase):
+    """La modalità va DETTA, non dedotta (residuo di clodia-platform#382).
+
+    Il default è cambiato due volte (`report` → `on`) e le righe di `_osserva`
+    escono solo quando qualcuno tocca un topic altrui: un'istanza tranquilla non
+    ne produce nessuna, e quel silenzio è identico in `on` e in `off`. Finché la
+    modalità non è scritta da qualche parte, «com'è configurata questa istanza?»
+    resta una domanda a cui si risponde leggendo il sorgente — cioè l'inferenza
+    che il 21 set ha risposto male."""
+
+    def setUp(self):
+        self.env = _SenzaVariabile()
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def test_il_default_implicito_e_dichiarato(self):
+        """Il caso che mancava: nessuna variabile nel deploy. Prima non lo
+        diceva nessuno, ed è la configurazione più diffusa."""
+        with self.assertLogs("clodia-tools", level="INFO") as log:
+            self.assertEqual(M.log_spawn_compartment_mode(), "on")
+        riga = next(r for r in log.output if "modalita' effettiva" in r)
+        self.assertIn("INFO", riga)
+        self.assertIn("on", riga)
+        self.assertIn("non dichiarata", riga)
+
+    def test_una_ritirata_in_esercizio_esce_come_warning(self):
+        """`report` è l'istanza di #382: osserva e lascia passare. Chi cerca le
+        istanze aperte deve poterle trovare con
+        `logs.tail(source="gateway", level="WARNING")`, senza sapere in anticipo
+        quale sia il default del momento."""
+        with patch.dict("os.environ", {"CLODIA_SPAWN_COMPARTMENT": "report"}):
+            with self.assertLogs("clodia-tools", level="WARNING") as log:
+                self.assertEqual(M.log_spawn_compartment_mode(), "report")
+        self.assertTrue(any("report" in r for r in log.output), log.output)
+
+    def test_un_valore_non_riconosciuto_non_si_spaccia_per_scelto(self):
+        """`CLODIA_SPAWN_COMPARTMENT=ON!` cade sul default: la riga deve dire
+        che il valore è stato scartato, se no il deploy legge `on` e crede che
+        sia la sua variabile a funzionare."""
+        with patch.dict("os.environ", {"CLODIA_SPAWN_COMPARTMENT": "enforce"}):
+            with self.assertLogs("clodia-tools", level="INFO") as log:
+                self.assertEqual(M.log_spawn_compartment_mode(), "on")
+        riga = next(r for r in log.output if "modalita' effettiva" in r)
+        self.assertIn("non riconosciuta", riga)
+        self.assertIn("enforce", riga)
+
+    def test_l_avvio_del_gateway_la_dichiara(self):
+        """Senza questo, la funzione è codice morto: la chiama solo il test.
+        `run_http` è l'unico entry point del gateway (cli.py --http)."""
+        import inspect
+
+        from . import http_app
+        self.assertIn("log_spawn_compartment_mode",
+                      inspect.getsource(http_app.run_http))
+
+
 if __name__ == "__main__":
     unittest.main()

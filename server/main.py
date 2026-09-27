@@ -3211,6 +3211,42 @@ def _spawn_compartment_mode() -> str:
     return m if m in ("off", "report", "on") else "on"
 
 
+def log_spawn_compartment_mode() -> str:
+    """Dichiara all'avvio del gateway la modalità EFFETTIVA del compartimento.
+
+    Residuo di clodia-platform#382. La modalità non è mai stata scritta da
+    nessuna parte: la si deduceva leggendo il default nel sorgente e sperando
+    che il deploy non dichiarasse altro — ed è esattamente l'inferenza che il
+    21 set ha dato la risposta sbagliata. Le righe di `_osserva` non colmano il
+    buco, perché escono solo quando qualcuno tocca un topic altrui: su
+    un'istanza tranquilla non ne esce nessuna, e quel silenzio è identico in
+    `on` e in `off`. Detta una volta all'avvio, la modalità diventa un fatto
+    leggibile con `logs.tail(source="gateway")` invece che una congettura.
+
+    Livello per modalità, non fisso: `off`/`report` sono la ritirata di
+    esercizio che lascia passare le letture cross-topic, e chi cerca un'istanza
+    aperta la trova filtrando i WARNING; `on` è l'esercizio normale e resta
+    INFO. Si dichiara anche l'ORIGINE del valore, perché «`on` perché nessuno
+    ha detto niente» e «`on` perché il deploy lo chiede» si diagnosticano in
+    modo diverso quando il default cambierà di nuovo.
+    """
+    import logging as _lg
+    from .tools.logs import REFMON_LOGGER
+    grezzo = _os.environ.get("CLODIA_SPAWN_COMPARTMENT")
+    modo = _spawn_compartment_mode()
+    if not (grezzo or "").strip():
+        origine = "default: CLODIA_SPAWN_COMPARTMENT non dichiarata"
+    elif grezzo.strip().lower() == modo:
+        origine = "CLODIA_SPAWN_COMPARTMENT"
+    else:
+        origine = f"default: CLODIA_SPAWN_COMPARTMENT={grezzo!r} non riconosciuta"
+    _lg.getLogger(REFMON_LOGGER).log(
+        _lg.INFO if modo == "on" else _lg.WARNING,
+        "compartimento spawn · modalita' effettiva all'avvio: %s (%s)",
+        modo, origine)
+    return modo
+
+
 #: Chi può ANCHE solo chiedere il grant cross-topic (decisione di Davide, 23 set
 #: 2026, in risposta al leak strutturale di `runtime.topics()` su
 #: `tomato-blogging`): nessuno spawn fa cross-topic per default, e l'UNICA
