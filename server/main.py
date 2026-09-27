@@ -1064,6 +1064,23 @@ _TOPIC_TOOLS: list[Tool] = [
             "path": {"type": "string", "description": "path da eliminare, dentro files/"},
         }, "required": ["tier", "name", "path"]},
     ),
+    Tool(
+        name="topic.move_file",
+        description=("Sposta o RINOMINA un file (o una cartella) già dentro il topic, "
+                     "preservandone la provenienza. È il verbo da usare per riordinare i "
+                     "file: il giro fetch+put+delete_file NON è equivalente, perché il "
+                     "put ri-etichetta il file come prodotto da te e cancella il flag "
+                     "'non attendibile' dei documenti arrivati da fuori (email, allegati). "
+                     "path e to = path come da topic.files (es. 'local/x.pdf' → "
+                     "'local/preventivi/x.pdf'). Non sovrascrive: se la destinazione "
+                     "esiste, il verbo rifiuta."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "path": {"type": "string", "description": "file o cartella da spostare, dentro local/"},
+            "to": {"type": "string", "description": "nuovo path, dentro local/ (le cartelle intermedie vengono create)"},
+        }, "required": ["tier", "name", "path", "to"]},
+    ),
     # ── Cartelle Drive dichiarate: whitelist + confinamento, MAI un mount da
     # navigare (decision-record #40). Un agente che deve lavorare su un file
     # Drive lo raggiunge coi verbi `gdrive.*` nel proprio scratch.
@@ -4621,7 +4638,7 @@ _TOPIC_SCOPED_VERBS = {
     "open", "save_summary", "save_agents_md", "add_minute", "archive",
     "files", "read_file",
     "read_document", "convert_document", "write_document", "write_file", "fetch",
-    "put", "delete_file",
+    "put", "delete_file", "move_file",
     "post_message", "messages", "my_mentions", "mark_seen",
     "drive_folder_add", "drive_folder_remove",
     "local_folder_add", "local_folder_remove",
@@ -4654,6 +4671,7 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
 _TOPIC_MUTATING_VERBS = frozenset({
     "save_summary", "save_agents_md", "add_minute", "archive",
     "write_file", "convert_document", "write_document", "put", "delete_file",
+    "move_file",
     "drive_folder_add", "drive_folder_remove",
     "local_folder_add", "local_folder_remove",
     "egress_add", "egress_remove", "ingress_add", "ingress_remove",
@@ -5539,6 +5557,8 @@ def _dispatch_topic(name: str, a: dict):
                             "agent", agent_name())
     if verb == "delete_file":
         return svc.delete_file(a["tier"], a["name"], a["path"])
+    if verb == "move_file":
+        return svc.move_file(a["tier"], a["name"], a["path"], a["to"])
     # Cartelle Drive dichiarate: whitelist + confinamento, mai un mount (#40).
     if verb == "drive_folder_add":
         return svc.drive_folder_add(a["tier"], a["name"], a["folder"],
