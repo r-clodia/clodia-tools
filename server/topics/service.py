@@ -2152,6 +2152,48 @@ class TopicService:
         store.delete(target)
         return {"trashed": rel, "trash_path": "Drive/Cestino", "recoverable": True}
 
+    def set_tier(self, tier: str, name: str, new_tier: str, *, by: str,
+                 reason: str) -> dict:
+        """Riclassifica il topic a un nuovo livello SEAL (clodia-platform#426).
+
+        Il livello sta nel PATH (`<tier>/<nome>/`) oltre che nel meta, quindi
+        riclassificare è SPOSTARE la cartella — meta, summary, messaggi e file
+        stanno tutti lì sotto (`_files_backend` è sempre locale, decision-record
+        #40). Il nome è unico fra i livelli (`new`), quindi la destinazione non
+        può essere occupata da un altro topic; se lo è, si rifiuta.
+
+        La decisione e la responsabilità sono di chi la prende (owner o admin,
+        verificato dall'agent-server): qui si registra CHI, QUANDO, DA DOVE A
+        DOVE e PERCHÉ nella cronologia del meta. È il registro provvisorio in
+        attesa dell'audit trail di piattaforma (clodia-platform#425).
+        """
+        tier = _normalize_tier(tier)
+        new = _normalize_tier(new_tier)
+        if new not in VALID_TIER:
+            raise TopicError(f"livello non valido: {new_tier} (ammessi: {VALID_TIER})")
+        if new == tier:
+            raise TopicError(f"il topic è già {tier}")
+        motivo = str(reason or "").strip()
+        if not motivo:
+            raise TopicError("serve una motivazione: resta nella cronologia del topic")
+        meta, ver = self._read_meta(tier, name)
+        src, dst = self._dir(tier, name), self._dir(new, name)
+        if self.s.exists(self._meta_p(new, name)):
+            raise TopicError(f"esiste già {new}/{name}")
+        self.s.move(src, dst)
+        try:
+            voce = {"from": tier, "to": new, "by": str(by or ""), "reason": motivo[:1000],
+                    "at": _now().isoformat()}
+            meta["tier"] = new
+            meta["tier_history"] = list(meta.get("tier_history") or []) + [voce]
+            self._write_meta(new, name, meta, base_version=ver)
+        except Exception:
+            # Il meta non si è scritto: la cartella torna dov'era, così il topic
+            # non resta a metà fra due livelli.
+            self.s.move(dst, src)
+            raise
+        return {"from": tier, "to": new, "name": name, "entry": voce}
+
     def archive(self, tier: str, name: str) -> dict:
         """Imposta status=archived nel meta (NON sposta su storage inferiore)."""
         meta, ver = self._read_meta(tier, name)

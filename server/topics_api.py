@@ -456,6 +456,49 @@ def _telegram_seal_state(tier: str, name: str) -> dict:
     }
 
 
+async def topic_tier(request: Request):
+    """POST /internal/topics/{tier}/{name}/tier {tier, by, reason} — riclassifica
+    il topic a un nuovo livello SEAL (clodia-platform#426).
+
+    Chi può farlo — una persona owner del topic o admin — lo verifica
+    l'agent-server prima di chiamare: qui arriva solo il suo principal
+    privilegiato, e `by` è l'umano che se ne prende la responsabilità.
+    Nessun egress/ingress viene modificato: le voci del topic vengono portate
+    identiche sotto la nuova chiave (`topics.retier`).
+    """
+    _, err = _authorize(request)
+    if err:
+        return err
+    tier = request.path_params["tier"]; name = request.path_params["name"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    body = body or {}
+    nuovo = str(body.get("tier") or "").strip()
+    chi = str(body.get("by") or "").strip()
+    motivo = str(body.get("reason") or "").strip()
+    if not (nuovo and chi and motivo):
+        return JSONResponse({"error": "richiesti 'tier', 'by' e 'reason'"}, status_code=400)
+    from .topics import retier
+    svc = _service()
+    try:
+        esito = retier.apply(svc, tier, name, nuovo, by=chi, reason=motivo)
+    except TopicError as e:
+        return JSONResponse({"error": str(e)[:300]}, status_code=400)
+    # Traccia leggibile nella stanza: chi, da dove a dove, perché. Il registro
+    # durevole è la cronologia del meta (`tier_history`), in attesa dell'audit
+    # trail di piattaforma (clodia-platform#425).
+    try:
+        svc.post_message(esito["to"], name, "platform",
+                         f"🔒 **Livello riclassificato da {esito['from']} a {esito['to']}** "
+                         f"da {chi}, che se ne assume la responsabilità.\n\n"
+                         f"Motivazione: {motivo[:600]}", kind="ai")
+    except Exception as e:  # noqa: BLE001 — la riclassificazione è avvenuta
+        LOG.warning("messaggio di riclassificazione non postato: %s", e)
+    return JSONResponse(esito)
+
+
 async def telegram_link(request: Request):
     """GET/POST /internal/topics/{tier}/{name}/telegram-link.
 
@@ -963,6 +1006,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/local-folder", local_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/telegram-link", telegram_link, methods=["GET", "POST"]),
+    Route("/internal/topics/{tier}/{name}/tier", topic_tier, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/mailbox-link", mailbox_link, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/mcp-clients", mcp_clients,
           methods=["GET", "POST"]),
