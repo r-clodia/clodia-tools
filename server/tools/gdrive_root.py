@@ -416,9 +416,14 @@ def assert_writable_parent(svc, account: str, parent_id: Optional[str],
     return parent_id.strip()
 
 
-def guard_calendar(account: Optional[str], verb: str) -> None:
-    """Come `assert_not_confined`, ma risolve l'account da sé (comodo per
-    gcalendar, che non ne ha uno in mano prima di costruire il client)."""
+def guard_calendar(account: Optional[str], verb: str,
+                   calendar_id: Optional[str] = None) -> None:
+    """Come `assert_calendar_allowed`, ma risolve l'account da sé (comodo per
+    gcalendar, che non ne ha uno in mano prima di costruire il client).
+
+    `calendar_id` è il calendario che la chiamata toccherebbe; `None` significa
+    «la chiamata non ne nomina uno» ed è il solo caso di `list_calendars`.
+    """
     from ..whitelist import in_channel
     if not _config() and not in_channel():
         return
@@ -427,25 +432,82 @@ def guard_calendar(account: Optional[str], verb: str) -> None:
         acct = gdrive._resolve_account(account)
     except RuntimeError:
         return           # nessun account: l'errore vero lo dà il client dopo
-    assert_not_confined(acct, verb)
+    assert_calendar_allowed(acct, verb, calendar_id)
 
 
-def assert_not_confined(account: str, verb: str) -> None:
-    """Rifiuta i verbi che una radice di Drive NON può confinare.
+def assert_calendar_allowed(account: str, verb: str,
+                            calendar_id: Optional[str] = None) -> None:
+    """Su credenziale confinata, ammette i soli calendari DICHIARATI.
 
     Il calendario non è un oggetto di Drive: nessuna cartella dice qualcosa su
     di esso. Se lasciassimo passare `gcalendar.*` su una credenziale confinata,
     l'affermazione «l'agente vede solo quella cartella» sarebbe **falsa** —
-    l'agenda dell'account sarebbe leggibile. Il confinamento va scelto sapendo
-    che costa questi verbi.
+    l'agenda dell'account sarebbe leggibile.
+
+    Fino a clodia-platform#429 la conseguenza era un rifiuto secco: il
+    calendario spariva per l'intera colonia appena esistesse UNA cartella
+    confinata da qualche parte, e il rifiuto indicava come unico rimedio «serve
+    un account non confinato». Rimedio inapplicabile — l'owner ha riconnesso
+    l'account quattro volte senza che potesse cambiare nulla, perché lo scope
+    `auth/calendar` era già nel consenso e questo controllo non lo guarda
+    nemmeno.
+
+    Il confine giusto non è «tutto o niente» ma la risorsa dichiarata, come per
+    la casella di posta (`outbox:`) e per la cartella (`gdrive:folder/`): la
+    lista nomina i calendari, e l'affermazione torna vera nella forma «solo
+    quella cartella, più i calendari che l'owner ha approvato».
     """
-    if roots_for_call(account)[0]:
-        raise OutsideRoot(
-            f"{verb}: non disponibile qui. L'accesso è "
-            f"confinato a una cartella di Drive, e il calendario non sta in una "
-            f"cartella: non c'è modo di limitarlo allo stesso perimetro, quindi "
-            f"è chiuso invece di essere concesso per intero. Per il calendario "
-            f"serve un account non confinato.")
+    roots, fonte = roots_for_call(account)
+    if not roots:
+        return                       # non confinato: comportamento storico
+    from .. import egress as _eg
+    approvati = _eg.approved_calendars()
+    if calendar_id is None:
+        # `list_calendars` non nomina un calendario: passa se ce n'è almeno uno
+        # approvato, e la RISPOSTA viene ridotta a quelli da `keep_calendars`.
+        # Passare a lista vuota sarebbe un elenco integrale dell'agenda.
+        if approvati:
+            return
+    elif _eg.calendar_allowed(calendar_id):
+        return
+    if fonte.startswith("topic"):
+        from ..whitelist import current_channel
+        dove = (f"il canale {current_channel()} è confinato alla cartella del "
+                f"proprio remote Drive ({roots})")
+    else:
+        dove = f"l'accesso con l'account '{account}' è confinato a {roots}"
+    quali = (f"Calendari approvati qui: {approvati}."
+             if approvati else "Qui non è approvato nessun calendario.")
+    chiesto = f" Chiesto: '{calendar_id}'." if calendar_id else ""
+    raise OutsideRoot(
+        f"{verb}: calendario non approvato per questo perimetro — {dove}, e il "
+        f"calendario non sta in una cartella: non c'è modo di limitarlo allo "
+        f"stesso perimetro, quindi vale solo ciò che è dichiarato.{chiesto} "
+        f"{quali} Rimedio: un admin approva il calendario per questo canale "
+        f"(voce di whitelist `gcal:<calendar_id>`, di solito l'indirizzo email "
+        f"dell'account). NON è un problema di consenso OAuth: lo scope Calendar "
+        f"è già nel consenso richiesto, riconnettere l'account non cambia nulla.")
+
+
+def keep_calendars(account: str, rows: list[dict]) -> list[dict]:
+    """Riduce l'elenco dei calendari a quelli dichiarati, se confinato.
+
+    Senza questo, `list_calendars` su un account confinato con UN calendario
+    approvato elencherebbe comunque tutti gli altri — nomi di agende altrui
+    inclusi, che è proprio ciò che il confinamento promette di non mostrare.
+
+    SHORTCUT: l'alias `primary` combacia solo con la voce letterale
+    `gcal:primary`. Risolverlo nell'id reale costerebbe una chiamata API per
+    elenco; regge finché chi approva scrive l'indirizzo email del calendario —
+    la forma che l'API restituisce come `id`. Se servirà, si risolve una volta
+    sola per account e si mette in cache accanto a `_parents_cache`.
+    """
+    if not roots_for_call(account)[0]:
+        return rows
+    from .. import egress as _eg
+    return [r for r in rows
+            if _eg.calendar_allowed(str(r.get("id") or ""))
+            or (r.get("primary") and _eg.calendar_allowed("primary"))]
 
 
 def reset_cache() -> None:

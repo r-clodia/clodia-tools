@@ -829,3 +829,58 @@ class ListingIncludesTheCallersScopeTests(unittest.TestCase):
         with self._dentro("SEAL-1/hedge-iot-new"):
             out = egress.listing("ingress")
         self.assertIn("gdrive:folder/1QBzBmKKdnOTWTPkGz9NErAb3_IuvtYkO", out["uris"])
+
+
+class CalendarSchemeTests(unittest.TestCase):
+    """`gcal:<calendar_id>` — clodia-platform#429.
+
+    La lista risponde alla stessa domanda delle altre voci: QUALE risorsa, non
+    chi la tocca. Serve perché il calendario è l'unica risorsa Google che non ha
+    un perimetro proprio (non sta in una cartella), e prima di questa voce il
+    confinamento di Drive lo chiudeva del tutto.
+    """
+
+    def test_a_declared_calendar_matches(self):
+        with _with(_cfg("gcal:agenda@tomato.blue")):
+            self.assertTrue(egress.calendar_allowed("agenda@tomato.blue"))
+            self.assertTrue(egress.calendar_allowed("Agenda@Tomato.Blue"))
+
+    def test_an_undeclared_calendar_does_not(self):
+        with _with(_cfg("gcal:agenda@tomato.blue")):
+            self.assertFalse(egress.calendar_allowed("altro@tomato.blue"))
+
+    def test_an_empty_list_denies(self):
+        """Il predicato è interrogato SOLO su credenziale già confinata: lì
+        «nessuna voce» significa «nessuno ha autorizzato», non «tutto aperto»."""
+        with _with(_cfg("mailto:a@tomato.blue")):
+            self.assertFalse(egress.calendar_allowed("agenda@tomato.blue"))
+            self.assertEqual(egress.approved_calendars(), [])
+
+    def test_a_domain_wildcard_works_like_the_other_schemes(self):
+        with _with(_cfg("gcal:*@tomato.blue")):
+            self.assertTrue(egress.calendar_allowed("agenda@tomato.blue"))
+            self.assertFalse(egress.calendar_allowed("agenda@altro.it"))
+
+    def test_the_bare_wildcard_is_not_grantable(self):
+        """`gcal:*` non è degenere per `_is_degenerate` (qualcosa dopo i due
+        punti c'è) ma aprirebbe l'intera agenda in tre caratteri, e in lista
+        sarebbe indistinguibile da una voce puntuale."""
+        with self.assertRaises(ValueError):
+            egress.check_grantable("egress", "gcal:*")
+
+    def test_an_empty_calendar_entry_is_not_grantable(self):
+        with self.assertRaises(ValueError):
+            egress.check_grantable("egress", "gcal:")
+
+    def test_a_calendar_is_an_egress_entry_not_a_trusted_source(self):
+        """Approvare un calendario concede AUTORITÀ sulla risorsa; non dice
+        nulla su quanto sia fidato il testo degli eventi che ci si legge — che
+        resta la domanda separata di `SOURCE_SCHEMES`."""
+        self.assertEqual(egress.check_grantable("egress", "gcal:agenda@tomato.blue"),
+                         "gcal:agenda@tomato.blue")
+        with self.assertRaises(ValueError):
+            egress.check_grantable("ingress", "gcal:agenda@tomato.blue")
+
+    def test_the_approval_dialog_says_what_it_costs(self):
+        nota = egress.danger_note("gcal:agenda@tomato.blue")
+        self.assertIn("agenda", nota)

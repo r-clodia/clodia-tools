@@ -361,7 +361,19 @@ _HIERARCHICAL = ("http", "https", "gdrive", "mcp")
 #: "questo agente ha il grant sulla credenziale mailbox_studio", ora "questo
 #: canale ha outbox:studio@davidecarboni.it in whitelist" — la domanda diventa
 #: DOVE, non CHI, coerente con tutto il resto di questo modulo.
-EGRESS_SCHEMES = ("mailto", "tg", "http", "https", "gdrive", "gsheets", "outbox")
+#: `gcal:<calendar_id>` è il calendario che i verbi `gcalendar.*` possono
+#: toccare quando la credenziale Google è confinata a una cartella di Drive
+#: (clodia-platform#429). Il calendario non sta in una cartella, quindi la
+#: radice di Drive non dice nulla su di esso: prima veniva chiuso del tutto, e
+#: il rifiuto proponeva «serve un account non confinato» — un rimedio che
+#: nessuno poteva applicare, e che ha prodotto quattro riconnessioni OAuth
+#: inutili. La domanda giusta è la stessa di `outbox:`/`gdrive:folder/`: QUALE
+#: risorsa, dichiarata una per una. Lo schema sta in uscita e non in ingresso
+#: perché governa l'AUTORITÀ sulla risorsa (leggere e scrivere eventi), non la
+#: fiducia nel contenuto che ne arriva — il taint di un evento letto resta la
+#: domanda separata di `SOURCE_SCHEMES`.
+EGRESS_SCHEMES = ("mailto", "tg", "http", "https", "gdrive", "gsheets", "outbox",
+                  "gcal")
 #: `gdrive` fra le fonti: una cartella Drive vagliata è una fonte fidata, ed è il
 #: caso che rende operativa questa lista — un topic collegato a una cartella di cui
 #: l'owner risponde non deve contaminare a ogni lettura.
@@ -517,6 +529,46 @@ def mailbox_allowed(direction: str, email: str, scope: str | None = None) -> boo
     uri = f"{direction}:{addr}"
     rules = effective_uris("ingress" if direction == "inbox" else "egress", scope)
     return any(_matches(uri, r) for r in rules)
+
+
+#: Prefisso con cui un calendario compare nelle liste.
+CAL_URI = "gcal:"
+
+
+def approved_calendars(scope: str | None = None) -> list[str]:
+    """Calendari dichiarati per questa chiamata (globale PIÙ quelli dello scope).
+
+    Serve anche nudo, non solo come predicato: un rifiuto deve poter dire quali
+    calendari SONO approvati qui, altrimenti chi lo legge non sa se manca la
+    voce o se ha sbagliato l'id.
+    """
+    out: list[str] = []
+    for u in effective_uris("egress", scope):
+        s = str(u).strip()
+        if s.lower().startswith(CAL_URI):
+            cid = s[len(CAL_URI):].strip()
+            if cid and cid not in out:
+                out.append(cid)
+    return out
+
+
+def calendar_allowed(calendar_id: str, scope: str | None = None) -> bool:
+    """Il calendario `calendar_id` è fra quelli dichiarati per questo scope?
+
+    Stessa domanda di `mailbox_allowed`, sull'altra risorsa che non ha un
+    perimetro proprio: quale CASELLA un canale usa, quale CALENDARIO un canale
+    tocca. Il confronto passa da `_matches`, quindi `gcal:*@tomato.blue` copre i
+    calendari di un dominio e l'id resta case-insensitive da entrambi i lati.
+
+    Lista vuota → False. È la direzione giusta: questo predicato viene
+    interrogato SOLO quando la credenziale è già confinata, e lì «nessuna voce»
+    significa «nessuno ha autorizzato il calendario», non «tutto aperto».
+    """
+    cid = (calendar_id or "").strip()
+    if not cid:
+        return False
+    uri = f"{CAL_URI}{cid}"
+    return any(_matches(uri, f"{CAL_URI}{r}") for r in approved_calendars(scope))
 
 
 #: Chiavi delle liste PER SCOPE nella config del gateway. Vivono lì e non nel
@@ -750,6 +802,10 @@ _DANGER = {
                "richiamabile e la copia resta sul server del destinatario."),
     "tg": ("una chat su Telegram, cioè su un'infrastruttura non tua."),
     "gsheets": ("un foglio Google. Se è condiviso, lo vede chi ha il link."),
+    "gcal": ("un calendario Google: chi lo approva concede di LEGGERE l'agenda "
+             "(con titoli, luoghi e invitati) e di scriverci eventi, che "
+             "arrivano come invito a chi è in lista. Non è confinabile a una "
+             "cartella: il perimetro è il calendario stesso."),
 }
 
 
@@ -1009,6 +1065,17 @@ def check_grantable(direction: str, uri: str) -> str:
     # potrebbe MAI combaciare — `_chat()` produce sempre `tg:<chat_id>`, quindi
     # `tg:pippo` sarebbe approvata e inefficace, e il sintomo («l'ho messa in
     # lista e chiede ancora») non nominerebbe la causa.
+    # `gcal:*` non è degenere per `_is_degenerate` (c'è qualcosa dopo i due
+    # punti) ma combacia con QUALUNQUE calendario: sarebbe il permesso più largo
+    # del modulo, scritto in tre caratteri e indistinguibile in lista da una
+    # voce puntuale. Chi vuole davvero tutto scrive `*`, che qui è già rifiutato
+    # e nella config si vede rileggendola. Un dominio (`gcal:*@tomato.blue`)
+    # resta concedibile: quello vincola qualcosa.
+    if scheme == "gcal" and rest.strip() == "*":
+        raise ValueError(
+            "'gcal:*' aprirebbe qualunque calendario dell'account, cioè l'intera "
+            "agenda: indica il calendario (`gcal:<id>`, di solito l'indirizzo "
+            "email) oppure un dominio (`gcal:*@esempio.it`).")
     if scheme == "tg" and not (_TG_GROUP.match(rest) or _TG_HANDLE.match(rest)):
         raise ValueError(
             f"'{u}' non è una chat Telegram: si scrive 'tg:<chat_id>' per un "
