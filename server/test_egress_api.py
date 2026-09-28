@@ -237,7 +237,7 @@ class ScopeWhitelistViewTests(unittest.TestCase):
                 _with(self._cfg()):
             r = self._call("SEAL-1", "un-altro-topic")
         b = json.loads(r.body)
-        self.assertEqual(b, {"egress": [], "ingress": []})
+        self.assertEqual(b, {"egress": [], "ingress": [], "labels": {}})
 
     def test_the_legacy_tier_alias_still_resolves(self):
         """`P1/acme` e `SEAL-1/acme` sono lo stesso posto (`_norm_scope_key`):

@@ -147,7 +147,22 @@ async def whitelist_view(request: Request):
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     from . import egress
-    return JSONResponse(egress.summary())
+    out = egress.summary()
+    out["labels"] = await _labels(list(out.get("egress_allow") or [])
+                                  + list(out.get("source_allow") or []))
+    return JSONResponse(out)
+
+
+async def _labels(uris: list) -> dict:
+    """Nome e link delle cartelle Drive (clodia-platform#424), in un thread: la
+    risoluzione aspetta Drive fino a un tetto di pochi secondi e l'event loop
+    non deve aspettare con lei. Best-effort: su errore, nessuna etichetta."""
+    import asyncio
+    from .tools import gdrive_labels
+    try:
+        return await asyncio.to_thread(gdrive_labels.labels, uris)
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 async def scope_whitelist_view(request: Request):
@@ -167,10 +182,9 @@ async def scope_whitelist_view(request: Request):
     name = request.path_params["name"]
     from . import egress
     scope = f"{tier}/{name}"
-    return JSONResponse({
-        "egress": egress.scope_uris("egress", scope),
-        "ingress": egress.scope_uris("ingress", scope),
-    })
+    eg, ing = egress.scope_uris("egress", scope), egress.scope_uris("ingress", scope)
+    return JSONResponse({"egress": eg, "ingress": ing,
+                         "labels": await _labels(list(eg) + list(ing))})
 
 
 async def scope_whitelist_edit(request):
