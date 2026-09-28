@@ -188,6 +188,67 @@ def upload(src: str, name: Optional[str] = None, folder_id: Optional[str] = None
     return {"account": acct, "uploaded": True, **_clean(f)}
 
 
+#: Formati che Drive sa importare in un Google Doc/Sheet/Slides nativo: con
+#: questi, `update` su un file nativo ne sostituisce il contenuto convertendo.
+_IMPORT_INTO_NATIVE = {
+    "application/vnd.google-apps.document": {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword", "application/rtf", "text/plain", "text/html",
+        "application/vnd.oasis.opendocument.text", "text/markdown"},
+    "application/vnd.google-apps.spreadsheet": {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel", "text/csv",
+        "application/vnd.oasis.opendocument.spreadsheet"},
+    "application/vnd.google-apps.presentation": {
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.ms-powerpoint"},
+}
+
+
+def update(file_id: str, src: str, account: Optional[str] = None) -> dict:
+    """Sostituisce il CONTENUTO di un file Drive esistente con `src` (path nello
+    scratch, già validato dal dispatch), lasciando lo stesso file: stesso id,
+    stesso link, stesse condivisioni, e Drive ne tiene la revisione precedente.
+
+    Esiste perché senza, per correggere un documento già trasmesso, l'unica via
+    era caricarne una COPIA nuova (clodia-platform#427, 28 set 2026: «serve il
+    verbo per modificare i gdoc esistenti senza creare nuove copie»).
+
+    Su un Google Doc/Sheet/Slides NATIVO il file caricato viene convertito nel
+    formato del documento (es. un .docx dentro un Google Doc): è l'import di
+    Drive. Un formato che Drive non sa importare in quel tipo è rifiutato prima
+    di scrivere.
+    """
+    tool_allowed("gdrive.update")
+    import mimetypes as _mt
+    import os
+    from googleapiclient.http import MediaFileUpload
+    if not os.path.isfile(src):
+        raise ValueError(f"gdrive.update: file sorgente non trovato: {src}")
+    svc, acct = _service(account)
+    gdrive_root.assert_inside(svc, acct, file_id, "gdrive.update")
+    meta = svc.files().get(fileId=file_id, fields="id, name, mimeType",
+                           supportsAllDrives=True).execute()
+    target = meta.get("mimeType", "")
+    src_mime = _mt.guess_type(src)[0] or "application/octet-stream"
+    if src.lower().endswith(".md"):
+        src_mime = "text/markdown"
+    if target == "application/vnd.google-apps.folder":
+        raise ValueError("gdrive.update: l'id è una cartella, non un file")
+    if target.startswith("application/vnd.google-apps."):
+        ammessi = _IMPORT_INTO_NATIVE.get(target)
+        if not ammessi:
+            raise ValueError(f"gdrive.update: tipo Google non aggiornabile: {target}")
+        if src_mime not in ammessi:
+            raise ValueError(
+                f"gdrive.update: {os.path.basename(src)} ({src_mime}) non si può importare "
+                f"in un {target.rsplit('.', 1)[-1]}: usa uno di {sorted(ammessi)}")
+    media = MediaFileUpload(src, mimetype=src_mime, resumable=False)
+    f = svc.files().update(fileId=file_id, media_body=media, fields=_FIELDS,
+                           supportsAllDrives=True).execute()
+    return {"account": acct, "updated": True, "same_file": f.get("id") == file_id, **_clean(f)}
+
+
 def download(file_id: str, dest: str, account: Optional[str] = None) -> dict:
     """Scarica un file di Drive in `dest` (path scratch dell'agent, già validato
     dal dispatch). I Google-native doc (Docs/Sheets/Slides) vengono esportati

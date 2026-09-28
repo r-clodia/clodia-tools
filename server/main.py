@@ -1593,6 +1593,16 @@ _GDRIVE_TOOLS: list[Tool] = [
              "src": {"type": "string"}, "name": {"type": "string"},
              "folder_id": {"type": "string"}, "account": {"type": "string"}},
              "required": ["src"]}),
+    Tool(name="gdrive.update",
+         description=("Sostituisce il CONTENUTO di un file Drive ESISTENTE con src (path nello "
+                      "scratch): stesso file, stesso id, stesso link, stesse condivisioni, e "
+                      "Drive tiene la revisione precedente. Usalo per correggere un documento "
+                      "già trasmesso invece di caricarne una copia. Su un Google Doc/Sheet/"
+                      "Slides nativo il file (es. .docx, .xlsx, .pptx, .md, .txt) viene "
+                      "convertito nel documento."),
+         inputSchema={"type": "object", "properties": {
+             "file_id": {"type": "string"}, "src": {"type": "string"},
+             "account": {"type": "string"}}, "required": ["file_id", "src"]}),
     Tool(name="gdrive.download",
          description=("Scarica un file Drive in dest (path scratch dell'agent; poi usa topic.put "
                       "per metterlo nel topic). I Google-doc nativi sono esportati (PDF/xlsx)."),
@@ -2103,6 +2113,9 @@ def _dispatch_gdrive(name: str, a: dict):
         src = _safe_scratch_path(a["src"])  # i byte vengono dallo scratch, mai dal modello
         return gd.upload(src, name=a.get("name"), folder_id=a.get("folder_id"),
                          account=a.get("account"))
+    if verb == "update":
+        src = _safe_scratch_path(a["src"])  # i byte vengono dallo scratch, mai dal modello
+        return gd.update(a["file_id"], src, account=a.get("account"))
     if verb == "download":
         dest = _safe_scratch_path(a["dest"])
         _os.makedirs(_os.path.dirname(dest), exist_ok=True)
@@ -2677,6 +2690,18 @@ def _copybrain_prefix() -> str:
 def _current_spawn_safe() -> str:
     from .whitelist import current_spawn as _cs
     return _cs() or "-"
+
+
+def _drive_parent_of(arguments: dict) -> str:
+    """La cartella che contiene il file di `gdrive.update`, o "" se non si sa."""
+    try:
+        from .tools import gdrive as _gd
+        svc, _acct = _gd._service(arguments.get("account"))
+        f = svc.files().get(fileId=str(arguments.get("file_id") or ""), fields="parents",
+                            supportsAllDrives=True).execute()
+        return str((f.get("parents") or [""])[0])
+    except Exception:  # noqa: BLE001 — ignoto = negato dal verdetto, non un errore qui
+        return ""
 
 
 def _telegram_chat_id_or_raise(arguments: dict) -> None:
@@ -4175,6 +4200,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 # whitelist (clodia-platform#402). Si rifiuta PRIMA del verdetto,
                 # dicendo l'id giusto quando il canale ne ha uno legato.
                 _telegram_chat_id_or_raise(arguments)
+            elif name == "gdrive.update":
+                # La destinazione di un aggiornamento è la CARTELLA del file:
+                # stessa regola di `gdrive.upload` (whitelist + taint), letta da
+                # Drive perché negli argomenti c'è solo l'id del file. Non
+                # risolvibile → destinazione ignota → negato.
+                _eargs = {**arguments,
+                          "folder_id": await asyncio.to_thread(_drive_parent_of, arguments)}
             elif name == "github.push":
                 # Senza questa riga il PDP vede un verbo con destinazione ignota
                 # e nega: è ciò che è successo il 17 ago 2026 appena `push` è

@@ -166,6 +166,8 @@ _SPECS: dict[str, tuple[str, Callable[[dict], list[str]]]] = {
     "gdrive.share": ("drive", _drive_target),
     "gdrive.mkdir": ("drive", _drive_target),
     "gdrive.move": ("drive", _drive_target),
+    # `folder_id` lo aggiunge `call_tool` leggendo il parent del file da Drive.
+    "gdrive.update": ("drive", _drive_target),
     "gsheets.add_tab": ("gsheets", _spreadsheet),
     "gsheets.append_rows": ("gsheets", _spreadsheet),
     "gsheets.write_range": ("gsheets", _spreadsheet),
