@@ -32,6 +32,7 @@ class EmailAttachmentToolTest(TestCase):
                 "--attachment", attachment,
             ],
             want_json=False,
+            direction="outbox",
         )
         self.assertEqual(result["attachments"], [attachment])
 
@@ -51,6 +52,7 @@ class EmailAttachmentToolTest(TestCase):
                 "--folder", "INBOX",
                 "--attachment", attachment,
             ],
+            direction="outbox",
         )
 
     def test_send_rejects_missing_attachment_path(self):
@@ -106,6 +108,7 @@ class EmailAccountSelectionTest(TestCase):
             "studio",
             ["send", "--to", "to@example.com", "--subject", "Subject", "--body", "Body"],
             want_json=False,
+            direction="outbox",
         )
         self.assertEqual(run_json.call_args_list[0].args[0], "studio")
         self.assertEqual(run_json.call_args_list[0].args[1][0], "list")

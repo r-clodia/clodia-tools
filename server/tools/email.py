@@ -475,7 +475,10 @@ def reply(email_id: str, body: str, account: str = "demo",
     if cc:
         args += ["--cc", cc]
     args += _attachment_args(attachments)
-    return _run_json(account, args)
+    # `outbox`, come dice `_run_json`: la risposta la SPEDISCE questa casella, ed
+    # è la sua whitelist di uscita che conta (clodia-platform#428 — passava da qui
+    # col default `inbox`, cioè col controllo della casella sbagliato).
+    return _run_json(account, args, direction="outbox")
 
 
 def send(
@@ -503,7 +506,10 @@ def send(
     if cc:
         args += ["--cc", cc]
     args += _attachment_args(attachments)
-    res = _run_cli(account, args, want_json=False)
+    # `direction` è obbligatorio dal refactor whitelist-mailbox del 18 set 2026:
+    # senza, ogni invio falliva con `TypeError` PRIMA di partire, dal 22 al 28 set
+    # (clodia-platform#428). `outbox`: si controlla la casella che spedisce.
+    res = _run_cli(account, args, want_json=False, direction="outbox")
     return {
         "ok": True,
         "to": to,
