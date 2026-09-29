@@ -4322,15 +4322,26 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                                 unattended=is_unattended())
             if _ev.get("checked"):
                 # The verdict, as a record and not only as a log line (#436).
+                # Recording it must never change it: a failure here is logged,
+                # except the fail-closed refusal the owner asked for.
+                from . import audit as _audit_mod
                 from .audit import policy as _apol
-                await asyncio.to_thread(
-                    _apol.decision, name, "egress",
-                    "would_deny" if _ev.get("would_deny") else _ev.get("action", "?"),
-                    reason_class=("destination_unknown" if _egress.UNKNOWN in
-                                  (_ev.get("destinations") or []) else
-                                  "not_listed" if _ev.get("refused") else None),
-                    rule=_apol.matched_rules(_ev),
-                    mode={"mode": _ev.get("mode"), "applied_mode": _ev.get("applied_mode")})
+                try:
+                    await asyncio.to_thread(
+                        _apol.decision, name, "egress",
+                        "would_deny" if _ev.get("would_deny") else _ev.get("action", "?"),
+                        reason_class=("destination_unknown" if _egress.UNKNOWN in
+                                      (_ev.get("destinations") or []) else
+                                      "not_listed" if _ev.get("refused") else None),
+                        rule=_apol.matched_rules(_ev),
+                        mode={"mode": _ev.get("mode"),
+                              "applied_mode": _ev.get("applied_mode")})
+                except _audit_mod.AuditWriteError:
+                    raise PermissionError("audit trail non disponibile: l'uscita non "
+                                          "si può registrare, quindi non si fa")
+                except Exception as _e:  # noqa: BLE001
+                    LOG.error("audit: egress decision of %s not recorded (%s)",
+                              name, type(_e).__name__)
             if _ev.get("action") == "deny":
                 from . import observe as _obs
                 if _obs.skipping():
