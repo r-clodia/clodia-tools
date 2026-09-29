@@ -4105,17 +4105,88 @@ def _ingress_source(verb: str, a: dict, result: object = None) -> str | None:
     if spec:
         rid = str(a.get(spec[0]) or "").strip()
         return spec[1].format(rid) if rid else None
-    if verb in _TOPIC_READ_VERBS and a.get("tier") and a.get("name"):
-        return f"topic:{a['tier']}/{a['name']}/{a.get('path') or ''}".rstrip("/")
+    if verb in _TOPIC_READ_VERBS and a.get("tier") and a.get("name") and a.get("path"):
+        # A listing (`topic.files`) has no single source: not an ingress.
+        return f"topic:{a['tier']}/{a['name']}/{a['path']}"
     return None
 
 
 def _audit_ingress(verb: str, a: dict, result: object, vetted) -> None:
-    """Record a read from an identifiable source. Never fails the read."""
+    """Record a read from an identifiable source, and its provenance. Never
+    fails the read."""
     try:
         _audit_ingress_unsafe(verb, a, result, vetted)
     except Exception as e:  # noqa: BLE001
         LOG.error("audit: flow.ingress of %s not recorded (%s)", verb, type(e).__name__)
+    try:
+        _audit_provenance(verb, a, result)
+    except Exception as e:  # noqa: BLE001
+        LOG.error("audit: data.read of %s not recorded (%s)", verb, type(e).__name__)
+
+
+def _response_hash(result: object) -> str:
+    from . import audit as _audit
+    try:
+        raw = result if isinstance(result, str) else json.dumps(
+            result, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001
+        raw = repr(result)
+    return _audit.content_hash(raw)
+
+
+def _provenance_sources(verb: str, a: dict, result: object) -> list[dict]:
+    """What this read was based on: `[{ref, content_hash, hash_of, …}]` (#440).
+
+    - a topic file: the hash of the WHOLE file at read time (its storage
+      version), even when the verb returned a window — `partial` says so;
+    - a RAG search: one source per returned chunk (document, version, page,
+      section) with the hash of that chunk;
+    - anything else with an identifiable source: the hash of the response.
+    """
+    from . import audit as _audit
+    a = a or {}
+    if verb in ("topic.read_file", "topic.read_document", "topic.fetch") \
+            and a.get("tier") and a.get("name") and a.get("path"):
+        ref = f"topic:{a['tier']}/{a['name']}/{a['path']}"
+        try:
+            ver = _topics().file_version(a["tier"], a["name"], a["path"])
+        except Exception:  # noqa: BLE001 - unreadable now: say so, do not guess
+            ver = None
+        return [{"ref": ref, "content_hash": ver, "hash_of": "file",
+                 "partial": True if (a.get("offset") or a.get("max_bytes")) else None}]
+    if verb in ("rag.search", "eu_corpus.search") and isinstance(result, dict):
+        coll = a.get("collection") or "eu-normativa"
+        out = []
+        for r in result.get("results") or []:
+            if not isinstance(r, dict):
+                continue
+            ref = f"rag:{coll}/{r.get('name')}@{r.get('version')}"
+            if r.get("page") is not None:
+                ref += f"#p{r.get('page')}"
+            out.append({"ref": ref, "section_hash": _audit.content_hash(str(r.get("section")))
+                        if r.get("section") else None,
+                        "content_hash": _audit.content_hash(str(r.get("text") or "")),
+                        "hash_of": "chunk"})
+        return out
+    if verb in ("memory.read", "profile.read_file") and a.get("path"):
+        return [{"ref": f"{verb.split('.')[0]}:{a['path']}",
+                 "content_hash": _response_hash(result), "hash_of": "response"}]
+    src = _ingress_source(verb, a, result)
+    if src:
+        return [{"ref": src, "content_hash": _response_hash(result), "hash_of": "response"}]
+    return []
+
+
+def _audit_provenance(verb: str, a: dict, result: object) -> None:
+    sources = _provenance_sources(verb, a, result)
+    if not sources:
+        return
+    from . import audit as _audit
+    from .audit.record import now_iso
+    read_at = now_iso()
+    _audit.emit("data.read", action="read", resource=verb,
+                tool={"name": verb},
+                provenance={"sources": [{**s, "read_at": read_at} for s in sources]})
 
 
 def _audit_ingress_unsafe(verb: str, a: dict, result: object, vetted) -> None:

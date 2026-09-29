@@ -1227,6 +1227,16 @@ class TopicService:
     def read_file(self, tier: str, name: str, relpath: str) -> bytes:
         """Legge un file dentro il topic (es. files/foo.md). Anti-traversal.
         I path sotto files/ vanno sullo storage del topic (local o drive)."""
+        return self._read_result(tier, name, relpath).data
+
+    def file_version(self, tier: str, name: str, relpath: str) -> str | None:
+        """The storage version of a topic file — sha256 of the content on
+        local-fs, the backend's checksum elsewhere. It is what the audit trail
+        records as "the content that was read" (clodia-platform#440): a file
+        can be rewritten after the read, the version cannot."""
+        return self._read_result(tier, name, relpath).version
+
+    def _read_result(self, tier: str, name: str, relpath: str):
         meta, _ = self._read_meta(tier, name)
         self._assert_content_available(meta)
         rel = (relpath or "").lstrip("/")
@@ -1234,10 +1244,10 @@ class TopicService:
             raise TopicError(f"path non valido: {relpath}")
         if self._is_data_path(meta, rel):
             store, base, sub, _mount = self._resolve_data_path(tier, name, rel)
-            return store.read(f"{base}/{sub}".strip("/")).data
+            return store.read(f"{base}/{sub}".strip("/"))
         # Fuori dai mount: control-plane (summary.md, meta.json, AGENTS.md), che
         # si legge ma non si naviga come dato.
-        return self.s.read(f"{self._dir(tier, name)}/{rel}").data
+        return self.s.read(f"{self._dir(tier, name)}/{rel}")
 
     def save_summary(self, tier: str, name: str, text: str,
                      base_version: str | None) -> dict:
