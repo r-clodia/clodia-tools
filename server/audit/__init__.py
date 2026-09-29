@@ -102,6 +102,20 @@ def emit(event_type: str, *, identity: str = "claims", **fields) -> dict | None:
     elif isinstance(fields.get("actor"), dict):
         fields = {**fields, "actor": {**fields["actor"],
                                       "source": fields["actor"].get("source") or "caller"}}
+    # The turn this event belongs to (#433), when the request comes from a
+    # spawn whose turn the agent-server has announced.
+    if not fields.get("trace_id"):
+        from . import trace as _trace
+        try:
+            from .. import whitelist as _wl
+            cur = _trace.current(_wl.current_spawn())
+        except Exception:  # noqa: BLE001
+            cur = None
+        if cur:
+            fields["trace_id"] = cur[0]
+            fields.setdefault("parent_span_id", None)
+            if not fields.get("parent_span_id"):
+                fields["parent_span_id"] = cur[1]
     try:
         rec = record.build(event_type, **fields)
     except RecordError:

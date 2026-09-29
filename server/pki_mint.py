@@ -81,9 +81,16 @@ def mint_session_token(agent: str, execution_id: str = "",
                        chat: str | None = None,
                        scoped_tools: list[str] | None = None,
                        unattended: bool = False,
-                       principal_kind: str | None = None) -> str:
+                       principal_kind: str | None = None,
+                       origin: list[str] | None = None,
+                       scope_tier: str | None = None) -> str:
     """Conia un token di sessione ckt1 firmato con l'identity key dell'agente.
-    Identico a colony.pki.mint_session_token, ma le chiavi stanno QUI (gateway)."""
+    Identico a colony.pki.mint_session_token, ma le chiavi stanno QUI (gateway).
+
+    `origin` and `scope_tier` are signed here too (clodia-platform#450): the
+    local signer in clodia-logic always included them, this one did not, so
+    in gateway-minting mode — production — the origin-chain intersection and
+    the scope tier of jobs ran on their fallbacks instead of the signed claim."""
     scoped_tools = list(dict.fromkeys(scoped_tools or []))
     if any(t in ("*", "agents") or t.startswith("agents.") for t in scoped_tools):
         raise PermissionError("scoped_tools non può concedere wildcard o tool agents.*")
@@ -120,6 +127,10 @@ def mint_session_token(agent: str, execution_id: str = "",
         # Sessione di un job schedulato: nessun umano davanti al turno. FIRMATO,
         # quindi l'agente non può rimuoverselo (clodia-platform#104).
         payload["unattended"] = True
+    if origin:
+        payload["origin"] = [str(x) for x in origin]
+    if scope_tier:
+        payload["scope_tier"] = scope_tier
     body = _b64e(json.dumps(payload, separators=(",", ":")).encode())
     sig = _b64e(key.sign(body.encode()))
     return f"{TOKEN_PREFIX}.{body}.{sig}"

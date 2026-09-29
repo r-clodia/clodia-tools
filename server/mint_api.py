@@ -66,6 +66,8 @@ async def mint(request: Request):
                 chat=b.get("chat") or None,
                 scoped_tools=b.get("scoped_tools") or None,
                 unattended=bool(b.get("unattended")),
+                origin=b.get("origin") or None,
+                scope_tier=b.get("scope_tier") or None,
             )
             return JSONResponse({"token": token})
         if kind == "capability":
