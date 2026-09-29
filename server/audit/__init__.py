@@ -1,0 +1,191 @@
+"""Audit trail of the gateway (clodia-platform#425, #431).
+
+The one door through which the platform certifies what happened:
+
+    from server import audit
+    audit.emit("tool.call", action="execute", resource="topic.put",
+               scope={"topic": "titulon-tech", "tier": "SEAL-2"},
+               tool={"name": "topic.put", "parameters_hash": audit.content_hash(raw)})
+
+`emit` builds the canonical record (#425 §1.3), chains and signs it, and
+appends it to the store in the gateway STATE directory — the volume the
+agent-server does not mount. Content never enters the trail: pass hashes
+(`content_hash`), not text.
+
+Failure policy. An audit write that fails is never silent: it is logged at
+ERROR, counted, and shown by `status()`. With `CLODIA_AUDIT_FAIL_CLOSED=1` it
+also raises `AuditWriteError`, so the caller can refuse the action it could
+not record. The default is fail-loud rather than fail-closed, because turning
+every verb off on a full disk is a decision for the owner, not a default.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import threading
+from pathlib import Path
+
+from .. import state_paths
+from . import checkpoint as _cp
+from . import record
+from .keys import Signer
+from .record import RecordError, content_hash  # noqa: F401 - public API
+from .store import AuditStore
+
+LOG = logging.getLogger("clodia-tools.audit")
+
+DEFAULT_CHECKPOINT_SECONDS = 900
+
+
+class AuditWriteError(RuntimeError):
+    """An audit event could not be recorded (only raised when fail-closed)."""
+
+
+_lock = threading.Lock()
+_store: AuditStore | None = None
+_store_root: Path | None = None
+_failures = 0
+_last_error: str | None = None
+
+
+def root_dir() -> Path:
+    """The store directory. `CLODIA_AUDIT_DIR` overrides (tests, dev)."""
+    explicit = (os.environ.get("CLODIA_AUDIT_DIR") or "").strip()
+    return Path(explicit) if explicit else state_paths.state_dir() / "audit"
+
+
+def key_dir() -> Path:
+    explicit = (os.environ.get("CLODIA_AUDIT_KEY_DIR") or "").strip()
+    return Path(explicit) if explicit else state_paths.state_dir() / "audit-key"
+
+
+def fail_closed() -> bool:
+    return (os.environ.get("CLODIA_AUDIT_FAIL_CLOSED") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _gateway_version() -> str:
+    try:
+        from .. import __version__
+        return __version__
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def store() -> AuditStore:
+    """The process-wide store, re-created if the directory changes (tests)."""
+    global _store, _store_root
+    root = root_dir()
+    with _lock:
+        if _store is None or _store_root != root:
+            _store = AuditStore(root, Signer(key_dir(), root))
+            _store_root = root
+        return _store
+
+
+def emit(event_type: str, **fields) -> dict | None:
+    """Record one canonical event. Returns it, or None if it could not be written."""
+    global _failures, _last_error
+    try:
+        rec = record.build(event_type, **fields)
+    except RecordError:
+        # A malformed record is a programming error in the caller: loud, always.
+        raise
+    try:
+        return store().append(rec)
+    except Exception as exc:  # noqa: BLE001
+        _failures += 1
+        _last_error = f"{type(exc).__name__}: {exc}"[:300]
+        LOG.error("audit: event %s NOT recorded (%s)", event_type, _last_error)
+        if fail_closed():
+            raise AuditWriteError(_last_error) from exc
+        return None
+
+
+def checkpoint_now() -> dict | None:
+    """Sign a checkpoint of the head and export it, if there is anything new."""
+    st = store()
+    seq, head_hash = st.head()
+    last = _cp.last_local(st.root)
+    if seq == 0 or (last and int(last["checkpoint"]["seq"]) >= seq):
+        return None
+    cp = _cp.make(seq, head_hash, st.signer, _gateway_version())
+    exports = []
+    for ex in _cp.exporters():
+        try:
+            ex.export(cp)
+            exports.append({**ex.describe(), "ok": True})
+        except Exception as exc:  # noqa: BLE001 - one exporter must not stop the others
+            exports.append({**ex.describe(), "ok": False, "error": str(exc)[:200]})
+            LOG.error("audit: checkpoint %s NOT exported to %s (%s)",
+                      seq, ex.describe().get("type"), exc)
+    _cp.append_local(st.root, cp, exports)
+    return {"checkpoint": cp, "exports": exports}
+
+
+def _isolated(root: Path) -> bool:
+    """True if the store is NOT under the datadir the agent-server mounts."""
+    try:
+        root.resolve().relative_to(state_paths.shared_dir().resolve())
+        return False
+    except ValueError:
+        return True
+
+
+def status() -> dict:
+    """Health of the trail, in words an owner can act on. No secrets."""
+    try:
+        st = store()
+        seq, head_hash = st.head()
+        last = _cp.last_local(st.root)
+        exporters = [e.describe() for e in _cp.exporters()]
+        last_cp = last["checkpoint"] if last else None
+        last_exports = last["exports"] if last else []
+        return {
+            "ok": _failures == 0,
+            "root": str(st.root),
+            # False means the store sits on the datadir the agent-server mounts:
+            # the trail is then not independent of the subject it records.
+            "isolated": _isolated(st.root),
+            "key_id": st.signer.key_id,
+            "events": seq,
+            "head_hash": head_hash if seq else None,
+            "last_checkpoint": ({"seq": last_cp["seq"], "timestamp": last_cp["timestamp"]}
+                                if last_cp else None),
+            "unanchored_events": seq - (int(last_cp["seq"]) if last_cp else 0),
+            "exporters": exporters,
+            "off_system": any(e.get("ok") for e in last_exports),
+            "failures": _failures,
+            "last_error": _last_error,
+            "fail_closed": fail_closed(),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300],
+                "failures": _failures, "last_error": _last_error}
+
+
+async def checkpoint_loop(interval: int | None = None) -> None:
+    """Periodic checkpoints, started by the gateway lifespan."""
+    every = interval or int(os.environ.get("CLODIA_AUDIT_CHECKPOINT_SECONDS")
+                            or DEFAULT_CHECKPOINT_SECONDS)
+    while True:
+        await asyncio.sleep(every)
+        try:
+            await asyncio.to_thread(checkpoint_now)
+        except Exception as exc:  # noqa: BLE001 - the loop must survive
+            LOG.error("audit: periodic checkpoint failed (%s)", exc)
+
+
+def boot() -> None:
+    """Mark the gateway start in the chain, and say what is not yet in place."""
+    emit("audit.start", action="boot", resource="gateway",
+         actor={"type": "service", "id": "clodia-tools"},
+         tool={"name": "clodia-tools", "version": _gateway_version()})
+    s = status()
+    if not s.get("isolated"):
+        LOG.warning("audit: the store is on the datadir shared with the agent-server "
+                    "(CLODIA_TOOLS_STATE_DIR not set): the trail is not independent")
+    if not s.get("exporters"):
+        LOG.warning("audit: no off-system checkpoint exporter configured "
+                    "(CLODIA_AUDIT_EXPORT_DIR or vault '%s'): a cut tail would "
+                    "not be detectable", _cp.WORM_CRED)

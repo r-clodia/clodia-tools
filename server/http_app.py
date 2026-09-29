@@ -89,6 +89,14 @@ async def _lifespan(_app):
         # per nominare una saturazione invece di dedurla.
         inflight.install_offload_pool()
         guardia = asyncio.create_task(inflight.watch())
+        # Audit trail (clodia-platform#431): mark the start in the chain, then
+        # sign and export checkpoints periodically. Never blocks the boot.
+        from . import audit
+        try:
+            await asyncio.to_thread(audit.boot)
+        except Exception as e:  # noqa: BLE001
+            LOG.error("audit: boot event not recorded: %s", e)
+        checkpoints = asyncio.create_task(audit.checkpoint_loop())
         # M3++: in modalità runtime-keyless (CLODIA_ORCHESTRATOR_SECRET set) il
         # gateway è il trust-anchor → bootstrap PKI qui (CA + identità native),
         # idempotente. L'entrypoint di agent-server la salta in questa modalità.
@@ -124,6 +132,7 @@ async def _lifespan(_app):
             yield
         finally:
             guardia.cancel()
+            checkpoints.cancel()
 
 
 def build_app() -> Starlette:
@@ -163,12 +172,15 @@ def build_app() -> Starlette:
     # Inventario collection RAG (pagina Databases della webui): lettura non
     # filtrata per grant, stesso principio di providers_api.
     from .rag_api import routes as rag_routes
+    # Audit trail health and checkpoints (clodia-platform#431): server-to-server.
+    from .audit_api import routes as audit_routes
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
                 *imagegen_routes, *topics_routes, *profile_routes,
                 *telegram_routes, *agents_routes, *vault_routes,
                 *tool_routes, *mint_routes, *gate_routes, *logic_routes,
-                *egress_routes, *proxy_auth_routes, *rag_routes],
+                *egress_routes, *proxy_auth_routes, *rag_routes,
+                *audit_routes],
         # Chi è in volo, su tutte le rotte (clodia-platform#316). Attorno a tutto
         # e non alle due rotte della issue: nell'incidente del 7 set le rotte
         # «innocenti» erano quelle in timeout, e un contatore puntato sui
