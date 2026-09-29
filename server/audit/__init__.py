@@ -83,9 +83,24 @@ def store() -> AuditStore:
         return _store
 
 
-def emit(event_type: str, **fields) -> dict | None:
-    """Record one canonical event. Returns it, or None if it could not be written."""
+def emit(event_type: str, *, identity: str = "claims", **fields) -> dict | None:
+    """Record one canonical event. Returns it, or None if it could not be written.
+
+    `identity="claims"` (default): actor, agent and scope come from the
+    verified claims of the request being served, overriding the caller's
+    (#441). `identity="explicit"`: the caller's identity is recorded as given —
+    for events the gateway itself originates (a timer, an expiry, a revocation)
+    or attributes on signed evidence other than the session (the `by` of a
+    CA-signed capability)."""
     global _failures, _last_error
+    from . import identity as _identity
+    if identity == "claims":
+        fields = _identity.merge(fields)
+    elif identity != "explicit":
+        raise RecordError(f"identity must be 'claims' or 'explicit', not {identity!r}")
+    elif isinstance(fields.get("actor"), dict):
+        fields = {**fields, "actor": {**fields["actor"],
+                                      "source": fields["actor"].get("source") or "caller"}}
     try:
         rec = record.build(event_type, **fields)
     except RecordError:
@@ -178,7 +193,7 @@ async def checkpoint_loop(interval: int | None = None) -> None:
 
 def boot() -> None:
     """Mark the gateway start in the chain, and say what is not yet in place."""
-    emit("audit.start", action="boot", resource="gateway",
+    emit("audit.start", identity="explicit", action="boot", resource="gateway",
          actor={"type": "service", "id": "clodia-tools"},
          tool={"name": "clodia-tools", "version": _gateway_version()})
     s = status()

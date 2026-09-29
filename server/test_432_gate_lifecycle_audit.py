@@ -106,7 +106,8 @@ class LifecycleTests(_Env):
         self.assertEqual(dec["event"]["type"], "gate.decision")
         self.assertEqual(dec["event"]["action"], "reject")
         self.assertEqual(dec["authorization"]["result"], "rejected")
-        self.assertEqual(dec["actor"], {"type": "human", "id": "davide", "role": "owner"})
+        self.assertEqual(dec["actor"], {"type": "human", "id": "davide", "role": "owner",
+                                        "source": "caller"})
 
     def test_nobody_answered_is_an_event(self) -> None:
         gate.request("clodia", "clodia-320", "web.post", chat=CHAT)

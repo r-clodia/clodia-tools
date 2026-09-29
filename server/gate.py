@@ -343,9 +343,13 @@ def _audit(event_type: str, action: str, agent: str, instance: str, verb: str,
            authorization: dict | None = None, decision: dict | None = None,
            result: dict | None = None) -> None:
     from . import audit
+    # A service event (expiry, revocation) or a human decision attributed on the
+    # CA-signed capability is recorded as given; anything else takes its identity
+    # from the verified claims of the call it happens in (#441).
+    identity = "explicit" if (actor or {}).get("type") in ("service", "human") else "claims"
     auth = {"required": True, "class": gate_class(verb),
             "gate_ref": _key(agent, instance, verb), **(authorization or {})}
-    audit.emit(event_type, action=action, resource=verb,
+    audit.emit(event_type, identity=identity, action=action, resource=verb,
                scope=_scope_of(chat),
                actor=actor or {"type": "agent", "id": agent},
                agent={"seed": agent, "spawn": instance if instance and instance != "-" else None},
