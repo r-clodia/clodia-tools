@@ -317,6 +317,41 @@ def needs_consent(verb: str, *, globally_gated: bool, agent_gated: bool,
     return True
 
 
+# ── Audit of the gate lifecycle (clodia-platform#432) ───────────────────────
+# The stores below keep CURRENT state only: a consumed or revoked consent is
+# deleted, and a decided request leaves the queue. Without these events nothing
+# would show, after the fact, who approved what, when, and for how long. Every
+# transition is emitted from here, the one module where consents are born and
+# die, so a new caller cannot forget it.
+def _scope_of(chat: Optional[str]) -> dict | None:
+    """`chan:<tier>:<name>:<agent>` → {tier, topic}; None outside a channel."""
+    parts = str(chat or "").split(":")
+    if len(parts) >= 3 and parts[0] == "chan":
+        return {"tier": parts[1], "topic": parts[2]}
+    return None
+
+
+def _consent_scope(verb: str) -> str:
+    """How long a consent lasts, in the words of #425 §1.3 `authorization.scope`."""
+    if verb.startswith(COPYBRAIN_PREFIX) or verb == "crosstopic":
+        return "spawn"
+    return "one-shot"
+
+
+def _audit(event_type: str, action: str, agent: str, instance: str, verb: str,
+           *, actor: dict | None = None, chat: Optional[str] = None,
+           authorization: dict | None = None, decision: dict | None = None,
+           result: dict | None = None) -> None:
+    from . import audit
+    auth = {"required": True, "class": gate_class(verb),
+            "gate_ref": _key(agent, instance, verb), **(authorization or {})}
+    audit.emit(event_type, action=action, resource=verb,
+               scope=_scope_of(chat),
+               actor=actor or {"type": "agent", "id": agent},
+               agent={"seed": agent, "spawn": instance if instance and instance != "-" else None},
+               authorization=auth, decision=decision, result=result)
+
+
 # ── Store dei CONSENSI (capability ccap1 firmate dalla CA) ───────────────────
 # Un consenso è per (agent, instance, verb): l'umano approva l'uso di QUEL verbo
 # da parte di QUELL'istanza, con ccap1 + jti + revoca e scope sul verbo
@@ -368,7 +403,9 @@ def _revoke_jti(jti: str) -> None:
     _save(_revoked_path(), {"jti": sorted(s)})
 
 
-def grant(agent: str, instance: str, verb: str, token: str) -> dict:
+def grant(agent: str, instance: str, verb: str, token: str, *,
+          decided_by: str = "", decided_by_role: str | None = None,
+          chat: Optional[str] = None) -> dict:
     """Registra un consenso per (agent, instance, verb) da una capability ccap1
     firmata dalla CA. Verifica firma + agente + `cap`=gate:<verb>. Memorizza jti+exp
     autoritativi dal payload firmato."""
@@ -379,13 +416,35 @@ def grant(agent: str, instance: str, verb: str, token: str) -> dict:
         raise PermissionError("capability non per questo verbo")
     d = _load(_store_path())
     now = time.time()
+    _expire_consents(d, now)
     d = {k: v for k, v in d.items() if float((v or {}).get("exp", 0)) > now}  # prune
     d[_key(agent, instance, verb)] = {
         "exp": float(payload.get("exp", 0)), "jti": str(payload.get("jti") or ""),
         "by": str(payload.get("by") or ""), "token": token, "at": now}
     _save(_store_path(), d)
+    by = str(payload.get("by") or "")
+    if chat is None:
+        chat = (_load(_req_path()).get(_key(agent, instance, verb)) or {}).get("chat")
+    _audit("gate.decision", "approve", agent, instance, verb,
+           actor={"type": "human", "id": by or decided_by, "role": decided_by_role},
+           chat=chat,
+           authorization={"actor": by or decided_by, "role": decided_by_role,
+                          "result": "approved", "scope": _consent_scope(verb),
+                          "jti": str(payload.get("jti") or ""),
+                          "expires_at": int(float(payload.get("exp", 0)))})
     return {"agent": agent, "instance": instance, "verb": verb,
             "expires_in_s": int(float(payload.get("exp", 0)) - now)}
+
+
+def _expire_consents(d: dict, now: float) -> None:
+    """Emit `gate.expire` for consents that lapsed unused (about to be pruned)."""
+    for k, v in d.items():
+        if float((v or {}).get("exp", 0)) <= now:
+            agent, instance, verb = (k.split("|", 2) + ["", ""])[:3]
+            _audit("gate.expire", "expire", agent, instance, verb,
+                   actor={"type": "service", "id": "clodia-tools"},
+                   authorization={"result": "expired", "what": "consent",
+                                  "jti": str((v or {}).get("jti") or "")})
 
 
 def details(agent: str, instance: str, verb: str) -> dict | None:
@@ -414,15 +473,23 @@ def active(agent: str, instance: str, verb: str) -> bool:
     return details(agent, instance, verb) is not None
 
 
-def consume(agent: str, instance: str, verb: str) -> None:
+def consume(agent: str, instance: str, verb: str, *, _why: str = "consume") -> None:
     """Consuma (revoca) il consenso dopo l'uso: il gate è per-azione, non un
-    lasciapassare riusabile. Idempotente."""
+    lasciapassare riusabile. Idempotente.
+
+    `_why` is `consume` (used by the action it approved) or `revoke` (withdrawn
+    before or without use, e.g. at the end of a spawn): the audit tells the two
+    apart, the store does not need to."""
     d = _load(_store_path())
     k = _key(agent, instance, verb)
     v = d.pop(k, None)
     if v:
         _revoke_jti(str(v.get("jti") or ""))
         _save(_store_path(), d)
+        _audit(f"gate.{_why}", _why, agent, instance, verb,
+               actor={"type": "service", "id": "clodia-tools"},
+               authorization={"result": "consumed" if _why == "consume" else "revoked",
+                              "jti": str(v.get("jti") or ""), "by": str(v.get("by") or "")})
 
 
 def active_with_prefix(agent: str, instance: str, prefix: str) -> list[str]:
@@ -456,7 +523,7 @@ def revoke_instance(agent: str, instance: str, prefix: str) -> list[str]:
     for k in list(_load(_store_path())):
         if k.startswith(testa):
             verb = k.split("|", 2)[2]
-            consume(agent, instance, verb)
+            consume(agent, instance, verb, _why="revoke")
             revocati.append(verb)
     return sorted(revocati)
 
@@ -477,13 +544,34 @@ def request(agent: str, instance: str, verb: str, *, context: Optional[str] = No
     ha già). `chat`/`context` = dove approvare; `mode` = sync|async."""
     d = _load(_req_path())
     now = time.time()
+    _expire_requests(d, now)
     d = {k: v for k, v in d.items() if now - float((v or {}).get("at", 0)) <= _REQ_TTL}
     rid = _key(agent, instance, verb)
+    renewed = rid in d
     d[rid] = {"agent": agent, "instance": instance or "-", "verb": verb,
               "context": context, "human": human, "chat": chat, "mode": mode,
               "reason": (reason or "")[:300], "at": now}
     _save(_req_path(), d)
+    if not renewed:
+        from .audit import content_hash
+        _audit("gate.request", "request", agent, instance or "-", verb, chat=chat,
+               actor={"type": "agent", "id": agent, "on_behalf": human},
+               # The agent's stated reason is free text written by the audited
+               # subject: its hash here, the text in the channel card (and in
+               # the evidence store, #445).
+               decision={"declared_reason_hash": content_hash(reason) if reason else None},
+               authorization={"mode": mode})
     return {"pending": True, "id": rid, **d[rid]}
+
+
+def _expire_requests(d: dict, now: float) -> None:
+    """Emit `gate.expire` for requests that nobody answered in time."""
+    for k, v in d.items():
+        if now - float((v or {}).get("at", 0)) > _REQ_TTL:
+            _audit("gate.expire", "expire", v.get("agent", ""), v.get("instance", "-"),
+                   v.get("verb", ""), chat=v.get("chat"),
+                   actor={"type": "service", "id": "clodia-tools"},
+                   authorization={"result": "unanswered", "what": "request"})
 
 
 def list_requests() -> list:
@@ -491,6 +579,7 @@ def list_requests() -> list:
     now = time.time()
     live = {k: v for k, v in d.items() if now - float((v or {}).get("at", 0)) <= _REQ_TTL}
     if len(live) != len(d):
+        _expire_requests(d, now)
         _save(_req_path(), live)
     # `class` viaggia con la richiesta perché l'autorità sulla classificazione è
     # QUI: chi approva sta in un altro servizio e non deve riderivarla: una
@@ -506,12 +595,28 @@ def list_requests() -> list:
             for k, v in live.items()]
 
 
-def resolve_request(agent: str, instance: str, verb: str) -> bool:
+def resolve_request(agent: str, instance: str, verb: str, *,
+                    outcome: str | None = None, decided_by: str = "",
+                    decided_by_role: str | None = None) -> bool:
+    """Take the request out of the queue.
+
+    `outcome` records why, when the caller knows: `rejected` (a human said no)
+    or `timeout` (nobody answered while the verb waited). An approval is
+    recorded by `grant`, so it resolves with no outcome here."""
     d = _load(_req_path())
     k = _key(agent, instance, verb)
     if k in d:
-        d.pop(k, None)
+        v = d.pop(k, None) or {}
         _save(_req_path(), d)
+        if outcome == "rejected":
+            _audit("gate.decision", "reject", agent, instance, verb, chat=v.get("chat"),
+                   actor={"type": "human", "id": decided_by, "role": decided_by_role},
+                   authorization={"actor": decided_by, "role": decided_by_role,
+                                  "result": "rejected"})
+        elif outcome == "timeout":
+            _audit("gate.expire", "expire", agent, instance, verb, chat=v.get("chat"),
+                   actor={"type": "service", "id": "clodia-tools"},
+                   authorization={"result": "unanswered", "what": "request"})
         return True
     return False
 
