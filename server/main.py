@@ -2111,10 +2111,12 @@ def _dispatch_gdrive(name: str, a: dict):
         return gd.mkdir(a["name"], parent_id=a.get("parent_id"), account=a.get("account"))
     if verb == "upload":
         src = _safe_scratch_path(a["src"])  # i byte vengono dallo scratch, mai dal modello
+        _note_crossing(src, kind="upload")
         return gd.upload(src, name=a.get("name"), folder_id=a.get("folder_id"),
                          account=a.get("account"))
     if verb == "update":
         src = _safe_scratch_path(a["src"])  # i byte vengono dallo scratch, mai dal modello
+        _note_crossing(src, kind="upload")
         return gd.update(a["file_id"], src, account=a.get("account"))
     if verb == "download":
         dest = _safe_scratch_path(a["dest"])
@@ -2279,6 +2281,7 @@ def _dispatch_telegram(name: str, a: dict):
                     "chat_id=<chat_id>) — o passa chat_id esplicito.")
         _require_topic_member(_topics(), tier, tname)
         data = _topics().read_file(tier, tname, a["path"])
+        _note_crossing(data=data, kind="file")
         return tg.send_file(cid, _os.path.basename(a["path"]),
                             base64.b64encode(data).decode("ascii"), a.get("caption", ""))
     if verb == "lease_release":
@@ -3966,6 +3969,86 @@ import contextvars as _contextvars
 
 _AUDIT_PARENT: "_contextvars.ContextVar[str | None]" = _contextvars.ContextVar(
     "audit_parent_span", default=None)
+#: Per call: what crossed the perimeter (hash + size of each file that left)
+#: and the egress verdict that let it out (#438). Lists/dicts, so that work
+#: offloaded to a thread (which copies the context) still writes into them.
+_AUDIT_CROSSING: "_contextvars.ContextVar[list | None]" = _contextvars.ContextVar(
+    "audit_crossing", default=None)
+_AUDIT_EGRESS: "_contextvars.ContextVar[dict | None]" = _contextvars.ContextVar(
+    "audit_egress", default=None)
+
+
+def _note_crossing(path=None, data: bytes | None = None, kind: str = "file") -> None:
+    """Record the hash of a file about to leave. Never its name or content."""
+    acc = _AUDIT_CROSSING.get()
+    if acc is None:
+        return
+    import hashlib as _hl
+    h = _hl.sha256()
+    size = 0
+    try:
+        if data is not None:
+            h.update(data)
+            size = len(data)
+        else:
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+                    size += len(chunk)
+    except OSError:
+        acc.append({"kind": kind, "hash": None, "error": "unreadable"})
+        return
+    acc.append({"kind": kind, "hash": "sha256:" + h.hexdigest(), "bytes": size})
+
+
+def _ingress_source(verb: str, a: dict, result: object = None) -> str | None:
+    """The one identifiable source of a read, as a URI, or None (#438).
+
+    Mirrors the branches of `_source_vetted`, without its I/O: it names the
+    source, `_source_vetted` judges it."""
+    from . import egress as _eg
+    a = a or {}
+    if proxy.is_proxied(verb):
+        return f"mcp:{verb}"
+    if verb.startswith("web."):
+        return str(a.get("url") or "").strip() or None
+    if verb == "email.read":
+        src = ""
+        if isinstance(result, dict):
+            src = str(result.get("from") or (result.get("message") or {}).get("from") or "")
+        addr = _eg.address_of(src)
+        return f"mailfrom:{addr}" if addr else None
+    spec = _RESOURCE_READ_VERBS.get(verb)
+    if spec:
+        rid = str(a.get(spec[0]) or "").strip()
+        return spec[1].format(rid) if rid else None
+    if verb in _TOPIC_READ_VERBS and a.get("tier") and a.get("name"):
+        return f"topic:{a['tier']}/{a['name']}/{a.get('path') or ''}".rstrip("/")
+    return None
+
+
+def _audit_ingress(verb: str, a: dict, result: object, vetted) -> None:
+    """Record a read from an identifiable source. Never fails the read."""
+    try:
+        _audit_ingress_unsafe(verb, a, result, vetted)
+    except Exception as e:  # noqa: BLE001
+        LOG.error("audit: flow.ingress of %s not recorded (%s)", verb, type(e).__name__)
+
+
+def _audit_ingress_unsafe(verb: str, a: dict, result: object, vetted) -> None:
+    src = _ingress_source(verb, a, result)
+    if not src:
+        return
+    from . import audit as _audit
+    try:
+        raw = result if isinstance(result, str) else json.dumps(result, sort_keys=True,
+                                                                ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001
+        raw = repr(result)
+    _audit.emit("flow.ingress", action="read", resource=verb,
+                tool={"name": verb, "source": src,
+                      "vetted": {True: "vetted", False: "not_vetted"}.get(vetted, "unknown")},
+                input={"hash": _audit.content_hash(raw)})
 
 
 def _denial_class(msg: str) -> str:
@@ -4019,11 +4102,34 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=f"DENIED: audit trail non disponibile ({e})")]
     span = (call or {}).get("event_id")
     tok = _AUDIT_PARENT.set(span or parent)
+    crossing, egress_seen = [], {}
+    tok_c = _AUDIT_CROSSING.set(crossing)
+    tok_e = _AUDIT_EGRESS.set(egress_seen)
     try:
         out = await _call_tool_unaudited(name, arguments)
     finally:
+        _AUDIT_EGRESS.reset(tok_e)
+        _AUDIT_CROSSING.reset(tok_c)
         _AUDIT_PARENT.reset(tok)
     status, err = _outcome_of(out)
+    verdict = egress_seen.get("verdict")
+    if status == "ok" and verdict and verdict.get("checked"):
+        # Data actually left (#438): where to, under which rule, and the hash of
+        # every file that went with it. The message body is in parameters_hash.
+        try:
+            from .audit import policy as _apol
+            await _aio.to_thread(
+                _audit.emit, "flow.egress", action="send", resource=name,
+                parent_span_id=span or parent,
+                tool={"name": name, "type": verdict.get("type"),
+                      "destination": verdict.get("destinations"),
+                      "parameters_hash": _args_hash(arguments),
+                      "would_deny": True if verdict.get("would_deny") else None},
+                decision={"rule": _apol.matched_rules(verdict),
+                          "policy_bundle_hash": _apol.bundle_hash()},
+                result={"files": crossing or None})
+        except Exception as e:  # noqa: BLE001 - the send happened; never turn it into an error
+            LOG.error("audit: flow.egress of %s not recorded (%s)", name, type(e).__name__)
     try:
         await _aio.to_thread(
             _audit.emit, "tool.result", action=status, resource=name,
@@ -4320,6 +4426,9 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             from . import observe as _obs2
             _ev = _egress.check(_ag or "", _acfg, name, _eargs,
                                 unattended=is_unattended())
+            _seen = _AUDIT_EGRESS.get()
+            if _seen is not None:
+                _seen["verdict"] = _ev
             if _ev.get("checked"):
                 # The verdict, as a record and not only as a log line (#436).
                 # Recording it must never change it: a failure here is logged,
@@ -4415,6 +4524,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             # lettura dei file del topic senza togliergli il mestiere — e non
             # brucia token su un PDF.
             _extra, _tmpdir = _topic_attachments(arguments, _ag or "")
+            for _p in (arguments.get("attachments") or []) + _extra:
+                _note_crossing(_p, kind="attachment")
             try:
                 result = email.send(
                     arguments["to"],
@@ -4509,6 +4620,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 limit=arguments.get("limit", 20),
             )
         elif name == "email.reply":
+            for _p in arguments.get("attachments") or []:
+                _note_crossing(_p, kind="attachment")
             result = email.reply(
                 arguments["email_id"],
                 arguments["body"],
@@ -4620,8 +4733,9 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             # I verbi GitHub e gli MCP esterni passano DA QUI: sono la sorgente di
             # contenuto di terzi più ovvia, e marcare solo il ritorno nativo
             # avrebbe lasciato scoperto proprio il vettore del caso Invariant Labs.
-            _taint.note_verb(name, _ag or "",
-                              vetted=_source_vetted(name, arguments))
+            _vet = _source_vetted(name, arguments)
+            _taint.note_verb(name, _ag or "", vetted=_vet)
+            await asyncio.to_thread(_audit_ingress, name, arguments, text, _vet)
             _tlm.record(name, _ag or "", "ok", channel=current_chat(),
                         unattended=is_unattended())
             return [TextContent(type="text", text=text)]
@@ -4632,8 +4746,9 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
         # entrato nel contesto, non quando è stato chiesto. La §4 riformula la
         # colonna `untrusted_input` del catalogo da «questo agente è esposto» a
         # «questo verbo produce taint», ed è questo il punto in cui accade.
-        _taint.note_verb(name, _ag or "",
-                          vetted=_source_vetted(name, arguments, result))
+        _vet = _source_vetted(name, arguments, result)
+        _taint.note_verb(name, _ag or "", vetted=_vet)
+        await asyncio.to_thread(_audit_ingress, name, arguments, result, _vet)
         _tlm.record(name, _ag or "", "ok", channel=current_chat(),
                     unattended=is_unattended())
         return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
