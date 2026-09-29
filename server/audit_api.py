@@ -82,7 +82,37 @@ async def evidence(request: Request):
             scope={"tier": ev.norm_tier(tier)})
 
 
+async def export(request: Request):
+    """POST /internal/audit/export {reader, since?, until?, purpose?}
+
+    A signed bundle of the trail, verifiable offline. The caller (clodia-logic)
+    has checked that `reader` may export (admin); the export is recorded."""
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from datetime import date
+    from starlette.responses import Response
+    from .audit import export as _export
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    reader = str(body.get("reader") or "").strip()
+    if not reader:
+        return JSONResponse({"error": "reader is required"}, status_code=400)
+    try:
+        since = date.fromisoformat(body["since"]) if body.get("since") else None
+        until = date.fromisoformat(body["until"]) if body.get("until") else None
+    except ValueError:
+        return JSONResponse({"error": "since/until must be YYYY-MM-DD"}, status_code=400)
+    blob = await asyncio.to_thread(_export.build, audit.store(), reader=reader,
+                                   since=since, until=until,
+                                   purpose=str(body.get("purpose") or ""))
+    return Response(blob, media_type="application/gzip", headers={
+        "Content-Disposition": 'attachment; filename="clodia-audit-export.tgz"'})
+
+
 routes = [
+    Route("/internal/audit/export", export, methods=["POST"]),
     Route("/internal/audit/evidence", evidence, methods=["GET"]),
     Route("/internal/audit/status", status, methods=["GET"]),
     Route("/internal/audit/checkpoint", checkpoint, methods=["POST"]),

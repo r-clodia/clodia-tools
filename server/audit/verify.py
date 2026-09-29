@@ -127,8 +127,30 @@ def verify(root: Path, *, pubkey_pem: bytes | None = None,
     ext_ok = sum(check_cp(cp, "exported") for cp in ext)
     truncated = any(int(cp.get("seq") or 0) > last_seq for cp in ext)
     covered = max([int(cp.get("seq") or 0) for cp in ext] or [0])
+    # An export bundle (#447) carries a signed manifest of every file in it.
+    manifest_state = None
+    mp = root / "manifest.json"
+    if mp.is_file():
+        import hashlib as _hl
+        man = json.loads(mp.read_text(encoding="utf-8"))
+        body = {k: v for k, v in man.items() if k != "signature"}
+        if man.get("key_id") != kid or not verify_sig(pub, record.canonical_json(body),
+                                                      man.get("signature") or ""):
+            err("manifest.json: signature does not verify")
+            manifest_state = "bad_signature"
+        else:
+            manifest_state = "ok"
+            for name, digest in (man.get("files") or {}).items():
+                f = root / name
+                if not f.is_file():
+                    err(f"manifest.json: {name} is missing from the bundle")
+                    manifest_state = "incomplete"
+                elif _hl.sha256(f.read_bytes()).hexdigest() != digest:
+                    err(f"manifest.json: {name} does not match its hash")
+                    manifest_state = "altered"
     return {
         "ok": not errors,
+        "manifest": manifest_state,
         "events": count,
         "last_seq": last_seq,
         "last_hash": prev if count else None,
