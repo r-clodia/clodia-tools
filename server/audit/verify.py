@@ -50,6 +50,22 @@ def verify(root: Path, *, pubkey_pem: bytes | None = None,
     hashes: dict[int, str] = {}
     expected_seq, prev = 1, record.GENESIS
     count = 0
+    # A signed prune record (#446) moves the start of the chain: the events up
+    # to `up_to_seq` were removed by retention, and the chain resumes after the
+    # hash they ended on. Only the LAST record counts, and it must verify.
+    pruned = None
+    pp = root / "pruned.jsonl"
+    if pp.is_file():
+        lines = [x for x in pp.read_text(encoding="utf-8").splitlines() if x.strip()]
+        if lines:
+            pruned = json.loads(lines[-1])
+            body = {k: v for k, v in pruned.items() if k != "signature"}
+            if pruned.get("key_id") != kid or not verify_sig(
+                    pub, record.canonical_json(body), pruned.get("signature") or ""):
+                err("pruned.jsonl: the last prune record does not verify")
+            else:
+                expected_seq = int(pruned["up_to_seq"]) + 1
+                prev = pruned["last_hash"]
     for seg in sorted(root.glob("events-*.jsonl")):
         with seg.open("r", encoding="utf-8") as fh:
             for n, line in enumerate(fh, 1):
@@ -81,7 +97,11 @@ def verify(root: Path, *, pubkey_pem: bytes | None = None,
                 expected_seq = seq + 1
     last_seq = expected_seq - 1
 
+    first_seq = int(pruned["up_to_seq"]) + 1 if pruned else 1
+
     def check_cp(cp: dict, origin: str) -> bool:
+        if int(cp.get("seq") or 0) < first_seq:
+            return True  # anchors a pruned part of the chain: nothing left to compare
         if cp.get("key_id") != kid or not verify_sig(pub, checkpoint.unsigned(cp),
                                                      cp.get("signature") or ""):
             err(f"{origin} checkpoint seq {cp.get('seq')}: signature does not verify")
@@ -119,6 +139,7 @@ def verify(root: Path, *, pubkey_pem: bytes | None = None,
         # Events after the last exported checkpoint are chained and signed, but
         # a cut of exactly those would not be detectable yet.
         "unanchored_events": max(0, last_seq - covered),
+        "pruned_up_to": int(pruned["up_to_seq"]) if pruned else None,
         "errors": errors,
     }
 
