@@ -117,6 +117,33 @@ def emit(event_type: str, *, identity: str = "claims", **fields) -> dict | None:
         return None
 
 
+def current_tier() -> str | None:
+    """The tier of the request being served (signed `chat` claim, else scope tier)."""
+    try:
+        from .. import whitelist as _wl
+        parts = str(_wl.current_chat() or "").split(":")
+        if len(parts) >= 3 and parts[0] == "chan":
+            return parts[1]
+        return _wl.current_scope_tier()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def keep(data: bytes | str, tier: str | None = None) -> str:
+    """Put `data` in the evidence store (#445) and return its content hash.
+
+    The hash is the same as `content_hash(data)`, so the trail can reference
+    the evidence. Outside any scope the evidence is filed under the most
+    restrictive tier. Keeping never fails the caller: on error the hash is
+    still returned, and the failure is logged."""
+    from . import evidence
+    try:
+        return evidence.keep(data, tier or current_tier())
+    except Exception as exc:  # noqa: BLE001
+        LOG.error("audit: evidence not kept (%s)", type(exc).__name__)
+        return content_hash(data)
+
+
 def checkpoint_now() -> dict | None:
     """Sign a checkpoint of the head and export it, if there is anything new."""
     st = store()
