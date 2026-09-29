@@ -98,7 +98,15 @@ def _authorize(request: Request):
         LOG.warning("topics: sessione di proxy rifiutata sull'API interna "
                     "(principal=%s)", payload.get("principal"))
         return None, JSONResponse({"error": "forbidden"}, status_code=403)
+    # The verified payload, for the human-read audit (#444): who is reading.
+    request.state.auth_payload = payload
     return payload.get("agent"), None
+
+
+def _reader(request: Request) -> dict | None:
+    """The person behind a read, or None for the runner's own (system) reads."""
+    p = getattr(request.state, "auth_payload", None) or {}
+    return p if p.get("on_behalf") and p.get("principal") else None
 
 
 # Cache TTL brevissima della lista topic: la webui la polla di continuo e
@@ -148,6 +156,9 @@ async def open_topic(request: Request):
         st = _t.status(f"{tier}/{name}")
         data["taint"] = {"tainted": st["tainted"], "since": st.get("since"),
                          "sources": st.get("sources") or []}
+        if _reader(request):
+            from .audit import reads as _reads
+            _reads.safe(_reads.view, _reader(request), tier, name)
         return JSONResponse(data)
     except TopicError:
         return JSONResponse({"error": "not_found"}, status_code=404)
@@ -166,6 +177,11 @@ async def open_file(request: Request):
         return JSONResponse({"error": "not_found"}, status_code=404)
     except Exception:  # noqa: BLE001 — file assente / illeggibile
         return JSONResponse({"error": "not_found"}, status_code=404)
+    if _reader(request):
+        import hashlib as _hl
+        from .audit import reads as _reads
+        _reads.safe(_reads.download, _reader(request), tier, name, path,
+                    "sha256:" + _hl.sha256(data).hexdigest())
     import mimetypes
     from starlette.responses import Response
     ct = mimetypes.guess_type(path)[0] or "application/octet-stream"
@@ -298,6 +314,9 @@ async def list_messages(request: Request):
     limit = int(request.query_params.get("limit", "200") or 200)
     try:
         msgs = await asyncio.to_thread(_service().list_messages, tier, name, limit=limit)
+        if _reader(request):
+            from .audit import reads as _reads
+            _reads.safe(_reads.view, _reader(request), tier, name, "messages")
         return JSONResponse({"messages": msgs})
     except TopicError:
         return JSONResponse({"error": "not_found"}, status_code=404)
@@ -799,7 +818,12 @@ async def export_topics(request: Request):
                     else:
                         tar.add(p, arcname=arcname)
     buf.seek(0)
-    return Response(buf.read(), media_type="application/gzip",
+    blob = buf.read()
+    # An export takes whole topics out of the platform: always on the trail (#444).
+    from .audit import reads as _reads
+    _reads.safe(_reads.export, _reader(request) or getattr(request.state, "auth_payload", {}),
+                sorted(included), len(blob))
+    return Response(blob, media_type="application/gzip",
                     headers={"Content-Disposition": 'attachment; filename="clodia-topics-snapshot.tgz"'})
 
 
