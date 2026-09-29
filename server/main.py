@@ -3955,8 +3955,90 @@ def _gate_effect_reason(name: str, arguments: dict) -> str:
     return ""
 
 
+# ── Audit of every verb call (clodia-platform#437) ─────────────────────────
+# One wrapper around the whole dispatch, so that no verb — native, proxied,
+# borrowed through copybrain, denied before it started — escapes the trail.
+# The trail gets the verb, the HASH of the arguments and of what went back to
+# the caller, the outcome class, the duration, and the identity from the
+# verified claims (#441). Never the arguments or the result themselves: those
+# are content (#425 §1.6, minimisation).
+import contextvars as _contextvars
+
+_AUDIT_PARENT: "_contextvars.ContextVar[str | None]" = _contextvars.ContextVar(
+    "audit_parent_span", default=None)
+
+
+def _denial_class(msg: str) -> str:
+    """The CLASS of a refusal, never its message (which names files and people)."""
+    return ("egress" if "uscita non consentita" in msg
+            else "unattended" if "job schedulato" in msg
+            else "denied_tools" if "denied_tools" in msg
+            else "whitelist" if "non in whitelist" in msg
+            else "clearance" if "clearance" in msg.lower()
+            else "other")
+
+
+def _outcome_of(out: list) -> tuple[str, str | None]:
+    text = out[0].text if out and hasattr(out[0], "text") else ""
+    if text.startswith("DENIED: "):
+        return "denied", _denial_class(text[len("DENIED: "):])
+    if text.startswith("CONFLICT:"):
+        return "conflict", "version_conflict"
+    if text.startswith("ERROR: "):
+        head = text[len("ERROR: "):].split(":", 1)[0].strip()
+        return "error", head if head.isidentifier() else "error"
+    return "ok", None
+
+
+def _args_hash(arguments) -> str:
+    from . import audit as _audit
+    try:
+        raw = json.dumps(arguments or {}, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001
+        raw = repr(arguments)
+    return _audit.content_hash(raw)
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    from . import __version__ as _gw_version
+    from . import audit as _audit
+    import asyncio as _aio
+    import time as _time
+    parent = _AUDIT_PARENT.get()
+    t0 = _time.monotonic()
+    try:
+        call = await _aio.to_thread(
+            _audit.emit, "tool.call", action="execute", resource=name,
+            parent_span_id=parent,
+            tool={"name": name, "version": _gw_version,
+                  "parameters_hash": _args_hash(arguments)})
+    except _audit.AuditWriteError as e:
+        # Fail-closed was asked for: an action that cannot be recorded does not run.
+        return [TextContent(type="text", text=f"DENIED: audit trail non disponibile ({e})")]
+    span = (call or {}).get("event_id")
+    tok = _AUDIT_PARENT.set(span or parent)
+    try:
+        out = await _call_tool_unaudited(name, arguments)
+    finally:
+        _AUDIT_PARENT.reset(tok)
+    status, err = _outcome_of(out)
+    try:
+        await _aio.to_thread(
+            _audit.emit, "tool.result", action=status, resource=name,
+            parent_span_id=span or parent,
+            tool={"name": name, "version": _gw_version},
+            result={"status": status, "error": err,
+                    "duration_ms": int((_time.monotonic() - t0) * 1000),
+                    "output_hash": _audit.content_hash(
+                        "".join(getattr(c, "text", "") or "" for c in out))})
+    except _audit.AuditWriteError:
+        pass  # the action already happened; the failure is counted in status()
+    return out
+
+
+async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
     try:
         # Enforcement whitelist per-richiesta: in HTTP multi-agente non basta
         # il filtro di list_tools (un client può invocare un tool non elencato).
@@ -4536,12 +4618,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     except PermissionError as e:
         # Il motivo è una CLASSE, non il messaggio: i messaggi contengono nomi di
         # file e indirizzi, e questo registro non deve diventare una rubrica.
-        _why = ("egress" if "uscita non consentita" in str(e)
-                else "unattended" if "job schedulato" in str(e)
-                else "denied_tools" if "denied_tools" in str(e)
-                else "whitelist" if "non in whitelist" in str(e)
-                else "clearance" if "clearance" in str(e).lower()
-                else "other")
+        _why = _denial_class(str(e))
         _tlm.record(name, agent_name_safe(), "denied", channel=current_chat(),
                     unattended=is_unattended(), detail=_why)
         # L'altra metà di clodia-platform#206. La telemetria di sopra è NOSTRA;

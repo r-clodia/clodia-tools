@@ -42,7 +42,7 @@ class TheDispatchDoesNotSwallowTheBackendTests(unittest.TestCase):
     per prefisso, o riprende tutti i verbi del backend."""
 
     def _dispatch_src(self) -> str:
-        return inspect.getsource(M.call_tool)
+        return inspect.getsource(M._call_tool_unaudited)
 
     def test_the_native_branch_matches_by_name_not_by_prefix(self):
         src = self._dispatch_src()

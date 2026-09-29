@@ -254,7 +254,7 @@ class DispatchTests(unittest.TestCase):
         questo permesso e sta usando un agente per averlo»."""
         import inspect
         from . import main
-        src = inspect.getsource(main.call_tool)
+        src = inspect.getsource(main._call_tool_unaudited)
         i_org = src.find("origin.evaluate")
         i_gate = src.find("M-gate:")
         self.assertGreater(i_org, 0, "l'intersezione non è nel dispatch")
@@ -263,7 +263,7 @@ class DispatchTests(unittest.TestCase):
     def test_report_mode_records_instead_of_blocking(self):
         import inspect
         from . import main
-        src = inspect.getsource(main.call_tool)
+        src = inspect.getsource(main._call_tool_unaudited)
         self.assertIn('_obs_o.note("would_deny"', src)
 
     def test_the_fallback_chain_is_explicit(self):

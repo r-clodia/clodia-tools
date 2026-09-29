@@ -106,7 +106,7 @@ class TheAgentBranchIsUnchangedTests(unittest.TestCase):
 
     def test_the_ceiling_is_only_consulted_on_behalf(self):
         import inspect
-        src = inspect.getsource(M.call_tool)
+        src = inspect.getsource(M._call_tool_unaudited)
         prima = src.index("if is_on_behalf():")
         dopo = src.index("elif not _is_super(_ag)")
         self.assertIn("_scoped_ceiling_ok", src[prima:dopo])

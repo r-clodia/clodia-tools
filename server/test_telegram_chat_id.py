@@ -34,7 +34,7 @@ class ChatIdTests(unittest.TestCase):
 
     def test_the_check_runs_before_the_egress_verdict(self):
         import inspect
-        src = inspect.getsource(main.call_tool)
+        src = inspect.getsource(main._call_tool_unaudited)
         self.assertLess(src.index("_telegram_chat_id_or_raise(arguments)"),
                         src.index("_egress.check("))
 
