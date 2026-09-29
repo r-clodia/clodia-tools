@@ -4,6 +4,10 @@ Stessa credenziale di gdrive/gdocs (scope `calendar` già incluso). L'agente dev
 avere un grant Workspace (`google_`/`gworkspace_`) — verificato dal vault.
 Verbi: list_calendars, list_events, create_event, update_event, delete_event,
 freebusy. Tutti gli orari sono ISO 8601 (RFC3339), es. 2026-07-22T15:00:00+02:00.
+
+Se la credenziale è confinata a una cartella di Drive, questi verbi valgono solo
+sui calendari dichiarati in whitelist come `gcal:<calendar_id>`: vedi
+`gdrive_root.assert_calendar_allowed` (clodia-platform#429).
 """
 from __future__ import annotations
 
@@ -18,19 +22,22 @@ def _svc(account: Optional[str]):
 
 
 def list_calendars(account: Optional[str] = None) -> dict:
-    gdrive_root.guard_calendar(account, "gcalendar")
+    gdrive_root.guard_calendar(account, "gcalendar.list_calendars")
     svc, acct = _svc(account)
     items = svc.calendarList().list().execute().get("items", [])
     cals = [{"id": c.get("id"), "summary": c.get("summary"),
              "primary": c.get("primary", False), "accessRole": c.get("accessRole")}
             for c in items]
+    # Su credenziale confinata l'elenco si riduce ai calendari dichiarati: il
+    # guard sopra ha solo accertato che ce ne sia almeno uno.
+    cals = gdrive_root.keep_calendars(acct, cals)
     return {"account": acct, "calendars": cals}
 
 
 def list_events(calendar_id: str = "primary", time_min: Optional[str] = None,
                 time_max: Optional[str] = None, query: Optional[str] = None,
                 limit: int = 25, account: Optional[str] = None) -> dict:
-    gdrive_root.guard_calendar(account, "gcalendar")
+    gdrive_root.guard_calendar(account, "gcalendar.list_events", calendar_id)
     svc, acct = _svc(account)
     params = {"calendarId": calendar_id, "singleEvents": True, "orderBy": "startTime",
               "maxResults": max(1, min(int(limit or 25), 250))}
@@ -49,7 +56,7 @@ def create_event(summary: str, start: str, end: str, calendar_id: str = "primary
                  description: Optional[str] = None, location: Optional[str] = None,
                  attendees: Optional[list] = None, all_day: bool = False,
                  account: Optional[str] = None) -> dict:
-    gdrive_root.guard_calendar(account, "gcalendar")
+    gdrive_root.guard_calendar(account, "gcalendar.create_event", calendar_id)
     svc, acct = _svc(account)
     body = {"summary": summary}
     if description:
@@ -72,7 +79,7 @@ def update_event(event_id: str, calendar_id: str = "primary",
                  summary: Optional[str] = None, start: Optional[str] = None,
                  end: Optional[str] = None, description: Optional[str] = None,
                  location: Optional[str] = None, account: Optional[str] = None) -> dict:
-    gdrive_root.guard_calendar(account, "gcalendar")
+    gdrive_root.guard_calendar(account, "gcalendar.update_event", calendar_id)
     svc, acct = _svc(account)
     e = svc.events().get(calendarId=calendar_id, eventId=event_id).execute()
     if summary is not None:
@@ -93,7 +100,7 @@ def update_event(event_id: str, calendar_id: str = "primary",
 
 def delete_event(event_id: str, calendar_id: str = "primary",
                  account: Optional[str] = None) -> dict:
-    gdrive_root.guard_calendar(account, "gcalendar")
+    gdrive_root.guard_calendar(account, "gcalendar.delete_event", calendar_id)
     svc, acct = _svc(account)
     svc.events().delete(calendarId=calendar_id, eventId=event_id).execute()
     return {"account": acct, "deleted": event_id, "ok": True}
@@ -101,7 +108,7 @@ def delete_event(event_id: str, calendar_id: str = "primary",
 
 def freebusy(time_min: str, time_max: str, calendar_id: str = "primary",
              account: Optional[str] = None) -> dict:
-    gdrive_root.guard_calendar(account, "gcalendar")
+    gdrive_root.guard_calendar(account, "gcalendar.freebusy", calendar_id)
     svc, acct = _svc(account)
     body = {"timeMin": time_min, "timeMax": time_max, "items": [{"id": calendar_id}]}
     res = svc.freebusy().query(body=body).execute()

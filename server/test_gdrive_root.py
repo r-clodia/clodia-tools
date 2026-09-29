@@ -87,9 +87,10 @@ class FakeDrive:
         return FakeFiles(self)
 
 
-def _cfg(roots):
+def _cfg(roots, egress=()):
     from . import whitelist as wl
-    return patch.object(wl, "CONFIG", {"gdrive_roots": roots, "agents": {}})
+    return patch.object(wl, "CONFIG", {"gdrive_roots": roots, "agents": {},
+                                       "egress_allow": list(egress)})
 
 
 class Base(unittest.TestCase):
@@ -324,6 +325,9 @@ class RefusalMessageTests(Base):
         self.assertIn("aggirabile", msg)   # e che riprovare non serve
 
 
+CAL = "agenda@tomato.blue"
+
+
 class CalendarTests(Base):
     def test_the_calendar_is_closed_when_a_folder_root_is_set(self):
         """Il calendario non sta in una cartella: nessuna radice di Drive dice
@@ -331,12 +335,65 @@ class CalendarTests(Base):
         «l'agente vede solo quella cartella» — l'agenda sarebbe leggibile."""
         with _cfg({"conto": [ROOT]}):
             with self.assertRaises(gr.OutsideRoot) as ctx:
-                gr.assert_not_confined("conto", "gcalendar.list_events")
+                gr.assert_calendar_allowed("conto", "gcalendar.list_events", CAL)
         self.assertIn("calendario", str(ctx.exception))
 
     def test_an_unconfined_account_keeps_the_calendar(self):
         with _cfg({}):
-            gr.assert_not_confined("conto", "gcalendar.list_events")   # non solleva
+            gr.assert_calendar_allowed("conto", "gcalendar.list_events", CAL)
+
+    def test_a_declared_calendar_passes_on_a_confined_account(self):
+        """clodia-platform#429. Il confinamento di Drive non è un argomento per
+        chiudere il calendario per sempre: è un argomento per pretendere che il
+        calendario sia dichiarato, come lo sono la cartella e la casella."""
+        with _cfg({"conto": [ROOT]}, egress=[f"gcal:{CAL}"]):
+            gr.assert_calendar_allowed("conto", "gcalendar.list_events", CAL)
+
+    def test_another_calendar_is_still_refused(self):
+        """La voce approva UN calendario, non il servizio."""
+        with _cfg({"conto": [ROOT]}, egress=[f"gcal:{CAL}"]):
+            with self.assertRaises(gr.OutsideRoot):
+                gr.assert_calendar_allowed("conto", "gcalendar.list_events",
+                                           "altro@tomato.blue")
+
+    def test_listing_the_calendars_needs_at_least_one_declared(self):
+        """`list_calendars` non nomina un calendario: senza nessuna voce
+        elencherebbe l'agenda intera, che è ciò che il confinamento promette di
+        non mostrare."""
+        with _cfg({"conto": [ROOT]}):
+            with self.assertRaises(gr.OutsideRoot):
+                gr.assert_calendar_allowed("conto", "gcalendar.list_calendars")
+        with _cfg({"conto": [ROOT]}, egress=[f"gcal:{CAL}"]):
+            gr.assert_calendar_allowed("conto", "gcalendar.list_calendars")
+
+    def test_the_listing_is_reduced_to_the_declared_calendars(self):
+        righe = [{"id": CAL}, {"id": "altro@tomato.blue"},
+                 {"id": "personale@gmail.com", "primary": True}]
+        with _cfg({"conto": [ROOT]}, egress=[f"gcal:{CAL}"]):
+            tenuti = [r["id"] for r in gr.keep_calendars("conto", righe)]
+        self.assertEqual(tenuti, [CAL])
+
+    def test_the_listing_is_untouched_when_unconfined(self):
+        righe = [{"id": CAL}, {"id": "altro@tomato.blue"}]
+        with _cfg({}):
+            self.assertEqual(gr.keep_calendars("conto", righe), righe)
+
+    def test_the_refusal_names_the_real_remedy_and_not_oauth(self):
+        """Il messaggio è metà del fix. Quello vecchio diceva «serve un account
+        non confinato» e ha prodotto quattro riconnessioni OAuth inutili: lo
+        scope Calendar era già nel consenso, e questo controllo non lo guarda.
+        Il rifiuto deve nominare la voce di whitelist, l'id chiesto, e dire
+        esplicitamente che riconnettere non serve."""
+        with _cfg({"conto": [ROOT]}, egress=[f"gcal:{CAL}"]):
+            try:
+                gr.assert_calendar_allowed("conto", "gcalendar.list_events",
+                                           "altro@tomato.blue")
+            except gr.OutsideRoot as e:
+                msg = str(e)
+        self.assertIn("gcal:", msg)                  # la voce da aggiungere
+        self.assertIn("altro@tomato.blue", msg)      # cosa è stato chiesto
+        self.assertIn(CAL, msg)                      # cosa è approvato qui
+        self.assertIn("OAuth", msg)                  # e che NON è quello
 
 
 class NativeDocTests(Base):
@@ -415,6 +472,24 @@ class VerbCoverageTests(Base):
                      "update_event", "delete_event", "freebusy"):
             src = inspect.getsource(getattr(gcalendar, name))
             self.assertIn("guard_calendar", src, f"gcalendar.{name} non è guardato")
+
+    def test_every_gcalendar_verb_declares_which_calendar_it_touches(self):
+        """Guardarlo non basta: il guard deve ricevere il `calendar_id`.
+
+        Chiamarlo senza è la regressione silenziosa di questa feature — il guard
+        interpreta l'assenza come «la chiamata non nomina un calendario» (il
+        caso di `list_calendars`) e lascia passare QUALUNQUE calendario non
+        appena uno solo è approvato. Il controllo sembrerebbe ancora in piedi.
+        """
+        import inspect
+        from .tools import gcalendar
+        for name in ("list_events", "create_event", "update_event",
+                     "delete_event", "freebusy"):
+            src = inspect.getsource(getattr(gcalendar, name))
+            self.assertIn("guard_calendar(account,", src)
+            riga = [r for r in src.splitlines() if "guard_calendar(" in r][0]
+            self.assertIn("calendar_id", riga,
+                          f"gcalendar.{name} non dice QUALE calendario tocca")
 
 
 if __name__ == "__main__":
