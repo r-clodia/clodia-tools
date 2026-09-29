@@ -17,7 +17,6 @@ Vincolo: i nomi dei backend NON devono collidere coi prefissi nativi
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 from contextlib import asynccontextmanager
 
@@ -33,6 +32,7 @@ from mcp.types import Tool
 
 from . import docmd as _docmd
 from . import vault
+from .tools import pack_runtime
 from .whitelist import CONFIG
 
 NS_SEP = "."
@@ -96,10 +96,17 @@ async def _session(b: dict):
     b = _resolve_secrets(b)
     transport = b.get("transport", "stdio")
     if transport == "stdio":
+        # `runtime_env` e non `os.environ`: i backend stdio sono i server MCP dei
+        # pack, e le loro dipendenze stanno nel venv/prefix npm persistenti che
+        # `packs.install_pip`/`install_npm` popolano. Senza questo PATH/PYTHONPATH
+        # erano installate sul volume ma invisibili al processo che doveva
+        # usarle, e il pack funzionava solo finché la stessa libreria era anche
+        # nell'immagine del gateway — che ogni rebuild azzera
+        # (clodia-platform#451). L'`env` del backend resta l'ultima parola.
         params = StdioServerParameters(
             command=b["command"],
             args=b.get("args", []),
-            env={**os.environ, **(b.get("env") or {})},
+            env={**pack_runtime.runtime_env(), **(b.get("env") or {})},
         )
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as s:

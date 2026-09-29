@@ -364,15 +364,38 @@ def connectors_snapshot() -> list[dict]:
     except Exception:  # noqa: BLE001 — lo stato connettori non deve mai rompersi
         pass
     # Backend MCP montati (Add-MCP): elencali come connettori "mcp".
+    # `connected` diceva sempre True — «montato» non è «funzionante»: un server
+    # MCP di pack le cui dipendenze pip non ci sono più (clodia-platform#451)
+    # risultava verde nella UI e falliva a ogni chiamata. Qui il gap diventa
+    # visibile dove l'owner guarda, con il nome di ciò che manca.
+    gaps_by_server: dict[str, dict] = {}
+    try:
+        from .tools import pack_runtime
+        for gap in pack_runtime.missing_requirements():
+            for server in gap["mcp_servers"]:
+                gaps_by_server[_slugify(server)] = gap
+    except Exception:  # noqa: BLE001 — lo stato connettori non deve mai rompersi
+        gaps_by_server = {}
     for b in (whitelist.CONFIG.get("mcp_backends") or []):
-        connectors.append({
+        row = {
             "id": b.get("name"),
             "label": b.get("label") or b.get("name"),
             "provider": "mcp",
             "transport": b.get("transport", "stdio"),
             "connected": True,
             "accounts": [],
-        })
+        }
+        gap = gaps_by_server.get(_slugify(str(b.get("name") or "")))
+        if gap:
+            row["operational"] = False
+            row["issues"] = [{
+                "pack": gap["pack"],
+                "missing": gap["missing"],
+                "error": "dipendenze pip del pack non installate: il server MCP "
+                         "non parte finché non vengono reinstallate "
+                         "(packs.install_pip)",
+            }]
+        connectors.append(row)
     allowed = instance_profile.connectors_allowed()
     if allowed is not None:
         # backup/topic-storage/mcp non sono connettori nativi gated

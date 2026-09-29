@@ -2457,6 +2457,19 @@ def runtime_configuration_warnings() -> list[str]:
         warnings.append(
             f"credenziale email '{row['credential']}' non materializzabile ({detail})"
         )
+    # Dipendenze pip dei pack: prima di clodia-platform#451 la loro assenza si
+    # scopriva solo come ModuleNotFoundError nel log, alla prima chiamata del
+    # verbo da parte di un agente — cioè anche molto tempo dopo il rebuild che
+    # le aveva buttate via. Al boot è rumore di una riga; lì era un guasto muto.
+    from .tools import pack_runtime
+
+    for gap in pack_runtime.missing_requirements():
+        servers = ", ".join(gap["mcp_servers"]) or "-"
+        warnings.append(
+            f"pack '{gap['pack']}': dipendenze pip dichiarate e non installate "
+            f"({', '.join(gap['missing'])}) — server MCP interessati: {servers}. "
+            "Reinstallale con packs.install_pip (finiscono nel venv persistente)"
+        )
     return warnings
 
 
