@@ -317,6 +317,48 @@ def needs_consent(verb: str, *, globally_gated: bool, agent_gated: bool,
     return True
 
 
+# ── Approve with modified arguments (clodia-platform#448) ───────────────────
+# Human oversight includes correcting before approving: the recipient of an
+# email, the text of a message. Only the fields below can be corrected, per
+# verb, and only on a VERB gate: a destination gate (`egress:…`) asks «may data
+# go THERE?», and editing the destination would answer a different question
+# than the one that was asked. A corrected call is re-judged by the reference
+# monitor on its new arguments (the destination check runs after the gate).
+EDITABLE_ARGS: dict[str, tuple[str, ...]] = {
+    "email.send": ("to", "cc", "subject", "body"),
+    "email.reply": ("body", "cc"),
+    "telegram.send": ("text",),
+    "web.post": ("body",),
+    "gdrive.upload": ("name",),
+    "github.pull_request": ("title", "body"),
+}
+
+
+def editable_of(verb: str, arguments: dict | None) -> dict | None:
+    """The current values of the editable fields of a call, or None."""
+    fields = EDITABLE_ARGS.get(verb)
+    if not fields or not isinstance(arguments, dict):
+        return None
+    out = {f: arguments.get(f) for f in fields if f in arguments}
+    return out or None
+
+
+def validate_modified(verb: str, modified) -> dict | None:
+    """Keep only editable fields with plain values; refuse anything else."""
+    if not modified:
+        return None
+    if not isinstance(modified, dict):
+        raise PermissionError("modified: deve essere un oggetto")
+    allowed = set(EDITABLE_ARGS.get(verb, ()))
+    extra = set(modified) - allowed
+    if extra:
+        raise PermissionError(f"modified: campi non modificabili per {verb}: {sorted(extra)}")
+    for k, v in modified.items():
+        if not isinstance(v, (str, int, float, bool, type(None), list)):
+            raise PermissionError(f"modified: valore non ammesso per '{k}'")
+    return dict(modified)
+
+
 # ── Audit of the gate lifecycle (clodia-platform#432) ───────────────────────
 # The stores below keep CURRENT state only: a consumed or revoked consent is
 # deleted, and a decided request leaves the queue. Without these events nothing
@@ -409,7 +451,7 @@ def _revoke_jti(jti: str) -> None:
 
 def grant(agent: str, instance: str, verb: str, token: str, *,
           decided_by: str = "", decided_by_role: str | None = None,
-          chat: Optional[str] = None) -> dict:
+          chat: Optional[str] = None, modified: dict | None = None) -> dict:
     """Registra un consenso per (agent, instance, verb) da una capability ccap1
     firmata dalla CA. Verifica firma + agente + `cap`=gate:<verb>. Memorizza jti+exp
     autoritativi dal payload firmato."""
@@ -422,9 +464,11 @@ def grant(agent: str, instance: str, verb: str, token: str, *,
     now = time.time()
     _expire_consents(d, now)
     d = {k: v for k, v in d.items() if float((v or {}).get("exp", 0)) > now}  # prune
+    modified = validate_modified(verb, modified)
     d[_key(agent, instance, verb)] = {
         "exp": float(payload.get("exp", 0)), "jti": str(payload.get("jti") or ""),
-        "by": str(payload.get("by") or ""), "token": token, "at": now}
+        "by": str(payload.get("by") or ""), "token": token, "at": now,
+        **({"modified": modified} if modified else {})}
     _save(_store_path(), d)
     by = str(payload.get("by") or "")
     if chat is None:
@@ -433,7 +477,9 @@ def grant(agent: str, instance: str, verb: str, token: str, *,
            actor={"type": "human", "id": by or decided_by, "role": decided_by_role},
            chat=chat,
            authorization={"actor": by or decided_by, "role": decided_by_role,
-                          "result": "approved", "scope": _consent_scope(verb),
+                          "result": "modified" if modified else "approved",
+                          "modified_fields": sorted(modified) if modified else None,
+                          "scope": _consent_scope(verb),
                           "jti": str(payload.get("jti") or ""),
                           "expires_at": int(float(payload.get("exp", 0)))})
     return {"agent": agent, "instance": instance, "verb": verb,
@@ -542,7 +588,7 @@ def _req_path() -> Path:
 
 def request(agent: str, instance: str, verb: str, *, context: Optional[str] = None,
             human: Optional[str] = None, chat: Optional[str] = None,
-            mode: str = "sync", reason: str = "") -> dict:
+            mode: str = "sync", reason: str = "", editable: dict | None = None) -> dict:
     """Crea/aggiorna una richiesta di gate PENDING per (agent, instance, verb).
     Nessuna restrizione su CHI richiede: il gate è sul verbo (che il richiedente
     ha già). `chat`/`context` = dove approvare; `mode` = sync|async."""
@@ -554,7 +600,8 @@ def request(agent: str, instance: str, verb: str, *, context: Optional[str] = No
     renewed = rid in d
     d[rid] = {"agent": agent, "instance": instance or "-", "verb": verb,
               "context": context, "human": human, "chat": chat, "mode": mode,
-              "reason": (reason or "")[:300], "at": now}
+              "reason": (reason or "")[:300], "at": now,
+              **({"editable": editable} if editable else {})}
     _save(_req_path(), d)
     if not renewed:
         from .audit import keep as content_hash  # the reason goes to the evidence store (#445)
@@ -595,7 +642,9 @@ def list_requests() -> list:
              "verb": v["verb"], "context": v.get("context"), "human": v.get("human"),
              "class": gate_class(v["verb"]),
              "chat": v.get("chat"), "mode": v.get("mode", "sync"),
-             "reason": v.get("reason", ""), "age_s": int(now - float(v.get("at", 0)))}
+             "reason": v.get("reason", ""), "age_s": int(now - float(v.get("at", 0))),
+             # What the approver may correct before approving (#448).
+             "editable": v.get("editable")}
             for k, v in live.items()]
 
 

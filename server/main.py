@@ -3123,7 +3123,7 @@ def _push_destination(arguments: dict) -> dict:
 
 async def _require_gate_consent(
     agent: str, gate_key: str, *, consume: bool, reason: str = "",
-    allow_delegation: bool = True,
+    allow_delegation: bool = True, arguments: dict | None = None,
 ) -> dict | None:
     """Block-and-wait sul consenso di gate per (agent, gate_key). Se assente crea
     la richiesta (popup) e ATTENDE la decisione umana (~180s), poi procede; solleva
@@ -3182,7 +3182,8 @@ async def _require_gate_consent(
     if not _gate.active(agent, inst, gate_key):
         req = _gate.request(agent, inst, gate_key, context=current_chat(),
                             human=current_principal(), chat=current_chat(),
-                            reason=reason)
+                            reason=reason,
+                            editable=_gate.editable_of(gate_key, arguments))
         # UX inline: se l'azione parte da un CANALE (chat=chan:tier:name:...),
         # posta un marker nel canale → il webui rende la card Approva/Nega
         # NELLA conversazione (come job-proposal), non nel popup staccato. I gate
@@ -4586,7 +4587,21 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                     # il gate esiste.
                     allow_delegation=name not in {
                         "web.post", "agents.grant_scoped", "agents.revoke_scoped"},
+                    arguments=arguments,
                 )
+                # Approved WITH CORRECTIONS (#448): the call runs on the corrected
+                # arguments, and everything after this point — the destination
+                # whitelist included — judges the corrected call, not the original.
+                _mod = (gate_approval or {}).get("modified")
+                if _mod:
+                    from . import audit as _audit_mod
+                    _orig = _args_hash(arguments)
+                    arguments = {**arguments, **_mod}
+                    await asyncio.to_thread(
+                        _audit_mod.emit, "gate.apply", action="modified", resource=name,
+                        authorization={"result": "modified", "modified_fields": sorted(_mod),
+                                       "original_hash": _orig,
+                                       "modified_hash": _args_hash(arguments)})
             _ck = _cross_topic_gate_key(name, arguments, _ag)
             if _ck:
                 # Niente delega permanente su 'crosstopic': una delega copre
