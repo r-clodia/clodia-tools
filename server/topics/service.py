@@ -1620,6 +1620,9 @@ class TopicService:
             meta["participants"] = {k: val for k, val in mappa.items()
                                     if k != meta.get("owner")}
             self._write_meta(tier, name, meta, v)
+            from ..audit import control as _control
+            _control.safe(_control.emit, "participants", "add" if added else "role",
+                          f"{tier}/{name}", participant=agent, role=r)
             if added:
                 self.post_message(
                     tier, name, "system",
@@ -1636,6 +1639,9 @@ class TopicService:
             meta["participants"] = {k: val for k, val in mappa.items()
                                     if k != meta.get("owner")}
             self._write_meta(tier, name, meta, v)
+            from ..audit import control as _control
+            _control.safe(_control.emit, "participants", "remove", f"{tier}/{name}",
+                          participant=agent)
         return {"participants": meta.get("participants")}
 
     def post_message(self, tier: str, name: str, author: str, text: str,
@@ -2270,8 +2276,13 @@ class TopicService:
         status normalizzato applicato."""
         st = _validate_status(status)
         meta, ver = self._read_meta(tier, name)
+        before = meta.get("status")
         meta["status"] = st
         self._write_meta(tier, name, meta, base_version=ver)
+        if before != st:
+            from ..audit import control as _control
+            _control.safe(_control.emit, "topic_status", "change", f"{tier}/{name}",
+                          before=before, after=st)
         return {"status": st}
 
     def set_deadline(self, tier: str, name: str, deadline) -> dict:

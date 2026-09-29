@@ -167,6 +167,10 @@ def save_config() -> None:
         return
     with open(CONFIG_PATH, "w") as f:
         yaml.safe_dump(finale, f, sort_keys=False, allow_unicode=True)
+    # Every rule change passes here: the delta goes on the audit trail
+    # (clodia-platform#439), attributed to whoever made the request.
+    from .audit import control as _control
+    _control.safe(_control.config, disco, finale)
     # Da qui in avanti «cambiato» si misura da ciò che è appena stato scritto.
     CONFIG.clear()
     CONFIG.update(finale)

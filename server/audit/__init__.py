@@ -193,9 +193,25 @@ async def checkpoint_loop(interval: int | None = None) -> None:
 
 def boot() -> None:
     """Mark the gateway start in the chain, and say what is not yet in place."""
+    try:
+        from .. import egress as _eg
+        egress_mode = _eg.mode()
+    except Exception:  # noqa: BLE001
+        egress_mode = None
+    try:
+        from .. import main as _main
+        compartment = _main._spawn_compartment_mode()
+    except Exception:  # noqa: BLE001
+        compartment = None
+    skip = (os.environ.get("CLODIA_DANGEROUSLY_SKIP_GATES") or "").strip().lower() in (
+        "1", "true", "yes", "on")
+    # The modes the reference monitor starts in are control-plane state too
+    # (#439): a restart with gates skipped must be visible in the trail.
     emit("audit.start", identity="explicit", action="boot", resource="gateway",
          actor={"type": "service", "id": "clodia-tools"},
-         tool={"name": "clodia-tools", "version": _gateway_version()})
+         tool={"name": "clodia-tools", "version": _gateway_version()},
+         decision={"egress_mode": egress_mode, "compartment_mode": compartment,
+                   "gates_skipped": skip})
     s = status()
     if not s.get("isolated"):
         LOG.warning("audit: the store is on the datadir shared with the agent-server "

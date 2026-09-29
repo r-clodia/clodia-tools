@@ -308,3 +308,32 @@ def issue_cert_for_pubkey(name: str, pubkey_pem: str, force: bool = False) -> st
         except Exception:  # noqa: BLE001
             pass
     return str(cert_path)
+
+
+# ── Audit of certificate issuance (clodia-platform#439) ─────────────────────
+# Both issuers return early when the identity already exists, so "called" is
+# not "issued". The wrapper compares the certificate before and after, and
+# records only a real (re-)issuance, with the serial of the new certificate.
+def _audited_issuer(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(name, *a, **kw):
+        path = _certs_dir() / f"{name}.crt"
+        before = path.read_bytes() if path.is_file() else None
+        out = fn(name, *a, **kw)
+        after = path.read_bytes() if path.is_file() else None
+        if after is not None and after != before:
+            from .audit import control as _control
+            try:
+                serial = format(x509.load_pem_x509_certificate(after).serial_number, "x")
+            except Exception:  # noqa: BLE001
+                serial = None
+            _control.safe(_control.emit, "pki", "reissue" if before else "issue", name,
+                          cert_serial=serial, via=fn.__name__)
+        return out
+    return wrapper
+
+
+issue_agent_identity = _audited_issuer(issue_agent_identity)
+issue_cert_for_pubkey = _audited_issuer(issue_cert_for_pubkey)
