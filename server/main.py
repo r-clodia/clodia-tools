@@ -3978,6 +3978,30 @@ _AUDIT_EGRESS: "_contextvars.ContextVar[dict | None]" = _contextvars.ContextVar(
     "audit_egress", default=None)
 
 
+#: Per call: the topic files actually read, `{ref: {content_hash, version}}`,
+#: noted from the read itself (#440) — never by reading the file again.
+_AUDIT_READS: "_contextvars.ContextVar[dict | None]" = _contextvars.ContextVar(
+    "audit_reads", default=None)
+
+
+def _read_topic_file(svc, a: dict) -> bytes:
+    """`svc.read_file` for topic.read_file / read_document / fetch, noting the
+    hash and storage version of the bytes returned for the provenance record."""
+    reader = getattr(svc, "read_file_versioned", None)
+    res = reader(a["tier"], a["name"], a["path"]) if callable(reader) else None
+    if isinstance(res, tuple) and len(res) == 2 and isinstance(res[0], (bytes, bytearray)):
+        data, version = res
+    else:  # a service without versions (a stub): the hash is still exact
+        data, version = svc.read_file(a["tier"], a["name"], a["path"]), None
+    reads = _AUDIT_READS.get()
+    if reads is not None:
+        import hashlib as _hl
+        h = "sha256:" + _hl.sha256(data).hexdigest()
+        reads[f"topic:{a['tier']}/{a['name']}/{a['path']}"] = {
+            "content_hash": h, "version": version if version != h else None}
+    return data
+
+
 #: Most bytes `_note_crossing` hashes of one file (#438). Above it the file is
 #: recorded with its size and no hash: the trail must never be the reason a
 #: send stalls.
@@ -4105,17 +4129,88 @@ def _ingress_source(verb: str, a: dict, result: object = None) -> str | None:
     if spec:
         rid = str(a.get(spec[0]) or "").strip()
         return spec[1].format(rid) if rid else None
-    if verb in _TOPIC_READ_VERBS and a.get("tier") and a.get("name"):
-        return f"topic:{a['tier']}/{a['name']}/{a.get('path') or ''}".rstrip("/")
+    if verb in _TOPIC_READ_VERBS and a.get("tier") and a.get("name") and a.get("path"):
+        # A listing (`topic.files`) has no single source: not an ingress.
+        return f"topic:{a['tier']}/{a['name']}/{a['path']}"
     return None
 
 
 def _audit_ingress(verb: str, a: dict, result: object, vetted) -> None:
-    """Record a read from an identifiable source. Never fails the read."""
+    """Record a read from an identifiable source, and its provenance. Never
+    fails the read."""
     try:
         _audit_ingress_unsafe(verb, a, result, vetted)
     except Exception as e:  # noqa: BLE001
         LOG.error("audit: flow.ingress of %s not recorded (%s)", verb, type(e).__name__)
+    try:
+        _audit_provenance(verb, a, result)
+    except Exception as e:  # noqa: BLE001
+        LOG.error("audit: data.read of %s not recorded (%s)", verb, type(e).__name__)
+
+
+def _response_hash(result: object) -> str:
+    from . import audit as _audit
+    try:
+        raw = result if isinstance(result, str) else json.dumps(
+            result, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001
+        raw = repr(result)
+    return _audit.content_hash(raw)
+
+
+def _provenance_sources(verb: str, a: dict, result: object) -> list[dict]:
+    """What this read was based on: `[{ref, content_hash, hash_of, …}]` (#440).
+
+    - a topic file: the hash of the WHOLE file at read time (its storage
+      version), even when the verb returned a window — `partial` says so;
+    - a RAG search: one source per returned chunk (document, version, page,
+      section) with the hash of that chunk;
+    - anything else with an identifiable source: the hash of the response.
+    """
+    from . import audit as _audit
+    a = a or {}
+    if verb in ("topic.read_file", "topic.read_document", "topic.fetch") \
+            and a.get("tier") and a.get("name") and a.get("path"):
+        ref = f"topic:{a['tier']}/{a['name']}/{a['path']}"
+        # The hash of the bytes the read returned, noted by the read itself:
+        # re-reading here would race a rewrite (and download a Drive file twice).
+        seen = (_AUDIT_READS.get() or {}).get(ref) or {}
+        return [{"ref": ref, "content_hash": seen.get("content_hash"),
+                 "version": seen.get("version"), "hash_of": "file",
+                 "partial": True if (a.get("offset") or a.get("max_bytes")) else None}]
+    if verb in ("rag.search", "eu_corpus.search") and isinstance(result, dict):
+        coll = a.get("collection") or "eu-normativa"
+        out = []
+        for r in result.get("results") or []:
+            if not isinstance(r, dict):
+                continue
+            ref = f"rag:{coll}/{r.get('name')}@{r.get('version')}"
+            if r.get("page") is not None:
+                ref += f"#p{r.get('page')}"
+            out.append({"ref": ref, "section_hash": _audit.content_hash(str(r.get("section")))
+                        if r.get("section") else None,
+                        "content_hash": _audit.content_hash(str(r.get("text") or "")),
+                        "hash_of": "chunk"})
+        return out
+    if verb in ("memory.read", "profile.read_file") and a.get("path"):
+        return [{"ref": f"{verb.split('.')[0]}:{a['path']}",
+                 "content_hash": _response_hash(result), "hash_of": "response"}]
+    src = _ingress_source(verb, a, result)
+    if src:
+        return [{"ref": src, "content_hash": _response_hash(result), "hash_of": "response"}]
+    return []
+
+
+def _audit_provenance(verb: str, a: dict, result: object) -> None:
+    sources = _provenance_sources(verb, a, result)
+    if not sources:
+        return
+    from . import audit as _audit
+    from .audit.record import now_iso
+    read_at = now_iso()
+    _audit.emit("data.read", action="read", resource=verb,
+                tool={"name": verb},
+                provenance={"sources": [{**s, "read_at": read_at} for s in sources]})
 
 
 def _audit_ingress_unsafe(verb: str, a: dict, result: object, vetted) -> None:
@@ -4188,9 +4283,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     crossing, egress_seen = [], {}
     tok_c = _AUDIT_CROSSING.set(crossing)
     tok_e = _AUDIT_EGRESS.set(egress_seen)
+    tok_r = _AUDIT_READS.set({})
     try:
         out = await _call_tool_unaudited(name, arguments)
     finally:
+        _AUDIT_READS.reset(tok_r)
         _AUDIT_EGRESS.reset(tok_e)
         _AUDIT_CROSSING.reset(tok_c)
         _AUDIT_PARENT.reset(tok)
@@ -5817,7 +5914,7 @@ def _dispatch_topic(name: str, a: dict):
     if verb == "files":
         return svc.list_files(a["tier"], a["name"], a.get("subpath", ""))
     if verb == "read_file":
-        data = svc.read_file(a["tier"], a["name"], a["path"])
+        data = _read_topic_file(svc, a)
         # Testo o binario si decide sul file INTERO, non sulla finestra: un
         # binario i cui primi 64 KB fossero per caso UTF-8 valido non deve
         # cambiare natura a seconda di quanto ne si chiede.
@@ -5847,7 +5944,7 @@ def _dispatch_topic(name: str, a: dict):
                 "note": "file binario (PDF/immagine/...): decodifica da base64"}
     if verb == "read_document":
         from . import docmd as _docmd
-        data = svc.read_file(a["tier"], a["name"], a["path"])
+        data = _read_topic_file(svc, a)
         cap = int(a.get("max_chars") or 60000)
         try:
             text, pages = _extract_document_text(a["path"].rsplit("/", 1)[-1], data)
@@ -5961,7 +6058,7 @@ def _dispatch_topic(name: str, a: dict):
     if verb == "fetch":
         # I byte attraversano il solo volume /shared come envelope cifrato per
         # lo spawn destinatario; agent-server decifra e materializza `dest`.
-        data = svc.read_file(a["tier"], a["name"], a["path"])
+        data = _read_topic_file(svc, a)
         chat_id = current_chat()
         if not chat_id:
             raise ValueError("topic.fetch richiede una sessione agent con chat_id")
