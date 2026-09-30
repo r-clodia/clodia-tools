@@ -2381,14 +2381,20 @@ class TopicService:
         non solo da chi ha letto la chat fino in fondo (clodia-platform#457).
         """
         meta, ver = self._read_meta(tier, name)
+        prima = meta.get("goal") if isinstance(meta.get("goal"), dict) else None
+        # Lo stato PRECEDENTE torna al chiamante: la stessa transizione verso
+        # `in-progress` è «strategia approvata» se veniva da `strategy-review` e
+        # «esito rifiutato, rimedia» se veniva da `claimed-done`. Senza, chi deve
+        # ingaggiare l'orchestratore dovrebbe rileggere il topic per saperlo.
+        precedente = str((prima or {}).get("state") or "") or None
         if goal in (None, "", {}):
-            precedente = meta.pop("goal", None)
+            meta.pop("goal", None)
             self._write_meta(tier, name, meta, base_version=ver)
-            return {"goal": None, "unpinned": bool(precedente)}
-        g = _norm_goal(goal, by=by, precedente=meta.get("goal"))
+            return {"goal": None, "unpinned": bool(prima), "previous": precedente}
+        g = _norm_goal(goal, by=by, precedente=prima)
         meta["goal"] = g
         self._write_meta(tier, name, meta, base_version=ver)
-        return {"goal": g}
+        return {"goal": g, "previous": precedente}
 
     def advance_goal(self, tier: str, name: str, state: str,
                      strategy_path: str | None = None, by: str = "") -> dict:
@@ -2411,7 +2417,7 @@ class TopicService:
         g = _norm_goal(proposto, by=by, precedente=corrente)
         meta["goal"] = g
         self._write_meta(tier, name, meta, base_version=ver)
-        return {"goal": g}
+        return {"goal": g, "previous": str(corrente.get("state") or "") or None}
 
     #: Il logo vive dentro il topic ma **fuori da `files/`**, perché è metadata e
     #: non un documento.

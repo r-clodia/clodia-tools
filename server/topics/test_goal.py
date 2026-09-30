@@ -99,6 +99,35 @@ class PinTests(Base):
         self.assertTrue(goal["text"].endswith("…"))
 
 
+class PrecedenteTests(Base):
+    """Lo stato da cui si veniva torna al chiamante. Serve perché la STESSA
+    transizione ha due significati: `→ in-progress` da `strategy-review` è
+    «strategia approvata», da `claimed-done` è «esito rifiutato, rimedia». Senza,
+    chi ingaggia l'orchestratore dovrebbe rileggere il topic per distinguerli."""
+
+    def test_the_previous_state_comes_back(self):
+        self.assertIsNone(self._pinned_res()["previous"])  # primo pin: non c'era niente
+        res = self.svc.advance_goal("SEAL-1", "progetto", "strategy-review", by="clodia")
+        self.assertEqual(res["previous"], "pinned")
+        res = self.svc.set_goal(
+            "SEAL-1", "progetto",
+            {"text": "Portare il sito in produzione entro ottobre",
+             "message_id": "20260930-180000-abcd", "state": "in-progress"},
+            by="davide")
+        self.assertEqual(res["previous"], "strategy-review")
+
+    def test_unpin_reports_the_state_it_stopped(self):
+        self._pin(state="in-progress")
+        res = self.svc.set_goal("SEAL-1", "progetto", None, by="davide")
+        self.assertEqual(res["previous"], "in-progress")
+
+    def _pinned_res(self):
+        return self.svc.set_goal(
+            "SEAL-1", "progetto",
+            {"text": "Portare il sito in produzione entro ottobre",
+             "message_id": "20260930-180000-abcd"}, by="davide")
+
+
 class UnpinTests(Base):
     def test_unpin_removes_the_goal(self):
         """Togliere il pin è l'atto che ferma l'esecuzione della strategia:
