@@ -15,6 +15,8 @@ arrivino alla riga di comando.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import sysconfig
 import tempfile
 import unittest
@@ -95,7 +97,7 @@ class RuntimeEnvTests(_TempRuntime):
         self.assertEqual("/root", env["HOME"])
 
         pythonpath = env["PYTHONPATH"].split(os.pathsep)
-        self.assertEqual(str(self.site), pythonpath[0])
+        self.assertIn(str(self.site), pythonpath)
 
     def test_pythonpath_porta_anche_le_site_packages_dell_immagine(self) -> None:
         """Con venv/bin in testa al PATH, un pack che dichiara `command: python3`
@@ -111,8 +113,32 @@ class RuntimeEnvTests(_TempRuntime):
         env = pack_runtime.runtime_env({"PATH": "/usr/bin", "PYTHONPATH": "/app"})
 
         parts = env["PYTHONPATH"].split(os.pathsep)
-        self.assertEqual(str(self.site), parts[0])
+        self.assertIn(str(self.site), parts)
         self.assertEqual("/app", parts[-1])
+
+    def test_image_site_packages_win_over_the_venv(self) -> None:
+        """clodia-platform#458: a pack's venv must not shadow what the image
+        ships. With the venv first, mcp 2.x resolved by an unpinned
+        `mcp>=1.2` hid the image's mcp 1.x and every pack server died on
+        `mcp.server.fastmcp`."""
+        env = pack_runtime.runtime_env({"PATH": "/usr/bin"})
+        parts = env["PYTHONPATH"].split(os.pathsep)
+        self.assertLess(parts.index(sysconfig.get_path("purelib")),
+                        parts.index(str(self.site)))
+
+    def test_a_broken_mcp_in_the_venv_does_not_break_fastmcp(self) -> None:
+        """End to end: put a poisoned `mcp` package in the venv and start a
+        real interpreter with the runtime env — the v1 FastMCP import that all
+        first-party pack servers use must still resolve to the image's mcp."""
+        poisoned = self.site / "mcp"
+        poisoned.mkdir(parents=True, exist_ok=True)
+        (poisoned / "__init__.py").write_text(
+            "raise ImportError('venv mcp shadowed the image')\n", encoding="utf-8")
+        env = pack_runtime.runtime_env({"PATH": os.environ.get("PATH", "")})
+        run = subprocess.run(
+            [sys.executable, "-c", "from mcp.server.fastmcp import FastMCP"],
+            env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, run.returncode, run.stderr)
 
 
 class VenvIsolationTests(_TempRuntime):

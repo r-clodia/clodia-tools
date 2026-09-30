@@ -155,7 +155,7 @@ def runtime_env(base: dict[str, str] | None = None) -> dict[str, str]:
 
     - `PATH`: venv/bin + npm/bin davanti, per `requires.bin` e per i server
       dichiarati come console script.
-    - `PYTHONPATH`: site-packages del venv **e** dell'immagine. Le seconde
+    - `PYTHONPATH`: site-packages dell'immagine **poi** del venv (#458). Le prime
       servono perché con venv/bin in testa un `command: python3` (la forma che
       usano tutti i pack first-party) finisce sull'interprete del venv, che
       senza `--system-site-packages` non vedrebbe nemmeno `mcp` — il server non
@@ -168,7 +168,14 @@ def runtime_env(base: dict[str, str] | None = None) -> dict[str, str]:
                   if p and Path(p).is_dir()]
     previous = [p for p in (env.get("PYTHONPATH", "") or "").split(os.pathsep) if p]
     parts: list[str] = []
-    for part in site_packages() + sorted(image_site) + previous:
+    # The image's site-packages come FIRST (clodia-platform#458). The venv only
+    # adds what the image lacks (e.g. PIL for image-captions); it must not be
+    # able to replace what the gateway itself ships. Every pack declares
+    # `mcp>=1.2` with no upper bound, so pip resolved mcp 2.x into the venv, and
+    # with the venv first it shadowed the image's mcp 1.x under every pack's
+    # server: all five stdio backends died on `mcp.server.fastmcp`. One pack's
+    # install must not be able to break every other pack's server.
+    for part in sorted(image_site) + site_packages() + previous:
         if part not in parts:
             parts.append(part)
     if parts:
