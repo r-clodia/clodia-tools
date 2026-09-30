@@ -277,6 +277,32 @@ async def set_deadline(request: Request):
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
+async def set_goal(request: Request):
+    """Fissa o toglie l'obiettivo del canale (clodia-platform#457).
+
+    Rotta INTERNA come `taint/clear`: chi chiede è l'owner lo ha già verificato
+    l'agent-server, che passa il suo principal in `by`. Il gateway non conosce i
+    ruoli umani di uno scope e non può deciderlo qui.
+    """
+    _, err = _authorize(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    body = body or {}
+    try:
+        res = _service().set_goal(request.path_params["tier"],
+                                  request.path_params["name"],
+                                  body.get("goal"),
+                                  by=str(body.get("by") or "").strip())
+        _invalidate_list_cache()
+        return JSONResponse(res)
+    except TopicError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
 async def create_topic(request: Request):
     principal, err = _authorize(request)
     if err:
@@ -1025,6 +1051,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/status", set_status, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/agents-md", set_agents_md, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/deadline", set_deadline, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/goal", set_goal, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/participants", participants, methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),

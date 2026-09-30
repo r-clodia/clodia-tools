@@ -303,6 +303,80 @@ def _coerce_deadline(value, ctx: str = "") -> str | None:
     return None
 
 
+#: Ciclo di vita dell'OBIETTIVO di un canale (clodia-platform#457). Un goal è un
+#: messaggio dell'utente promosso a requisito vincolante: vive nel meta, allo
+#: stesso rango di summary/tldr, e non nella cronologia — dove scorrerebbe via.
+#:
+#: `pinned`        fissato dall'owner, nessuna strategia ancora scritta
+#: `strategy-review` la strategia esiste ed è in attesa del sì dell'owner
+#: `in-progress`   strategia approvata, l'orchestratore la sta eseguendo
+#: `claimed-done`  l'orchestratore dichiara raggiunto: manca la verifica umana
+#: `done`          l'owner ha accettato l'esito
+GOAL_STATES = ("pinned", "strategy-review", "in-progress", "claimed-done", "done")
+
+#: Il testo del goal è una COPIA del messaggio pinnato, non il messaggio: serve
+#: a poterlo leggere senza ricaricare la cronologia. Oltre questo limite si
+#: tronca invece di rifiutare — `message_id` resta il riferimento al testo
+#: integrale, quindi niente va perso, mentre un errore impedirebbe di fissare
+#: come obiettivo una richiesta lunga, che è esattamente il caso normale.
+GOAL_TEXT_MAX = 4000
+
+
+def _norm_goal(value, by: str = "", precedente=None) -> dict:
+    """Valida l'obiettivo in scrittura. Solleva TopicError sui valori non conformi.
+
+    `pinned_by` NON si legge dal goal ricevuto: arriva da `by`, che l'agent-
+    server valorizza col principal di cui ha appena verificato la proprietà del
+    canale. Un campo che dichiara chi ha preso una decisione e che il
+    richiedente può scrivere da sé non è una firma, è un suggerimento.
+    """
+    if not isinstance(value, dict):
+        raise TopicError("goal non valido: atteso un oggetto con `text`, oppure null")
+    text = str(value.get("text") or "").strip()
+    if not text:
+        raise TopicError("goal non valido: `text` obbligatorio")
+    if len(text) > GOAL_TEXT_MAX:
+        text = text[: GOAL_TEXT_MAX - 1].rstrip() + "…"
+    state = str(value.get("state") or "").strip().lower() or "pinned"
+    if state not in GOAL_STATES:
+        raise TopicError(
+            f"stato goal non valido: {value.get('state')} "
+            f"(validi: {', '.join(GOAL_STATES)})")
+    prev = precedente if isinstance(precedente, dict) else {}
+    mid = str(value.get("message_id") or "").strip() or None
+    # Stesso messaggio ⇒ è lo STESSO obiettivo che avanza di stato: origine e
+    # istante del pin non si riscrivono. Messaggio diverso ⇒ obiettivo nuovo.
+    stesso = bool(mid) and mid == prev.get("message_id")
+    strategy = str(value.get("strategy_path") or "").strip() or None
+    now = _now().isoformat(timespec="seconds")
+    return {
+        "text": text,
+        "message_id": mid,
+        "state": state,
+        "pinned_by": (prev.get("pinned_by") if stesso else None) or by or "",
+        "pinned_at": (prev.get("pinned_at") if stesso else None) or now,
+        "strategy_path": strategy or (prev.get("strategy_path") if stesso else None),
+        "updated_at": now,
+    }
+
+
+def _coerce_goal(value, ctx: str = "") -> Optional[dict]:
+    """Versione TOLLERANTE di `_norm_goal` per il read-path: come per la
+    deadline, un meta legacy o corrotto non deve rendere il topic non-apribile.
+    Un goal non conforme diventa None con un warning."""
+    if value in (None, "", {}):
+        return None
+    if isinstance(value, dict) and str(value.get("text") or "").strip():
+        out = dict(value)
+        out["text"] = str(out["text"]).strip()
+        st = str(out.get("state") or "").strip().lower()
+        out["state"] = st if st in GOAL_STATES else "pinned"
+        return out
+    LOG.warning("meta v2%s: goal non conforme %r → null",
+                f" ({ctx})" if ctx else "", value)
+    return None
+
+
 #: Nome del mount quando il metadata legacy non ne ha uno. Il tipo va bene finché
 #: i mount sono uno: con due mount dello stesso tipo servirebbe distinguerli, ed è
 #: per questo che il nome nuovo si sceglie al collegamento invece di derivarlo.
@@ -365,6 +439,11 @@ def normalize_meta_v2(meta: dict, tier: str) -> dict:
     out["tier"] = _normalize_tier(out.get("tier") or tier)
     out["status"] = _norm_status(out.get("status") or "active")
     out["deadline"] = _coerce_deadline(out.get("deadline"), ctx=out.get("name", ""))
+    goal = _coerce_goal(out.get("goal"), ctx=out.get("name", ""))
+    if goal is None:
+        out.pop("goal", None)  # assente ≠ presente e vuoto: la UI legge la chiave
+    else:
+        out["goal"] = goal
     return out
 
 
@@ -2292,6 +2371,47 @@ class TopicService:
         meta["deadline"] = dl
         self._write_meta(tier, name, meta, base_version=ver)
         return {"deadline": dl}
+
+    def set_goal(self, tier: str, name: str, goal, by: str = "") -> dict:
+        """Fissa l'OBIETTIVO del canale, o lo toglie (`goal=None` → unpin).
+
+        Sta nel meta e non fra i messaggi perché è un requisito che sopravvive
+        alla conversazione: togliere il pin è l'atto che ferma l'esecuzione
+        della strategia, quindi deve essere leggibile da chiunque orchestri,
+        non solo da chi ha letto la chat fino in fondo (clodia-platform#457).
+        """
+        meta, ver = self._read_meta(tier, name)
+        if goal in (None, "", {}):
+            precedente = meta.pop("goal", None)
+            self._write_meta(tier, name, meta, base_version=ver)
+            return {"goal": None, "unpinned": bool(precedente)}
+        g = _norm_goal(goal, by=by, precedente=meta.get("goal"))
+        meta["goal"] = g
+        self._write_meta(tier, name, meta, base_version=ver)
+        return {"goal": g}
+
+    def advance_goal(self, tier: str, name: str, state: str,
+                     strategy_path: str | None = None, by: str = "") -> dict:
+        """Fa AVANZARE un obiettivo già fissato. Non lo crea e non lo toglie.
+
+        È la porta degli agenti, e la differenza con `set_goal` è deliberata:
+        fissare un obiettivo e ritirarlo sono atti dell'owner: un orchestratore
+        che potesse pinnarsi i propri obiettivi — o togliersi quello scomodo —
+        non starebbe eseguendo un requisito, se lo starebbe scrivendo.
+        """
+        meta, ver = self._read_meta(tier, name)
+        corrente = meta.get("goal")
+        if not isinstance(corrente, dict) or not str(corrente.get("text") or "").strip():
+            raise TopicError("nessun obiettivo fissato su questo canale: "
+                             "il pin è un atto dell'owner")
+        proposto = dict(corrente)
+        proposto["state"] = state
+        if strategy_path:
+            proposto["strategy_path"] = strategy_path
+        g = _norm_goal(proposto, by=by, precedente=corrente)
+        meta["goal"] = g
+        self._write_meta(tier, name, meta, base_version=ver)
+        return {"goal": g}
 
     #: Il logo vive dentro il topic ma **fuori da `files/`**, perché è metadata e
     #: non un documento.

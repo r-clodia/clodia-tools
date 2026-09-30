@@ -1081,6 +1081,26 @@ _TOPIC_TOOLS: list[Tool] = [
             "to": {"type": "string", "description": "nuovo path, dentro local/ (le cartelle intermedie vengono create)"},
         }, "required": ["tier", "name", "path", "to"]},
     ),
+    Tool(
+        name="topic.goal_progress",
+        description=("Fa avanzare l'OBIETTIVO fissato dall'owner su questo canale "
+                     "(lo leggi in topic.open, campo meta.goal). Serve a dichiarare a "
+                     "che punto è: 'strategy-review' quando hai scritto la strategia e "
+                     "aspetti il via libera dell'owner, 'in-progress' mentre la esegui, "
+                     "'claimed-done' quando ritieni l'obiettivo raggiunto e chiedi la "
+                     "verifica. NON puoi fissare né togliere un obiettivo: quello è "
+                     "dell'owner. Se non c'è nessun obiettivo, il verbo rifiuta."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "state": {"type": "string",
+                      "enum": ["strategy-review", "in-progress", "claimed-done"],
+                      "description": "nuovo stato dell'obiettivo"},
+            "strategy_path": {"type": "string",
+                              "description": "path del documento di strategia nei file del "
+                                             "topic (es. 'local/goals/strategia.md')"},
+        }, "required": ["tier", "name", "state"]},
+    ),
     # ── Cartelle Drive dichiarate: whitelist + confinamento, MAI un mount da
     # navigare (decision-record #40). Un agente che deve lavorare su un file
     # Drive lo raggiunge coi verbi `gdrive.*` nel proprio scratch.
@@ -5235,7 +5255,7 @@ _TOPIC_SCOPED_VERBS = {
     "open", "save_summary", "save_agents_md", "add_minute", "archive",
     "files", "read_file",
     "read_document", "convert_document", "write_document", "write_file", "fetch",
-    "put", "delete_file", "move_file",
+    "put", "delete_file", "move_file", "goal_progress",
     "post_message", "messages", "my_mentions", "mark_seen",
     "drive_folder_add", "drive_folder_remove",
     "local_folder_add", "local_folder_remove",
@@ -5268,7 +5288,7 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
 _TOPIC_MUTATING_VERBS = frozenset({
     "save_summary", "save_agents_md", "add_minute", "archive",
     "write_file", "convert_document", "write_document", "put", "delete_file",
-    "move_file",
+    "move_file", "goal_progress",
     "drive_folder_add", "drive_folder_remove",
     "local_folder_add", "local_folder_remove",
     "egress_add", "egress_remove", "ingress_add", "ingress_remove",
@@ -6156,6 +6176,11 @@ def _dispatch_topic(name: str, a: dict):
         return svc.delete_file(a["tier"], a["name"], a["path"])
     if verb == "move_file":
         return svc.move_file(a["tier"], a["name"], a["path"], a["to"])
+    if verb == "goal_progress":
+        # Avanzamento, non pin: creare e togliere un obiettivo restano
+        # dell'owner (TopicService.advance_goal).
+        return svc.advance_goal(a["tier"], a["name"], a["state"],
+                                a.get("strategy_path"), by=agent_name())
     # Cartelle Drive dichiarate: whitelist + confinamento, mai un mount (#40).
     if verb == "drive_folder_add":
         return svc.drive_folder_add(a["tier"], a["name"], a["folder"],
