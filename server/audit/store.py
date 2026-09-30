@@ -19,6 +19,16 @@ Appends are serialised by a thread lock and an `flock`, and the chain head is
 re-read from disk under the lock, so two processes on the same volume cannot
 fork the chain. Each line is written with one `write` and `fsync`ed before the
 append returns.
+
+A crash in the middle of that `write` can leave a torn last line. It was never
+an event (the append that wrote it did not return), but left in place it would
+make every later append fail — and, fail-closed, stop every verb. Under the
+lock, `append` therefore repairs the tail first: the torn bytes are moved to a
+sidecar `quarantine-<segment>-<utc>.torn` (kept, never deleted), the segment is
+cut back to its last complete record, the chain continues from that record, and
+an `audit.tail_quarantined` event records the hash and size of what was set
+aside. Only the LAST line is ever repaired: damage anywhere else is for the
+verifier to report, not for the writer to hide.
 """
 from __future__ import annotations
 
@@ -37,6 +47,16 @@ _TAIL = 256 * 1024
 
 class StoreError(RuntimeError):
     """The store could not append (I/O, corrupt tail)."""
+
+
+def _valid_record(line: bytes) -> bool:
+    try:
+        integ = json.loads(line.decode("utf-8"))["integrity"]
+        int(integ["seq"])
+        str(integ["hash"])
+        return True
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError):
+        return False
 
 
 def _write_all(fd: int, data: bytes) -> None:
@@ -96,6 +116,75 @@ class AuditStore:
                     if line.strip():
                         yield seg.name, n, line
 
+    # ── tail repair ──────────────────────────────────────────────────────────
+    def _repair_tail(self) -> dict | None:
+        """Quarantine a torn last line of the newest non-empty segment.
+
+        Called under the append lock. Returns a description of what was set
+        aside (for the `audit.tail_quarantined` event), or None if the tail
+        was sound. A last record that is complete but lost its newline gets
+        the newline back and nothing is quarantined.
+        """
+        for seg in reversed(self.segments()):
+            size = seg.stat().st_size
+            if size == 0:
+                continue
+            with seg.open("rb") as fh:
+                start = max(0, size - _TAIL)
+                fh.seek(start)
+                chunk = fh.read()
+            body = chunk.rstrip(b"\n")
+            cut = body.rfind(b"\n")
+            last = body[cut + 1:]
+            if _valid_record(last):
+                if not chunk.endswith(b"\n"):
+                    fd = os.open(seg, os.O_WRONLY | os.O_APPEND)
+                    try:
+                        _write_all(fd, b"\n")
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                return None
+            if cut < 0 and start > 0:
+                # A single line longer than the scan window is not a torn
+                # append of ours (records are small): leave it to head().
+                return None
+            keep_to = start + cut + 1 if cut >= 0 else 0
+            torn = chunk[keep_to - start:]
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            side = self.root / f"quarantine-{seg.stem}-{stamp}.torn"
+            fd = os.open(side, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                _write_all(fd, torn)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            with seg.open("r+b") as fh:
+                fh.truncate(keep_to)
+                fh.flush()
+                os.fsync(fh.fileno())
+            return {"segment": seg.name, "offset": keep_to, "size": len(torn),
+                    "content_hash": record.content_hash(torn), "sidecar": side.name}
+        return None
+
+    def _write_locked(self, rec: dict) -> dict:
+        seq, prev = self.head()
+        rec = dict(rec)
+        rec["integrity"] = {"seq": seq + 1, "previous_hash": prev,
+                            "key_id": self.signer.key_id}
+        h = record.event_hash(rec)
+        rec["integrity"]["hash"] = h
+        rec["integrity"]["signature"] = self.signer.sign(bytes.fromhex(h))
+        line = record.canonical_json(rec) + b"\n"
+        seg = self.root / _segment_name(datetime.now(timezone.utc))
+        fd = os.open(seg, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            _write_all(fd, line)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return rec
+
     # ── writing ──────────────────────────────────────────────────────────────
     def append(self, rec: dict) -> dict:
         """Chain, sign and persist `rec` (a `record.build()` result)."""
@@ -104,21 +193,13 @@ class AuditStore:
             with lock_path.open("a") as lk:
                 fcntl.flock(lk, fcntl.LOCK_EX)
                 try:
-                    seq, prev = self.head()
-                    rec = dict(rec)
-                    rec["integrity"] = {"seq": seq + 1, "previous_hash": prev,
-                                        "key_id": self.signer.key_id}
-                    h = record.event_hash(rec)
-                    rec["integrity"]["hash"] = h
-                    rec["integrity"]["signature"] = self.signer.sign(bytes.fromhex(h))
-                    line = record.canonical_json(rec) + b"\n"
-                    seg = self.root / _segment_name(datetime.now(timezone.utc))
-                    fd = os.open(seg, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-                    try:
-                        _write_all(fd, line)
-                        os.fsync(fd)
-                    finally:
-                        os.close(fd)
-                    return rec
+                    repaired = self._repair_tail()
+                    if repaired:
+                        self._write_locked(record.build(
+                            "audit.tail_quarantined", action="repair",
+                            resource=repaired["segment"],
+                            actor={"type": "service", "id": "clodia-tools"},
+                            security={"torn_tail": repaired}))
+                    return self._write_locked(rec)
                 finally:
                     fcntl.flock(lk, fcntl.LOCK_UN)

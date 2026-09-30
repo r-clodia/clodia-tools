@@ -182,6 +182,40 @@ class ContentAndFailureTests(_Env):
             audit.emit("notatype")
         self.assertFalse(self.root.exists() and list(self.root.glob("events-*")))
 
+    def test_torn_last_line_is_quarantined_and_the_chain_continues(self) -> None:
+        # A crash in the middle of the write of event 4 leaves half a line.
+        evs = self.emit(3)
+        seg = sorted(self.root.glob("events-*.jsonl"))[-1]
+        torn = b'{"schema":"clodia.audit/1","event_id":"ab'
+        with seg.open("ab") as fh:
+            fh.write(torn)
+        os.environ["CLODIA_AUDIT_FAIL_CLOSED"] = "1"
+        # The next append must not fail forever: it repairs and goes on.
+        nxt = audit.emit("tool.call", action="execute", resource="after-crash")
+        self.assertIsNotNone(nxt)
+        self.assertEqual(nxt["integrity"]["seq"], 5)
+        lines = self.lines()
+        repair = json.loads(lines[3])
+        self.assertEqual(repair["event"]["type"], "audit.tail_quarantined")
+        self.assertEqual(repair["integrity"]["previous_hash"], evs[2]["integrity"]["hash"])
+        info = repair["security"]["torn_tail"]
+        self.assertEqual(info["size"], len(torn))
+        self.assertEqual(info["content_hash"], record.content_hash(torn))
+        side = self.root / info["sidecar"]
+        self.assertEqual(side.read_bytes(), torn)
+        rep = verify.verify(self.root)
+        self.assertTrue(rep["ok"], rep["errors"])
+        self.assertEqual(rep["events"], 5)
+
+    def test_last_record_without_newline_is_kept(self) -> None:
+        self.emit(2)
+        seg = sorted(self.root.glob("events-*.jsonl"))[-1]
+        seg.write_bytes(seg.read_bytes().rstrip(b"\n"))
+        self.emit(1)
+        self.assertEqual(len(self.lines()), 3)
+        self.assertFalse(list(self.root.glob("quarantine-*")))
+        self.assertTrue(verify.verify(self.root)["ok"])
+
     def test_failed_write_is_loud_not_silent(self) -> None:
         with patch.object(audit.store(), "append", side_effect=OSError("disk full")):
             self.assertIsNone(audit.emit("tool.call"))
