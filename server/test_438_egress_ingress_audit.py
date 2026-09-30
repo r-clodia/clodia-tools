@@ -70,8 +70,16 @@ class _Env(unittest.TestCase):
 
 
 class EgressTests(_Env):
+    def scratch(self) -> Path:
+        d = self.base / "spawns" / "clodia-320"
+        d.mkdir(parents=True, exist_ok=True)
+        p = patch.object(main, "_SPAWNS_ROOT", str(self.base / "spawns"))
+        p.start()
+        self.addCleanup(p.stop)
+        return d
+
     def test_a_sent_email_records_destination_rule_and_attachment_hash(self) -> None:
-        att = self.base / "contratto_rossi.pdf"
+        att = self.scratch() / "contratto_rossi.pdf"
         att.write_bytes(b"%PDF-1.4 riservato")
         out = self.run_call(
             "email.send", {"to": "mario.rossi@example.com", "subject": "s", "body": "b",
@@ -89,6 +97,61 @@ class EgressTests(_Env):
         self.assertTrue(ev["tool"]["parameters_hash"].startswith("sha256:"))
         self.assertNotIn("contratto_rossi", self.raw())
         self.assertNotIn("riservato", self.raw())
+
+    def _send_with(self, attachments: list[str]) -> list[dict]:
+        out = self.run_call(
+            "email.send", {"to": "x@example.com", "subject": "s", "body": "b",
+                           "attachments": attachments},
+            verdict=_allow("mailto:x@example.com"),
+            send=(main.email, "send", lambda *a, **k: {"ok": True}),
+            account=(main, "_email_account", lambda a: "studio"))
+        self.assertFalse(out[0].text.startswith(("DENIED", "ERROR")), out[0].text)
+        (ev,) = self.events("flow.egress")
+        return ev["result"]["files"]
+
+    def _within(self, seconds: float, fn):
+        # The hash must never hang the gateway: run the call in a thread and
+        # fail (instead of blocking the suite) if it does not return in time.
+        import threading
+        box: dict = {}
+        t = threading.Thread(target=lambda: box.setdefault("v", fn()), daemon=True)
+        t.start()
+        t.join(seconds)
+        self.assertFalse(t.is_alive(), "the crossing hash blocked")
+        return box["v"]
+
+    def test_dev_zero_as_attachment_does_not_hang(self) -> None:
+        self.scratch()
+        files = self._within(10, lambda: self._send_with(["/dev/zero"]))
+        self.assertIsNone(files[0].get("hash"))
+        self.assertIn(files[0]["error"], ("outside_scratch", "not_a_regular_file"))
+
+    def test_a_device_or_fifo_inside_the_scratch_is_never_opened(self) -> None:
+        d = self.scratch()
+        fifo = d / "pipe"
+        os.mkfifo(fifo)
+        link = d / "zero"
+        os.symlink("/dev/zero", link)
+        files = self._within(10, lambda: self._send_with([str(fifo), str(link)]))
+        self.assertEqual([f.get("hash") for f in files], [None, None])
+        # the symlink resolves outside the scratch, the FIFO is not a regular file
+        self.assertEqual(files[0]["error"], "not_a_regular_file")
+
+    def test_a_file_over_the_cap_is_recorded_by_size_only(self) -> None:
+        att = self.scratch() / "big.bin"
+        att.write_bytes(b"x" * 2048)
+        with patch.dict(os.environ, {"CLODIA_AUDIT_CROSSING_MAX_BYTES": "1024"}):
+            files = self._send_with([str(att)])
+        self.assertEqual(files, [{"kind": "attachment",
+                                  "error": "too_large", "bytes": 2048}])
+
+    def test_an_attachment_outside_the_scratch_is_not_opened(self) -> None:
+        self.scratch()
+        att = self.base / "elsewhere.pdf"
+        att.write_bytes(b"x")
+        files = self._send_with([str(att)])
+        self.assertEqual(files, [{"kind": "attachment",
+                                  "error": "outside_scratch"}])
 
     def test_nothing_is_recorded_as_sent_when_the_destination_is_refused(self) -> None:
         out = self.run_call(
@@ -119,6 +182,21 @@ class IngressTests(_Env):
         self.assertEqual(ev["tool"]["vetted"], "not_vetted")
         self.assertTrue(ev["input"]["hash"].startswith("sha256:"))
         self.assertNotIn("third-party", self.raw())
+
+    def test_a_web_source_never_carries_credentials_query_or_fragment(self) -> None:
+        self.run_call("web.fetch",
+                      {"url": "https://alice:s3cr3t@Docs.Example.com:8443/a/B?token=XYZ&x=1#frag"},
+                      fetch=(main.web_fetch, "fetch", lambda a, agent="": {"ok": 1}),
+                      vet=(main, "_source_vetted", lambda *a, **k: None))
+        (ev,) = self.events("flow.ingress")
+        self.assertEqual(ev["tool"]["source"], "https://docs.example.com:8443/a/B")
+        for leaked in ("alice", "s3cr3t", "XYZ", "token", "frag"):
+            self.assertNotIn(leaked, self.raw())
+
+    def test_source_url_forms(self) -> None:
+        self.assertEqual(main._source_url("ftp://u:p@h.example/x?y=1"), "ftp://h.example/x")
+        self.assertEqual(main._source_url("https://h:notaport/"), "url:unparseable")
+        self.assertIsNone(main._source_url(""))
 
     def test_a_verb_with_no_identifiable_source_is_not_an_ingress(self) -> None:
         self.assertIsNone(main._ingress_source("email.list", {}))

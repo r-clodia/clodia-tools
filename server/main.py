@@ -3978,27 +3978,110 @@ _AUDIT_EGRESS: "_contextvars.ContextVar[dict | None]" = _contextvars.ContextVar(
     "audit_egress", default=None)
 
 
-def _note_crossing(path=None, data: bytes | None = None, kind: str = "file") -> None:
-    """Record the hash of a file about to leave. Never its name or content."""
+#: Most bytes `_note_crossing` hashes of one file (#438). Above it the file is
+#: recorded with its size and no hash: the trail must never be the reason a
+#: send stalls.
+_CROSSING_MAX_BYTES_DEFAULT = 512 * 1024 * 1024
+
+
+def _crossing_max_bytes() -> int:
+    try:
+        return max(0, int(_os.environ.get("CLODIA_AUDIT_CROSSING_MAX_BYTES")
+                          or _CROSSING_MAX_BYTES_DEFAULT))
+    except ValueError:
+        return _CROSSING_MAX_BYTES_DEFAULT
+
+
+def _note_crossing(path=None, data: bytes | None = None, kind: str = "file",
+                   trusted: bool = False) -> None:
+    """Record the hash of a file about to leave. Never its name or content.
+
+    `path` comes from the agent unless `trusted` (a file the gateway itself
+    staged, e.g. topic_files in its own temp dir). An agent path is hashed
+    only if it is inside the caller's scratch (`_safe_scratch_path`) and is a
+    REGULAR file: `/dev/zero`, a FIFO or a directory is never opened — opening
+    a FIFO blocks and reading `/dev/zero` never ends. The file is opened
+    non-blocking and re-checked with fstat (a swap between stat and open is
+    caught), and at most `CLODIA_AUDIT_CROSSING_MAX_BYTES` are read. Callers on
+    the event loop run this in a thread.
+    """
     acc = _AUDIT_CROSSING.get()
     if acc is None:
         return
     import hashlib as _hl
-    h = _hl.sha256()
-    size = 0
+    import stat as _stat
+    if data is not None:
+        acc.append({"kind": kind, "hash": "sha256:" + _hl.sha256(data).hexdigest(),
+                    "bytes": len(data)})
+        return
     try:
-        if data is not None:
-            h.update(data)
-            size = len(data)
-        else:
-            with open(path, "rb") as fh:
-                for chunk in iter(lambda: fh.read(1 << 20), b""):
-                    h.update(chunk)
-                    size += len(chunk)
+        p = str(path) if trusted else _safe_scratch_path(str(path or ""))
+    except (ValueError, TypeError):
+        acc.append({"kind": kind, "hash": None, "error": "outside_scratch"})
+        return
+    try:
+        if not _stat.S_ISREG(_os.stat(p).st_mode):
+            acc.append({"kind": kind, "hash": None, "error": "not_a_regular_file"})
+            return
+        fd = _os.open(p, _os.O_RDONLY | getattr(_os, "O_NONBLOCK", 0)
+                      | getattr(_os, "O_NOCTTY", 0))
     except OSError:
         acc.append({"kind": kind, "hash": None, "error": "unreadable"})
         return
+    try:
+        st = _os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            acc.append({"kind": kind, "hash": None, "error": "not_a_regular_file"})
+            return
+        cap = _crossing_max_bytes()
+        if st.st_size > cap:
+            acc.append({"kind": kind, "hash": None, "error": "too_large",
+                        "bytes": st.st_size})
+            return
+        h = _hl.sha256()
+        size = 0
+        while size <= cap:
+            chunk = _os.read(fd, min(1 << 20, cap + 1 - size))
+            if not chunk:
+                break
+            h.update(chunk)
+            size += len(chunk)
+        if size > cap:  # grew while we read it
+            acc.append({"kind": kind, "hash": None, "error": "too_large", "bytes": size})
+            return
+    except OSError:
+        acc.append({"kind": kind, "hash": None, "error": "unreadable"})
+        return
+    finally:
+        _os.close(fd)
     acc.append({"kind": kind, "hash": "sha256:" + h.hexdigest(), "bytes": size})
+
+
+def _source_url(url: object) -> str | None:
+    """A URL as the trail may carry it: the egress canonical form (#438).
+
+    Same rules as the destination side (`egress.canonical`): scheme and host
+    in lower case, path kept, and NO userinfo, query or fragment — they are
+    where credentials and tokens travel (`https://user:pw@host/`, `?token=`,
+    signed-URL signatures), and the trail is read by people not cleared for
+    them. Not http(s): the same reduction on whatever authority it has.
+    """
+    from urllib.parse import urlsplit as _us
+    from . import egress as _eg
+    u = str(url or "").strip()
+    if not u:
+        return None
+    try:
+        if u.lower().startswith(("http://", "https://")):
+            return _eg.canonical(u) or None
+        sp = _us(u)
+        if sp.scheme and sp.netloc:
+            host = (sp.hostname or "").lower()
+            port = f":{sp.port}" if sp.port else ""
+            return f"{sp.scheme.lower()}://{host}{port}{sp.path or '/'}"
+        return _eg.canonical(u.split("#", 1)[0].split("?", 1)[0]) or None
+    except ValueError:  # e.g. a port that is not a number
+        return "url:unparseable"
 
 
 def _ingress_source(verb: str, a: dict, result: object = None) -> str | None:
@@ -4011,7 +4094,7 @@ def _ingress_source(verb: str, a: dict, result: object = None) -> str | None:
     if proxy.is_proxied(verb):
         return f"mcp:{verb}"
     if verb.startswith("web."):
-        return str(a.get("url") or "").strip() or None
+        return _source_url(a.get("url"))
     if verb == "email.read":
         src = ""
         if isinstance(result, dict):
@@ -4524,8 +4607,11 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             # lettura dei file del topic senza togliergli il mestiere — e non
             # brucia token su un PDF.
             _extra, _tmpdir = _topic_attachments(arguments, _ag or "")
-            for _p in (arguments.get("attachments") or []) + _extra:
-                _note_crossing(_p, kind="attachment")
+            for _p in arguments.get("attachments") or []:
+                await asyncio.to_thread(_note_crossing, _p, kind="attachment")
+            for _p in _extra:
+                await asyncio.to_thread(_note_crossing, _p, kind="attachment",
+                                        trusted=True)
             try:
                 result = email.send(
                     arguments["to"],
@@ -4621,7 +4707,7 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             )
         elif name == "email.reply":
             for _p in arguments.get("attachments") or []:
-                _note_crossing(_p, kind="attachment")
+                await asyncio.to_thread(_note_crossing, _p, kind="attachment")
             result = email.reply(
                 arguments["email_id"],
                 arguments["body"],
