@@ -64,6 +64,26 @@ class ProvenanceTests(unittest.TestCase):
                         p.stop()
         return asyncio.run(go())
 
+    def test_the_hash_is_of_the_bytes_returned_and_the_file_is_read_once(self) -> None:
+        # A rewrite between the read and the provenance record must not change
+        # what the record says was read, and the storage is read exactly once.
+        r = self.svc.put_file("SEAL-1", "ch", "nota.md", b"what was read", "trusted",
+                              by="davide")
+        path = r.get("path") or f"files/{r['name']}"
+        real_sources = main._provenance_sources
+        rewrite = lambda *a, **k: (self.svc.put_file(  # noqa: E731
+            "SEAL-1", "ch", "nota.md", b"rewritten after", "trusted", by="davide"),
+            real_sources(*a, **k))[1]
+        calls = []
+        real_read = self.svc._read_result
+        self.svc._read_result = lambda *a: calls.append(a) or real_read(*a)
+        self.call("topic.read_file", {"tier": "SEAL-1", "name": "ch", "path": path},
+                  prov=(main, "_provenance_sources", rewrite))
+        (src,) = self.reads()[0]["provenance"]["sources"]
+        self.assertEqual(src["content_hash"],
+                         "sha256:" + hashlib.sha256(b"what was read").hexdigest())
+        self.assertEqual(len(calls), 1)
+
     def test_the_version_of_the_file_read_is_recorded_and_survives_a_rewrite(self) -> None:
         r = self.svc.put_file("SEAL-1", "ch", "nota.md", b"version one", "trusted", by="davide")
         path = r.get("path") or f"files/{r['name']}"
@@ -102,6 +122,15 @@ class ProvenanceTests(unittest.TestCase):
                          "sha256:" + hashlib.sha256(b"ict risk").hexdigest())
         raw = "".join(p.read_text() for p in self.root.glob("events-*.jsonl"))
         self.assertNotIn("ict risk", raw)
+
+    def test_a_web_source_ref_carries_no_credentials_or_query(self) -> None:
+        self.call("web.fetch", {"url": "https://bob:hunter2@api.example.com/v1/doc?sig=ABC#x"},
+                  fetch=(main.web_fetch, "fetch", lambda a, agent="": {"ok": 1}))
+        (src,) = self.reads()[0]["provenance"]["sources"]
+        self.assertEqual(src["ref"], "https://api.example.com/v1/doc")
+        raw = "".join(p.read_text() for p in self.root.glob("events-*.jsonl"))
+        for leaked in ("bob", "hunter2", "sig=", "ABC"):
+            self.assertNotIn(leaked, raw)
 
     def test_a_listing_is_not_a_read_of_something(self) -> None:
         self.call("topic.files", {"tier": "SEAL-1", "name": "ch"})

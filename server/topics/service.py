@@ -1229,12 +1229,17 @@ class TopicService:
         I path sotto files/ vanno sullo storage del topic (local o drive)."""
         return self._read_result(tier, name, relpath).data
 
-    def file_version(self, tier: str, name: str, relpath: str) -> str | None:
-        """The storage version of a topic file — sha256 of the content on
-        local-fs, the backend's checksum elsewhere. It is what the audit trail
-        records as "the content that was read" (clodia-platform#440): a file
-        can be rewritten after the read, the version cannot."""
-        return self._read_result(tier, name, relpath).version
+    def read_file_versioned(self, tier: str, name: str,
+                            relpath: str) -> tuple[bytes, str | None]:
+        """`read_file` plus the storage version of THOSE bytes (sha256 on
+        local-fs, the backend's checksum elsewhere), from the same read.
+
+        The audit trail records what a decision was based on
+        (clodia-platform#440): the version must be the one of the content
+        that was returned, not of whatever the file holds a moment later, and
+        asking for it must not read (or download) the file a second time."""
+        r = self._read_result(tier, name, relpath)
+        return r.data, r.version
 
     def _read_result(self, tier: str, name: str, relpath: str):
         meta, _ = self._read_meta(tier, name)
