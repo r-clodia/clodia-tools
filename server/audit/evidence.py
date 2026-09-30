@@ -124,6 +124,14 @@ def keep(data: bytes | str, tier: str | None) -> str:
         return "sha256:" + hexd
     p = _path(hexd, tier)
     if p.exists():
+        # Already kept: refresh its mtime. Retention prunes on mtime
+        # (retention.py), so without this an object first seen more than a
+        # retention ago and referenced again today would be deleted while the
+        # newest trail events still point at it.
+        try:
+            os.utime(p, None)
+        except OSError:
+            pass
         return "sha256:" + hexd
     p.parent.mkdir(parents=True, exist_ok=True)
     if len(data) > max_bytes():

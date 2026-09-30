@@ -97,6 +97,8 @@ async def _lifespan(_app):
         except Exception as e:  # noqa: BLE001
             LOG.error("audit: boot event not recorded: %s", e)
         checkpoints = asyncio.create_task(audit.checkpoint_loop())
+        from .audit import retention as _retention
+        retention = asyncio.create_task(_retention.retention_loop())
         # M3++: in modalità runtime-keyless (CLODIA_ORCHESTRATOR_SECRET set) il
         # gateway è il trust-anchor → bootstrap PKI qui (CA + identità native),
         # idempotente. L'entrypoint di agent-server la salta in questa modalità.
@@ -133,6 +135,7 @@ async def _lifespan(_app):
         finally:
             guardia.cancel()
             checkpoints.cancel()
+            retention.cancel()
 
 
 def build_app() -> Starlette:
