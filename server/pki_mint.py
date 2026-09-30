@@ -325,6 +325,20 @@ def issue_cert_for_pubkey(name: str, pubkey_pem: str, force: bool = False) -> st
 # Both issuers return early when the identity already exists, so "called" is
 # not "issued". The wrapper compares the certificate before and after, and
 # records only a real (re-)issuance, with the serial of the new certificate.
+#
+# Re-issuing a revoked principal also CLEARS its revocation from `revoked.json`
+# (`issue_cert_for_pubkey`, above). That is a control-plane change of its own —
+# a name that was refused is accepted again — and under M3++ it happens here,
+# in the gateway, not in the agent-server that records revocations
+# (clodia-platform#466). It is recorded as `control.pki unrevoke`, only when an
+# entry actually left the file.
+def _revoked_names() -> set:
+    try:
+        return set(json.loads(_revoked_file().read_text()).get("revoked", []))
+    except Exception:  # noqa: BLE001 - absent or unreadable: nothing revoked to clear
+        return set()
+
+
 def _audited_issuer(fn):
     import functools
 
@@ -332,15 +346,21 @@ def _audited_issuer(fn):
     def wrapper(name, *a, **kw):
         path = _certs_dir() / f"{name}.crt"
         before = path.read_bytes() if path.is_file() else None
+        revoked_before = _revoked_names()
         out = fn(name, *a, **kw)
         after = path.read_bytes() if path.is_file() else None
-        if after is not None and after != before:
-            from .audit import control as _control
+        serial = None
+        if after is not None:
             try:
                 serial = format(x509.load_pem_x509_certificate(after).serial_number, "x")
             except Exception:  # noqa: BLE001
                 serial = None
+        from .audit import control as _control
+        if after is not None and after != before:
             _control.safe(_control.emit, "pki", "reissue" if before else "issue", name,
+                          cert_serial=serial, via=fn.__name__)
+        if name in revoked_before and name not in _revoked_names():
+            _control.safe(_control.emit, "pki", "unrevoke", name,
                           cert_serial=serial, via=fn.__name__)
         return out
     return wrapper

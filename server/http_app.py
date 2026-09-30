@@ -177,18 +177,23 @@ def build_app() -> Starlette:
     from .rag_api import routes as rag_routes
     # Audit trail health and checkpoints (clodia-platform#431): server-to-server.
     from .audit_api import routes as audit_routes
+    # Egress proxy records (#463): what the agents' proxy saw, joined to the turn.
+    from .egress_proxy_api import routes as egress_proxy_routes
+    from .audit.trace import TraceparentMiddleware
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
                 *imagegen_routes, *topics_routes, *profile_routes,
                 *telegram_routes, *agents_routes, *vault_routes,
                 *tool_routes, *mint_routes, *gate_routes, *logic_routes,
                 *egress_routes, *proxy_auth_routes, *rag_routes,
-                *audit_routes],
+                *audit_routes, *egress_proxy_routes],
         # Chi è in volo, su tutte le rotte (clodia-platform#316). Attorno a tutto
         # e non alle due rotte della issue: nell'incidente del 7 set le rotte
         # «innocenti» erano quelle in timeout, e un contatore puntato sui
         # sospetti misura solo l'alibi.
-        middleware=[Middleware(inflight.InflightMiddleware)],
+        # W3C `traceparent` of the request, for the audit trail (#463).
+        middleware=[Middleware(inflight.InflightMiddleware),
+                    Middleware(TraceparentMiddleware)],
         lifespan=_lifespan)
 
 
