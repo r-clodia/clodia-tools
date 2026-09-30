@@ -4798,8 +4798,9 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             # i segreti. È ciò che permette di togliere a un postino i verbi di
             # lettura dei file del topic senza togliergli il mestiere — e non
             # brucia token su un PDF.
+            _own = _agent_attachments(arguments.get("attachments"))
             _extra, _tmpdir = _topic_attachments(arguments, _ag or "")
-            for _p in arguments.get("attachments") or []:
+            for _p in _own:
                 await asyncio.to_thread(_note_crossing, _p, kind="attachment")
             for _p in _extra:
                 await asyncio.to_thread(_note_crossing, _p, kind="attachment",
@@ -4811,7 +4812,7 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                     arguments["body"],
                     account=_email_account(arguments),
                     cc=arguments.get("cc"),
-                    attachments=(arguments.get("attachments") or []) + _extra,
+                    attachments=_own + _extra,
                 )
             finally:
                 if _tmpdir:
@@ -4898,7 +4899,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 limit=arguments.get("limit", 20),
             )
         elif name == "email.reply":
-            for _p in arguments.get("attachments") or []:
+            _own = _agent_attachments(arguments.get("attachments"))
+            for _p in _own:
                 await asyncio.to_thread(_note_crossing, _p, kind="attachment")
             result = email.reply(
                 arguments["email_id"],
@@ -4906,7 +4908,7 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
                 cc=arguments.get("cc"),
-                attachments=arguments.get("attachments"),
+                attachments=_own,
             )
         elif name.startswith("topic."):
             # offload su thread: _dispatch_topic tocca lo storage e (suggest_team/
@@ -5173,6 +5175,38 @@ def _decode_b64_strict(content: str, filename: str) -> bytes:
 
 
 _SPAWNS_ROOT = _os.environ.get("CLODIA_SPAWNS_ROOT", "/datadir/spawns")
+
+
+def _agent_attachments(paths) -> list[str]:
+    """Attachment paths passed by an agent, confined to its own scratch
+    (clodia-platform#461).
+
+    `email.py` only checked `is_file()`, so any regular file the gateway can
+    read — its datadir, the vault store, keys — could be attached and mailed
+    out: the egress perimeter vets the destination, not where the bytes come
+    from. Each path must now resolve (symlinks included) inside the caller's
+    scratch and be a regular file; the resolved path is what gets sent, so a
+    symlink swapped after this check cannot redirect it. Topic attachments
+    (`topic_files`) are materialised by the gateway itself and do not pass
+    here.
+    """
+    import stat as _stat
+    out: list[str] = []
+    for raw in paths or []:
+        try:
+            rp = _safe_scratch_path(str(raw))
+        except ValueError:
+            raise ValueError(
+                f"attachment outside your scratch: '{raw}'. Attach files from your "
+                f"scratch, or topic files with topic_files=[...]") from None
+        try:
+            st = _os.stat(rp)
+        except OSError:
+            raise ValueError(f"attachment not found: '{raw}'") from None
+        if not _stat.S_ISREG(st.st_mode):
+            raise ValueError(f"attachment is not a regular file: '{raw}'")
+        out.append(rp)
+    return out
 
 
 def _safe_scratch_path(p: str) -> str:

@@ -120,11 +120,23 @@ class EgressTests(_Env):
         self.assertFalse(t.is_alive(), "the crossing hash blocked")
         return box["v"]
 
+    def _refused_within(self, seconds: float, attachments: list[str]) -> str:
+        # Since clodia-platform#461 these are refused before anything is sent;
+        # what #438 still requires is that the refusal never hangs the gateway
+        # and that nothing is recorded as having crossed.
+        out = self._within(seconds, lambda: self.run_call(
+            "email.send", {"to": "x@example.com", "subject": "s", "body": "b",
+                           "attachments": attachments},
+            verdict=_allow("mailto:x@example.com"),
+            send=(main.email, "send", lambda *a, **k: {"ok": True}),
+            account=(main, "_email_account", lambda a: "studio")))
+        self.assertEqual(self.events("flow.egress"), [])
+        return out[0].text
+
     def test_dev_zero_as_attachment_does_not_hang(self) -> None:
         self.scratch()
-        files = self._within(10, lambda: self._send_with(["/dev/zero"]))
-        self.assertIsNone(files[0].get("hash"))
-        self.assertIn(files[0]["error"], ("outside_scratch", "not_a_regular_file"))
+        text = self._refused_within(10, ["/dev/zero"])
+        self.assertIn("outside your scratch", text)
 
     def test_a_device_or_fifo_inside_the_scratch_is_never_opened(self) -> None:
         d = self.scratch()
@@ -132,10 +144,9 @@ class EgressTests(_Env):
         os.mkfifo(fifo)
         link = d / "zero"
         os.symlink("/dev/zero", link)
-        files = self._within(10, lambda: self._send_with([str(fifo), str(link)]))
-        self.assertEqual([f.get("hash") for f in files], [None, None])
-        # the symlink resolves outside the scratch, the FIFO is not a regular file
-        self.assertEqual(files[0]["error"], "not_a_regular_file")
+        self.assertIn("not a regular file", self._refused_within(10, [str(fifo)]))
+        # the symlink resolves outside the scratch
+        self.assertIn("outside your scratch", self._refused_within(10, [str(link)]))
 
     def test_a_file_over_the_cap_is_recorded_by_size_only(self) -> None:
         att = self.scratch() / "big.bin"
@@ -149,9 +160,7 @@ class EgressTests(_Env):
         self.scratch()
         att = self.base / "elsewhere.pdf"
         att.write_bytes(b"x")
-        files = self._send_with([str(att)])
-        self.assertEqual(files, [{"kind": "attachment",
-                                  "error": "outside_scratch"}])
+        self.assertIn("outside your scratch", self._refused_within(10, [str(att)]))
 
     def test_nothing_is_recorded_as_sent_when_the_destination_is_refused(self) -> None:
         out = self.run_call(
