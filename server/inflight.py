@@ -96,11 +96,16 @@ def _env_float(name: str, default: float) -> float:
 class _Req:
     """Una richiesta in volo. `caller` è mutabile di proposito: all'ingresso si
     sa solo da che IP arriva, e chi ha già risolto l'identità la attacca dopo
-    (vedi `attribute`)."""
+    (vedi `attribute`).
+
+    `trace` è il nome del TURNO dell'agent-server che ha fatto questa chiamata
+    (clodia-platform#455), quando c'è: una chiamata della webui non appartiene a
+    nessun turno e resta senza, che è un'informazione a sua volta."""
     id: int
     route: str
     caller: str
     started: float
+    trace: str = ""
 
 
 _LOCK = threading.Lock()
@@ -148,22 +153,42 @@ def route_label(path: str) -> str:
     return "/" + "/".join(parti) if parti else "/"
 
 
+def _header_of(scope: dict, nome: str, limite: int) -> str:
+    """Un header della richiesta ASGI, o stringa vuota. Tagliato: quello che
+    entra qui finisce in una riga di log, e un header lungo la renderebbe
+    illeggibile — o la userebbe come megafono."""
+    atteso = nome.lower()
+    for k, v in scope.get("headers") or []:
+        if k.decode().lower() == atteso:
+            return v.decode()[:limite]
+    return ""
+
+
 def _caller_of(scope: dict) -> str:
     """Chi chiama, per quel che se ne sa all'ingresso: l'header dedicato se il
     chiamante si presenta, altrimenti l'IP. Le rotte che risolvono un'identità
     la migliorano con `attribute()`."""
-    for k, v in scope.get("headers") or []:
-        if k.decode().lower() == "x-clodia-caller":
-            return v.decode()[:60]
+    presentato = _header_of(scope, "x-clodia-caller", 60)
+    if presentato:
+        return presentato
     client = scope.get("client") or ()
     return str(client[0]) if client else "?"
 
 
-def start(route: str, caller: str) -> _Req:
+def _trace_of(scope: dict) -> str:
+    """Il turno per conto del quale arriva questa richiesta (#455).
+
+    Lo manda l'agent-server da `GatewayHTTP` su OGNI chiamata interna fatta
+    dentro un turno. Qui non si verifica e non si autorizza niente con questo:
+    è un'etichetta per i log, e per i log vale quanto vale chi la manda."""
+    return _header_of(scope, "x-clodia-trace-id", 64)
+
+
+def start(route: str, caller: str, trace: str = "") -> _Req:
     """Registra una richiesta in volo e, se la concorrenza su quella rotta supera
     la soglia, lo dice una volta."""
     now = time.monotonic()
-    req = _Req(id=next(_SEQ), route=route, caller=caller, started=now)
+    req = _Req(id=next(_SEQ), route=route, caller=caller, started=now, trace=trace)
     with _LOCK:
         _ACTIVE[req.id] = req
         quante = sum(1 for r in _ACTIVE.values() if r.route == route)
@@ -197,8 +222,9 @@ def _finish(req: _Req) -> None:
     durata = time.monotonic() - req.started
     limite = _env_float("CLODIA_SLOW_REQUEST_S", _DEFAULT_SLOW_REQUEST_S)
     if durata >= limite and not _said_recently(f"slow:{req.route}", time.monotonic()):
-        LOG.warning("richiesta lenta: %s da %s ha tenuto %.2fs (soglia %.2fs)",
-                    req.route, req.caller, durata, limite)
+        LOG.warning("richiesta lenta: %s da %s ha tenuto %.2fs (soglia %.2fs) "
+                    "[trace=%s]", req.route, req.caller, durata, limite,
+                    req.trace or "-")
 
 
 def _by_caller(route: str | None = None) -> dict[str, int]:
@@ -214,7 +240,7 @@ def snapshot() -> list[dict]:
     guarda uno stallo."""
     now = time.monotonic()
     with _LOCK:
-        righe = [{"route": r.route, "caller": r.caller,
+        righe = [{"route": r.route, "caller": r.caller, "trace": r.trace,
                   "age_s": round(now - r.started, 3)} for r in _ACTIVE.values()]
     return sorted(righe, key=lambda r: -r["age_s"])
 
@@ -273,8 +299,10 @@ def report_if_stalled(lag_s: float) -> bool:
             return False
     righe = snapshot()
     pool = pool_stats()
-    dettaglio = "; ".join(f"{r['route']} da {r['caller']} ({r['age_s']}s)"
-                          for r in righe[:10]) or "nessuna richiesta in volo"
+    dettaglio = "; ".join(
+        f"{r['route']} da {r['caller']} ({r['age_s']}s"
+        + (f", trace={r['trace']}" if r["trace"] else "") + ")"
+        for r in righe[:10]) or "nessuna richiesta in volo"
     LOG.warning("event loop in ritardo di %.1fs (soglia %.1fs) — offload: "
                 "%d/%d thread, coda %d — in volo: %s",
                 lag_s, limite, pool["threads"], pool["max_workers"],
@@ -316,8 +344,30 @@ class InflightMiddleware:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
-        req = start(route_label(scope.get("path", "")), _caller_of(scope))
+        req = start(route_label(scope.get("path", "")), _caller_of(scope),
+                    _trace_of(scope))
+
+        async def send_tracciato(message):
+            # Il 500 costruito dall'handler. Non si applica l'anti-rumore: un
+            # 5xx è raro per definizione, e deduplicarlo per rotta cancellerebbe
+            # proprio la colonna che serve — quale turno lo ha preso.
+            if (message.get("type") == "http.response.start"
+                    and int(message.get("status") or 0) >= 500):
+                LOG.warning("risposta %s su %s a %s [trace=%s]",
+                            message.get("status"), req.route, req.caller,
+                            req.trace or "-")
+            await send(message)
+
         try:
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, send_tracciato)
+        except Exception as e:
+            # L'altra forma del 500, e la più comune: l'handler solleva e la
+            # risposta la costruisce `ServerErrorMiddleware`, che sta PIÙ FUORI
+            # di questo middleware — quindi come stato non passa mai di qui, e
+            # aspettarlo dal ramo sopra vorrebbe dire non vedere nessun guasto
+            # vero. Si logga e si rilancia: la gestione resta di chi la faceva.
+            LOG.warning("richiesta fallita su %s a %s: %s [trace=%s]",
+                        req.route, req.caller, type(e).__name__, req.trace or "-")
+            raise
         finally:
             _finish(req)
