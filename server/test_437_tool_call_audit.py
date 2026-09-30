@@ -96,8 +96,11 @@ class ToolCallAuditTests(unittest.TestCase):
         # a call and a result.
         out = self.call("no.such_verb", {})
         self.assertTrue(out[0].text.startswith(("ERROR", "DENIED")))
-        self.assertEqual([e["event"]["type"] for e in self.events()],
-                         ["tool.call", "tool.result"])
+        types = [e["event"]["type"] for e in self.events()]
+        # A refusal of the reference monitor adds its decision in between
+        # (#436); whatever happens, the call and its result frame it.
+        self.assertEqual((types[0], types[-1]), ("tool.call", "tool.result"))
+        self.assertTrue(set(types[1:-1]) <= {"policy.decision"}, types)
 
     def test_a_borrowed_call_is_nested_under_the_call_that_made_it(self) -> None:
         async def outer(name, arguments):

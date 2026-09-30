@@ -4320,6 +4320,28 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             from . import observe as _obs2
             _ev = _egress.check(_ag or "", _acfg, name, _eargs,
                                 unattended=is_unattended())
+            if _ev.get("checked"):
+                # The verdict, as a record and not only as a log line (#436).
+                # Recording it must never change it: a failure here is logged,
+                # except the fail-closed refusal the owner asked for.
+                from . import audit as _audit_mod
+                from .audit import policy as _apol
+                try:
+                    await asyncio.to_thread(
+                        _apol.decision, name, "egress",
+                        "would_deny" if _ev.get("would_deny") else _ev.get("action", "?"),
+                        reason_class=("destination_unknown" if _egress.UNKNOWN in
+                                      (_ev.get("destinations") or []) else
+                                      "not_listed" if _ev.get("refused") else None),
+                        rule=_apol.matched_rules(_ev),
+                        mode={"mode": _ev.get("mode"),
+                              "applied_mode": _ev.get("applied_mode")})
+                except _audit_mod.AuditWriteError:
+                    raise PermissionError("audit trail non disponibile: l'uscita non "
+                                          "si può registrare, quindi non si fa")
+                except Exception as _e:  # noqa: BLE001
+                    LOG.error("audit: egress decision of %s not recorded (%s)",
+                              name, type(_e).__name__)
             if _ev.get("action") == "deny":
                 from . import observe as _obs
                 if _obs.skipping():
@@ -4619,6 +4641,15 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
         # Il motivo è una CLASSE, non il messaggio: i messaggi contengono nomi di
         # file e indirizzi, e questo registro non deve diventare una rubrica.
         _why = _denial_class(str(e))
+        if _why != "egress":
+            # Every refusal of the reference monitor is a decision on record
+            # (#436). Egress refusals were recorded with their rule above.
+            try:
+                from .audit import policy as _apol
+                await asyncio.to_thread(_apol.decision, name, _why, "deny",
+                                        reason_class=_why)
+            except Exception:  # noqa: BLE001 - the refusal stands even if unrecorded
+                pass
         _tlm.record(name, agent_name_safe(), "denied", channel=current_chat(),
                     unattended=is_unattended(), detail=_why)
         # L'altra metà di clodia-platform#206. La telemetria di sopra è NOSTRA;
