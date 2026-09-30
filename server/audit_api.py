@@ -111,7 +111,57 @@ async def export(request: Request):
         "Content-Disposition": 'attachment; filename="clodia-audit-export.tgz"'})
 
 
+#: Event types the agent-server may deposit: what only it knows (turns,
+#: routing, provider and model, interrupts, its own control plane). It may not
+#: forge the gateway's own evidence (tool.*, policy.*, gate.*, flow.*, audit.*).
+AGENT_SERVER_TYPES = ("turn.", "model.", "route.", "control.", "human.")
+
+
+async def ingest(request: Request):
+    """POST /internal/audit/event — an event reported by the agent-server.
+
+    Recorded with `actor.source = "agent-server"`: it is the orchestrator's
+    word, verified by its secret, not the gateway's own observation — the two
+    weigh differently for an auditor (#425 §1.5). `turn.start` / `turn.end`
+    also open and close the spawn's trace (#433)."""
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from .audit import trace
+    try:
+        b = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    et = str(b.get("type") or "")
+    if not et.startswith(AGENT_SERVER_TYPES):
+        return JSONResponse({"error": f"type '{et}' is not the agent-server's to report"},
+                            status_code=403)
+    spawn = (b.get("agent") or {}).get("spawn")
+    if et == "turn.start":
+        try:
+            trace.start(spawn, b.get("trace_id"), b.get("span_id"))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+    sections = {k: b[k] for k in ("scope", "agent", "model", "input", "decision",
+                                  "authorization", "tool", "result", "provenance",
+                                  "security") if isinstance(b.get(k), dict)}
+    actor = dict(b.get("actor") or {"type": "service", "id": "agent-server"})
+    actor["source"] = "agent-server"
+    try:
+        rec = await asyncio.to_thread(
+            audit.emit, et, identity="explicit", action=b.get("action"),
+            resource=b.get("resource"), trace_id=b.get("trace_id"),
+            span_id=b.get("span_id"), parent_span_id=b.get("parent_span_id"),
+            actor=actor, **sections)
+    except audit.RecordError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    finally:
+        if et == "turn.end":
+            trace.end(spawn, b.get("trace_id"))
+    return JSONResponse({"recorded": bool(rec), "event_id": (rec or {}).get("event_id")})
+
+
 routes = [
+    Route("/internal/audit/event", ingest, methods=["POST"]),
     Route("/internal/audit/export", export, methods=["POST"]),
     Route("/internal/audit/evidence", evidence, methods=["GET"]),
     Route("/internal/audit/status", status, methods=["GET"]),
