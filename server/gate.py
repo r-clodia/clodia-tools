@@ -317,6 +317,67 @@ def needs_consent(verb: str, *, globally_gated: bool, agent_gated: bool,
     return True
 
 
+# ── Approve with modified arguments (clodia-platform#448) ───────────────────
+# Human oversight includes correcting before approving: the recipient of an
+# email, the text of a message. Only the fields below can be corrected, per
+# verb, and only on a VERB gate: a destination gate (`egress:…`) asks «may data
+# go THERE?», and editing the destination would answer a different question
+# than the one that was asked. A corrected call is re-judged by the reference
+# monitor on its new arguments (the destination check runs after the gate).
+EDITABLE_ARGS: dict[str, tuple[str, ...]] = {
+    "email.send": ("to", "cc", "subject", "body"),
+    "email.reply": ("body", "cc"),
+    "telegram.send": ("text",),
+    "web.post": ("body",),
+    "gdrive.upload": ("name",),
+    "github.pull_request": ("title", "body"),
+}
+
+
+def editable_of(verb: str, arguments: dict | None) -> dict | None:
+    """The current values of the editable fields of a call, or None."""
+    fields = EDITABLE_ARGS.get(verb)
+    if not fields or not isinstance(arguments, dict):
+        return None
+    out = {f: arguments.get(f) for f in fields if f in arguments}
+    return out or None
+
+
+def validate_modified(verb: str, modified) -> dict | None:
+    """Keep only editable fields with plain values; refuse anything else."""
+    if not modified:
+        return None
+    if not isinstance(modified, dict):
+        raise PermissionError("modified: deve essere un oggetto")
+    allowed = set(EDITABLE_ARGS.get(verb, ()))
+    extra = set(modified) - allowed
+    if extra:
+        raise PermissionError(f"modified: campi non modificabili per {verb}: {sorted(extra)}")
+    scalar = (str, int, float, bool, type(None))
+    for k, v in modified.items():
+        if isinstance(v, list):
+            # A list (e.g. several recipients) holds plain values only: no
+            # nested list or object can ride a correction into the call.
+            if not all(isinstance(x, (str, int, float, bool)) for x in v):
+                raise PermissionError(f"modified: elemento non ammesso nella lista '{k}'")
+        elif not isinstance(v, scalar):
+            raise PermissionError(f"modified: valore non ammesso per '{k}'")
+    return dict(modified)
+
+
+def args_hash(arguments: dict | None) -> str:
+    """Hash of a call's arguments, to bind a correction to the request the
+    human saw (#448). Canonical JSON; a pure hash, nothing is kept."""
+    import hashlib
+    import json as _json
+    try:
+        raw = _json.dumps(arguments or {}, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        raw = repr(arguments)
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 # ── Audit of the gate lifecycle (clodia-platform#432) ───────────────────────
 # The stores below keep CURRENT state only: a consumed or revoked consent is
 # deleted, and a decided request leaves the queue. Without these events nothing
@@ -409,10 +470,19 @@ def _revoke_jti(jti: str) -> None:
 
 def grant(agent: str, instance: str, verb: str, token: str, *,
           decided_by: str = "", decided_by_role: str | None = None,
-          chat: Optional[str] = None) -> dict:
+          chat: Optional[str] = None, modified: dict | None = None,
+          args_hash: str | None = None) -> dict:
     """Registra un consenso per (agent, instance, verb) da una capability ccap1
     firmata dalla CA. Verifica firma + agente + `cap`=gate:<verb>. Memorizza jti+exp
-    autoritativi dal payload firmato."""
+    autoritativi dal payload firmato.
+
+    A correction (`modified`, #448) is bound to the request the human saw:
+    that request must still be pending, and the consent stores the hash of
+    ITS arguments. The dispatch applies the correction only to a call with the
+    same arguments — a correction arriving after the wait timed out, or meant
+    for another spawn's call of the same verb, is never merged into a different
+    call. `args_hash`, when the approver's client passes it (the value it was
+    shown in the pending list), must match the pending request too."""
     payload = pki_verify.verify_capability(token)  # solleva se firma/scadenza KO
     if payload.get("agent") != agent:
         raise PermissionError("capability intestata ad altro agente")
@@ -422,9 +492,24 @@ def grant(agent: str, instance: str, verb: str, token: str, *,
     now = time.time()
     _expire_consents(d, now)
     d = {k: v for k, v in d.items() if float((v or {}).get("exp", 0)) > now}  # prune
+    modified = validate_modified(verb, modified)
+    bound = None
+    if modified:
+        pending = _load(_req_path()).get(_key(agent, instance, verb)) or {}
+        if not pending or now - float(pending.get("at", 0)) > _REQ_TTL:
+            raise PermissionError("modified: la richiesta a cui si riferisce la correzione "
+                                  "non è più in attesa")
+        bound = pending.get("args_hash")
+        if not bound:
+            raise PermissionError("modified: la richiesta non porta l'hash dei suoi "
+                                  "argomenti, la correzione non è vincolabile")
+        if args_hash and args_hash != bound:
+            raise PermissionError("modified: la richiesta è cambiata da quando è stata "
+                                  "mostrata")
     d[_key(agent, instance, verb)] = {
         "exp": float(payload.get("exp", 0)), "jti": str(payload.get("jti") or ""),
-        "by": str(payload.get("by") or ""), "token": token, "at": now}
+        "by": str(payload.get("by") or ""), "token": token, "at": now,
+        **({"modified": modified, "args_hash": bound} if modified else {})}
     _save(_store_path(), d)
     by = str(payload.get("by") or "")
     if chat is None:
@@ -433,11 +518,18 @@ def grant(agent: str, instance: str, verb: str, token: str, *,
            actor={"type": "human", "id": by or decided_by, "role": decided_by_role},
            chat=chat,
            authorization={"actor": by or decided_by, "role": decided_by_role,
-                          "result": "approved", "scope": _consent_scope(verb),
+                          "result": "modified" if modified else "approved",
+                          "modified_fields": sorted(modified) if modified else None,
+                          "scope": _consent_scope(verb),
                           "jti": str(payload.get("jti") or ""),
                           "expires_at": int(float(payload.get("exp", 0)))})
-    return {"agent": agent, "instance": instance, "verb": verb,
-            "expires_in_s": int(float(payload.get("exp", 0)) - now)}
+    out = {"agent": agent, "instance": instance, "verb": verb,
+           "expires_in_s": int(float(payload.get("exp", 0)) - now)}
+    if modified:
+        # The confirmation the approver's client checks: what will be applied.
+        out.update({"modified": modified, "modified_fields": sorted(modified),
+                    "args_hash": bound})
+    return out
 
 
 def _expire_consents(d: dict, now: float) -> None:
@@ -542,7 +634,8 @@ def _req_path() -> Path:
 
 def request(agent: str, instance: str, verb: str, *, context: Optional[str] = None,
             human: Optional[str] = None, chat: Optional[str] = None,
-            mode: str = "sync", reason: str = "") -> dict:
+            mode: str = "sync", reason: str = "", editable: dict | None = None,
+            args_hash: str | None = None) -> dict:
     """Crea/aggiorna una richiesta di gate PENDING per (agent, instance, verb).
     Nessuna restrizione su CHI richiede: il gate è sul verbo (che il richiedente
     ha già). `chat`/`context` = dove approvare; `mode` = sync|async."""
@@ -554,7 +647,9 @@ def request(agent: str, instance: str, verb: str, *, context: Optional[str] = No
     renewed = rid in d
     d[rid] = {"agent": agent, "instance": instance or "-", "verb": verb,
               "context": context, "human": human, "chat": chat, "mode": mode,
-              "reason": (reason or "")[:300], "at": now}
+              "reason": (reason or "")[:300], "at": now,
+              **({"editable": editable} if editable else {}),
+              **({"args_hash": args_hash} if args_hash else {})}
     _save(_req_path(), d)
     if not renewed:
         from .audit import keep as content_hash  # the reason goes to the evidence store (#445)
@@ -595,7 +690,10 @@ def list_requests() -> list:
              "verb": v["verb"], "context": v.get("context"), "human": v.get("human"),
              "class": gate_class(v["verb"]),
              "chat": v.get("chat"), "mode": v.get("mode", "sync"),
-             "reason": v.get("reason", ""), "age_s": int(now - float(v.get("at", 0)))}
+             "reason": v.get("reason", ""), "age_s": int(now - float(v.get("at", 0))),
+             # What the approver may correct before approving (#448), and the
+             # hash of the arguments shown, which binds a correction to them.
+             "editable": v.get("editable"), "args_hash": v.get("args_hash")}
             for k, v in live.items()]
 
 
