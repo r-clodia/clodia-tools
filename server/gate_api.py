@@ -67,7 +67,8 @@ async def grant(request: Request):
         return JSONResponse({"error": "agent/verb/token richiesti"}, status_code=400)
     try:
         res = gate.grant(agent, instance, verb, token, decided_by=principal,
-                         decided_by_role=_role(request), modified=body.get("modified"))
+                         decided_by_role=_role(request), modified=body.get("modified"),
+                         args_hash=body.get("args_hash"))
     except PermissionError as e:
         LOG.warning("gate grant rifiutato %s@%s:%s — %s", agent, instance, verb, e)
         return JSONResponse({"error": "bad_capability", "detail": str(e)}, status_code=400)

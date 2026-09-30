@@ -3179,11 +3179,13 @@ async def _require_gate_consent(
                 return {"delegated": True, "principal": _d.get("principal")}
         except Exception:  # noqa: BLE001 — la delega è additiva: su errore, gate normale
             pass
+    _editable = _gate.editable_of(gate_key, arguments)
+    _cur_hash = _gate.args_hash(arguments) if arguments is not None else None
     if not _gate.active(agent, inst, gate_key):
         req = _gate.request(agent, inst, gate_key, context=current_chat(),
                             human=current_principal(), chat=current_chat(),
-                            reason=reason,
-                            editable=_gate.editable_of(gate_key, arguments))
+                            reason=reason, editable=_editable,
+                            args_hash=_cur_hash if _editable else None)
         # UX inline: se l'azione parte da un CANALE (chat=chan:tier:name:...),
         # posta un marker nel canale → il webui rende la card Approva/Nega
         # NELLA conversazione (come job-proposal), non nel popup staccato. I gate
@@ -3250,6 +3252,16 @@ async def _require_gate_consent(
     approval = _gate.details(agent, inst, gate_key)
     if not approval:
         raise PermissionError(f"gate: capability per '{gate_key}' non disponibile")
+    if approval.get("modified") and (not _cur_hash or approval.get("args_hash") != _cur_hash):
+        # A correction for ANOTHER call (#448): its request timed out, or it
+        # was another spawn's call of the same verb. Never merged into this
+        # one, and never run uncorrected either — the human approved the
+        # corrected version of a different request. The stale consent goes.
+        _gate.consume(agent, inst, gate_key, _why="revoke")
+        raise PermissionError(
+            f"gate: la correzione approvata per '{gate_key}' riguardava un'altra "
+            "richiesta (argomenti diversi): non applicata, consenso ritirato — "
+            "richiedi di nuovo")
     if consume:
         _gate.consume(agent, inst, gate_key)
     return approval
