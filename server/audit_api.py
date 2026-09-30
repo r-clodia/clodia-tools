@@ -59,8 +59,12 @@ async def evidence(request: Request):
     q = request.query_params
     h, tier = q.get("hash", ""), q.get("tier", "")
     reader, clearance = q.get("reader", ""), q.get("clearance", "")
-    if not (h and tier and reader):
-        return JSONResponse({"error": "hash, tier and reader are required"}, status_code=400)
+    if not (h and tier and reader and clearance):
+        return JSONResponse({"error": "hash, tier, reader and clearance are required"},
+                            status_code=400)
+    if not ev.valid_clearance(clearance):
+        # An unknown clearance is not "the highest": it is no clearance.
+        return JSONResponse({"error": "clearance must be a SEAL tier"}, status_code=400)
     outcome = "denied"
     try:
         data = await asyncio.to_thread(ev.fetch, h, tier, clearance)

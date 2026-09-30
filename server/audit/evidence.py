@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 DEFAULT_MAX = 1 << 20
+_HEX64 = re.compile(r"[0-9a-f]{64}")
 _TIERS = ("SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4")
 
 
@@ -70,15 +72,43 @@ def _key() -> bytes:
     return key
 
 
-def norm_tier(tier: str | None) -> str:
+def _known(tier: str | None) -> str | None:
     t = str(tier or "").upper().strip()
     if t.startswith("P") and t[1:].isdigit():
         t = f"SEAL-{t[1:]}"
-    return t if t in _TIERS else "SEAL-4"   # unknown tier: the most restrictive
+    return t if t in _TIERS else None
+
+
+def norm_tier(tier: str | None) -> str:
+    """The tier an object is FILED under: an unknown tier is the most
+    restrictive. Never use it for a clearance (see `clearance_rank`)."""
+    return _known(tier) or "SEAL-4"
 
 
 def _rank(tier: str | None) -> int:
     return _TIERS.index(norm_tier(tier))
+
+
+def clearance_rank(clearance: str | None) -> int:
+    """The rank a CLEARANCE grants. Unknown or empty grants nothing (-1):
+    below SEAL-0, so it reads no evidence at all. The opposite of
+    `norm_tier`, on purpose — for the object unknown means «most
+    restrictive», for the reader it means «not cleared»."""
+    k = _known(clearance)
+    return _TIERS.index(k) if k else -1
+
+
+def valid_clearance(clearance: str | None) -> bool:
+    return _known(clearance) is not None
+
+
+def max_tier(*tiers: str | None) -> str | None:
+    """The most restrictive of the given tiers; None if the first (the
+    channel) is unknown, so that the object is filed as SEAL-4."""
+    if not tiers or _known(tiers[0]) is None:
+        return None
+    known = [k for k in (_known(t) for t in tiers) if k]
+    return max(known, key=_TIERS.index)
 
 
 def _path(hexdigest: str, tier: str) -> Path:
@@ -114,9 +144,13 @@ def fetch(content_hash: str, tier: str | None, clearance: str | None) -> bytes:
 
     Raises `EvidenceDenied` without saying whether the object exists, and
     `FileNotFoundError` only to a cleared reader."""
-    if _rank(clearance) < _rank(tier):
+    if clearance_rank(clearance) < _rank(tier):
         raise EvidenceDenied("clearance insufficient for this evidence")
     hexd = content_hash.split(":", 1)[-1]
+    if not _HEX64.fullmatch(hexd):
+        # Not a sha256: nothing can be stored under it. A 404, not a 500 —
+        # and never a path built from what the caller typed.
+        raise FileNotFoundError("evidence not found")
     blob = _path(hexd, tier).read_bytes()
     if blob.startswith(b"TOO-LARGE:"):
         raise FileNotFoundError(f"evidence not kept: object larger than the limit ({blob[10:].decode()} bytes)")

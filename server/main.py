@@ -4291,8 +4291,26 @@ def _args_hash(arguments) -> str:
     return _audit.keep(raw)
 
 
+def _resource_tier_of(arguments) -> str | None:
+    """The tier named by the call's `tier` argument (a topic verb, a
+    crosstopic read). Only used to RAISE the tier evidence is filed under
+    (#445): the channel tier from the signed claim stays the floor, so an
+    agent cannot lower it by naming a lower tier."""
+    t = (arguments or {}).get("tier") if isinstance(arguments, dict) else None
+    return str(t) if isinstance(t, str) and t.strip() else None
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    from . import audit as _audit
+    tok = _audit.set_resource_tier(_resource_tier_of(arguments))
+    try:
+        return await _call_tool_recorded(name, arguments)
+    finally:
+        _audit.reset_resource_tier(tok)
+
+
+async def _call_tool_recorded(name: str, arguments: dict) -> list[TextContent]:
     from . import __version__ as _gw_version
     from . import audit as _audit
     import asyncio as _aio

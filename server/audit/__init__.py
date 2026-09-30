@@ -21,6 +21,7 @@ every verb off on a full disk is a decision for the owner, not a default.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import threading
@@ -117,8 +118,22 @@ def emit(event_type: str, *, identity: str = "claims", **fields) -> dict | None:
         return None
 
 
-def current_tier() -> str | None:
-    """The tier of the request being served (signed `chat` claim, else scope tier)."""
+#: The tier of the RESOURCE the current call touches (e.g. the topic of a
+#: crosstopic read), set by the dispatch. It can only raise the tier evidence
+#: is filed under, never lower it below the channel's.
+_RESOURCE_TIER: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
+    "audit_resource_tier", default=None)
+
+
+def set_resource_tier(tier: str | None):
+    return _RESOURCE_TIER.set(tier)
+
+
+def reset_resource_tier(token) -> None:
+    _RESOURCE_TIER.reset(token)
+
+
+def _channel_tier() -> str | None:
     try:
         from .. import whitelist as _wl
         parts = str(_wl.current_chat() or "").split(":")
@@ -127,6 +142,15 @@ def current_tier() -> str | None:
         return _wl.current_scope_tier()
     except Exception:  # noqa: BLE001
         return None
+
+
+def current_tier() -> str | None:
+    """The tier evidence of the current request is filed under:
+    max(channel tier — signed `chat` claim, else scope tier — , tier of the
+    resource the call touches). A SEAL-3 topic read from a SEAL-1 channel is
+    SEAL-3 evidence. None (→ SEAL-4) when the channel tier is unknown."""
+    from . import evidence
+    return evidence.max_tier(_channel_tier(), _RESOURCE_TIER.get())
 
 
 def keep(data: bytes | str, tier: str | None = None) -> str:

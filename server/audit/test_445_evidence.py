@@ -108,6 +108,51 @@ class TrailToEvidenceTests(_Env):
                          b'{"sent": true}')
 
 
+    def _call(self, chat_tier: str, arguments: dict) -> dict:
+        tok = {**TOKEN, "chat": f"chan:{chat_tier}:ch:clodia"}
+
+        async def inner(name, arguments):
+            return [TextContent(type="text", text='{"text": "riservato"}')]
+
+        async def go():
+            with ClaimsContext(tok, "t"), patch.object(main, "_call_tool_unaudited", inner):
+                return await main.call_tool("topic.read_file", arguments)
+        asyncio.run(go())
+        return self.events("tool.result")[-1]
+
+    def test_a_crosstopic_read_is_filed_under_the_resource_tier(self) -> None:
+        # A SEAL-3 topic read from a SEAL-1 channel is SEAL-3 evidence.
+        res = self._call("SEAL-1", {"tier": "SEAL-3", "name": "vault", "path": "files/x"})
+        h = res["result"]["output_hash"]
+        self.assertEqual(evidence.fetch(h, "SEAL-3", "SEAL-3"), b'{"text": "riservato"}')
+        with self.assertRaises(FileNotFoundError):
+            evidence.fetch(h, "SEAL-1", "SEAL-4")
+        with self.assertRaises(evidence.EvidenceDenied):
+            evidence.fetch(h, "SEAL-3", "SEAL-1")
+
+    def test_an_argument_cannot_lower_the_channel_tier(self) -> None:
+        res = self._call("SEAL-3", {"tier": "SEAL-0", "name": "pub", "path": "files/x"})
+        h = res["result"]["output_hash"]
+        self.assertEqual(evidence.fetch(h, "SEAL-3", "SEAL-3"), b'{"text": "riservato"}')
+        with self.assertRaises(FileNotFoundError):
+            evidence.fetch(h, "SEAL-0", "SEAL-4")
+
+
+class ClearanceTests(_Env):
+    def test_an_unknown_or_empty_clearance_reads_nothing(self) -> None:
+        h = evidence.keep(b"public", "SEAL-0")
+        for bad in ("", None, "SEAL-9", "admin", "top-secret"):
+            with self.assertRaises(evidence.EvidenceDenied, msg=repr(bad)):
+                evidence.fetch(h, "SEAL-0", bad)
+        self.assertEqual(evidence.fetch(h, "SEAL-0", "P0"), b"public")
+
+    def test_an_unknown_tier_is_still_filed_as_the_most_restrictive(self) -> None:
+        h = evidence.keep(b"x", "weird")
+        with self.assertRaises(evidence.EvidenceDenied):
+            evidence.fetch(h, "weird", "SEAL-3")
+        self.assertEqual(evidence.fetch(h, "weird", "SEAL-4"), b"x")
+
+
 class ApiTests(_Env):
     def test_reading_evidence_is_itself_an_event(self) -> None:
         h = evidence.keep(b"secret", "SEAL-2")
@@ -123,6 +168,26 @@ class ApiTests(_Env):
         self.assertEqual([(e["actor"]["id"], e["event"]["action"]) for e in reads],
                          [("auditor", "served"), ("intern", "denied")])
         self.assertEqual(c.get("/internal/audit/evidence").status_code, 401)
+
+
+    def test_clearance_is_required_and_must_be_a_tier(self) -> None:
+        h = evidence.keep(b"secret", "SEAL-0")
+        c = TestClient(Starlette(routes=audit_api.routes))
+        hdr = {"x-orchestrator-secret": "s"}
+        base = {"hash": h, "tier": "SEAL-0", "reader": "r"}
+        self.assertEqual(c.get("/internal/audit/evidence", headers=hdr,
+                               params=base).status_code, 400)
+        self.assertEqual(c.get("/internal/audit/evidence", headers=hdr,
+                               params={**base, "clearance": "root"}).status_code, 400)
+
+    def test_a_hash_that_is_not_hex_is_a_404(self) -> None:
+        c = TestClient(Starlette(routes=audit_api.routes))
+        hdr = {"x-orchestrator-secret": "s"}
+        for bad in ("sha256:../../audit-key/evidence.key", "sha256:zz", "nothex"):
+            r = c.get("/internal/audit/evidence", headers=hdr,
+                      params={"hash": bad, "tier": "SEAL-0", "reader": "r",
+                              "clearance": "SEAL-4"})
+            self.assertEqual(r.status_code, 404, bad)
 
 
 if __name__ == "__main__":
