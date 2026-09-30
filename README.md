@@ -57,6 +57,13 @@ agent (clodia-logic / clodia-web)  ──  Authorization: Bearer ckt1.<signed to
   under Object Lock) so that a cut tail is detectable too. Content never enters
   the trail, only hashes. `python -m server.audit.verify <store>` checks a store
   offline. Design: clodia-platform#425.
+  A signed export (`POST /internal/audit/export`, #447) is a bundle that verifies
+  with its own bundled verifier. An auditor must bring two things the bundle
+  cannot prove about itself: the audit public key or its fingerprint, obtained
+  out of band (the `key_id` of `GET /internal/audit/status`), passed with
+  `--pubkey` or compared with the `key_id` of the report; and the checkpoints
+  read from the WORM storage, passed with `--checkpoints` — without them a cut
+  tail is not detectable.
 
 The rules themselves are not restated here. They are specified in
 **[`docs/specification.md`](https://github.com/r-clodia/clodia-platform/blob/main/docs/specification.md)**,
