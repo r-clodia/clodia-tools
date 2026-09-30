@@ -128,6 +128,17 @@ class PrecedenteTests(Base):
              "message_id": "20260930-180000-abcd"}, by="davide")
 
 
+class ListaTests(Base):
+    def test_the_goal_is_in_the_topic_listing(self):
+        """Chi sorveglia gli obiettivi fermi deve trovarli senza aprire ogni
+        topic: una scansione periodica che apre tutto è la stessa spesa che
+        `light` è nato per togliere."""
+        self._pin()
+        riga = next(r for r in self.svc.list() if r["name"] == "progetto")
+        self.assertEqual(riga["goal"]["state"], "pinned")
+        self.assertIn("updated_at", riga)  # serve a capire da quanto è fermo
+
+
 class UnpinTests(Base):
     def test_unpin_removes_the_goal(self):
         """Togliere il pin è l'atto che ferma l'esecuzione della strategia:

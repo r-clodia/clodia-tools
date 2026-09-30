@@ -2339,6 +2339,11 @@ class TopicService:
                     # per chi non le guarda.
                     "logo": m.get("logo"),
                     "channel": m.get("channel"),
+                    # L'obiettivo è nella proiezione perché chi sorveglia i goal
+                    # fermi (clodia-platform#457) deve poterli trovare SENZA
+                    # aprire ogni topic: una scansione periodica che apre tutto
+                    # è la stessa spesa che `light` è nato per togliere.
+                    "goal": m.get("goal"),
                     "updated_at": info["updated_at"],
                     # `recent_files` NON è più qui. Era calcolato con una
                     # chiamata a Drive per topic, trasportato fino a
