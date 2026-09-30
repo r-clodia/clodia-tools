@@ -130,7 +130,8 @@ def _with_trace(fields: dict) -> dict:
     `traceparent` is the caller's word: on the same trace it is a closer
     parent (a runtime span under the turn span), on another trace it becomes a
     link (the runtime's own OTel trace), and it names the trace only when no
-    spawn is behind the request (an internal call of the agent-server)."""
+    spawn is behind the request AND the request authenticated as the
+    agent-server or the egress proxy (`trace.request_trusted`)."""
     from . import trace as _trace
     try:
         from .. import whitelist as _wl
@@ -144,7 +145,9 @@ def _with_trace(fields: dict) -> dict:
         fields["trace_id"] = cur[0]
         if not fields.get("parent_span_id"):
             fields["parent_span_id"] = req[1] if req and req[0] == cur[0] else cur[1]
-    elif req and not spawn:
+    elif req and not spawn and _trace.request_trusted():
+        # Only a paired component (agent-server, proxy) may NAME the trace of
+        # a spawn-less event; anyone else's header stays a link below.
         fields["trace_id"] = req[0]
         if not fields.get("parent_span_id"):
             fields["parent_span_id"] = req[1]

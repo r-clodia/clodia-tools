@@ -9,7 +9,6 @@ its own access rule and its own audit event.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import os
 
 from starlette.requests import Request
@@ -17,6 +16,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from . import audit
+from .audit import trace
 
 
 def _authorized(request: Request) -> bool:
@@ -24,7 +24,7 @@ def _authorized(request: Request) -> bool:
     if not expected:
         return False  # fail-closed
     got = (request.headers.get("x-orchestrator-secret") or "").strip()
-    return bool(got) and hmac.compare_digest(got, expected)
+    return trace.secret_equal(got, expected)   # never raises on non-ASCII
 
 
 async def status(request: Request):

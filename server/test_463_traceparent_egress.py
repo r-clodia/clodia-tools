@@ -59,8 +59,10 @@ class TraceparentOnTheTrailTests(_AuditEnv):
             routes=[Route("/e", emit_one, methods=["POST"])],
             middleware=[Middleware(trace.TraceparentMiddleware)]))
 
-    def post(self, *, spawn: bool, tp: str | None) -> dict:
+    def post(self, *, spawn: bool, tp: str | None, paired: dict | None = None) -> dict:
         h = {"traceparent": tp} if tp else {}
+        # The agent-server's internal calls carry its secret (see _AuditEnv).
+        h.update(paired if paired is not None else ({} if spawn else self.h))
         self.app.post("/e" + ("?spawn=1" if spawn else ""), headers=h)
         return self.events()[-1]
 
@@ -68,6 +70,23 @@ class TraceparentOnTheTrailTests(_AuditEnv):
         ev = self.post(spawn=False, tp=f"00-{TRACE}-{SPAN}-01")
         self.assertEqual((ev["trace_id"], ev["parent_span_id"]), (TRACE, SPAN))
         self.assertNotIn("links", ev)
+
+    def test_the_proxy_is_a_paired_caller_too(self) -> None:
+        with patch.dict(os.environ, {"CLODIA_EGRESS_PROXY_SECRET": PROXY_SECRET}):
+            ev = self.post(spawn=False, tp=f"00-{TRACE}-{SPAN}-01",
+                           paired={"x-egress-proxy-secret": PROXY_SECRET})
+        self.assertEqual(ev["trace_id"], TRACE)
+
+    def test_an_unauthenticated_spawnless_call_cannot_name_a_trace(self) -> None:
+        # #470 review: without a verified spawn AND without the agent-server's
+        # (or the proxy's) secret, the header must not place the event in
+        # someone else's turn. It is kept as a link, the caller's word.
+        for paired in ({}, {"x-orchestrator-secret": "wrong"},
+                       {"x-orchestrator-secret": "sé".encode("latin-1")}, {"x-egress-proxy-secret": "s"}):
+            ev = self.post(spawn=False, tp=f"00-{TRACE}-{SPAN}-01", paired=paired)
+            self.assertNotIn("trace_id", ev, paired)
+            self.assertNotIn("parent_span_id", ev, paired)
+            self.assertEqual(ev["links"][0]["trace_id"], TRACE, paired)
 
     def test_under_a_turn_a_foreign_traceparent_is_a_link_not_the_trace(self) -> None:
         trace.start("clodia-320", TRACE, SPAN)
@@ -114,6 +133,11 @@ class EgressRecordTests(_AuditEnv):
         env = patch.dict(os.environ, {"CLODIA_EGRESS_PROXY_SECRET": PROXY_SECRET})
         env.start()
         self.addCleanup(env.stop)
+        self.now = [1000.0]
+        den = patch.object(egress_proxy_api, "_denials",
+                           egress_proxy_api._Denials(clock=lambda: self.now[0]))
+        den.start()
+        self.addCleanup(den.stop)
         self.proxy = TestClient(Starlette(routes=egress_proxy_api.routes))
         self.ph = {"x-egress-proxy-secret": PROXY_SECRET}
 
@@ -173,6 +197,93 @@ class EgressRecordTests(_AuditEnv):
         with patch.dict(os.environ, {"CLODIA_EGRESS_PROXY_SECRET": ""}):
             self.assertEqual(self.proxy.post("/internal/egress/record", json=body,
                                              headers=self.ph).status_code, 401)
+
+    def test_a_non_ascii_secret_is_a_401_not_a_500(self) -> None:
+        body = {"host": "a.b", "port": 443, "method": "CONNECT", "allowed": True}
+        for got in ("prox\u00e9-s", "\u00ff" * 8):
+            r = self.proxy.post("/internal/egress/record", json=body,
+                                headers={"x-egress-proxy-secret": got.encode("latin-1")})
+            self.assertEqual(r.status_code, 401, got)
+        r = self.c.post("/internal/audit/checkpoint",
+                        headers={"x-orchestrator-secret": "\u00e9".encode("latin-1")})
+        self.assertEqual(r.status_code, 401)
+        with patch.dict(os.environ, {"CLODIA_EGRESS_PROXY_SECRET": "s\u00e9cret"}):
+            r = self.proxy.post("/internal/egress/record", json=body,
+                                headers={"x-egress-proxy-secret": "s\u00e9cret".encode("utf-8")})
+            self.assertEqual(r.status_code, 401)   # latin-1 decoded: not equal, no crash
+
+    def test_a_non_ascii_or_malformed_tag_is_unverified_not_an_error(self) -> None:
+        good = trace.egress_tag("clodia-320")
+        for tag in ("\u00e9" * 32, good[:-1] + "\u00e9", good + "\x00", 42, ["x"], {}):
+            self.assertFalse(trace.verify_egress("clodia-320", tag), repr(tag))
+            out = self.report(spawn="clodia-320", tag=tag)
+            self.assertEqual(out["attribution"], "unverified", repr(tag))
+        self.assertTrue(trace.verify_egress("clodia-320", f" {good.upper()} "))
+        self.assertTrue(trace.secret_equal("\u00e9", "\u00e9"))
+        self.assertFalse(trace.secret_equal("", ""))
+        self.assertFalse(trace.secret_equal("\u00e9", "e"))
+
+    def test_a_trailing_newline_is_not_a_host_nor_an_id(self) -> None:
+        for host in ("api.anthropic.com\n", "a.b\r\n", "a.b\x00"):
+            body = {"host": host, "port": 443, "method": "CONNECT", "allowed": True}
+            r = self.proxy.post("/internal/egress/record", headers=self.ph, json=body)
+            self.assertEqual(r.status_code, 400, repr(host))
+        self.assertFalse(trace.valid_trace_id(TRACE + "\n"))
+        self.assertFalse(trace.valid_span_id(SPAN + "\n"))
+        self.assertFalse(trace.valid_spawn_label("clodia-320\n"))
+        self.assertIsNone(trace.parse_traceparent(f"00-{TRACE}-{SPAN}-01\n\n\x00"))
+
+    def test_repeated_denials_are_one_event_and_a_count(self) -> None:
+        deny = {"host": "evil.example", "allowed": False, "reason": "filtered"}
+        first = self.report(**deny)
+        self.assertTrue(first["recorded"])
+        n0 = len(self.events())
+        for _ in range(50):
+            out = self.report(**deny)
+            self.assertEqual((out["recorded"], out["coalesced"], out["event_id"]),
+                             (False, True, first["event_id"]))
+        self.assertEqual(len(self.events()), n0)            # the chain did not grow
+        # a different destination, and an allowed request, are not coalesced
+        self.assertTrue(self.report(host="other.example", allowed=False)["recorded"])
+        self.assertTrue(self.report()["recorded"])
+        self.assertTrue(self.report()["recorded"])
+        # the window closes: the next report writes the summary of the repeats
+        self.now[0] += 61
+        self.report()
+        summary = [e for e in self.events() if (e.get("decision") or {}).get("coalesced")]
+        self.assertEqual(len(summary), 1)
+        d = summary[0]["decision"]
+        self.assertEqual((d["count"], d["first_event_id"], d["reason"], d["allowed"]),
+                         (50, first["event_id"], "filtered", False))
+        self.assertEqual(summary[0]["event"]["resource"], "evil.example:443")
+        # other.example had no repeats: no summary for it; a new window records again
+        self.assertTrue(self.report(**deny)["recorded"])
+
+    def test_denials_are_coalesced_per_source(self) -> None:
+        tag = trace.egress_tag("clodia-320")
+        deny = {"host": "evil.example", "allowed": False, "reason": "filtered"}
+        self.assertTrue(self.report(**deny)["recorded"])
+        # the same destination from a verified spawn is another source
+        self.assertTrue(self.report(spawn="clodia-320", tag=tag, **deny)["recorded"])
+        self.assertTrue(self.report(spawn="clodia-320", tag=tag, **deny)["coalesced"])
+
+    def test_varying_the_host_does_not_escape_the_limit(self) -> None:
+        tag = trace.egress_tag("clodia-320")
+        with patch.dict(os.environ, {"CLODIA_EGRESS_DENY_BURST": "5"}):
+            n0 = len(self.events())
+            outs = [self.report(spawn="clodia-320", tag=tag, host=f"h{i}.evil.example",
+                                allowed=False, reason="filtered") for i in range(40)]
+            self.assertEqual(sum(o["recorded"] for o in outs), 5)
+            self.assertEqual(len(self.events()) - n0, 5)
+            egress_proxy_api._denials.flush()
+        over = [e for e in self.events() if (e.get("decision") or {}).get("reason") == "rate_limited"]
+        self.assertEqual(len(over), 1)
+        self.assertEqual(over[0]["decision"]["count"], 35)
+        self.assertEqual(over[0]["agent"]["spawn"], "clodia-320")
+
+    def test_an_address_refusal_keeps_its_reason(self) -> None:
+        self.report(host="good.example", allowed=False, reason="address")
+        self.assertEqual(self.events()[-1]["decision"], {"allowed": False, "reason": "address"})
 
     def test_malformed_reports_are_refused(self) -> None:
         for bad in ({"host": "a b"}, {"port": 0}, {"port": "x"}, {"method": "BREW"}):

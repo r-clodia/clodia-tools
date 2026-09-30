@@ -19,8 +19,11 @@ and a runtime with OTel tracing on (Claude Code) puts its own span's on every
 MCP call. It is the caller's word, so it never overrides the trace of a spawn's
 announced turn: a matching trace gives the event a closer parent span, a
 different one is kept as a span LINK — which is how a runtime's OTel span is
-joined to the gateway's event. Only a request with no spawn behind it (an
-internal call of the agent-server) takes its trace from the header.
+joined to the gateway's event. Only a request with no spawn behind it takes
+its trace from the header, and only when it is authenticated as a component
+paired with this gateway — the agent-server (`X-Orchestrator-Secret`) or the
+egress proxy (`X-Egress-Proxy-Secret`). Anyone else's header is at most a link:
+an unauthenticated call must not place events in another turn's trace.
 
 Egress attribution (#463). The egress proxy sees `host:port` of a CONNECT and
 nothing inside it, so the join to the turn travels in the proxy credentials:
@@ -41,19 +44,21 @@ import threading
 import time
 
 TTL_S = 6 * 3600
-_HEX32 = re.compile(r"^[0-9a-f]{32}$")
-_HEX16 = re.compile(r"^[0-9a-f]{16}$")
+# `fullmatch` everywhere below: under `match`, `$` also matches before a
+# trailing "\n", so "<32 hex>\n" would pass as a trace id.
+_HEX32 = re.compile(r"[0-9a-f]{32}")
+_HEX16 = re.compile(r"[0-9a-f]{16}")
 
 _by_spawn: dict[str, tuple[str, str, float]] = {}
 _lock = threading.Lock()
 
 
 def valid_trace_id(t: str | None) -> bool:
-    return bool(t and _HEX32.match(t) and t != "0" * 32)
+    return bool(t and _HEX32.fullmatch(t) and t != "0" * 32)
 
 
 def valid_span_id(s: str | None) -> bool:
-    return bool(s and _HEX16.match(s) and s != "0" * 16)
+    return bool(s and _HEX16.fullmatch(s) and s != "0" * 16)
 
 
 def start(spawn: str, trace_id: str, span_id: str) -> None:
@@ -84,10 +89,35 @@ def current(spawn: str | None) -> tuple[str, str] | None:
 
 
 # ── W3C traceparent (#463) ────────────────────────────────────────────────────
-_TRACEPARENT = re.compile(r"^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})(-.*)?$")
+_TRACEPARENT = re.compile(r"([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})(-[ -~]*)?")
 
 _REQUEST_PARENT: "contextvars.ContextVar[tuple[str, str] | None]" = contextvars.ContextVar(
     "audit_request_traceparent", default=None)
+#: Whether the request being served authenticated as a paired component.
+_REQUEST_TRUSTED: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "audit_request_trusted", default=False)
+
+
+def secret_equal(got: str | bytes | None, expected: str | bytes | None) -> bool:
+    """Constant-time comparison that cannot raise: `hmac.compare_digest` on a
+    `str` with a non-ASCII character is a TypeError (a 500), so both sides are
+    compared as UTF-8 bytes. Empty on either side is never equal."""
+    def b(v):
+        if isinstance(v, bytes):
+            return v
+        return (v or "").encode("utf-8", "surrogatepass")
+    g, e = b(got), b(expected)
+    return bool(g and e) and hmac.compare_digest(g, e)
+
+
+def _paired_caller(headers: dict[str, str]) -> bool:
+    """The request carries the secret of the agent-server or of the proxy."""
+    for header, var in (("x-orchestrator-secret", "CLODIA_ORCHESTRATOR_SECRET"),
+                        ("x-egress-proxy-secret", "CLODIA_EGRESS_PROXY_SECRET")):
+        expected = (os.environ.get(var) or "").strip()
+        if expected and secret_equal((headers.get(header) or "").strip(), expected):
+            return True
+    return False
 
 
 def parse_traceparent(value: str | None) -> tuple[str, str] | None:
@@ -95,7 +125,7 @@ def parse_traceparent(value: str | None) -> tuple[str, str] | None:
 
     Version `ff` is invalid; version `00` must have exactly four fields; a
     higher version may carry more (W3C Trace Context §3.2.4)."""
-    m = _TRACEPARENT.match((value or "").strip().lower())
+    m = _TRACEPARENT.fullmatch((value or "").strip().lower())
     if not m:
         return None
     version, trace_id, span_id, _flags, rest = m.groups()
@@ -110,12 +140,19 @@ def format_traceparent(trace_id: str, span_id: str, sampled: bool = True) -> str
     return f"00-{trace_id}-{span_id}-{'01' if sampled else '00'}"
 
 
-def set_request_parent(parent: tuple[str, str] | None):
-    return _REQUEST_PARENT.set(parent)
+def set_request_parent(parent: tuple[str, str] | None, trusted: bool = False):
+    return _REQUEST_PARENT.set(parent), _REQUEST_TRUSTED.set(bool(trusted))
 
 
 def reset_request_parent(token) -> None:
-    _REQUEST_PARENT.reset(token)
+    parent_tok, trusted_tok = token
+    _REQUEST_TRUSTED.reset(trusted_tok)
+    _REQUEST_PARENT.reset(parent_tok)
+
+
+def request_trusted() -> bool:
+    """True when the request authenticated as the agent-server or the proxy."""
+    return _REQUEST_TRUSTED.get()
 
 
 def request_parent() -> tuple[str, str] | None:
@@ -134,11 +171,15 @@ class TraceparentMiddleware:
             await self.app(scope, receive, send)
             return
         value = ""
+        secrets: dict[str, str] = {}
         for k, v in scope.get("headers") or []:
-            if k.decode("latin-1").lower() == "traceparent":
+            name = k.decode("latin-1").lower()
+            if name == "traceparent" and not value:
                 value = v.decode("latin-1")[:128]
-                break
-        tok = set_request_parent(parse_traceparent(value))
+            elif name in ("x-orchestrator-secret", "x-egress-proxy-secret"):
+                secrets.setdefault(name, v.decode("latin-1")[:512])
+        parent = parse_traceparent(value)
+        tok = set_request_parent(parent, bool(parent) and _paired_caller(secrets))
         try:
             await self.app(scope, receive, send)
         finally:
@@ -147,12 +188,12 @@ class TraceparentMiddleware:
 
 # ── egress attribution (#463) ─────────────────────────────────────────────────
 #: A spawn label as the agent-server writes it into the proxy URL userinfo.
-_SPAWN_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
+_SPAWN_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}")
 _EGRESS_DOMAIN = b"clodia-egress-attribution/v1|"
 
 
 def valid_spawn_label(spawn: str | None) -> bool:
-    return bool(spawn and _SPAWN_LABEL.match(spawn))
+    return bool(isinstance(spawn, str) and _SPAWN_LABEL.fullmatch(spawn))
 
 
 def egress_tag(spawn: str, secret: str | None = None) -> str | None:
@@ -168,5 +209,13 @@ def egress_tag(spawn: str, secret: str | None = None) -> str | None:
 
 
 def verify_egress(spawn: str | None, tag: str | None) -> bool:
+    """Whether `tag` is the proxy credential of `spawn`. Anything that is not
+    32 hex — including non-ASCII, which `compare_digest` would raise on — is
+    simply not a match."""
+    if not isinstance(tag, str):
+        return False
+    tag = tag.strip().lower()
+    if not _HEX32.fullmatch(tag):
+        return False
     want = egress_tag(spawn or "")
-    return bool(want and tag) and hmac.compare_digest(want, str(tag).strip().lower())
+    return bool(want) and secret_equal(want, tag)
