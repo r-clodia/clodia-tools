@@ -45,7 +45,45 @@ async def checkpoint(request: Request):
     return JSONResponse({"created": True, "seq": cp["seq"], "exports": res["exports"]})
 
 
+async def evidence(request: Request):
+    """GET /internal/audit/evidence?hash=&tier=&reader=&clearance=
+
+    The content behind a hash of the trail. The caller (clodia-logic) has
+    authenticated the human reader and passes their id and clearance; the
+    gateway enforces clearance ≥ tier and records the read — reading evidence
+    is itself an event (#425 §1.6)."""
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from starlette.responses import Response
+    from .audit import evidence as ev
+    q = request.query_params
+    h, tier = q.get("hash", ""), q.get("tier", "")
+    reader, clearance = q.get("reader", ""), q.get("clearance", "")
+    if not (h and tier and reader and clearance):
+        return JSONResponse({"error": "hash, tier, reader and clearance are required"},
+                            status_code=400)
+    if not ev.valid_clearance(clearance):
+        # An unknown clearance is not "the highest": it is no clearance.
+        return JSONResponse({"error": "clearance must be a SEAL tier"}, status_code=400)
+    outcome = "denied"
+    try:
+        data = await asyncio.to_thread(ev.fetch, h, tier, clearance)
+        outcome = "served"
+        return Response(content=data, media_type="application/octet-stream")
+    except ev.EvidenceDenied:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    except FileNotFoundError as e:
+        outcome = "not_found"
+        return JSONResponse({"error": "not_found", "detail": str(e)}, status_code=404)
+    finally:
+        await asyncio.to_thread(
+            audit.emit, "audit.evidence_read", identity="explicit", action=outcome,
+            resource=h, actor={"type": "human", "id": reader, "clearance": clearance},
+            scope={"tier": ev.norm_tier(tier)})
+
+
 routes = [
+    Route("/internal/audit/evidence", evidence, methods=["GET"]),
     Route("/internal/audit/status", status, methods=["GET"]),
     Route("/internal/audit/checkpoint", checkpoint, methods=["POST"]),
 ]

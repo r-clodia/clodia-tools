@@ -557,7 +557,7 @@ def request(agent: str, instance: str, verb: str, *, context: Optional[str] = No
               "reason": (reason or "")[:300], "at": now}
     _save(_req_path(), d)
     if not renewed:
-        from .audit import content_hash
+        from .audit import keep as content_hash  # the reason goes to the evidence store (#445)
         _audit("gate.request", "request", agent, instance or "-", verb, chat=chat,
                actor={"type": "agent", "id": agent, "on_behalf": human},
                # The agent's stated reason is free text written by the audited

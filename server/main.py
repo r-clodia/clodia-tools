@@ -4016,6 +4016,23 @@ def _crossing_max_bytes() -> int:
         return _CROSSING_MAX_BYTES_DEFAULT
 
 
+def _crossing_evidence_max() -> int | None:
+    """Byte limit of the evidence copy of a crossing file, None when off (#445)."""
+    try:
+        from .audit import evidence as _ev
+        return _ev.max_bytes() if _ev.enabled() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _crossing_keep(data: bytes) -> None:
+    try:
+        from .audit import keep as _keep
+        _keep(data)
+    except Exception:  # noqa: BLE001 - the hash is still the record
+        pass
+
+
 def _note_crossing(path=None, data: bytes | None = None, kind: str = "file",
                    trusted: bool = False) -> None:
     """Record the hash of a file about to leave. Never its name or content.
@@ -4035,6 +4052,9 @@ def _note_crossing(path=None, data: bytes | None = None, kind: str = "file",
     import hashlib as _hl
     import stat as _stat
     if data is not None:
+        ev_max = _crossing_evidence_max()
+        if ev_max is not None and len(data) <= ev_max:
+            _crossing_keep(data)
         acc.append({"kind": kind, "hash": "sha256:" + _hl.sha256(data).hexdigest(),
                     "bytes": len(data)})
         return
@@ -4062,6 +4082,10 @@ def _note_crossing(path=None, data: bytes | None = None, kind: str = "file",
             acc.append({"kind": kind, "hash": None, "error": "too_large",
                         "bytes": st.st_size})
             return
+        # A copy of what left goes to the evidence store (#445) when it fits:
+        # collected from the same read, never by opening the path again.
+        ev_max = _crossing_evidence_max()
+        buf = bytearray() if ev_max is not None and st.st_size <= ev_max else None
         h = _hl.sha256()
         size = 0
         while size <= cap:
@@ -4070,6 +4094,10 @@ def _note_crossing(path=None, data: bytes | None = None, kind: str = "file",
                 break
             h.update(chunk)
             size += len(chunk)
+            if buf is not None:
+                buf += chunk
+                if len(buf) > ev_max:
+                    buf = None
         if size > cap:  # grew while we read it
             acc.append({"kind": kind, "hash": None, "error": "too_large", "bytes": size})
             return
@@ -4078,6 +4106,8 @@ def _note_crossing(path=None, data: bytes | None = None, kind: str = "file",
         return
     finally:
         _os.close(fd)
+    if buf is not None:
+        _crossing_keep(bytes(buf))
     acc.append({"kind": kind, "hash": "sha256:" + h.hexdigest(), "bytes": size})
 
 
@@ -4155,7 +4185,7 @@ def _response_hash(result: object) -> str:
             result, sort_keys=True, ensure_ascii=False, default=str)
     except Exception:  # noqa: BLE001
         raw = repr(result)
-    return _audit.content_hash(raw)
+    return _audit.keep(raw)
 
 
 def _provenance_sources(verb: str, a: dict, result: object) -> list[dict]:
@@ -4189,7 +4219,7 @@ def _provenance_sources(verb: str, a: dict, result: object) -> list[dict]:
                 ref += f"#p{r.get('page')}"
             out.append({"ref": ref, "section_hash": _audit.content_hash(str(r.get("section")))
                         if r.get("section") else None,
-                        "content_hash": _audit.content_hash(str(r.get("text") or "")),
+                        "content_hash": _audit.keep(str(r.get("text") or "")),
                         "hash_of": "chunk"})
         return out
     if verb in ("memory.read", "profile.read_file") and a.get("path"):
@@ -4226,7 +4256,7 @@ def _audit_ingress_unsafe(verb: str, a: dict, result: object, vetted) -> None:
     _audit.emit("flow.ingress", action="read", resource=verb,
                 tool={"name": verb, "source": src,
                       "vetted": {True: "vetted", False: "not_vetted"}.get(vetted, "unknown")},
-                input={"hash": _audit.content_hash(raw)})
+                input={"hash": _audit.keep(raw)})
 
 
 def _denial_class(msg: str) -> str:
@@ -4258,11 +4288,29 @@ def _args_hash(arguments) -> str:
                          ensure_ascii=False, default=str)
     except Exception:  # noqa: BLE001
         raw = repr(arguments)
-    return _audit.content_hash(raw)
+    return _audit.keep(raw)
+
+
+def _resource_tier_of(arguments) -> str | None:
+    """The tier named by the call's `tier` argument (a topic verb, a
+    crosstopic read). Only used to RAISE the tier evidence is filed under
+    (#445): the channel tier from the signed claim stays the floor, so an
+    agent cannot lower it by naming a lower tier."""
+    t = (arguments or {}).get("tier") if isinstance(arguments, dict) else None
+    return str(t) if isinstance(t, str) and t.strip() else None
 
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    from . import audit as _audit
+    tok = _audit.set_resource_tier(_resource_tier_of(arguments))
+    try:
+        return await _call_tool_recorded(name, arguments)
+    finally:
+        _audit.reset_resource_tier(tok)
+
+
+async def _call_tool_recorded(name: str, arguments: dict) -> list[TextContent]:
     from . import __version__ as _gw_version
     from . import audit as _audit
     import asyncio as _aio
@@ -4317,7 +4365,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             tool={"name": name, "version": _gw_version},
             result={"status": status, "error": err,
                     "duration_ms": int((_time.monotonic() - t0) * 1000),
-                    "output_hash": _audit.content_hash(
+                    "output_hash": _audit.keep(
                         "".join(getattr(c, "text", "") or "" for c in out))})
     except _audit.AuditWriteError:
         pass  # the action already happened; the failure is counted in status()
