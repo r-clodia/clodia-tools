@@ -40,6 +40,15 @@ def _authorize(request: Request):
     return principal, None
 
 
+def _role(request: Request) -> str | None:
+    """The deciding human's role, from the verified session token (for the audit)."""
+    auth = request.headers.get("authorization", "")
+    try:
+        return verify_session_token(auth[7:]).get("human_role") or None
+    except PermissionError:
+        return None
+
+
 async def grant(request: Request):
     """POST /internal/gate/grant {agent, instance, verb, token} — registra il
     consenso (capability ccap1 gate:<verb>). fail-closed se la firma non verifica."""
@@ -57,7 +66,8 @@ async def grant(request: Request):
     if not (agent and verb and token):
         return JSONResponse({"error": "agent/verb/token richiesti"}, status_code=400)
     try:
-        res = gate.grant(agent, instance, verb, token)
+        res = gate.grant(agent, instance, verb, token, decided_by=principal,
+                         decided_by_role=_role(request))
     except PermissionError as e:
         LOG.warning("gate grant rifiutato %s@%s:%s — %s", agent, instance, verb, e)
         return JSONResponse({"error": "bad_capability", "detail": str(e)}, status_code=400)
@@ -79,7 +89,8 @@ async def deny(request: Request):
     agent = (body.get("agent") or "").strip()
     instance = (body.get("instance") or "-").strip() or "-"
     verb = (body.get("verb") or "").strip()
-    removed = gate.resolve_request(agent, instance, verb)
+    removed = gate.resolve_request(agent, instance, verb, outcome="rejected",
+                                   decided_by=principal, decided_by_role=_role(request))
     LOG.info("GATE richiesta NEGATA %s@%s:%s da %s: %s", agent, instance, verb,
              principal, removed)
     return JSONResponse({"ok": True, "denied": removed})

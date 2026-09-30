@@ -3165,6 +3165,14 @@ async def _require_gate_consent(
                 _lg.getLogger("clodia-tools").info(
                     "gate '%s' autorizzato da delega permanente di '%s'",
                     gate_key, _d.get("principal"))
+                # A standing delegation decides in place of a human click: it
+                # is still a decision, and it must say whose (#432).
+                _gate._audit("gate.decision", "delegate", agent, inst, gate_key,
+                             chat=current_chat(),
+                             actor={"type": "human", "id": _d.get("principal")},
+                             authorization={"actor": _d.get("principal"),
+                                            "result": "delegated",
+                                            "delegation_exp": _d.get("exp")})
                 return {"delegated": True, "principal": _d.get("principal")}
         except Exception:  # noqa: BLE001 — la delega è additiva: su errore, gate normale
             pass
@@ -3233,7 +3241,7 @@ async def _require_gate_consent(
             if not _gate.request_pending(agent, inst, gate_key):
                 raise PermissionError(f"gate: '{gate_key}' negato dall'operatore")
         if not approved:
-            _gate.resolve_request(agent, inst, gate_key)
+            _gate.resolve_request(agent, inst, gate_key, outcome="timeout")
             raise PermissionError(f"gate: '{gate_key}' non approvato entro il tempo limite")
     approval = _gate.details(agent, inst, gate_key)
     if not approval:

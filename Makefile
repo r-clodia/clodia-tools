@@ -12,6 +12,13 @@ PY ?= $(shell test -x .venv/bin/python && echo .venv/bin/python || echo python3)
 # workflow dà già a `CLODIA_TOOLS_MCP_URL`, spostata dove vale anche in locale.
 export AGENT_SERVER_URL ?= http://127.0.0.1:9
 
+# The audit trail (clodia-platform#431) writes wherever the gateway state dir
+# is — `/datadir` by default. The suite exercises gates and verbs that emit
+# events, so it gets a throw-away store of its own, never the instance's.
+TEST_AUDIT := $(shell mktemp -d 2>/dev/null || echo /tmp/clodia-tools-test-audit)
+export CLODIA_AUDIT_DIR ?= $(TEST_AUDIT)/store
+export CLODIA_AUDIT_KEY_DIR ?= $(TEST_AUDIT)/key
+
 .PHONY: test test-verbose test-one version-check help
 
 help:

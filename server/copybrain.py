@@ -199,6 +199,6 @@ def release(arguments: dict) -> dict:
     agent, spawn = _caller_and_spawn()
     seed = _norm_seed(arguments.get("seed"))
     had = _gate.active(agent, spawn, gate_key(seed))
-    _gate.consume(agent, spawn, gate_key(seed))
+    _gate.consume(agent, spawn, gate_key(seed), _why="revoke")
     LOG.info("COPYBRAIN %s@%s ha restituito i verbi di %s", agent, spawn, seed)
     return {"released": seed, "spawn": spawn, "was_active": had}
