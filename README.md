@@ -50,6 +50,13 @@ agent (clodia-logic / clodia-web)  ──  Authorization: Bearer ckt1.<signed to
 - **Gates.** An action that crosses a boundary is held for a human. The class of
   the crossing (`system`, `walls`, `outward`) travels with the request, because
   whoever approves must not have to re-derive it — a duplicated rule diverges.
+- **Audit trail.** What the gateway certifies is appended to a hash-chained,
+  signed store in its own state volume (`server/audit/`): one canonical event
+  per line, signed with a dedicated key the agent-server cannot reach, and
+  periodic signed checkpoints exported off-system (a directory, or an S3 bucket
+  under Object Lock) so that a cut tail is detectable too. Content never enters
+  the trail, only hashes. `python -m server.audit.verify <store>` checks a store
+  offline. Design: clodia-platform#425.
 
 The rules themselves are not restated here. They are specified in
 **[`docs/specification.md`](https://github.com/r-clodia/clodia-platform/blob/main/docs/specification.md)**,
