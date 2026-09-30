@@ -226,6 +226,10 @@ def issue(tier: str, name: str, principal: str, *, provider: str,
         "created_by": by or "", "revoked": False,
     })
     _save(grants)
+    from .audit import control as _control
+    _control.safe(_control.emit, "mcp_client", "issue", gid, principal=principal,
+                  topic=f"{tier}/{name}", provider=provider,
+                  expires=grants[-1]["expires"])
     return {"id": gid, "token": token, "expires": grants[-1]["expires"],
             "tier": tier, "topic": name, "principal": principal,
             "auth": "assertion" if proxy else "bearer",
@@ -255,6 +259,10 @@ def revoke(gid: str) -> dict:
             g["revoked"] = True
             g["revoked_at"] = int(time.time())
             _save(grants)
+            from .audit import control as _control
+            _control.safe(_control.emit, "mcp_client", "revoke", gid,
+                          principal=g.get("principal"),
+                          topic=f"{g.get('tier')}/{g.get('name')}" if g.get("tier") else None)
             return {"id": gid, "revoked": True}
     raise ValueError(f"grant '{gid}' inesistente")
 

@@ -126,6 +126,9 @@ def configure(body: dict) -> dict:
         "schedule": body.get("schedule") or "0 3 * * *",  # cron: ogni notte 03:00
     }
     vault.deposit(CRED, cfg, cred_type="backup_config", grant_agents=[])
+    from .audit import control as _control
+    _control.safe(_control.emit, "backup", "configure", "restic",
+                  backend=cfg["backend"], retention=cfg["retention"], schedule=cfg["schedule"])
     # init idempotente del repository (se non esiste)
     chk = _run(["cat", "config"], cfg, timeout=120)
     if chk.returncode != 0:
@@ -221,6 +224,15 @@ def backup_targets() -> list[str]:
 
 
 def run_backup() -> dict:
+    res = _run_backup()
+    from .audit import control as _control
+    _control.safe(_control.emit, "backup", "run", "restic",
+                  ok=bool(res.get("ok")), check_rc=res.get("check_rc"),
+                  forget_rc=res.get("forget_rc"), backup_rc=res.get("backup_rc"))
+    return res
+
+
+def _run_backup() -> dict:
     """Backup completo: snapshot DB → restic backup datadir → forget retention → check."""
     cfg = _cfg()
     if not cfg:
@@ -267,6 +279,14 @@ def run_backup() -> dict:
 
 
 def restore_test() -> dict:
+    res = _restore_test()
+    from .audit import control as _control
+    _control.safe(_control.emit, "backup", "restore_test", "restic",
+                  ok=bool((res or {}).get("ok")))
+    return res
+
+
+def _restore_test() -> dict:
     """Restore-test (A.8.13): ripristina l'ultimo snapshot in dir temp e verifica
     che i file chiave esistano. Evidenza che il backup è ripristinabile."""
     cfg = _cfg()

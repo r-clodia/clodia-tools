@@ -447,6 +447,9 @@ def deposit(credential: str, bundle: dict, *, cred_type: str = "opaque",
     _audit(_caller_hint(), "deposit", credential, "OK",
            grants_after=sorted(x for x in (
                (g or {}).get("agent") for g in grants) if x))
+    from .audit import control as _control
+    _control.safe(_control.emit, "vault", "deposit", credential, type=cred_type,
+                  grants_after=sorted(x for x in ((g or {}).get("agent") for g in grants) if x))
 
 
 def set_grant(credential: str, agent: str, granted: bool,
@@ -494,6 +497,9 @@ def set_grant(credential: str, agent: str, granted: bool,
     # «nessuno l'ha toccato» da «nessuno lo sa».
     _audit(agent, "grant" if granted else "revoke", credential,
            "OK", by=_caller_hint(), was_granted=agent in prima)
+    from .audit import control as _control
+    _control.safe(_control.emit, "vault", "grant" if granted else "ungrant", credential,
+                  agent=agent, actions=actions, principals=principals, topics=topics)
 
 
 def grant_scope(credential: str) -> dict[str, dict]:
@@ -537,6 +543,8 @@ def remove(credential: str) -> bool:
     if bf.is_file():
         bf.unlink()
         removed = True
+        from .audit import control as _control
+        _control.safe(_control.emit, "vault", "remove", credential)
     policy = _load_policy()
     creds = policy.get("credentials") or {}
     if credential in creds:

@@ -102,4 +102,13 @@ def apply(svc, tier: str, name: str, new_tier: str, *, by: str, reason: str) -> 
         svc._write_meta(esito["from"], name, meta, base_version=ver)
         raise
     LOG.warning("topic riclassificato %s → %s da %s: %s", old, new, by, reason[:200])
+    # The authoritative record of a re-classification (clodia-platform#439);
+    # `tier_history` in meta.json stays as a readable projection of it. The
+    # reason is the decider's free text: its hash here.
+    from ..audit import control as _control
+    from ..audit.record import content_hash
+    _control.safe(_control.emit, "topic_tier", "reclassify", f"{esito['to']}/{name}",
+                  before=esito["from"], after=esito["to"], by=by,
+                  reason_hash=content_hash(reason) if reason else None,
+                  responsibility_accepted=True)
     return esito

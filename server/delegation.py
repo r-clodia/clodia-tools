@@ -69,6 +69,9 @@ def register(token: str) -> dict | None:
     with _store().open("a", encoding="utf-8") as f:
         f.write(json.dumps({"token": token, "principal": v["principal"],
                             "scope": v["scope"]}, ensure_ascii=False) + "\n")
+    from .audit import control as _control
+    _control.safe(_control.emit, "delegation", "register", v["principal"],
+                  scope=v.get("scope"), exp=v.get("exp"))
     return v
 
 
@@ -128,6 +131,8 @@ def revoke(principal: str, verb: str) -> bool:
         kept.append(ln)
     if removed:
         _store().write_text("\n".join(kept) + ("\n" if kept else ""), "utf-8")
+        from .audit import control as _control
+        _control.safe(_control.emit, "delegation", "revoke", principal, verb=verb)
     return removed
 
 
