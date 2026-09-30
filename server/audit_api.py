@@ -161,6 +161,15 @@ async def ingest(request: Request):
     if not et.startswith(AGENT_SERVER_TYPES):
         return JSONResponse({"error": f"type '{et}' is not the agent-server's to report"},
                             status_code=403)
+    # Idempotent on the agent-server's own `event_id` (#466): an event replayed
+    # from its outbox after a lost answer is admitted once.
+    from .audit import dedupe
+    win = dedupe.window() if dedupe.normalize(b.get("event_id")) else None
+    if win is not None:
+        # Before any side effect: a replayed turn.start must not re-open a trace.
+        dup, recorded = win.seen(b["event_id"])
+        if dup:
+            return JSONResponse({"recorded": True, "duplicate": True, "event_id": recorded})
     spawn = (b.get("agent") or {}).get("spawn")
     if et == "turn.start":
         try:
@@ -172,12 +181,20 @@ async def ingest(request: Request):
                                   "security") if isinstance(b.get(k), dict)}
     actor = dict(b.get("actor") or {"type": "service", "id": "agent-server"})
     actor["source"] = "agent-server"
+    def record():
+        return audit.emit(et, identity="explicit", action=b.get("action"),
+                          resource=b.get("resource"), trace_id=b.get("trace_id"),
+                          span_id=b.get("span_id"), parent_span_id=b.get("parent_span_id"),
+                          links=_links(b.get("links")), actor=actor, **sections)
+
     try:
-        rec = await asyncio.to_thread(
-            audit.emit, et, identity="explicit", action=b.get("action"),
-            resource=b.get("resource"), trace_id=b.get("trace_id"),
-            span_id=b.get("span_id"), parent_span_id=b.get("parent_span_id"),
-            links=_links(b.get("links")), actor=actor, **sections)
+        if win is None:
+            rec = await asyncio.to_thread(record)
+        else:
+            dup, rec, recorded = await asyncio.to_thread(win.admit, b["event_id"], record)
+            if dup:
+                return JSONResponse({"recorded": True, "duplicate": True,
+                                     "event_id": recorded})
     except audit.RecordError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     finally:
