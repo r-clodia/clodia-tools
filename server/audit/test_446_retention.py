@@ -101,5 +101,40 @@ class EvidenceRetentionTests(_Env):
         self.assertEqual(evidence.fetch(h2, "SEAL-2", "SEAL-4"), b"confidential")
 
 
+    def test_evidence_kept_again_is_not_pruned_as_old(self) -> None:
+        # First seen long ago, referenced again today: still evidence.
+        h = evidence.keep(b"still referenced", "SEAL-1")
+        old = time.time() - 400 * 86400
+        for p in evidence.root().rglob("*"):
+            if p.is_file():
+                os.utime(p, (old, old))
+        self.assertEqual(evidence.keep(b"still referenced", "SEAL-1"), h)
+        res = retention.apply()
+        self.assertEqual(res["evidence"], {})
+        self.assertEqual(evidence.fetch(h, "SEAL-1", "SEAL-4"), b"still referenced")
+
+
+class LoopTests(unittest.TestCase):
+    def test_the_first_pass_runs_shortly_after_startup(self) -> None:
+        import asyncio
+        slept: list[float] = []
+
+        async def fake_sleep(s):
+            slept.append(s)
+            if len(slept) >= 2:
+                raise asyncio.CancelledError
+
+        async def go():
+            with patch("asyncio.sleep", fake_sleep), \
+                    patch.object(retention, "apply", lambda: None):
+                try:
+                    await retention.retention_loop()
+                except asyncio.CancelledError:
+                    pass
+        asyncio.run(go())
+        self.assertEqual(slept, [retention.FIRST_PASS_DELAY, 86400])
+        self.assertLess(retention.FIRST_PASS_DELAY, 3600)
+
+
 if __name__ == "__main__":
     unittest.main()

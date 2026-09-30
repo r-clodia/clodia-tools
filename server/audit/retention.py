@@ -121,11 +121,19 @@ def apply(now: datetime | None = None) -> dict:
     return res
 
 
-async def retention_loop(interval: int = 86400) -> None:
+#: Seconds after startup before the first pass. A gateway restarted more
+#: often than once a day would otherwise never prune anything.
+FIRST_PASS_DELAY = 120
+
+
+async def retention_loop(interval: int = 86400, first_delay: int | None = None) -> None:
     import asyncio
     import logging
+    delay = FIRST_PASS_DELAY if first_delay is None else first_delay
+    delay = min(delay, interval)
     while True:
-        await asyncio.sleep(interval)
+        await asyncio.sleep(delay)
+        delay = interval
         try:
             await asyncio.to_thread(apply)
         except Exception as e:  # noqa: BLE001 - the loop must survive
