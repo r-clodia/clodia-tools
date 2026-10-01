@@ -85,6 +85,12 @@ _GATE_CLASS = {
     # scrivere oltre ai propri file, quindi lo decide l'owner dello scope, in
     # entrambe le direzioni.
     "topic.local_folder_add": GATE_WALLS, "topic.local_folder_remove": GATE_WALLS,
+    # Collegamento fra due topic (clodia-platform#477): è la stessa domanda di
+    # `add_participant` guardata dall'altro verso — invece di far entrare un
+    # agente in una stanza, fa entrare una stanza intera nel campo visivo di
+    # un'altra. Simmetrico, perché scollegare cambia chi vede cosa quanto
+    # collegare.
+    "topic.link_add": GATE_WALLS, "topic.link_remove": GATE_WALLS,
     # Whitelist egress/ingress LOCALE al topic (router-notebook R17, clodia-
     # platform#334): stessa forma di drive_folder_add/remove due righe sopra —
     # un agent può chiedere, solo l'owner dello scope allarga o restringe il
@@ -176,6 +182,11 @@ _DEFAULT_GATED_EXACT = frozenset({
     # collegarla/scollegarla è la dichiarazione di autorità, in entrambe le
     # direzioni (simmetrico come drive_folder_add/remove).
     "topic.local_folder_add", "topic.local_folder_remove",
+    # Collegare due topic apre a OGNI partecipante di ciascuno la lettura dei
+    # file dell'altro: più largo di una cartella agganciata, e per la stessa
+    # ragione simmetrico — scollegare toglie a una stanza ciò su cui stava
+    # lavorando, e nessuna delle due direzioni è una preferenza.
+    "topic.link_add", "topic.link_remove",
     # Whitelist egress/ingress LOCALE a un topic (router-notebook R17,
     # clodia-platform#334): stessa ragione di drive_folder_add/remove due
     # righe sopra — è il perimetro DI QUESTA STANZA, quindi simmetrico

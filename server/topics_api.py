@@ -465,6 +465,43 @@ async def local_folder(request: Request):
         return JSONResponse({"error": str(e)[:200]}, status_code=502)
 
 
+async def topic_link(request: Request):
+    """POST /internal/topics/{tier}/{name}/link {action, other_tier, other_name, mount}.
+
+    Collegamento fra due topic dello stesso livello SEAL
+    (clodia-platform#477): ognuno vede l'albero dati dell'altro come una
+    cartella in sola lettura. action: add|remove.
+
+    Qui passa l'OWNER dalla webui — la stessa porta di `local-folder`, con la
+    stessa autorizzazione. L'agente passa invece dai verbi `topic.link_add`/
+    `link_remove`, che sono gated: due strade, un solo servizio sotto, e la
+    regola (stesso livello, reciprocità, sola lettura) sta là sotto — non in
+    questa funzione, dove varrebbe per una sola delle due.
+    """
+    who, err = _authorize(request)
+    if err:
+        return err
+    tier = request.path_params["tier"]; name = request.path_params["name"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    svc = _service()
+    action = body.get("action")
+    try:
+        if action == "add":
+            return JSONResponse(svc.link_add(
+                tier, name, body.get("other_tier") or tier,
+                body.get("other_name") or "", body.get("mount"), by=who or ""))
+        if action == "remove":
+            return JSONResponse(svc.link_remove(tier, name, body.get("mount") or ""))
+        return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
+    except TopicError as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=400)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)[:200]}, status_code=502)
+
+
 def _telegram_binding_for(tier: str, name: str) -> tuple[str | None, dict | None]:
     """(chat_id, binding) legati a questo topic, o (None, None). Una chat →
     un solo topic, ma questo cerca l'inverso: qual è LA chat di questo topic —
@@ -1056,6 +1093,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/local-folder", local_folder, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/link", topic_link, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/telegram-link", telegram_link, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/tier", topic_tier, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/mailbox-link", mailbox_link, methods=["GET", "POST"]),

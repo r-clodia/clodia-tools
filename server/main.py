@@ -1162,6 +1162,40 @@ _TOPIC_TOOLS: list[Tool] = [
             "mount": {"type": "string", "description": "nome del mount da sganciare"}},
             "required": ["tier", "name", "mount"]},
     ),
+    # ── Collegamento fra due topic (clodia-platform#477): ognuno vede l'albero
+    # dati dell'altro come una cartella in SOLA LETTURA accanto a `local/`.
+    # Nessuna copia: i byte restano nel topic che li possiede, e con loro
+    # l'etichetta di provenienza. Solo fra topic dello STESSO livello SEAL.
+    Tool(
+        name="topic.link_add",
+        description=("Collega due topic dello stesso livello SEAL: ognuno vede "
+                     "i file dell'altro come una cartella in sola lettura "
+                     "accanto a local/, e l'altro topic diventa una fonte "
+                     "dichiarata per questo (e viceversa). Simmetrico: il "
+                     "collegamento si scrive su entrambi. Non copia niente — i "
+                     "file restano dove sono, con la loro provenienza. Per "
+                     "scrivere in un topic collegato si lavora da dentro quel "
+                     "topic. Richiede approvazione dell'owner."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "other_tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"], "description": "livello dell'altro topic: deve essere lo stesso"},
+            "other_name": {"type": "string", "description": "codename dell'altro topic"},
+            "mount": {"type": "string", "description": "nome della cartella con cui l'altro topic compare qui (default: il suo codename)"},
+        }, "required": ["tier", "name", "other_tier", "other_name"]},
+    ),
+    Tool(
+        name="topic.link_remove",
+        description=("Scollega un topic collegato: la cartella sparisce da "
+                     "entrambi i lati. Non cancella nessun file — toglie solo "
+                     "la vista. Le voci di ingresso restano: si tolgono con "
+                     "topic.ingress_remove, che è un atto a sé."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "mount": {"type": "string", "description": "nome della cartella del collegamento da togliere"}},
+            "required": ["tier", "name", "mount"]},
+    ),
     # Whitelist egress/ingress LOCALE a questo canale (router-notebook R17,
     # clodia-platform#334): a differenza di egress.allow/ingress.allow (GLOBALI,
     # per tutti gli agenti, per sempre) queste voci valgono solo dentro questo
@@ -3600,10 +3634,26 @@ def _source_vetted(verb: str, a: dict, result: object = None) -> bool | None:
         path = str((a or {}).get("path") or "").strip()
         if not path:
             return None                     # `topic.files`: elenco, nessun file
-        rel = path[len("files/"):] if path.startswith("files/") else path
-        prov = (svc.provenance_map(tier, name).get(rel) or {}).get("provenance")
+        # L'etichetta si chiede al servizio, che sa tradurre il path visto nella
+        # chiave del sidecar e sa a QUALE topic appartengono i byte: per un file
+        # letto attraverso un collegamento l'etichetta sta nel sidecar dell'altro
+        # topic, perché viaggia col file e non con la stanza che lo mostra.
+        prov = svc.provenance_of(tier, name, path)
         if prov in ("trusted", "agent"):
             return True
+        if prov == "untrusted":
+            return False
+        # Etichetta ASSENTE. Nel topic stesso resta non fidata (un file caricato
+        # prima che le etichette esistessero non è «buono» per default). Letta da
+        # un topic COLLEGATO e dichiarato fonte, invece, la stanza di cui
+        # risponde l'owner è la fonte: è ciò che il collegamento dichiara. Un
+        # file marcato `untrusted` non passa comunque da qui — sopra c'è il suo
+        # rifiuto — quindi un allegato di terzi non si ripulisce attraversando un
+        # collegamento.
+        collegato = svc.link_mount_owner(tier, name, path)
+        if collegato:
+            return _eg.is_vetted_source(f"topic:{collegato[0]}/{collegato[1]}",
+                                        scope=f"{tier}/{name}")
         return False                        # untrusted, o etichetta assente
     except Exception as e:  # noqa: BLE001 — non determinabile ≠ fidata
         LOG.warning("taint: provenienza di %s non determinabile (%s)", verb, e)
@@ -3960,6 +4010,16 @@ def _gate_effect_reason(name: str, arguments: dict) -> str:
                     f"come `local/{mount}/` nel topic "
                     f"`{a.get('tier')}/{a.get('name')}` — bind reale, non uno specchio: "
                     f"chi scrive lì dal Mac lo rende visibile a ogni agente del topic.")
+        if name == "topic.link_add":
+            return (f"collega i topic `{a.get('tier')}/{a.get('name')}` e "
+                    f"`{a.get('other_tier')}/{a.get('other_name')}`: da qui in avanti "
+                    f"OGNI partecipante di ciascuno dei due legge i file dell'altro "
+                    f"(sola lettura) e l'altro topic conta come fonte dichiarata, "
+                    f"quindi leggerlo non contaminerà più il canale.")
+        if name == "topic.link_remove":
+            return (f"scollega il topic montato come `{a.get('mount')}` da "
+                    f"`{a.get('tier')}/{a.get('name')}`: la cartella sparisce da "
+                    f"entrambi i lati. Nessun file viene cancellato.")
         if name == "topic.local_folder_remove":
             return (f"sgancia la cartella condivisa `{a.get('mount')}` dal topic "
                     f"`{a.get('tier')}/{a.get('name')}` — il contenuto reale resta "
@@ -5293,6 +5353,7 @@ _TOPIC_SCOPED_VERBS = {
     "post_message", "messages", "my_mentions", "mark_seen",
     "drive_folder_add", "drive_folder_remove",
     "local_folder_add", "local_folder_remove",
+    "link_add", "link_remove",
     "egress_add", "egress_remove", "ingress_add", "ingress_remove",
 }
 
@@ -5325,6 +5386,7 @@ _TOPIC_MUTATING_VERBS = frozenset({
     "move_file", "goal_progress",
     "drive_folder_add", "drive_folder_remove",
     "local_folder_add", "local_folder_remove",
+    "link_add", "link_remove",
     "egress_add", "egress_remove", "ingress_add", "ingress_remove",
 })
 
@@ -5900,6 +5962,14 @@ def _dispatch_topic(name: str, a: dict):
     if verb in _TOPIC_SCOPED_VERBS:
         _require_topic_member(svc, a.get("tier"), a.get("name"),
                               mutating=verb in _TOPIC_MUTATING_VERBS)
+    if verb == "link_add":
+        # DUE topic, due controlli. `_require_topic_member` guarda solo
+        # `tier`/`name`: senza questa riga, chi partecipa a una stanza sola
+        # potrebbe agganciarci qualunque altra e leggerne i file — il
+        # compartimento aggirato dal verbo che lo allarga. Il collegamento scrive
+        # anche il meta dell'altro lato, quindi è `mutating` anche là.
+        _require_topic_member(svc, a.get("other_tier"), a.get("other_name"),
+                              mutating=True)
     if verb == "suggest_team":
         # proposta di squadra: proxy read-only all'agent-server (registry+rilevanza)
         return runtime.suggest_team(a.get("tier") or "SEAL-0", a.get("description") or "")
@@ -6227,6 +6297,14 @@ def _dispatch_topic(name: str, a: dict):
         return svc.local_folder_add(a["tier"], a["name"], a.get("mount"))
     if verb == "local_folder_remove":
         return svc.local_folder_remove(a["tier"], a["name"], a["mount"])
+    # Collegamento fra topic (clodia-platform#477): vista in sola lettura
+    # sull'albero dati dell'altro, mai una copia. Gated WALLS — chi entra nel
+    # perimetro di una stanza lo decide l'owner, come per i partecipanti.
+    if verb == "link_add":
+        return svc.link_add(a["tier"], a["name"], a["other_tier"], a["other_name"],
+                            mount_name=a.get("mount"), by=agent_name() or "")
+    if verb == "link_remove":
+        return svc.link_remove(a["tier"], a["name"], a["mount"])
     # Whitelist egress/ingress locale al canale (router-notebook R17,
     # clodia-platform#334): stesso storage di egress.allow/revoke, chiave
     # scoped `<tier>/<name>` invece che globale. Il gate WALLS (owner dello
