@@ -153,6 +153,51 @@ class PkiTests(_Env):
         acts = [e["event"]["action"] for e in self.events("control.pki")]
         self.assertEqual(acts, ["issue", "reissue"])
 
+    def test_clearing_a_revocation_is_recorded(self) -> None:
+        """#466: a revoked.json that loses an entry without `control.pki
+        unrevoke` is a revocation undone off the record."""
+        from . import pki_mint
+        certs = self.base / "certs"
+        certs.mkdir()
+        rf = self.base / "revoked.json"
+        rf.write_text(json.dumps({"revoked": ["minerva", "ophelia"]}))
+
+        def fake(name, pubkey_pem="", force=False):
+            (certs / f"{name}.crt").write_bytes(f"cert-{name}".encode())
+            data = json.loads(rf.read_text())
+            data["revoked"] = [n for n in data["revoked"] if n != name]
+            rf.write_text(json.dumps(data))
+            return str(certs / f"{name}.crt")
+        wrapped = pki_mint._audited_issuer(fake)
+        with patch.object(pki_mint, "_certs_dir", return_value=certs), \
+                patch.dict(os.environ, {"CLODIA_PKI_REVOKED": str(rf)}):
+            wrapped("minerva", force=True)
+            wrapped("avvocato", force=True)       # was not revoked: no unrevoke
+        acts = [(e["event"]["action"], e["event"]["resource"])
+                for e in self.events("control.pki")]
+        self.assertEqual(acts, [("issue", "minerva"), ("unrevoke", "minerva"),
+                                ("issue", "avvocato")])
+        self.assertEqual(json.loads(rf.read_text())["revoked"], ["ophelia"])
+
+    def test_the_real_issuer_clears_and_records(self) -> None:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from . import pki_mint
+        rf = self.base / "revoked.json"
+        rf.write_text(json.dumps({"revoked": ["davide"]}))
+        with patch.dict(os.environ, {"CLODIA_SECRETS_DIR": str(self.base / "secrets"),
+                                     "CLODIA_PKI_CERTS": str(self.base / "pki" / "certs"),
+                                     "CLODIA_PKI_REVOKED": str(rf)}):
+            pki_mint.init_ca()
+            pub = Ed25519PrivateKey.generate().public_key().public_bytes(
+                serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+            pki_mint.issue_cert_for_pubkey("davide", pub.decode(), force=True)
+        ev = [e for e in self.events("control.pki") if e["event"]["action"] == "unrevoke"]
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["event"]["resource"], "davide")
+        self.assertRegex(ev[0]["result"]["cert_serial"], r"^[0-9a-f]+$")
+        self.assertEqual(json.loads(rf.read_text())["revoked"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

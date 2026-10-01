@@ -181,7 +181,14 @@ def _trace_of(scope: dict) -> str:
     Lo manda l'agent-server da `GatewayHTTP` su OGNI chiamata interna fatta
     dentro un turno. Qui non si verifica e non si autorizza niente con questo:
     è un'etichetta per i log, e per i log vale quanto vale chi la manda."""
-    return _header_of(scope, "x-clodia-trace-id", 64)
+    etichetta = _header_of(scope, "x-clodia-trace-id", 64)
+    if etichetta:
+        return etichetta
+    # Chi parla W3C (#463) e non manda l'header nostro: il trace sta nel
+    # `traceparent`. Stessa etichetta di log, stesso valore.
+    from .audit.trace import parse_traceparent
+    tp = parse_traceparent(_header_of(scope, "traceparent", 128))
+    return tp[0] if tp else ""
 
 
 def start(route: str, caller: str, trace: str = "") -> _Req:

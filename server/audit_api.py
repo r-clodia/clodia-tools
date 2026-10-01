@@ -9,7 +9,6 @@ its own access rule and its own audit event.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import os
 
 from starlette.requests import Request
@@ -17,6 +16,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from . import audit
+from .audit import trace
 
 
 def _authorized(request: Request) -> bool:
@@ -24,7 +24,7 @@ def _authorized(request: Request) -> bool:
     if not expected:
         return False  # fail-closed
     got = (request.headers.get("x-orchestrator-secret") or "").strip()
-    return bool(got) and hmac.compare_digest(got, expected)
+    return trace.secret_equal(got, expected)   # never raises on non-ASCII
 
 
 async def status(request: Request):
@@ -117,6 +117,32 @@ async def export(request: Request):
 AGENT_SERVER_TYPES = ("turn.", "model.", "route.", "control.", "human.")
 
 
+#: At most this many span links per reported event, and only scalar attributes.
+MAX_LINKS = 8
+
+
+def _links(raw) -> list | None:
+    """W3C span links of a reported event (#463), e.g. a turn linked to the
+    runtime's own OTel trace. Malformed entries are dropped, not recorded."""
+    from .audit import trace
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for item in raw[:MAX_LINKS]:
+        if not isinstance(item, dict):
+            continue
+        tid, sid = item.get("trace_id"), item.get("span_id")
+        if not trace.valid_trace_id(tid) or (sid is not None and not trace.valid_span_id(sid)):
+            continue
+        attrs = {str(k)[:64]: v for k, v in (item.get("attributes") or {}).items()
+                 if isinstance(v, (str, int, float, bool))} if isinstance(
+                     item.get("attributes"), dict) else {}
+        out.append({"trace_id": tid, "span_id": sid,
+                    "attributes": {k: (v[:128] if isinstance(v, str) else v)
+                                   for k, v in list(attrs.items())[:8]} or None})
+    return out or None
+
+
 async def ingest(request: Request):
     """POST /internal/audit/event — an event reported by the agent-server.
 
@@ -135,6 +161,15 @@ async def ingest(request: Request):
     if not et.startswith(AGENT_SERVER_TYPES):
         return JSONResponse({"error": f"type '{et}' is not the agent-server's to report"},
                             status_code=403)
+    # Idempotent on the agent-server's own `event_id` (#466): an event replayed
+    # from its outbox after a lost answer is admitted once.
+    from .audit import dedupe
+    win = dedupe.window() if dedupe.normalize(b.get("event_id")) else None
+    if win is not None:
+        # Before any side effect: a replayed turn.start must not re-open a trace.
+        dup, recorded = win.seen(b["event_id"])
+        if dup:
+            return JSONResponse({"recorded": True, "duplicate": True, "event_id": recorded})
     spawn = (b.get("agent") or {}).get("spawn")
     if et == "turn.start":
         try:
@@ -146,12 +181,20 @@ async def ingest(request: Request):
                                   "security") if isinstance(b.get(k), dict)}
     actor = dict(b.get("actor") or {"type": "service", "id": "agent-server"})
     actor["source"] = "agent-server"
+    def record():
+        return audit.emit(et, identity="explicit", action=b.get("action"),
+                          resource=b.get("resource"), trace_id=b.get("trace_id"),
+                          span_id=b.get("span_id"), parent_span_id=b.get("parent_span_id"),
+                          links=_links(b.get("links")), actor=actor, **sections)
+
     try:
-        rec = await asyncio.to_thread(
-            audit.emit, et, identity="explicit", action=b.get("action"),
-            resource=b.get("resource"), trace_id=b.get("trace_id"),
-            span_id=b.get("span_id"), parent_span_id=b.get("parent_span_id"),
-            actor=actor, **sections)
+        if win is None:
+            rec = await asyncio.to_thread(record)
+        else:
+            dup, rec, recorded = await asyncio.to_thread(win.admit, b["event_id"], record)
+            if dup:
+                return JSONResponse({"recorded": True, "duplicate": True,
+                                     "event_id": recorded})
     except audit.RecordError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     finally:

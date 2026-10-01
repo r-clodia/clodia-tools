@@ -105,17 +105,7 @@ def emit(event_type: str, *, identity: str = "claims", **fields) -> dict | None:
     # The turn this event belongs to (#433), when the request comes from a
     # spawn whose turn the agent-server has announced.
     if not fields.get("trace_id"):
-        from . import trace as _trace
-        try:
-            from .. import whitelist as _wl
-            cur = _trace.current(_wl.current_spawn())
-        except Exception:  # noqa: BLE001
-            cur = None
-        if cur:
-            fields["trace_id"] = cur[0]
-            fields.setdefault("parent_span_id", None)
-            if not fields.get("parent_span_id"):
-                fields["parent_span_id"] = cur[1]
+        fields = _with_trace(fields)
     try:
         rec = record.build(event_type, **fields)
     except RecordError:
@@ -130,6 +120,43 @@ def emit(event_type: str, *, identity: str = "claims", **fields) -> dict | None:
         if fail_closed():
             raise AuditWriteError(_last_error) from exc
         return None
+
+
+def _with_trace(fields: dict) -> dict:
+    """Trace id, parent span and links of an event that did not bring its own.
+
+    Precedence (#433, #463): the announced turn of the calling spawn — the
+    signed `execution_id` — always names the trace. The request's W3C
+    `traceparent` is the caller's word: on the same trace it is a closer
+    parent (a runtime span under the turn span), on another trace it becomes a
+    link (the runtime's own OTel trace), and it names the trace only when no
+    spawn is behind the request AND the request authenticated as the
+    agent-server or the egress proxy (`trace.request_trusted`)."""
+    from . import trace as _trace
+    try:
+        from .. import whitelist as _wl
+        spawn = _wl.current_spawn()
+    except Exception:  # noqa: BLE001
+        spawn = None
+    cur = _trace.current(spawn)
+    req = _trace.request_parent()
+    fields = dict(fields)
+    if cur:
+        fields["trace_id"] = cur[0]
+        if not fields.get("parent_span_id"):
+            fields["parent_span_id"] = req[1] if req and req[0] == cur[0] else cur[1]
+    elif req and not spawn and _trace.request_trusted():
+        # Only a paired component (agent-server, proxy) may NAME the trace of
+        # a spawn-less event; anyone else's header stays a link below.
+        fields["trace_id"] = req[0]
+        if not fields.get("parent_span_id"):
+            fields["parent_span_id"] = req[1]
+    if req and req[0] != fields.get("trace_id"):
+        links = list(fields.get("links") or [])
+        links.append({"trace_id": req[0], "span_id": req[1],
+                      "attributes": {"link.source": "traceparent"}})
+        fields["links"] = links
+    return fields
 
 
 #: The tier of the RESOURCE the current call touches (e.g. the topic of a

@@ -39,8 +39,19 @@ def _get(path: str):
         return r.json()
 
 
+def _calling_turn_traceparent() -> str | None:
+    """W3C `traceparent` of the turn the CALLING spawn is in (#465, #463).
+
+    From the spawn's announced turn — the signed `execution_id`, not anything
+    the agent says. None outside a turn, or for a caller that is not a spawn."""
+    from ..audit import trace
+    cur = trace.current(whitelist.current_spawn())
+    return trace.format_traceparent(*cur) if cur else None
+
+
 def _post(path: str, payload: dict, *, auth: bool = False,
-          secret: bool = False, timeout: httpx.Timeout | None = None):
+          secret: bool = False, timeout: httpx.Timeout | None = None,
+          traceparent: bool = False):
     # auth=True: inoltra il session token ckt1 del chiamante corrente, così
     # agent-server verifica l'identità firmata (via _principal_from_request) e
     # non deve fidarsi di un campo auto-dichiarato nel body.
@@ -49,6 +60,13 @@ def _post(path: str, payload: dict, *, auth: bool = False,
         token = whitelist.current_token()
         if token:
             headers["Authorization"] = f"Bearer {token}"
+    # traceparent=True: the turn this call is made from travels with it, so the
+    # turn it wakes up hangs under it (#465). Only next to `auth`: the
+    # agent-server accepts a parent only from an authenticated caller.
+    if traceparent:
+        tp = _calling_turn_traceparent()
+        if tp:
+            headers["traceparent"] = tp
     # secret=True: secret orchestrator condiviso, come già fanno `logic_api` ed
     # `egress_api` nella direzione opposta. Serve dove la chiamata NON è per
     # conto di un chiamante identificato — l'annuncio di un messaggio parte
@@ -119,9 +137,13 @@ def channel_trigger(tier: str, name: str, text: str, by: str) -> dict:
     usava nessuno: mancava il pezzo dall'altra parte, dove il claim `agent` di
     un token on-behalf è il CARRIER e non la persona — questa chiamata prende il
     403 da impersonazione finché l'agent-server non legge l'attore firmato.
-    Richiede clodia-logic ≥ 6.245.0."""
+    Richiede clodia-logic ≥ 6.245.0.
+
+    The calling turn goes along as W3C `traceparent` (clodia-platform#465):
+    without it the woken turn records only `root.kind = "internal_trigger"`,
+    and the chain that caused it is lost at this hop."""
     return _post(f"/clodia/channels/{tier}/{name}/trigger/internal",
-                 {"text": text, "by": by}, auth=True)
+                 {"text": text, "by": by}, auth=True, traceparent=True)
 
 
 # Timeout PIÙ CORTO del default: questa chiamata sta sul percorso caldo di ogni
