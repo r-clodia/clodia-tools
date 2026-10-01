@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from .topics import service as service_mod
 from .topics.local_fs import LocalFsStorage
 from .topics.service import TopicService
 
@@ -34,30 +35,75 @@ class LinkTaintTests(unittest.TestCase):
         self.svc.put_file("SEAL-1", "legale", "contratto.pdf", b"%PDF",
                           "untrusted", by="messaggero")
         with patch.object(TopicService, "_link_ingress"):
-            self.svc.link_add("SEAL-1", "acme", "SEAL-1", "legale")
+            self.svc.link_add("SEAL-1", "acme", "SEAL-1", "legale", approver="davide")
+        # Who may read through the link is checked elsewhere (review fix B1):
+        # here every read is let through, the question is the taint only.
+        g = patch.object(service_mod, "_LINK_READER_GUARD", lambda t, n, m: None)
+        g.start()
+        self.addCleanup(g.stop)
 
     def tearDown(self):
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def _vetted(self, path, scope_sources=()):
+    def _vetted(self, path, scope_sources=(), other_scope_sources=()):
         from . import main, whitelist as wl
         cfg = {"agents": {},
-               "scope_source_allow": {"SEAL-1/acme": list(scope_sources)}}
+               "scope_source_allow": {"SEAL-1/acme": list(scope_sources),
+                                      "SEAL-1/legale": list(other_scope_sources)}}
         with patch.object(wl, "CONFIG", cfg), \
                 patch.object(main, "_topics", lambda: self.svc):
             return main._source_vetted(
                 "topic.read_file",
                 {"tier": "SEAL-1", "name": "acme", "path": path}, None)
 
-    def test_un_file_senza_etichetta_nel_topic_collegato_non_contamina(self):
+    def test_an_unlabelled_file_of_the_linked_topic_taints(self):
+        """Review fix B2: read inside `legale` this file taints, so it taints
+        read through the link too — even with `topic:SEAL-1/legale` declared
+        as a source of `acme`. Being linked vouches for nothing the other room
+        would not vouch for itself."""
         self.assertIs(self._vetted("legale/parere.md",
-                                   ["topic:SEAL-1/legale"]), True)
-
-    def test_senza_la_voce_di_ingresso_contamina_come_prima(self):
-        """La dichiarazione è ciò che spegne il taint: toglierla lo riaccende.
-        Se passasse comunque, il collegamento sarebbe un permesso implicito —
-        e nessuno potrebbe revocarlo rileggendo una lista."""
+                                   ["topic:SEAL-1/legale"]), False)
         self.assertIs(self._vetted("legale/parere.md", []), False)
+
+    def test_same_verdict_as_inside_the_linked_topic(self):
+        from . import main, whitelist as wl
+        cfg = {"agents": {}, "scope_source_allow": {}}
+        with patch.object(wl, "CONFIG", cfg), \
+                patch.object(main, "_topics", lambda: self.svc):
+            for via_link, at_home in (("legale/parere.md", "local/parere.md"),
+                                      ("legale/contratto.pdf", "local/contratto.pdf")):
+                with self.subTest(path=via_link):
+                    self.assertIs(
+                        main._source_vetted("topic.read_file", {
+                            "tier": "SEAL-1", "name": "acme", "path": via_link}),
+                        main._source_vetted("topic.read_file", {
+                            "tier": "SEAL-1", "name": "legale", "path": at_home}))
+
+    def test_an_unlabelled_file_in_a_shared_subfolder_taints(self):
+        """Files that arrive without a label — the Mac-shared folder, a Drive
+        sync into the local tree — are unlabelled at home, and so through the
+        link."""
+        self.svc.s.write("SEAL-1/legale/files/condivisa/dal-mac.md", b"?")
+        self.assertIs(self._vetted("legale/condivisa/dal-mac.md",
+                                   ["topic:SEAL-1/legale"]), False)
+
+    def test_a_drive_backed_linked_topic_is_judged_on_its_own_folder(self):
+        """`legale` lives on a Drive folder: labels do not exist there, the
+        source is the folder, and it is the folder declared for `legale` that
+        counts — not `acme`'s list, not the link."""
+        p = self.root / "SEAL-1/legale/meta.json"
+        import json as _json
+        meta = _json.loads(p.read_text())
+        meta["remote"] = {"type": "drive", "config": {"folder": "F123"}}
+        p.write_text(_json.dumps(meta))
+        self.assertIs(self._vetted("legale/parere.md",
+                                   ["topic:SEAL-1/legale", "gdrive:folder/F123"]), False)
+        self.assertIs(self._vetted("legale/parere.md",
+                                   other_scope_sources=["gdrive:folder/F123"]), True)
+
+    def test_a_trusted_file_of_the_linked_topic_does_not_taint(self):
+        self.svc.put_file("SEAL-1", "legale", "nota.md", b"n", "trusted", by="giovanni")
+        self.assertIs(self._vetted("legale/nota.md"), True)
 
     def test_un_allegato_untrusted_resta_untrusted_anche_dal_collegamento(self):
         """Il caso che vale: il collegamento dichiara fidata la STANZA, non ciò

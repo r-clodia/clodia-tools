@@ -1175,7 +1175,13 @@ _TOPIC_TOOLS: list[Tool] = [
                      "collegamento si scrive su entrambi. Non copia niente — i "
                      "file restano dove sono, con la loro provenienza. Per "
                      "scrivere in un topic collegato si lavora da dentro quel "
-                     "topic. Richiede approvazione dell'owner."),
+                     "topic. Richiede il consenso dell'owner di ENTRAMBI i "
+                     "topic (o di un admin): se i due owner sono diversi il "
+                     "collegamento resta in attesa, inerte, finché l'owner "
+                     "dell'altro non approva chiamando questo stesso verbo dal "
+                     "suo topic. Chi legge attraverso il collegamento deve "
+                     "comunque poter leggere l'altro topic di suo "
+                     "(partecipante e clearance)."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
@@ -1188,8 +1194,9 @@ _TOPIC_TOOLS: list[Tool] = [
         name="topic.link_remove",
         description=("Scollega un topic collegato: la cartella sparisce da "
                      "entrambi i lati. Non cancella nessun file — toglie solo "
-                     "la vista. Le voci di ingresso restano: si tolgono con "
-                     "topic.ingress_remove, che è un atto a sé."),
+                     "la vista. Toglie anche le voci di ingresso che il "
+                     "collegamento aveva aggiunto, non quelle dichiarate a "
+                     "parte."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
@@ -3622,6 +3629,20 @@ def _source_vetted(verb: str, a: dict, result: object = None) -> bool | None:
         if not (tier and name):
             return None
         svc = _topics()
+        path = str((a or {}).get("path") or "").strip()
+        scope = None                        # the list of the calling room
+        # THROUGH A LINK a file carries the taint its own topic would give it
+        # (review fix B2 of clodia-platform#477): the question is asked of the
+        # topic that OWNS the bytes, with that topic's remote, labels and
+        # source list, exactly as if it were read from inside it. Being linked
+        # vouches for nothing: an unlabelled file — synced from Drive, dropped
+        # in the Mac-shared folder — taints here as it taints at home.
+        collegato = svc.link_mount_owner(tier, name, path) if path else None
+        if collegato:
+            resto = path.lstrip("/").split("/", 1)
+            tier, name = collegato
+            path = f"{TopicService.MOUNT_LOCAL}/{resto[1]}" if len(resto) > 1 else ""
+            scope = f"{tier}/{name}"
         meta = svc.open(tier, name).get("meta", {})
         rem = (meta.get("remote") or {})
         if str(rem.get("type") or "") == "drive":
@@ -3630,8 +3651,8 @@ def _source_vetted(verb: str, a: dict, result: object = None) -> bool | None:
             # etichette di provenienza non esistono su Drive — chi ci scrive lo fa
             # da fuori — quindi l'unica domanda sensata è se di quella cartella
             # l'owner risponda.
-            return _eg.is_vetted_source(f"gdrive:folder/{folder}") if folder else None
-        path = str((a or {}).get("path") or "").strip()
+            return (_eg.is_vetted_source(f"gdrive:folder/{folder}", scope=scope)
+                    if folder else None)
         if not path:
             return None                     # `topic.files`: elenco, nessun file
         # L'etichetta si chiede al servizio, che sa tradurre il path visto nella
@@ -3641,20 +3662,9 @@ def _source_vetted(verb: str, a: dict, result: object = None) -> bool | None:
         prov = svc.provenance_of(tier, name, path)
         if prov in ("trusted", "agent"):
             return True
-        if prov == "untrusted":
-            return False
-        # Etichetta ASSENTE. Nel topic stesso resta non fidata (un file caricato
-        # prima che le etichette esistessero non è «buono» per default). Letta da
-        # un topic COLLEGATO e dichiarato fonte, invece, la stanza di cui
-        # risponde l'owner è la fonte: è ciò che il collegamento dichiara. Un
-        # file marcato `untrusted` non passa comunque da qui — sopra c'è il suo
-        # rifiuto — quindi un allegato di terzi non si ripulisce attraversando un
-        # collegamento.
-        collegato = svc.link_mount_owner(tier, name, path)
-        if collegato:
-            return _eg.is_vetted_source(f"topic:{collegato[0]}/{collegato[1]}",
-                                        scope=f"{tier}/{name}")
-        return False                        # untrusted, o etichetta assente
+        # `untrusted`, or no label at all: a file uploaded before labels existed
+        # is not "good" by default — in its own topic or seen through a link.
+        return False
     except Exception as e:  # noqa: BLE001 — non determinabile ≠ fidata
         LOG.warning("taint: provenienza di %s non determinabile (%s)", verb, e)
         return None
@@ -4012,10 +4022,12 @@ def _gate_effect_reason(name: str, arguments: dict) -> str:
                     f"chi scrive lì dal Mac lo rende visibile a ogni agente del topic.")
         if name == "topic.link_add":
             return (f"collega i topic `{a.get('tier')}/{a.get('name')}` e "
-                    f"`{a.get('other_tier')}/{a.get('other_name')}`: da qui in avanti "
-                    f"OGNI partecipante di ciascuno dei due legge i file dell'altro "
-                    f"(sola lettura) e l'altro topic conta come fonte dichiarata, "
-                    f"quindi leggerlo non contaminerà più il canale.")
+                    f"`{a.get('other_tier')}/{a.get('other_name')}` (read-only, both "
+                    f"ways). Your approval is the consent of the owner of each of the "
+                    f"two topics you own; the link is active only once the owner of "
+                    f"BOTH has consented. Through it, only who can already read the "
+                    f"other topic (participant and clearance) reads its files, and "
+                    f"its unlabelled files still taint the channel.")
         if name == "topic.link_remove":
             return (f"scollega il topic montato come `{a.get('mount')}` da "
                     f"`{a.get('tier')}/{a.get('name')}`: la cartella sparisce da "
@@ -4071,10 +4083,39 @@ _AUDIT_EGRESS: "_contextvars.ContextVar[dict | None]" = _contextvars.ContextVar(
     "audit_egress", default=None)
 
 
+#: Per call: the gate consent the call runs on (`gate.details`), or None. Read
+#: by `topic.link_add` to know whose consent a new link carries (#477 B1).
+_GATE_APPROVAL: "_contextvars.ContextVar[dict | None]" = _contextvars.ContextVar(
+    "gate_approval", default=None)
+
+
 #: Per call: the topic files actually read, `{ref: {content_hash, version}}`,
 #: noted from the read itself (#440) — never by reading the file again.
 _AUDIT_READS: "_contextvars.ContextVar[dict | None]" = _contextvars.ContextVar(
     "audit_reads", default=None)
+
+
+def _topic_read_ref(tier: str, name: str, path: str, svc=None) -> tuple[str, str | None]:
+    """`(ref, via)` naming the bytes a topic read returned.
+
+    Through a link (clodia-platform#477) the bytes belong to the OTHER topic:
+    the ref names that topic and the file's path inside it, so its owner finds
+    who read their data by looking for their own topic in the trail, and `via`
+    keeps the path as the reader saw it (the link). Outside a link `via` is
+    None and the ref is the path as given.
+    """
+    own = f"topic:{tier}/{name}/{path}"
+    try:
+        svc = svc or _topics()
+        owner = getattr(svc, "link_mount_owner", None)
+        tgt = owner(tier, name, path) if callable(owner) else None
+    except Exception:  # noqa: BLE001 — not resolvable: record what was asked
+        tgt = None
+    if not tgt:
+        return own, None
+    resto = str(path).lstrip("/").split("/", 1)
+    sub = resto[1] if len(resto) > 1 else ""
+    return f"topic:{tgt[0]}/{tgt[1]}/{TopicService.MOUNT_LOCAL}/{sub}", own
 
 
 def _read_topic_file(svc, a: dict) -> bytes:
@@ -4090,8 +4131,8 @@ def _read_topic_file(svc, a: dict) -> bytes:
     if reads is not None:
         import hashlib as _hl
         h = "sha256:" + _hl.sha256(data).hexdigest()
-        reads[f"topic:{a['tier']}/{a['name']}/{a['path']}"] = {
-            "content_hash": h, "version": version if version != h else None}
+        ref, _via = _topic_read_ref(a["tier"], a["name"], a["path"], svc)
+        reads[ref] = {"content_hash": h, "version": version if version != h else None}
     return data
 
 
@@ -4254,7 +4295,8 @@ def _ingress_source(verb: str, a: dict, result: object = None) -> str | None:
         return spec[1].format(rid) if rid else None
     if verb in _TOPIC_READ_VERBS and a.get("tier") and a.get("name") and a.get("path"):
         # A listing (`topic.files`) has no single source: not an ingress.
-        return f"topic:{a['tier']}/{a['name']}/{a['path']}"
+        # Through a link the source is the topic that owns the bytes (#477).
+        return _topic_read_ref(a["tier"], a["name"], a["path"])[0]
     return None
 
 
@@ -4294,13 +4336,14 @@ def _provenance_sources(verb: str, a: dict, result: object) -> list[dict]:
     a = a or {}
     if verb in ("topic.read_file", "topic.read_document", "topic.fetch") \
             and a.get("tier") and a.get("name") and a.get("path"):
-        ref = f"topic:{a['tier']}/{a['name']}/{a['path']}"
+        ref, via = _topic_read_ref(a["tier"], a["name"], a["path"])
         # The hash of the bytes the read returned, noted by the read itself:
         # re-reading here would race a rewrite (and download a Drive file twice).
         seen = (_AUDIT_READS.get() or {}).get(ref) or {}
         return [{"ref": ref, "content_hash": seen.get("content_hash"),
                  "version": seen.get("version"), "hash_of": "file",
-                 "partial": True if (a.get("offset") or a.get("max_bytes")) else None}]
+                 "partial": True if (a.get("offset") or a.get("max_bytes")) else None,
+                 **({"via": via} if via else {})}]
     if verb in ("rag.search", "eu_corpus.search") and isinstance(result, dict):
         coll = a.get("collection") or "eu-normativa"
         out = []
@@ -4677,8 +4720,12 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                     # allargano un'autorità: una delega li renderebbe silenziosi
                     # per tutta la sua finestra, cioè l'opposto del motivo per cui
                     # il gate esiste.
+                    # A topic link records WHO consented (the owner of each
+                    # side): a standing delegation names no approver for the
+                    # card, so it cannot stand in for that consent.
                     allow_delegation=name not in {
-                        "web.post", "agents.grant_scoped", "agents.revoke_scoped"},
+                        "web.post", "agents.grant_scoped", "agents.revoke_scoped",
+                        "topic.link_add"},
                     arguments=arguments,
                 )
                 # Approved WITH CORRECTIONS (#448): the call runs on the corrected
@@ -4701,6 +4748,10 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # esattamente il buco che lo scoping per spawn chiude.
                 await _require_gate_consent(_ag, _ck, consume=False,
                                             allow_delegation=False)
+        # The consent this call runs on, for the verbs whose effect depends on
+        # WHO approved it (`topic.link_add`, review fix B1 of #477). Set on
+        # every call, None included, so a value can never outlive its call.
+        _GATE_APPROVAL.set(gate_approval)
         # WHITELIST DI DESTINAZIONE (clodia-platform#104 §7, passo 5). Uscita da
         # capacità binaria a capacità circoscritta: «può inviare mail» diventa
         # «può inviare mail a queste destinazioni». Dopo il gate, non prima: se
@@ -5523,6 +5574,77 @@ def _require_topic_member(svc, tier, name, mutating: bool = False) -> None:
             f"topic {tier}/{name} (accesso negato: livello)")
 
 
+def _link_approver() -> tuple[str, bool]:
+    """Whose consent a `topic.link_add` call carries, and whether that person
+    is an admin (review fix B1 of clodia-platform#477).
+
+    - an admin acting on-behalf is exempt from the M-gate: the consent is
+      theirs, as admin;
+    - otherwise the consent is the human who approved the WALLS gate card,
+      named by `by` in the CA-signed capability — never an argument of the
+      call, which would be the agent's word on who agreed.
+
+    No consent (observation mode, a gate turned off by configuration) gives
+    an empty approver, and the service then refuses to create the link.
+    """
+    from .human import is_admin as _is_admin
+    if is_on_behalf() and _human_is_admin():
+        return str(current_principal() or ""), True
+    by = str((_GATE_APPROVAL.get() or {}).get("by") or "")
+    return by, bool(by) and _is_admin(by)
+
+
+def _announce_pending_link(svc, res: dict) -> None:
+    """Tell the room whose owner has not consented yet that a link waits for
+    them. Best effort: the link stays inert whether or not this is read."""
+    lato1 = f"{res['other']['tier']}/{res['other']['topic']}"   # the topic called
+    lato2 = f"{res['link']['tier']}/{res['link']['topic']}"     # the other one
+    for scope in res.get("awaiting_owner_of") or []:
+        try:
+            t, n = scope.split("/", 1)
+            altro = lato2 if scope == lato1 else lato1
+            svc.post_message(
+                t, n, author="gate", kind="ai",
+                text=(f"🔗 A link between this topic and `{altro}` is waiting for "
+                      f"the consent of this topic's owner. Until then it is inert: "
+                      f"no folder, no reads. To approve, ask an agent here to call "
+                      f"`topic.link_add` with tier=`{t}`, name=`{n}`, "
+                      f"other_tier/other_name=`{altro}` and approve the card."))
+        except Exception:  # noqa: BLE001
+            LOG.warning("link: avviso di collegamento in attesa non postato su %s", scope)
+
+
+def _require_link_reader(tier: str, name: str, meta: dict) -> None:
+    """Read-time check for bytes reached through a topic link (review fix B1 of
+    clodia-platform#477): the caller must be entitled to read the topic that
+    OWNS the bytes on its own terms — participant (or an active `crosstopic`
+    grant) AND clearance ≥ its tier — exactly as if it had opened that topic
+    directly. Participation in the topic it reads FROM counts for nothing.
+
+    A token bound to one room carries a person: the person must take part in
+    the linked topic and have the clearance for it. The room binding itself is
+    not re-checked here, because the call did enter through the bound room.
+    """
+    tier_t = meta.get("tier", tier)
+    if _token_is_bound_to_a_room():
+        _require_person_of_this_room(meta, tier, name, tier_t, mutating=False)
+        return
+    caller = agent_name()
+    if not (_topic_is_member(meta, caller) or _crosstopic_grant_active(caller)):
+        raise PermissionError(
+            f"accesso negato al topic collegato {tier}/{name}: l'agente "
+            f"'{caller}' non ne è partecipante. Un collegamento non presta la "
+            "partecipazione della stanza da cui si legge.")
+    if _rank(current_clearance()) < _rank(tier_t):
+        raise PermissionError(
+            f"agent '{caller}': clearance insufficiente per il tier {tier_t} del "
+            f"topic collegato {tier}/{name} (accesso negato: livello)")
+
+
+from .topics.service import set_link_reader_guard as _set_link_reader_guard  # noqa: E402
+_set_link_reader_guard(_require_link_reader)
+
+
 def _filter_member_rows(rows: list, caller: str) -> list:
     """Filtra allo scope need-to-know dell'AGENTE, su ENTRAMBI gli assi.
 
@@ -6301,8 +6423,13 @@ def _dispatch_topic(name: str, a: dict):
     # sull'albero dati dell'altro, mai una copia. Gated WALLS — chi entra nel
     # perimetro di una stanza lo decide l'owner, come per i partecipanti.
     if verb == "link_add":
-        return svc.link_add(a["tier"], a["name"], a["other_tier"], a["other_name"],
-                            mount_name=a.get("mount"), by=agent_name() or "")
+        approver, approver_admin = _link_approver()
+        res = svc.link_add(a["tier"], a["name"], a["other_tier"], a["other_name"],
+                           mount_name=a.get("mount"), by=agent_name() or "",
+                           approver=approver, approver_admin=approver_admin)
+        if res.get("state") == "pending":
+            _announce_pending_link(svc, res)
+        return res
     if verb == "link_remove":
         return svc.link_remove(a["tier"], a["name"], a["mount"])
     # Whitelist egress/ingress locale al canale (router-notebook R17,

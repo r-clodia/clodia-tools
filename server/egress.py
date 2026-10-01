@@ -405,6 +405,11 @@ EGRESS_SCHEMES = ("mailto", "tg", "http", "https", "gdrive", "gsheets", "outbox"
 #: letto attraverso un collegamento contamina come contaminerebbe a casa sua.
 #: Quello che si dichiara qui è la STANZA: il suo summary, le sue istruzioni, i
 #: file che ci hanno messo i suoi partecipanti.
+#: Review fix B2: a FILE read through a link is judged exactly as its own topic
+#: would judge it (label, Drive folder, that topic's source list), so this entry
+#: never makes an unlabelled file of the other room vetted. It is written only
+#: once BOTH owners have consented to the link, and `link_remove` takes back
+#: the entries the link itself added.
 SOURCE_SCHEMES = ("mailfrom", "tg", "http", "https", "gdrive", "gsheets", "mcp",
                   "inbox", "topic")
 

@@ -27,7 +27,7 @@ from starlette.routing import Route
 from . import human_mcp, internal_auth
 from .topics.local_fs import LocalFsStorage
 from .topics.service import (MESSAGE_KINDS, SCHEMA_VERSION, TopicError, TopicService,
-                             normalize_meta_v2)
+                             normalize_meta_v2, topic_links)
 from .topics.storage import VersionConflict
 
 LOG = logging.getLogger("clodia-tools.topics")
@@ -468,19 +468,33 @@ async def local_folder(request: Request):
 async def topic_link(request: Request):
     """POST /internal/topics/{tier}/{name}/link {action, other_tier, other_name, mount}.
 
-    Collegamento fra due topic dello stesso livello SEAL
-    (clodia-platform#477): ognuno vede l'albero dati dell'altro come una
-    cartella in sola lettura. action: add|remove.
+    Link between two topics of the same SEAL level (clodia-platform#477): each
+    sees the other's data tree as a read-only folder. action: add|approve|remove.
 
-    Qui passa l'OWNER dalla webui — la stessa porta di `local-folder`, con la
-    stessa autorizzazione. L'agente passa invece dai verbi `topic.link_add`/
-    `link_remove`, che sono gated: due strade, un solo servizio sotto, e la
-    regola (stesso livello, reciprocità, sola lettura) sta là sotto — non in
-    questa funzione, dove varrebbe per una sola delle due.
+    WHO may do it is checked HERE, on the signed session of the person, and
+    not left to the caller (review fix of #477): the route accepted any human,
+    and a link opens a read path into both rooms.
+
+    - `add`: the person must own BOTH topics, or be an admin — the consent of
+      both owners in one act;
+    - `approve`: the owner of THIS topic (or an admin) consents to a link that
+      is already pending — the other owner's consent was given on the other
+      side;
+    - `remove`: the owner of either topic, or an admin. Unlinking only narrows
+      access, and requiring both owners would let one keep reading the other
+      against the other's will.
     """
-    who, err = _authorize(request)
+    _who, err = _authorize(request)
     if err:
         return err
+    person = _reader(request)
+    if not person:
+        return JSONResponse({"error": "forbidden",
+                             "detail": "solo una persona può collegare topic"},
+                            status_code=403)
+    principal = str(person.get("principal") or "")
+    from .human import _ADMIN_ROLES
+    admin = str(person.get("human_role") or "user") in _ADMIN_ROLES
     tier = request.path_params["tier"]; name = request.path_params["name"]
     try:
         body = await request.json()
@@ -488,13 +502,40 @@ async def topic_link(request: Request):
         return JSONResponse({"error": "bad_json"}, status_code=400)
     svc = _service()
     action = body.get("action")
+
+    def _owner(t: str, n: str) -> str:
+        meta, _ = svc._read_meta(t, n)
+        return str(meta.get("owner") or "")
+
+    def _forbidden(why: str):
+        LOG.warning("topics: link %s rifiutato a %s su %s/%s (%s)",
+                    action, principal, tier, name, why)
+        return JSONResponse({"error": "forbidden", "detail": why}, status_code=403)
+
     try:
-        if action == "add":
+        if action in ("add", "approve"):
+            other_tier = body.get("other_tier") or tier
+            other_name = body.get("other_name") or ""
+            if not admin:
+                if action == "add" and not (principal == _owner(tier, name)
+                                            == _owner(other_tier, other_name)):
+                    return _forbidden("collegare due topic richiede di essere "
+                                      "owner di entrambi, o admin")
+                if action == "approve" and principal != _owner(tier, name):
+                    return _forbidden("approva solo l'owner di questo topic, o un admin")
             return JSONResponse(svc.link_add(
-                tier, name, body.get("other_tier") or tier,
-                body.get("other_name") or "", body.get("mount"), by=who or ""))
+                tier, name, other_tier, other_name, body.get("mount"),
+                by=principal, approver=principal, approver_admin=admin,
+                approve_only=action == "approve"))
         if action == "remove":
-            return JSONResponse(svc.link_remove(tier, name, body.get("mount") or ""))
+            mount = body.get("mount") or ""
+            if not admin and principal != _owner(tier, name):
+                voce = next((l for l in topic_links(svc._read_meta(tier, name)[0])
+                             if l.get("name") == mount), None)
+                if not voce or principal != _owner(voce["tier"], voce["topic"]):
+                    return _forbidden("scollega solo l'owner di uno dei due topic, "
+                                      "o un admin")
+            return JSONResponse(svc.link_remove(tier, name, mount))
         return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
     except TopicError as e:
         return JSONResponse({"error": str(e)[:200]}, status_code=400)
@@ -838,6 +879,11 @@ async def files(request: Request):
 
 def _snapshot_meta_bytes(raw: bytes, tier: str) -> bytes:
     meta = normalize_meta_v2(json.loads(raw.decode("utf-8")), tier)
+    # Topic links (clodia-platform#477) are NOT restored from an archive: they
+    # carry the consent of the owners of two topics on THIS instance, and an
+    # imported meta.json is the archive's word, not theirs. Links are made
+    # (and approved) again after the import.
+    meta.pop("links", None)
     return json.dumps(meta, ensure_ascii=False, indent=2).encode()
 
 

@@ -27,6 +27,7 @@ from pathlib import Path
 from unittest import mock
 
 from .local_fs import LocalFsStorage
+from . import service as service_mod
 from .service import TopicService, TopicError, topic_links
 
 
@@ -47,12 +48,22 @@ class Base(unittest.TestCase):
         self._ing = mock.patch.object(TopicService, "_link_ingress")
         self._ing.start()
         self.addCleanup(self._ing.stop)
+        # The read-time access check on the linked topic is the gateway's (it
+        # knows the caller): here a guard that lets every read through, and the
+        # tests of the check itself replace it.
+        self.guard_calls = []
+        g = mock.patch.object(service_mod, "_LINK_READER_GUARD",
+                              lambda t, n, m: self.guard_calls.append((t, n)))
+        g.start()
+        self.addCleanup(g.stop)
 
     def tearDown(self):
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def _link(self, mount=None):
-        return self.svc.link_add("SEAL-1", "acme", "SEAL-1", "legale", mount)
+    def _link(self, mount=None, approver="davide"):
+        # davide owns both topics: his one consent is the consent of both.
+        return self.svc.link_add("SEAL-1", "acme", "SEAL-1", "legale", mount,
+                                 approver=approver)
 
     def _names(self, tier="SEAL-1", name="acme", sub=""):
         return [f["name"] for f in self.svc.list_files(tier, name, sub)]
@@ -166,12 +177,12 @@ class ValiditaTests(Base):
     def test_livelli_diversi_non_si_collegano(self):
         self.svc.new("SEAL-2", "riservato", {"title": "R", "owner": "davide"})
         with self.assertRaises(TopicError) as e:
-            self.svc.link_add("SEAL-1", "acme", "SEAL-2", "riservato")
+            self.svc.link_add("SEAL-1", "acme", "SEAL-2", "riservato", approver="davide")
         self.assertIn("stesso livello", str(e.exception))
 
     def test_un_topic_non_si_collega_a_se_stesso(self):
         with self.assertRaises(TopicError):
-            self.svc.link_add("SEAL-1", "acme", "SEAL-1", "acme")
+            self.svc.link_add("SEAL-1", "acme", "SEAL-1", "acme", approver="davide")
 
     def test_due_volte_lo_stesso_collegamento_e_un_errore(self):
         self._link()
@@ -254,6 +265,154 @@ class IngressTests(Base):
             [("ingress", "SEAL-1/acme", "topic:SEAL-1/legale"),
              ("ingress", "SEAL-1/legale", "topic:SEAL-1/acme")])
         self._ing.start()
+
+
+class ConsentOfBothOwnersTests(Base):
+    """Review fix B1: a link opens a read path into BOTH rooms, so it is
+    effective only with the consent of the owner of each — or of an admin.
+    Here `legale` belongs to giovanni, `acme` to davide."""
+
+    def setUp(self):
+        super().setUp()
+        p = self.root / "SEAL-1/legale/meta.json"
+        meta = json.loads(p.read_text())
+        meta["owner"] = "giovanni"
+        p.write_text(json.dumps(meta))
+
+    def test_the_other_owner_not_consulted_leaves_the_link_pending(self):
+        res = self._link(approver="davide")
+        self.assertEqual(res["state"], "pending")
+        self.assertEqual(res["awaiting_owner_of"], ["SEAL-1/legale"])
+        self.assertNotIn("legale", self._names("SEAL-1", "acme"))
+        self.assertNotIn("acme", self._names("SEAL-1", "legale"))
+        with self.assertRaises(TopicError) as e:
+            self.svc.read_file("SEAL-1", "acme", "legale/parere.md")
+        self.assertIn("non è attivo", str(e.exception))
+        self.assertEqual(self.guard_calls, [])
+        stato = self.svc.open("SEAL-1", "acme")
+        self.assertEqual(stato["links"], [])
+        self.assertEqual([(l["name"], l["state"], l["awaiting_owner_of"])
+                          for l in stato["links_declared"]],
+                         [("legale", "pending", ["SEAL-1/legale"])])
+
+    def test_different_owners_need_both_approvals(self):
+        self._link(approver="davide")
+        # The same consent again does not speak for the other topic.
+        with self.assertRaises(TopicError) as e:
+            self._link(approver="davide")
+        self.assertIn("attende il consenso", str(e.exception))
+        # giovanni consents from his side: now, and only now, it is active.
+        res = self.svc.link_add("SEAL-1", "legale", "SEAL-1", "acme",
+                                approver="giovanni", approve_only=True)
+        self.assertEqual(res["state"], "active")
+        self.assertIn("legale", self._names("SEAL-1", "acme"))
+        self.assertEqual(self.svc.read_file("SEAL-1", "acme", "legale/parere.md"),
+                         b"# parere")
+
+    def test_an_approver_who_owns_neither_topic_creates_nothing(self):
+        with self.assertRaises(TopicError) as e:
+            self._link(approver="mallory")
+        self.assertIn("consenso", str(e.exception))
+        with self.assertRaises(TopicError):
+            self._link(approver="")
+        for name in ("acme", "legale"):
+            meta, _ = self.svc._read_meta("SEAL-1", name)
+            self.assertEqual(topic_links(meta), [], name)
+
+    def test_approve_only_does_not_create_a_link(self):
+        with self.assertRaises(TopicError):
+            self.svc.link_add("SEAL-1", "legale", "SEAL-1", "acme",
+                              approver="giovanni", approve_only=True)
+
+    def test_one_admin_consent_is_enough(self):
+        with mock.patch.object(service_mod, "_is_admin_principal",
+                               lambda p: p == "root"):
+            res = self.svc.link_add("SEAL-1", "acme", "SEAL-1", "legale",
+                                    approver="root", approver_admin=True)
+            self.assertEqual(res["state"], "active")
+            self.assertIn("legale", self._names("SEAL-1", "acme"))
+        # Re-checked at read time: an admin who lost the role no longer counts.
+        with mock.patch.object(service_mod, "_is_admin_principal", lambda p: False):
+            self.assertNotIn("legale", self._names("SEAL-1", "acme"))
+
+    def test_a_change_of_owner_withdraws_the_consent(self):
+        self._link(approver="davide")
+        self.svc.link_add("SEAL-1", "legale", "SEAL-1", "acme", approver="giovanni")
+        self.assertIn("legale", self._names("SEAL-1", "acme"))
+        p = self.root / "SEAL-1/legale/meta.json"
+        meta = json.loads(p.read_text())
+        meta["owner"] = "terzo"
+        p.write_text(json.dumps(meta))
+        self.assertNotIn("legale", self._names("SEAL-1", "acme"))
+        with self.assertRaises(TopicError):
+            self.svc.read_file("SEAL-1", "acme", "legale/parere.md")
+
+    def test_no_ingress_entry_while_pending(self):
+        self._ing.stop()
+        try:
+            with mock.patch("server.egress.scope_allow",
+                            return_value={"added": True}) as allow:
+                self._link(approver="davide")
+                self.assertEqual(allow.call_count, 0)
+                self.svc.link_add("SEAL-1", "legale", "SEAL-1", "acme",
+                                  approver="giovanni")
+                self.assertEqual(allow.call_count, 2)
+        finally:
+            self._ing.start()
+
+
+class ReaderEntitlementTests(Base):
+    """Review fix B1: an approved link does not lend the reader the
+    membership of the room it reads from. The read-time check runs on the
+    topic that OWNS the bytes."""
+
+    def test_the_check_runs_on_the_linked_topic(self):
+        self._link()
+        self.svc.read_file("SEAL-1", "acme", "legale/parere.md")
+        self.svc.list_files("SEAL-1", "acme", "legale")
+        self.assertEqual(set(self.guard_calls), {("SEAL-1", "legale")})
+
+    def test_a_reader_not_entitled_to_the_other_topic_is_refused(self):
+        self._link()
+
+        def nega(t, n, m):
+            raise PermissionError(f"non partecipante di {t}/{n}")
+
+        with mock.patch.object(service_mod, "_LINK_READER_GUARD", nega):
+            with self.assertRaises(PermissionError):
+                self.svc.read_file("SEAL-1", "acme", "legale/parere.md")
+            with self.assertRaises(PermissionError):
+                self.svc.list_files("SEAL-1", "acme", "legale")
+            # The room's own files are not affected.
+            self.svc.put_file("SEAL-1", "acme", "mio.txt", b"m")
+            self.assertEqual(self.svc.read_file("SEAL-1", "acme", "local/mio.txt"), b"m")
+
+    def test_without_a_registered_guard_link_reads_are_refused(self):
+        self._link()
+        with mock.patch.object(service_mod, "_LINK_READER_GUARD", None):
+            with self.assertRaises(PermissionError):
+                self.svc.read_file("SEAL-1", "acme", "legale/parere.md")
+
+
+class UnlinkIngressProvenanceTests(Base):
+    """`link_remove` takes back the ingress entries the link added, and only
+    those: an entry an operator had declared on their own stays."""
+
+    def test_only_the_entries_the_link_added_are_revoked(self):
+        self._ing.stop()
+        try:
+            def allow(direction, scope, uri):
+                # acme's entry is new; legale's was already declared by hand.
+                return {"added": scope == "SEAL-1/acme"}
+
+            with mock.patch("server.egress.scope_allow", side_effect=allow):
+                self._link()
+            with mock.patch("server.egress.scope_revoke") as revoke:
+                self.svc.link_remove("SEAL-1", "acme", "legale")
+            self.assertEqual([c.args for c in revoke.call_args_list],
+                             [("ingress", "SEAL-1/acme", "topic:SEAL-1/legale")])
+        finally:
+            self._ing.start()
 
 
 if __name__ == "__main__":

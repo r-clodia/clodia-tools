@@ -433,6 +433,53 @@ def topic_links(meta: dict) -> list:
             if isinstance(l, dict) and l.get("name") and l.get("topic") and l.get("tier")]
 
 
+#: Who may read a linked topic's bytes (clodia-platform#477, review fix B1).
+#: The service does not know the caller, so the process that serves calls
+#: registers a guard here: `guard(tier, name, meta)` for the topic that OWNS
+#: the bytes, raising `PermissionError` when the current caller is not entitled
+#: to read it on its own terms. A link never lends the reader its membership
+#: of the room it reads from. With no guard registered a read through a link
+#: is refused: fail closed, never "whoever reaches this line".
+_LINK_READER_GUARD = None
+
+
+def set_link_reader_guard(guard) -> None:
+    """Register the read-time access check for linked topics (see above)."""
+    global _LINK_READER_GUARD
+    _LINK_READER_GUARD = guard
+
+
+def _is_admin_principal(principal: str) -> bool:
+    """Is `principal` an admin of the instance today? Read at every check, so a
+    consent given by an admin who has since lost the role stops counting."""
+    if not principal:
+        return False
+    try:
+        from .. import human as _hu
+        return bool(_hu.is_admin(principal))
+    except Exception:  # noqa: BLE001 — unknown is not admin
+        return False
+
+
+def link_approval_valid(meta: dict, entry: dict) -> bool:
+    """Does `entry` (a link declared in `meta`) carry the consent of the owner
+    of THIS topic, or of an admin?
+
+    The consent of a side is recorded on that side's own entry. It is checked
+    against the CURRENT owner at every use: if the topic changes owner, the
+    consent of the previous one no longer speaks for it.
+    """
+    a = entry.get("approval") if isinstance(entry, dict) else None
+    if not isinstance(a, dict):
+        return False
+    by = str(a.get("by") or "")
+    if not by:
+        return False
+    if a.get("as") == "admin":
+        return _is_admin_principal(by)
+    return by == str(meta.get("owner") or "")
+
+
 def _unique_name(voluto: str, presi: set) -> str:
     """Identificatore validato, unico nell'insieme dato, stabile: il tipo
     finché è libero, `-2`/`-3`… solo quando serve davvero."""
@@ -542,11 +589,46 @@ class TopicService:
                 continue                      # bersaglio sparito o riclassificato
             if _normalize_tier(altro.get("tier") or lt) != mio_tier:
                 continue                      # livelli diversi: mai un mount
-            if not any(_normalize_tier(b.get("tier")) == mio_tier
-                       and str(b.get("topic") or "") == name
-                       for b in topic_links(altro)):
+            ritorno = next((b for b in topic_links(altro)
+                            if _normalize_tier(b.get("tier")) == mio_tier
+                            and str(b.get("topic") or "") == name), None)
+            if ritorno is None:
                 continue                      # non reciproco: dichiarato da un lato solo
+            # Consent of BOTH owners (review fix B1), re-checked at every
+            # resolution: a pending link, or one whose consent no longer
+            # speaks for the current owner, gives no mount.
+            if not (link_approval_valid(meta, l) and link_approval_valid(altro, ritorno)):
+                continue
             out.append({"name": str(l.get("name")), "tier": lt, "topic": ln})
+        return out
+
+    def link_states(self, tier: str, name: str, meta: dict | None = None) -> list[dict]:
+        """Every link DECLARED here, with its state: `active`, or `pending`
+        with the topics whose owner has not consented yet. For `open`: "we
+        thought we were linked" is what one checks by opening the topic."""
+        if meta is None:
+            meta, _ = self._read_meta(tier, name)
+        attivi = {l["name"] for l in self._links_safe(tier, name, meta)}
+        out = []
+        for l in topic_links(meta):
+            lt, ln = _normalize_tier(l.get("tier")), str(l.get("topic") or "")
+            row = {"name": str(l.get("name")), "tier": lt, "topic": ln}
+            if row["name"] in attivi:
+                out.append({**row, "state": "active"})
+                continue
+            attesa = []
+            if not link_approval_valid(meta, l):
+                attesa.append(f"{_normalize_tier(meta.get('tier') or tier)}/{name}")
+            try:
+                altro, _ = self._read_meta(lt, ln)
+                ritorno = next((b for b in topic_links(altro)
+                                if str(b.get("topic") or "") == name), None)
+                if ritorno is None or not link_approval_valid(altro, ritorno):
+                    attesa.append(f"{lt}/{ln}")
+            except TopicError:
+                attesa.append(f"{lt}/{ln}")
+            out.append({**row, "state": "pending" if attesa else "inactive",
+                        "awaiting_owner_of": attesa})
         return out
 
     def _links_safe(self, tier: str, name: str, meta: dict | None = None) -> list[dict]:
@@ -555,6 +637,14 @@ class TopicService:
             return self._links(tier, name, meta)
         except Exception as e:  # noqa: BLE001
             LOG.warning("collegamenti di %s/%s illeggibili (%s)", tier, name,
+                        type(e).__name__)
+            return []
+
+    def _link_states_safe(self, tier: str, name: str, meta: dict | None = None) -> list[dict]:
+        try:
+            return self.link_states(tier, name, meta)
+        except Exception as e:  # noqa: BLE001
+            LOG.warning("stato dei collegamenti di %s/%s illeggibile (%s)", tier, name,
                         type(e).__name__)
             return []
 
@@ -594,8 +684,21 @@ class TopicService:
         return (self.link_mount_owner(tier, name, relpath, meta)
                 or (_normalize_tier(tier), name))
 
+    def _require_link_reader(self, tier: str, name: str) -> None:
+        """The caller must be entitled to READ the linked topic `tier/name` on
+        its own terms — clearance and participation of THAT topic — not on the
+        strength of the topic it reads from (review fix B1). The check itself
+        lives in the registered guard, which knows the caller."""
+        guard = _LINK_READER_GUARD
+        if guard is None:
+            raise PermissionError(
+                f"lettura attraverso un collegamento verso {tier}/{name} rifiutata: "
+                "nessun controllo d'accesso registrato per i topic collegati")
+        meta, _ = self._read_meta(tier, name)
+        guard(tier, name, meta)
+
     def _resolve_data_path(self, tier: str, name: str, relpath: str,
-                           meta: dict | None = None):
+                           meta: dict | None = None, check_reader: bool = True):
         """`(store, base, sub, mount)` per un path dell'albero dati.
 
         Tre forme:
@@ -627,10 +730,14 @@ class TopicService:
                 tgt = self._link_target(tier, name, parts[0], meta)
                 if not tgt:
                     raise TopicError(
-                        f"il collegamento '{parts[0]}' non è attivo: l'altro topic "
-                        "non esiste più, non dichiara il collegamento di ritorno "
-                        "oppure non sta più allo stesso livello SEAL di questo. "
-                        "Rifallo con `topic.link_add` se serve ancora.")
+                        f"il collegamento '{parts[0]}' non è attivo: è in attesa "
+                        "del consenso dell'owner di uno dei due topic, oppure "
+                        "l'altro topic non esiste più, non dichiara il "
+                        "collegamento di ritorno o non sta più allo stesso "
+                        "livello SEAL di questo. Lo stato è in `topic.open` "
+                        "(`links_declared`).")
+                if check_reader:
+                    self._require_link_reader(*tgt)
                 store, base = self._local_mount(*tgt)
                 return store, base, "/".join(parts[1:]), parts[0]
 
@@ -1306,25 +1413,33 @@ class TopicService:
         return presi
 
     def link_add(self, tier: str, name: str, other_tier: str, other_name: str,
-                 mount_name: str | None = None, by: str = "") -> dict:
-        """Collega due topic dello STESSO livello SEAL (clodia-platform#477).
+                 mount_name: str | None = None, by: str = "", *,
+                 approver: str = "", approver_admin: bool = False,
+                 approve_only: bool = False) -> dict:
+        """Link two topics of the SAME SEAL level (clodia-platform#477), or
+        record a consent on a link that is already declared and pending.
 
-        Il collegamento è SIMMETRICO e si scrive sui due meta in una volta: ogni
-        topic vede l'albero dati dell'altro come una cartella in sola lettura,
-        accanto a `local/`. Nessuna copia e nessuno specchio — i byte restano
-        uno solo, nel topic che li possiede, e con loro la provenienza.
+        The link is SYMMETRIC and is declared on both metas: each topic sees the
+        other's data tree as a read-only folder next to `local/`. No copy, no
+        mirror — the bytes stay in the topic that owns them, and so does their
+        provenance.
 
-        Perché simmetrico e non a senso unico: un collegamento a senso unico
-        sarebbe un diritto di lettura preso da una stanza su un'altra senza che
-        la seconda lo dichiari, e la stanza letta non avrebbe modo di vederlo
-        rileggendo il proprio meta. Qui la dichiarazione è su entrambi i lati,
-        quindi guardare il meta di un topic basta a sapere chi lo legge.
+        CONSENT OF BOTH OWNERS (review fix B1). A link opens a read path into
+        BOTH rooms, so it is effective only when the owner of each topic has
+        agreed — or an admin has. `approver` is the human whose consent this
+        call carries (the signed approver of the gate card, or the person on
+        the internal route); it counts for every side whose CURRENT owner it
+        is, and for both sides if `approver_admin`. One approval is therefore
+        enough when the two topics share an owner; otherwise the link is
+        written PENDING and stays inert — no mount, no read, no ingress entry —
+        until the other owner consents by calling this again from their side
+        (`approve_only=True` refuses to create a new link, for the routes that
+        only approve). Each consent is stored on its own side's entry and
+        re-checked at every resolution (`_links`), so a change of owner
+        withdraws it.
 
-        Stesso livello SEAL perché un collegamento con un livello più alto
-        porterebbe quel contenuto dentro una stanza che non ha la clearance per
-        riceverlo — il controllo di livello di `_require_topic_member` guarda il
-        tier del topic chiamato, e da qui in poi i byte arriverebbero senza
-        passare da lì.
+        Same SEAL level because a link to a higher level would carry that
+        content into a room without the clearance to receive it.
         """
         t1, n1 = _normalize_tier(tier), name
         t2, n2 = _normalize_tier(other_tier), str(other_name or "").strip()
@@ -1340,65 +1455,140 @@ class TopicService:
                 f"{t1}/{n1} è {liv1}, {t2}/{n2} è {liv2}. Un collegamento fra "
                 f"livelli diversi porterebbe il contenuto del più alto in una "
                 f"stanza che non ha la clearance per riceverlo.")
-        for l in topic_links(meta1):
-            if (_normalize_tier(l.get("tier")), str(l.get("topic"))) == (t2, n2):
+        approver = str(approver or "").strip()
+
+        def _speaks_for(meta: dict) -> bool:
+            return bool(approver) and (approver_admin
+                                       or approver == str(meta.get("owner") or ""))
+
+        stamp = {"by": approver, "as": "admin" if approver_admin else "owner",
+                 "at": _now().isoformat(timespec="seconds")}
+
+        def _entry(meta: dict, t: str, n: str) -> dict | None:
+            return next((l for l in topic_links(meta)
+                         if (_normalize_tier(l.get("tier")), str(l.get("topic"))) == (t, n)),
+                        None)
+
+        links1, links2 = topic_links(meta1), topic_links(meta2)
+        e1, e2 = _entry(meta1, t2, n2), _entry(meta2, t1, n1)
+        before2 = json.loads(json.dumps(links2))
+        if e1 is not None or e2 is not None:
+            # A link is already declared: this call can only add a consent.
+            if e1 is None or e2 is None:
+                raise TopicError(
+                    f"il collegamento fra {t1}/{n1} e {t2}/{n2} è dichiarato da un "
+                    "lato solo: toglilo con `topic.link_remove` e rifallo")
+            nuovi = []
+            if _speaks_for(meta1) and not link_approval_valid(meta1, e1):
+                e1["approval"] = dict(stamp)
+                nuovi.append(f"{t1}/{n1}")
+            if _speaks_for(meta2) and not link_approval_valid(meta2, e2):
+                e2["approval"] = dict(stamp)
+                nuovi.append(f"{t2}/{n2}")
+            if not nuovi:
+                manca = [f"{t}/{n}" for (m, e, t, n) in ((meta1, e1, t1, n1),
+                                                        (meta2, e2, t2, n2))
+                         if not link_approval_valid(m, e)]
+                if manca:
+                    raise TopicError(
+                        f"il collegamento fra {t1}/{n1} e {t2}/{n2} attende il "
+                        f"consenso dell'owner di {', '.join(manca)}: "
+                        f"'{approver or 'nessuno'}' non parla per quel topic")
                 raise TopicError(
                     f"{t1}/{n1} è già collegato a {t2}/{n2} (mount "
-                    f"'{l.get('name')}')")
-        m1 = _unique_name(mount_name or n2, self._link_mount_names(t1, n1, meta1))
-        m2 = _unique_name(n1, self._link_mount_names(t2, n2, meta2))
-        v1 = {"name": m1, "tier": t2, "topic": n2,
-              "at": _now().isoformat(timespec="seconds"), "by": by}
-        v2 = {"name": m2, "tier": t1, "topic": n1,
-              "at": _now().isoformat(timespec="seconds"), "by": by}
-        meta2["links"] = topic_links(meta2) + [v2]
+                    f"'{e1.get('name')}')")
+        else:
+            if approve_only:
+                raise TopicError(
+                    f"nessun collegamento in attesa fra {t1}/{n1} e {t2}/{n2} da approvare")
+            if not (_speaks_for(meta1) or _speaks_for(meta2)):
+                raise TopicError(
+                    "un collegamento richiede il consenso dell'owner di ciascun "
+                    f"topic (o di un admin): '{approver or 'nessuno'}' non è owner "
+                    f"né di {t1}/{n1} né di {t2}/{n2}")
+            m1 = _unique_name(mount_name or n2, self._link_mount_names(t1, n1, meta1))
+            m2 = _unique_name(n1, self._link_mount_names(t2, n2, meta2))
+            at = _now().isoformat(timespec="seconds")
+            e1 = {"name": m1, "tier": t2, "topic": n2, "at": at, "by": by}
+            e2 = {"name": m2, "tier": t1, "topic": n1, "at": at, "by": by}
+            if _speaks_for(meta1):
+                e1["approval"] = dict(stamp)
+            if _speaks_for(meta2):
+                e2["approval"] = dict(stamp)
+            links1.append(e1)
+            links2.append(e2)
+        meta1["links"], meta2["links"] = links1, links2
+
+        attivo = link_approval_valid(meta1, e1) and link_approval_valid(meta2, e2)
+        aggiunte: dict = {}
+        if attivo:
+            # The two rooms become declared sources of each other only once
+            # BOTH owners have agreed: before that, B's ingress list would be
+            # widened without B's consent. Whether each entry was added HERE is
+            # recorded on the link, so `link_remove` takes back only its own
+            # and never an entry an operator put there.
+            aggiunte = self._link_ingress(t1, n1, t2, n2)
+            if not isinstance(aggiunte, dict):
+                aggiunte = {}
+            if aggiunte.get(f"{t1}/{n1}"):
+                e1["ingress_added"] = True
+            if aggiunte.get(f"{t2}/{n2}"):
+                e2["ingress_added"] = True
         self._write_meta(t2, n2, meta2, base_version=ver2)
         try:
-            meta1["links"] = topic_links(meta1) + [v1]
             self._write_meta(t1, n1, meta1, base_version=ver1)
         except Exception:
-            # Un collegamento dichiarato da un lato solo non è attivo (lo dice
-            # `_links`), ma resterebbe a sporcare il meta dell'altro topic e a
-            # far credere a chi lo rilegge che quella stanza sia letta da
-            # un'altra. Si disfa subito, e l'errore originale risale.
+            # A link declared on one side is not active (see `_links`), but it
+            # would litter the other meta and tell whoever re-reads it that the
+            # room is read by another. Undo it, and let the original error rise.
             try:
                 meta2b, ver2b = self._read_meta(t2, n2)
-                meta2b["links"] = [l for l in topic_links(meta2b)
-                                   if not (_normalize_tier(l.get("tier")) == t1
-                                           and str(l.get("topic")) == n1)]
+                meta2b["links"] = before2
                 self._write_meta(t2, n2, meta2b, base_version=ver2b)
             except Exception:  # noqa: BLE001
                 LOG.error("link_add: rollback del lato %s/%s fallito", t2, n2)
+            for scope, other in ((f"{t1}/{n1}", f"{t2}/{n2}"), (f"{t2}/{n2}", f"{t1}/{n1}")):
+                if aggiunte.get(scope):
+                    self._link_ingress_revoke(scope, other)
             raise
-        # Il topic collegato diventa una FONTE DICHIARATA per questa stanza, e
-        # viceversa: senza, ogni lettura attraverso il collegamento
-        # contaminerebbe il canale come un allegato di un estraneo. Non è un
-        # lasciapassare sul contenuto — l'etichetta `untrusted` di un singolo
-        # file continua a valere, perché viaggia col file (vedi
-        # `main._source_vetted`): qui si dichiara fidata la STANZA, non ciò che
-        # un terzo ci ha depositato dentro.
-        self._link_ingress(t1, n1, t2, n2)
-        return {"ok": True, "link": v1, "other": v2}
+        manca = [f"{t}/{n}" for (m, e, t, n) in ((meta1, e1, t1, n1), (meta2, e2, t2, n2))
+                 if not link_approval_valid(m, e)]
+        return {"ok": True, "state": "active" if attivo else "pending",
+                "awaiting_owner_of": manca, "link": e1, "other": e2}
 
     @staticmethod
-    def _link_ingress(t1: str, n1: str, t2: str, n2: str) -> None:
+    def _link_ingress(t1: str, n1: str, t2: str, n2: str) -> dict:
+        """Declare each room a source of the other. Returns `{scope: added}`:
+        whether the entry was ADDED by this call or was already there."""
         from .. import egress as _eg
+        out = {}
         for a, b in (((t1, n1), (t2, n2)), ((t2, n2), (t1, n1))):
-            _eg.scope_allow("ingress", f"{a[0]}/{a[1]}", f"topic:{b[0]}/{b[1]}")
+            res = _eg.scope_allow("ingress", f"{a[0]}/{a[1]}", f"topic:{b[0]}/{b[1]}")
+            out[f"{a[0]}/{a[1]}"] = bool((res or {}).get("added"))
+        return out
+
+    @staticmethod
+    def _link_ingress_revoke(scope: str, other: str) -> None:
+        """Take back one ingress entry that a link added. Best effort: the link
+        is gone either way, and a leftover entry is visible in the scope list."""
+        from .. import egress as _eg
+        try:
+            _eg.scope_revoke("ingress", scope, f"topic:{other}")
+        except Exception as e:  # noqa: BLE001
+            LOG.error("link: voce di ingresso topic:%s su %s non rimossa (%s)",
+                      other, scope, type(e).__name__)
 
     def link_remove(self, tier: str, name: str, mount_name: str) -> dict:
-        """Scollega: toglie la dichiarazione da ENTRAMBI i meta.
+        """Unlink: remove the declaration from BOTH metas.
 
-        Da entrambi, non solo da qui: una dichiarazione rimasta sull'altro lato
-        non darebbe accesso (il collegamento non sarebbe più reciproco, e
-        `_links` lo scarterebbe), ma direbbe a chi rilegge quel meta che questa
-        stanza lo sta leggendo — cioè una cosa falsa, nel posto in cui si va a
-        controllare chi legge cosa.
+        From both, not only here: a declaration left on the other side would
+        give no access (the link would no longer be reciprocal) but would tell
+        whoever re-reads that meta that this room reads it.
 
-        Le voci di ingresso NON si tolgono qui: toglierle richiederebbe sapere
-        che nessun altro le ha concesse per altro, e una revoca di perimetro è
-        un atto di chi amministra (`topic.ingress_remove`), non l'effetto
-        collaterale di un'altra operazione.
+        The ingress entries are taken back too, but only those the link itself
+        added (`ingress_added` on each side's entry): an entry an operator had
+        declared on their own stays, because removing it is not this
+        operation's call.
         """
         t1, n1 = _normalize_tier(tier), name
         meta1, ver1 = self._read_meta(t1, n1)
@@ -1411,14 +1601,18 @@ class TopicService:
         t2, n2 = _normalize_tier(voce.get("tier")), str(voce.get("topic"))
         meta1["links"] = [l for l in topic_links(meta1) if l.get("name") != mount_name]
         self._write_meta(t1, n1, meta1, base_version=ver1)
+        if voce.get("ingress_added"):
+            self._link_ingress_revoke(f"{t1}/{n1}", f"{t2}/{n2}")
         try:
             meta2, ver2 = self._read_meta(t2, n2)
-            meta2["links"] = [l for l in topic_links(meta2)
-                              if not (_normalize_tier(l.get("tier")) == t1
-                                      and str(l.get("topic")) == n1)]
+            ritorno = [l for l in topic_links(meta2)
+                       if _normalize_tier(l.get("tier")) == t1 and str(l.get("topic")) == n1]
+            meta2["links"] = [l for l in topic_links(meta2) if l not in ritorno]
             self._write_meta(t2, n2, meta2, base_version=ver2)
+            if any(l.get("ingress_added") for l in ritorno):
+                self._link_ingress_revoke(f"{t2}/{n2}", f"{t1}/{n1}")
         except TopicError:
-            pass  # l'altro topic non c'è più: niente da togliere di là
+            pass  # the other topic is gone: nothing to remove there
         return {"ok": True, "removed": mount_name, "topic": f"{t2}/{n2}"}
 
     def _migrate_mounts_field(self, tier: str, name: str) -> None:
@@ -1556,6 +1750,10 @@ class TopicService:
             # resto di `open`: un meta illeggibile dall'altro lato non deve poter
             # far fallire l'apertura di questo.
             "links": self._links_safe(tier, name, meta),
+            # Every DECLARED link with its state, pending ones included: a link
+            # awaiting the other owner's consent is visible here, and says
+            # whose consent is missing (review fix B1).
+            "links_declared": self._link_states_safe(tier, name, meta),
         }
         if light:
             # Niente `recent_files`, `agents_md`, `recap_history`: vedi il
@@ -2447,7 +2645,8 @@ class TopicService:
                 "(optimistic lock, come il summary). Un upload lo lascerebbe "
                 "scrivibile da qualunque partecipante.")
         store, base, sub, mount = self._resolve_data_path(
-            tier, name, f"{mount_prefix}/{rel}".strip("/") if mount_prefix else rel)
+            tier, name, f"{mount_prefix}/{rel}".strip("/") if mount_prefix else rel,
+            check_reader=False)
         # SOLA LETTURA sui mount di collegamento (clodia-platform#477). Il
         # rifiuto sta qui perché qui passano TUTTE le scritture dell'albero dati
         # — `put_file` e la destinazione di `move_file` — e una guardia per
@@ -2494,7 +2693,8 @@ class TopicService:
                 "puoi spostare solo file dentro i mount del topic — "
                 f"`{self.MOUNT_LOCAL}/…` (meta, summary e AGENTS.md sono "
                 "control-plane: l'AGENTS.md si scrive con `topic.save_agents_md`)")
-        store, base, sub, mount = self._resolve_data_path(tier, name, rel, meta)
+        store, base, sub, mount = self._resolve_data_path(tier, name, rel, meta,
+                                                          check_reader=False)
         self._refuse_if_linked(mount, relpath)
         if not sub:
             raise TopicError("un mount non si sposta: indica un file dentro di esso")
@@ -2570,7 +2770,8 @@ class TopicService:
                 f"`{self.MOUNT_LOCAL}/…` "
                 "(meta, summary e AGENTS.md sono control-plane e non si "
                 "cancellano da qui)")
-        store, base, sub, _mount = self._resolve_data_path(tier, name, rel, meta)
+        store, base, sub, _mount = self._resolve_data_path(tier, name, rel, meta,
+                                                           check_reader=False)
         self._refuse_if_linked(_mount, relpath)
         if not sub:
             raise TopicError("un mount non si cancella: indica un file dentro di esso")
