@@ -395,7 +395,23 @@ EGRESS_SCHEMES = ("mailto", "tg", "http", "https", "gdrive", "gsheets", "outbox"
 #: domande sono indipendenti — un canale può leggere `mailbox_studio` e allo
 #: stesso tempo trattare come non fidato ogni messaggio che non venga da un
 #: mittente del perimetro.
-SOURCE_SCHEMES = ("mailfrom", "tg", "http", "https", "gdrive", "gsheets", "mcp", "inbox")
+#: `topic:<tier>/<nome>` è un ALTRO topic della colonia, collegato a questo
+#: (clodia-platform#477). Esiste solo in ingresso: un topic non è una
+#: destinazione verso cui si esce — scrivere nei file di un altro topic non si
+#: può, il mount del collegamento è in sola lettura — ed è invece una fonte, da
+#: cui si legge. Dichiararlo non rende fidato tutto ciò che quella stanza
+#: contiene: l'etichetta di provenienza del singolo file continua a valere e
+#: viaggia col file (`main._source_vetted`), quindi un allegato `untrusted`
+#: letto attraverso un collegamento contamina come contaminerebbe a casa sua.
+#: Quello che si dichiara qui è la STANZA: il suo summary, le sue istruzioni, i
+#: file che ci hanno messo i suoi partecipanti.
+#: Review fix B2: a FILE read through a link is judged exactly as its own topic
+#: would judge it (label, Drive folder, that topic's source list), so this entry
+#: never makes an unlabelled file of the other room vetted. It is written only
+#: once BOTH owners have consented to the link, and `link_remove` takes back
+#: the entries the link itself added.
+SOURCE_SCHEMES = ("mailfrom", "tg", "http", "https", "gdrive", "gsheets", "mcp",
+                  "inbox", "topic")
 
 #: Le due forme di `tg:`, e non ce n'è una terza. La distinzione fra un gruppo e
 #: una persona la porta la FORMA, non un parametro a parte: un parametro
@@ -1076,6 +1092,17 @@ def check_grantable(direction: str, uri: str) -> str:
             "'gcal:*' aprirebbe qualunque calendario dell'account, cioè l'intera "
             "agenda: indica il calendario (`gcal:<id>`, di solito l'indirizzo "
             "email) oppure un dominio (`gcal:*@esempio.it`).")
+    # `topic:` vuole LIVELLO e NOME. `topic:SEAL-1/` non è degenere per
+    # `_is_degenerate` (c'è un livello), e `topic` non è fra gli schemi
+    # gerarchici: quella voce non combacerebbe con NESSUN topic, cioè sarebbe
+    # approvata e inefficace — e il sintomo («l'ho messa in lista e contamina
+    # ancora») non nominerebbe la causa. Stessa ragione del controllo su `tg:`.
+    if scheme == "topic" and not re.match(r"^[A-Za-z0-9-]+/[a-z0-9][a-z0-9_-]*$",
+                                          rest.strip()):
+        raise ValueError(
+            f"'{u}' non è un topic: si scrive 'topic:<tier>/<nome>', per esempio "
+            f"'topic:SEAL-1/acme'. Niente wildcard e niente livello da solo: un "
+            f"livello intero non è una fonte di cui qualcuno risponda.")
     if scheme == "tg" and not (_TG_GROUP.match(rest) or _TG_HANDLE.match(rest)):
         raise ValueError(
             f"'{u}' non è una chat Telegram: si scrive 'tg:<chat_id>' per un "
