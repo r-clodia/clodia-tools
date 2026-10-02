@@ -50,6 +50,51 @@ class LocalFsStorage(Storage):
         except ValueError:
             return False
 
+    # Modes of the shared folder (clodia-platform#498): read and written from
+    # the Mac by the human owner — another Unix account — so group rw, and
+    # directories enterable/writable by the group. The rest of the storage is
+    # private to the gateway.
+    SHARED_FILE_MODE = 0o664
+    SHARED_DIR_MODE = 0o775
+    PRIVATE_FILE_MODE = 0o600
+    PRIVATE_DIR_MODE = 0o700
+
+    def _set_mode(self, p: Path) -> None:
+        """The mode `p` must have where it now lives. Never follows symlinks."""
+        try:
+            if p.is_symlink():
+                return
+            shared = self._is_shared(p)
+            if p.is_dir():
+                os.chmod(p, self.SHARED_DIR_MODE if shared else self.PRIVATE_DIR_MODE)
+            elif p.is_file():
+                os.chmod(p, self.SHARED_FILE_MODE if shared else self.PRIVATE_FILE_MODE)
+        except OSError:
+            pass
+
+    def _set_tree_mode(self, top: Path) -> None:
+        """`_set_mode` on `top` and everything under it, without following
+        symlinks: a moved file keeps its SOURCE mode (`shutil.move`), so a file
+        born 0600 in the private storage stayed unreadable from the Mac once
+        moved into the shared folder (#498)."""
+        self._set_mode(top)
+        if top.is_dir() and not top.is_symlink():
+            for dirpath, dirnames, filenames in os.walk(top, followlinks=False):
+                for n in dirnames + filenames:
+                    self._set_mode(Path(dirpath) / n)
+
+    def _mkdirs(self, d: Path) -> None:
+        """mkdir -p, giving every directory it CREATES the mode of where it is
+        (0775 in the shared folder, instead of the umask's 0755)."""
+        missing: list[Path] = []
+        cur = d
+        while not cur.exists() and cur != cur.parent:
+            missing.append(cur)
+            cur = cur.parent
+        d.mkdir(parents=True, exist_ok=True)
+        for m in reversed(missing):
+            self._set_mode(m)
+
     def list(self, path: str) -> list[Entry]:
         d = self._abs(path)
         if not d.is_dir():
@@ -71,7 +116,7 @@ class LocalFsStorage(Storage):
 
     def write(self, path: str, data: bytes, if_version: str | None = None) -> str:
         f = self._abs(path)
-        f.parent.mkdir(parents=True, exist_ok=True)
+        self._mkdirs(f.parent)
         if if_version is not None:
             cur = _version(f.read_bytes()) if f.is_file() else None
             if cur != if_version:
@@ -80,22 +125,22 @@ class LocalFsStorage(Storage):
         tmp = f.with_name(f.name + ".tmp")
         tmp.write_bytes(data)
         os.replace(tmp, f)
-        try:
-            os.chmod(f, 0o664 if self._is_shared(f) else 0o600)
-        except OSError:
-            pass
+        self._set_mode(f)
         return _version(data)
 
     def mkdir(self, path: str) -> None:
-        self._abs(path).mkdir(parents=True, exist_ok=True)
+        self._mkdirs(self._abs(path))
 
     def move(self, src: str, dst: str) -> None:
         s = self._abs(src)
         d = self._abs(dst)
         if not s.exists():
             raise NotFound(f"non trovato: {src}")
-        d.parent.mkdir(parents=True, exist_ok=True)
+        self._mkdirs(d.parent)
         shutil.move(str(s), str(d))
+        # The moved tree takes the modes of where it landed (#498): shared ->
+        # 0664/0775, private -> 0600/0700.
+        self._set_tree_mode(d)
 
     def delete(self, path: str) -> None:
         p = self._abs(path)

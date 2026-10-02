@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import tempfile
+import unittest
 import warnings
 
 
@@ -84,3 +85,63 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+class SharedFolderModesTests(unittest.TestCase):
+    """clodia-platform#498: what lands in the shared folder must be readable
+    from the Mac by the human owner (another Unix account)."""
+
+    def setUp(self) -> None:
+        import tempfile
+        from .local_fs import LocalFsStorage
+        from .storage import LOCAL_SHARED_ROOT
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.fs = LocalFsStorage(self._tmp.name)
+        self.sh = LOCAL_SHARED_ROOT
+
+    def mode(self, rel: str) -> int:
+        import os, stat
+        return stat.S_IMODE(os.lstat(self.fs._abs(rel)).st_mode)
+
+    def test_a_private_file_moved_into_the_shared_folder_becomes_0664(self) -> None:
+        self.fs.write("data/rendiconto/report.md", b"x")
+        self.assertEqual(self.mode("data/rendiconto/report.md"), 0o600)
+        self.fs.move("data/rendiconto", f"{self.sh}/hedge/rendiconto")
+        self.assertEqual(self.mode(f"{self.sh}/hedge/rendiconto/report.md"), 0o664)
+        self.assertEqual(self.mode(f"{self.sh}/hedge/rendiconto"), 0o775)
+        self.assertEqual(self.mode(f"{self.sh}/hedge"), 0o775)
+
+    def test_a_whole_tree_moved_in_gets_shared_modes_at_every_level(self) -> None:
+        self.fs.write("data/a/b/c.pdf", b"x")
+        self.fs.write("data/a/d.md", b"y")
+        self.fs.move("data/a", f"{self.sh}/t/a")
+        for rel, m in ((f"{self.sh}/t/a", 0o775), (f"{self.sh}/t/a/b", 0o775),
+                       (f"{self.sh}/t/a/b/c.pdf", 0o664), (f"{self.sh}/t/a/d.md", 0o664)):
+            with self.subTest(rel=rel):
+                self.assertEqual(self.mode(rel), m)
+
+    def test_moving_out_of_the_shared_folder_makes_it_private_again(self) -> None:
+        self.fs.write(f"{self.sh}/t/x.md", b"x")
+        self.assertEqual(self.mode(f"{self.sh}/t/x.md"), 0o664)
+        self.fs.move(f"{self.sh}/t/x.md", "data/x.md")
+        self.assertEqual(self.mode("data/x.md"), 0o600)
+
+    def test_directories_created_in_the_shared_folder_are_0775(self) -> None:
+        self.fs.mkdir(f"{self.sh}/t/new/deep")
+        self.assertEqual(self.mode(f"{self.sh}/t/new"), 0o775)
+        self.assertEqual(self.mode(f"{self.sh}/t/new/deep"), 0o775)
+        self.fs.write(f"{self.sh}/u/v/w.md", b"x")          # parents created by write
+        self.assertEqual(self.mode(f"{self.sh}/u/v"), 0o775)
+
+    def test_a_symlink_in_a_moved_tree_is_not_followed(self) -> None:
+        import os
+        outside = os.path.join(self._tmp.name, "..", "outside-" + os.path.basename(self._tmp.name))
+        os.makedirs(outside, exist_ok=True)
+        self.addCleanup(lambda: os.rmdir(outside))
+        os.chmod(outside, 0o700)
+        self.fs.write("data/tree/f.md", b"x")
+        os.symlink(outside, self.fs._abs("data/tree") / "link")
+        self.fs.move("data/tree", f"{self.sh}/t/tree")
+        import stat
+        self.assertEqual(stat.S_IMODE(os.stat(outside).st_mode), 0o700)
