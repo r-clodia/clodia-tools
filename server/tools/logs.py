@@ -26,7 +26,7 @@ import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from ..whitelist import tool_allowed
+from ..whitelist import current_clearance, tool_allowed
 
 #: Le sorgenti leggibili, e il file di ciascuna nella cartella `logs/`.
 SOURCES = {"agent-server": "agent-server.log", "gateway": "clodia-tools.log"}
@@ -41,13 +41,73 @@ _BACKUPS = 3
 _FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 _SECRET_RE = re.compile(
     r"(?i)\b(token|secret|key|password|authorization|bearer|api[_-]?key)\b\s*[=:]\s*\S+")
+#: Il NOME di un topic nelle righe del reference monitor, nelle due sole forme
+#: in cui vi compare: `SEAL-2/dossier` (il bersaglio) e `chan:SEAL-2:dossier:…`
+#: (la stanza da cui parte la chiamata). In entrambe il tier sta ATTACCATO al
+#: nome, ed è ciò che rende la redazione possibile a lettura.
+#:
+#: SHORTCUT: la redazione è testuale e regge finché il refmon scrive il tier
+#:           accanto al nome. Un nome loggato nudo non è redigibile dal testo:
+#:           allora il tier va messo nella riga (o il nome va tolto dal log),
+#:           non va dedotto aprendo il topic — `logs.tail` è una lettura di
+#:           file e non deve diventare una scansione dello store.
+#:           `test_418_logs_redazione.py` fallisce se un emettitore smette di
+#:           scrivere il tier.
+_TOPIC_RE = re.compile(r"\b(SEAL-[0-4]|P[0-4])([/:])([A-Za-z0-9][\w.-]*)")
+
+
+def _rank(tier: str | None) -> int:
+    """Il livello come numero, accettando l'alias storico `P<n>`.
+
+    Copia deliberata della scala che sta in `main._rank`: `logs` è importato DA
+    `main`, e farglielo importare all'indietro per cinque costanti creerebbe un
+    ciclo. Un test (`test_418_logs_redazione`) pretende che le due scale diano
+    lo stesso numero, così la copia non può divergere in silenzio.
+    """
+    u = str(tier or "SEAL-0").strip().upper()
+    if u.startswith("P") and u[1:].isdigit():
+        u = f"SEAL-{u[1:]}"
+    try:
+        return int(u.replace("SEAL-", "").strip())
+    except ValueError:
+        return 0
+
+
+def _redact_topics(line: str, clearance: str | None) -> str:
+    """Oscura i NOMI dei topic di tier superiore alla clearance di chi legge.
+
+    Le righe del reference monitor dicono quale stanza un agente ha toccato, e
+    `logs.tail` le rende leggibili a chi ha il verbo **indipendentemente dalla
+    sua clearance** (clodia-platform#418 §5). Il contenuto non c'è mai, ma il
+    nome di un topic SEAL-3 è già informazione: dice che quel dossier esiste e
+    come si chiama.
+
+    Il tier resta VISIBILE: una riga «SEAL-3/•••» continua a servire a chi
+    diagnostica — dice che è successo, a che livello e a chi — e toglie l'unica
+    parte che non gli compete. Oscurare la riga intera avrebbe reso il log
+    inutile proprio a chi lo legge per mestiere.
+    """
+    mio = _rank(clearance)
+
+    def _sub(m: "re.Match[str]") -> str:
+        if _rank(m.group(1)) <= mio:
+            return m.group(0)
+        return f"{m.group(1)}{m.group(2)}•••"
+
+    return _TOPIC_RE.sub(_sub, line)
 
 
 def _log_file(source: str = "agent-server") -> Path:
     """Il file della sorgente. Sconosciuta → errore, mai un ripiego silenzioso:
     rispondere con l'agent-server a chi ha chiesto il gateway è dargli la
-    risposta giusta alla domanda sbagliata."""
-    nome = SOURCES.get((source or "agent-server").strip().lower())
+    risposta giusta alla domanda sbagliata.
+
+    `str()` prima di `.strip()`: un `source` non stringa sollevava
+    `AttributeError` invece del `ValueError` che questa funzione documenta, e
+    chi lo riceveva leggeva un guasto al posto di «sorgente sconosciuta»
+    (clodia-platform#418 §6).
+    """
+    nome = SOURCES.get(str(source or "agent-server").strip().lower())
     if not nome:
         raise ValueError(
             f"sorgente di log sconosciuta: '{source}'. "
@@ -93,7 +153,8 @@ def attach_gateway_file_log(level: int = logging.INFO) -> Path | None:
 def tail(lines: int = 100, level: str = "", source: str = "agent-server") -> dict:
     """Ultime `lines` righe del log (max 500), opzionalmente filtrate per
     `level` (INFO/WARNING/ERROR). `source`: `agent-server` (default) o
-    `gateway`. Segreti redatti."""
+    `gateway`. Segreti redatti, e con loro i nomi dei topic sopra la clearance
+    di chi legge (`_redact_topics`)."""
     tool_allowed("logs.tail")
     f = _log_file(source)
     n = max(1, min(int(lines or 100), _MAX_LINES))
@@ -104,5 +165,7 @@ def tail(lines: int = 100, level: str = "", source: str = "agent-server") -> dic
     lv = (level or "").strip().upper()
     if lv:
         rows = [r for r in rows if f" {lv} " in r]
-    out = [_SECRET_RE.sub(lambda m: m.group(1) + "=•••", r) for r in rows[-n:]]
+    cl = current_clearance()
+    out = [_redact_topics(_SECRET_RE.sub(lambda m: m.group(1) + "=•••", r), cl)
+           for r in rows[-n:]]
     return {"file": str(f), "source": source, "count": len(out), "lines": out}

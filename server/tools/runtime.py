@@ -373,7 +373,16 @@ def providers() -> dict:
 
 def topics(include_restricted: bool = False) -> dict:
     """I topic di cui l'agente chiamante è owner o partecipante (metadati). Un
-    agente non autorizzato NON vede i topic altrui. P3 esclusi di default."""
+    agente non autorizzato NON vede i topic altrui. P3 esclusi di default.
+
+    Qui c'è SOLO la membership del seed. Clearance di chi chiede, token di una
+    persona, stanza di provenienza e sessione non presidiata li applica il
+    dispatch, in `main._visible_topic_rows` — lo stesso punto che serve
+    `topic.list`/`topic.search`, perché i tre verbi rispondono gli stessi
+    metadati e tre regole separate sono tre posti in cui dimenticarne una
+    (clodia-platform#418). `include_restricted` chiede di includere anche i tier
+    alti; **non** è una clearance, e non lo diventa aggiungendone una copia qui.
+    """
     from ..topics_api import _service
     try:
         me = whitelist.agent_name()
