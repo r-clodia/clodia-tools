@@ -2590,13 +2590,15 @@ def _dispatch_runtime(name: str, arguments: dict, caller: str | None = None):
     if sub == "chats":
         return runtime.chats()
     if sub == "topics":
-        # Stessa porta di `topic.list`/`topic.search`, altra maniglia: anche qui
-        # il filtro è sulla membership del SEED. Compartimentarne uno solo
-        # lascerebbe il verbo accanto a rifare quello che si è appena chiuso —
-        # ed è proprio da `runtime.topics()` che nasce la decisione del 23 set
-        # sul grant `crosstopic` (clodia-platform#401, residuo di #382).
+        # Stessa porta di `topic.list`/`topic.search`, altra maniglia: il filtro
+        # dentro `runtime.topics()` guarda la sola membership del SEED, e
+        # compartimentarne uno solo lascerebbe il verbo accanto a rifare quello
+        # che si è appena chiuso — ed è proprio da `runtime.topics()` che nasce
+        # la decisione del 23 set sul grant `crosstopic` (#401, residuo di #382).
+        # Da #418 le righe passano dagli STESSI filtri di `topic.list`:
+        # clearance, token di persona e sessione non presidiata comprese.
         out = runtime.topics(include_restricted=bool(arguments.get("include_restricted")))
-        righe = _scope_rows_to_this_room(
+        righe = _visible_topic_rows(
             (out or {}).get("topics") or [], caller or agent_name() or "")
         # `count` segue le righe: un numero che non corrisponde racconterebbe
         # comunque quante stanze esistono, e il numero è già informazione.
@@ -3378,6 +3380,16 @@ def spawn_compartment_declaration() -> tuple[int, str]:
     ` WARNING ` nella riga, quindi `report`/`off` — un perimetro aperto — devono
     restare pescabili col filtro anche dentro un log lungo, mentre `on` è
     l'esercizio normale e resta INFO.
+
+    La riga dice anche **cosa succede fuori da una stanza**, ed è la nota di
+    release del punto 7 di clodia-platform#418 messa dove l'operatore la legge.
+    `on` era *meno* stretto fuori da una stanza che dentro — senza un «qui» non
+    c'è niente da confinare — e quella frase, letta su un'istanza che non
+    dichiara la variabile, suonava come un buco. Da oggi il «fuori» ha due
+    regole proprie, volute e dichiarate: una sessione non presidiata non riceve
+    l'elenco, un token di persona lo riceve ristretto alla persona. Il resto —
+    una chat della webui che chiede quali topic esistono — continua a vedere lo
+    scope del seed, e non è una svista.
     """
     import logging as _lg
     modo = _spawn_compartment_mode()
@@ -3394,7 +3406,9 @@ def spawn_compartment_declaration() -> tuple[int, str]:
                "off": "compartimento non applicato"}[modo]
     livello = _lg.INFO if modo == "on" else _lg.WARNING
     return livello, (f"compartimento spawn · modalita' effettiva '{modo}' "
-                     f"({effetto}) · origine: {origine}")
+                     f"({effetto}) · origine: {origine} · fuori da una stanza: "
+                     "elenco topic negato alle sessioni non presidiate e "
+                     "ristretto alla persona per i token umani")
 
 
 def log_spawn_compartment_mode() -> str:
@@ -5705,8 +5719,8 @@ def _scope_rows_to_this_room(rows: list, caller: str) -> list:
     dentro X ciò che appartiene a Y, e senza un «qui» non c'è nessun X. Lì
     c'è una sessione presidiata della webui — un umano che chiede quali topic
     esistono — e svuotarle l'elenco toglierebbe una funzione senza chiudere
-    niente. Una sessione NON presidiata non arriva fin qui: `list`/`search` le
-    sono negati a monte (`_UNATTENDED_TOPIC_ALLOW`).
+    niente. Una sessione NON presidiata invece sì, ma il taglio non è qui: sta
+    in testa a `_visible_topic_rows`, prima di ogni altro ramo (#418 §1).
 
     Con il grant `crosstopic` attivo l'elenco torna intero: chi deve davvero
     guardare fuori non perde il verbo, lo usa con un consenso esplicito.
@@ -5733,6 +5747,94 @@ def _scope_rows_to_this_room(rows: list, caller: str) -> list:
                 "stanza)", caller, len(rows), qui, len(dentro))
         return rows
     return dentro
+
+
+def _rows_also_of_this_person(rows: list) -> list:
+    """Intersezione con la PERSONA, quando il token è di una persona (#418 §2).
+
+    Il token di un client MCP umano porta `on_behalf` e il nome del principal,
+    ma il carrier resta un agente — in esercizio `clodia`, che partecipa a
+    tutto. Filtrare sul solo carrier significa rispondere a Giovanni con
+    l'elenco delle stanze di Clodia: non i contenuti, ma la mappa, e una perdita
+    che non somiglia a un errore perché una lista di titoli sembra sempre
+    plausibile. Il ramo `_token_is_bound_to_a_room` copriva già il token legato
+    a UNA stanza; questo copre quello che non lo è.
+
+    INTERSEZIONE, mai sostituzione: la membership umana non ha mai ampliato
+    l'elenco (`_filter_member_rows`), e qui non lo amplia — lo restringe. Senza
+    questa cautela il token di una persona diventerebbe la via per far elencare
+    a un agente stanze che non sono sue.
+
+    Nessuna esenzione per il ruolo `admin` (decisione dell'owner, 3 ott 2026):
+    un amministratore che non partecipa a un topic non lo vede nell'elenco, come
+    già accade in `topic.list`. Chi deve vedere tutto ha un canale
+    amministrativo, non un elenco più largo di quello che gli compete.
+    """
+    if not is_on_behalf():
+        return rows
+    chi = (current_principal() or "").strip()
+    if not chi:
+        # Fail closed: «per conto di una persona» senza dire quale non è un
+        # token di agente, è un token che non si può valutare.
+        return []
+    return [r for r in rows if _topic_is_member(r, chi)]
+
+
+def _visible_topic_rows(rows: list, caller: str) -> list:
+    """Le righe di topic che questa richiesta può vedere — UNICO punto.
+
+    `topic.list`, `topic.search` e `runtime.topics` restituiscono gli stessi
+    metadati, e fino al 3 ott 2026 applicavano filtri diversi: i primi due
+    need-to-know + clearance + stanza + ramo del token umano, il terzo la sola
+    membership del seed (dentro `tools/runtime.py`). Da quell'asimmetria nascono
+    tutti e tre i primi punti di clodia-platform#418 — niente clearance, niente
+    ramo umano, e per una sessione non presidiata nemmeno il filtro di stanza,
+    che fuori da una stanza non restringe per disegno.
+
+    Tre copie della stessa regola sono tre posti in cui dimenticarne una: la
+    prova che conta, in `test_418_elenco_topic.py`, è che i due verbi rispondano
+    la stessa cosa nelle stesse condizioni.
+    """
+    if not isinstance(rows, list):
+        return rows
+    if is_unattended():
+        # FAIL CLOSED per le sessioni non presidiate (clodia-platform#418 §1),
+        # e PRIMA di ogni altro ramo. Un job non accede ai dati dei topic
+        # (#104): `_unattended_denial` lo applica ai verbi `topic.*`, ma
+        # `runtime.topics` non è uno di quelli e arrivava in fondo — dove, non
+        # avendo il job nessun «qui», la regola della stanza lo lasciava passare
+        # intero. Elenco vuoto invece che verbo negato: è la risposta vera alla
+        # domanda «quali topic vedi da questa sessione».
+        #
+        # In testa, non dentro `_scope_rows_to_this_room`: là sotto il ramo del
+        # token legato a una stanza esce prima, e una sessione non presidiata
+        # che portasse anche un claim di stanza lo scavalcherebbe. Qui sopra non
+        # c'è nessun ramo da cui uscire.
+        #
+        # E fuori da `_spawn_compartment_mode`, di proposito: quella è la leva di
+        # rollout del compartimento per-spawn (#382), questa è un'altra
+        # decisione, e una ritirata dall'una non deve riaprire l'altra.
+        import logging as _lg
+        from .tools.logs import REFMON_LOGGER
+        _lg.getLogger(REFMON_LOGGER).warning(
+            "compartimento spawn · sessione non presidiata di %s: elenco topic "
+            "negato (%d righe trattenute, nessun umano davanti al turno)",
+            caller, len(rows))
+        return []
+    if _token_is_bound_to_a_room():
+        # Un client MCP di una persona è collegato a UNA stanza: l'elenco è
+        # quella stanza, qualunque cosa il carrier partecipi.
+        solo = (current_chat() or "")[len("chan:"):].split(":")[:2]
+        if len(solo) < 2:
+            return []
+        return [r for r in rows
+                if str(r.get("tier")) == solo[0] and str(r.get("name")) == solo[1]]
+    # I filtri si compongono nell'ordine in cui stringono, e nessuno sostituisce
+    # l'altro: need-to-know del seed con la clearance, poi la persona se c'è,
+    # poi la stanza da cui parte la chiamata.
+    righe = _filter_member_rows(rows, caller)
+    righe = _rows_also_of_this_person(righe)
+    return _scope_rows_to_this_room(righe, caller)
 
 
 def _rag_grants(agent: str) -> dict[str, set[str]]:
@@ -6204,34 +6306,13 @@ def _dispatch_topic(name: str, a: dict):
         return svc.archive(a["tier"], a["name"])
     if verb in ("list", "search"):
         # `list` e `search` non passano da `_require_topic_member`: filtrano da
-        # sé, per membership del chiamante. E il chiamante lo leggevano da
-        # `agent_name()` — il CARRIER — anche quando il token era di una persona
-        # legata a una stanza. In esercizio il carrier è `clodia`, che partecipa
-        # a tutto: dal client di Giovanni una ricerca rispondeva con i titoli dei
-        # topic di clodia. Non un accesso ai contenuti, ma una mappa di stanze
-        # che non lo riguardano — e una perdita che non somiglia a un errore,
-        # perché una lista di titoli sembra sempre plausibile.
-        if _token_is_bound_to_a_room():
-            solo = current_chat()[len("chan:"):].split(":")[:2]
-            righe = (svc.list(a.get("tier"), a.get("include_archived", False))
-                     if verb == "list" else svc.search(a["query"], a.get("mode", "lexical")))
-            if not isinstance(righe, list):
-                return righe
-            return [r for r in righe
-                    if str(r.get("tier")) == solo[0] and str(r.get("name")) == solo[1]]
-        # Per uno SPAWN lo stesso confinamento vale sulla stanza da cui parte la
-        # chiamata, non solo sulla membership del seed: `_scope_rows_to_this_room`
-        # (clodia-platform#401). I due filtri si compongono nell'ordine in cui
-        # stringono — prima need-to-know del seed, poi la stanza — e nessuno dei
-        # due sostituisce l'altro.
-        chi = agent_name()
-        if verb == "list":
-            return _scope_rows_to_this_room(_filter_member_rows(
-                svc.list(a.get("tier"), a.get("include_archived", False)), chi), chi)
-        res = svc.search(a["query"], a.get("mode", "lexical"))
-        if not isinstance(res, list):
-            return res
-        return _scope_rows_to_this_room(_filter_member_rows(res, chi), chi)
+        # sé. Chi può vedere quali righe è deciso in un posto solo,
+        # `_visible_topic_rows`, che serve anche `runtime.topics`: finché la
+        # regola è una, non esiste il verbo accanto che rifà quello che questo
+        # ha appena chiuso (clodia-platform#418).
+        righe = (svc.list(a.get("tier"), a.get("include_archived", False))
+                 if verb == "list" else svc.search(a["query"], a.get("mode", "lexical")))
+        return _visible_topic_rows(righe, agent_name())
     if verb == "files":
         return svc.list_files(a["tier"], a["name"], a.get("subpath", ""))
     if verb == "read_file":
