@@ -395,15 +395,29 @@ def _run_backup() -> dict:
         excludes = []
         for e in [*_EXCLUDES, *_spawn_excludes()]:
             excludes += ["--exclude", e]
-        b = _run(["backup", *backup_targets(), "--tag", "platform", *excludes],
-                 cfg, timeout=3600)
-        result = {"backup_rc": b.returncode, "backup_err": b.stderr[-400:] if b.returncode else ""}
+        # `result` nasce PRIMA del comando, non dal suo esito: `_con_sblocco` ci
+        # scrive dentro cosa ha trovato (`locks`, `unlocked`) mentre il comando
+        # è ancora in corso, e quell'informazione serve anche se il backup
+        # fallisce.
+        result: dict = {}
+        # Anche `backup` passa dallo sblocco: il lock lasciato il 13 set da un
+        # `check`/`forget --prune` ucciso è ESCLUSIVO, e con uno di quelli
+        # appeso non parte nemmeno lo snapshot. Sbloccare solo prima di forget e
+        # check lascerebbe il run morto un passo prima di arrivarci — cioè
+        # lascerebbe necessario l'`unlock` a mano che stiamo togliendo.
+        b = _con_sblocco(["backup", *backup_targets(), "--tag", "platform", *excludes],
+                         cfg, 3600, result)
+        result["backup_rc"] = b.returncode
+        result["backup_err"] = b.stderr[-400:] if b.returncode else ""
         # Uno snapshot INCOMPLETO è comunque uno snapshot: si prosegue con
         # retention e verifica, e lo si dice. Fermarsi qui lasciava il repository
         # senza `forget` né `check` per un file sparito durante la lettura.
         incompleto = b.returncode == _RESTIC_INCOMPLETO
         if b.returncode != 0 and not incompleto:
-            raise RuntimeError(f"restic backup fallito: {b.stderr[:400]}")
+            # Se a fermarlo è stato un lock, dirlo: «restic backup fallito» da
+            # solo non fa capire che basta aspettare (o che non basta).
+            dettaglio = (" — " + _descrivi_lock(result["locks"])) if result.get("locks") else ""
+            raise RuntimeError(f"restic backup fallito: {b.stderr[:400]}{dettaglio}")
         if incompleto:
             result["incomplete"] = True
             result["skipped"] = b.stderr[-400:]

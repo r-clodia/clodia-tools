@@ -59,10 +59,12 @@ class _Restic:
 
     def __init__(self, *, backup_rc: int = 0, forget_rc: int = 0, check_rc: int = 0,
                  locks: tuple[dict, ...] = (), unlock_rc: int = 0,
-                 check_rc_dopo_unlock: int = 0, err: str = ""):
+                 check_rc_dopo_unlock: int = 0, backup_rc_dopo_unlock: int = 0,
+                 err: str = ""):
         self.comandi: list[str] = []
         self.backup_rc, self.forget_rc, self.check_rc = backup_rc, forget_rc, check_rc
         self.check_rc_dopo = check_rc_dopo_unlock
+        self.backup_rc_dopo = backup_rc_dopo_unlock
         self.unlock_rc, self.err = unlock_rc, err
         self.locks = {f"{i}" * 64: l for i, l in enumerate(locks)}
         self.sbloccato = False
@@ -71,6 +73,8 @@ class _Restic:
         verbo = args[0]
         self.comandi.append(verbo)
         if verbo == "backup":
+            if self.sbloccato:
+                return _cp(self.backup_rc_dopo)
             return _cp(self.backup_rc, self.err)
         if verbo == "forget":
             return _cp(self.forget_rc)
@@ -176,6 +180,33 @@ class UnLockMortoNonBloccaPerQuattordiciGiorni(unittest.TestCase):
         self.assertEqual(r.comandi.count("unlock"), 1)
         self.assertEqual(r.comandi[-1], "check")
 
+    def test_un_lock_esclusivo_morto_ferma_anche_il_backup(self):
+        """Il lock del 13 set l'ha lasciato un `check`/`forget --prune` ucciso:
+        quelli prendono il lock **esclusivo**, e con uno di quelli appeso non
+        parte nemmeno `restic backup`. Se lo sblocco scattasse solo su forget e
+        check, il run morirebbe prima di arrivarci — e l'`unlock` a mano, che è
+        ciò che la issue vuole togliere, resterebbe necessario."""
+        r = _Restic(backup_rc=11, backup_rc_dopo_unlock=0,
+                    locks=(_lock(ore_fa=336, exclusive=True),))
+        with _Mondo(r) as m:
+            res = backup.run_backup()
+        self.assertEqual(r.comandi[:5],
+                         ["backup", "list", "cat", "unlock", "backup"])
+        self.assertEqual(res["backup_rc"], 0)
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(m.registrato[-1][0])
+
+    def test_un_backup_bloccato_da_un_lock_vivo_resta_un_fallimento(self):
+        """Senza snapshot non c'è backup: si solleva, come per qualunque altro
+        fallimento vero — ma dicendo DA CHI è bloccato."""
+        r = _Restic(backup_rc=11, locks=(_lock(ore_fa=0.1, hostname="altro"),))
+        with _Mondo(r) as m:
+            with self.assertRaises(RuntimeError) as e:
+                backup.run_backup()
+        self.assertNotIn("unlock", r.comandi)
+        self.assertIn("altro", str(e.exception))
+        self.assertFalse(m.registrato[-1][0])
+
     def test_un_lock_illeggibile_non_fa_esplodere_il_run(self):
         """Diagnostica: se non si riesce a leggere un lock si prosegue, non si
         perde il backup."""
@@ -197,6 +228,31 @@ class UnLockMortoNonBloccaPerQuattordiciGiorni(unittest.TestCase):
         t = backup._parse_restic_time("2026-09-13T21:19:02.690411382Z")
         self.assertIsNotNone(t)
         self.assertEqual((t.year, t.month, t.day, t.hour), (2026, 9, 13, 21))
+
+
+class LaSogliaDecideDaSola(unittest.TestCase):
+    """Due run identici in tutto tranne l'età del lock: è la soglia, e solo la
+    soglia, a decidere se si sblocca. Un'ora è la distanza fra «c'è qualcuno che
+    sta lavorando» e «è rimasto appeso»."""
+
+    def _run_con_lock(self, ore_fa: float):
+        r = _Restic(check_rc=11, locks=(_lock(ore_fa=ore_fa),))
+        with _Mondo(r):
+            with patch.object(backup, "_LOCK_STALE_SECONDS", 3600):
+                res = backup.run_backup()
+        return r, res
+
+    def test_a_zero_virgola_nove_ore_il_lock_e_vivo_e_non_si_tocca(self):
+        r, res = self._run_con_lock(0.9)
+        self.assertNotIn("unlock", r.comandi)
+        self.assertFalse(res["locks"][0]["stale"])
+        self.assertFalse(res["ok"])
+
+    def test_a_un_ora_e_un_decimo_il_lock_e_morto_e_si_sblocca(self):
+        r, res = self._run_con_lock(1.1)
+        self.assertIn("unlock", r.comandi)
+        self.assertTrue(res["locks"][0]["stale"])
+        self.assertTrue(res["ok"])
 
 
 class UnaRetentionCheNonGiraNonEUnBackupRiuscito(unittest.TestCase):
