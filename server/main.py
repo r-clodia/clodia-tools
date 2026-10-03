@@ -5719,35 +5719,16 @@ def _scope_rows_to_this_room(rows: list, caller: str) -> list:
     dentro X ciò che appartiene a Y, e senza un «qui» non c'è nessun X. Lì
     c'è una sessione presidiata della webui — un umano che chiede quali topic
     esistono — e svuotarle l'elenco toglierebbe una funzione senza chiudere
-    niente. Una sessione NON presidiata invece sì, e lì si chiude (§sotto).
+    niente. Una sessione NON presidiata invece sì, ma il taglio non è qui: sta
+    in testa a `_visible_topic_rows`, prima di ogni altro ramo (#418 §1).
 
     Con il grant `crosstopic` attivo l'elenco torna intero: chi deve davvero
     guardare fuori non perde il verbo, lo usa con un consenso esplicito.
 
     Stessa maniglia di rollout del resto del compartimento
     (`_spawn_compartment_mode`), così `report`/`off` valgono per l'intera regola
-    e non si crea una seconda leva da ricordare — con l'unica eccezione del
-    blocco dei job, che non è questa regola e non segue questa maniglia.
+    e non si crea una seconda leva da ricordare.
     """
-    if is_unattended():
-        # FAIL CLOSED per le sessioni non presidiate (clodia-platform#418 §1).
-        # Un job non accede ai dati dei topic (#104): `_unattended_denial` lo
-        # applica ai verbi `topic.*`, ma `runtime.topics` non è uno di quelli e
-        # arrivava fin qui — dove, non avendo il job nessun «qui», la regola
-        # della stanza lo lasciava passare intero. Si chiude QUI e non negando
-        # il verbo perché l'elenco vuoto è la risposta vera alla domanda «quali
-        # topic vedi da questa sessione»: nessuno.
-        #
-        # Prima del controllo di modalità di proposito: `CLODIA_SPAWN_COMPARTMENT`
-        # è la leva di rollout del compartimento per-spawn (#382), e una ritirata
-        # da quello non deve riaprire il blocco dei job, che è un'altra decisione.
-        import logging as _lg
-        from .tools.logs import REFMON_LOGGER
-        _lg.getLogger(REFMON_LOGGER).warning(
-            "compartimento spawn · sessione non presidiata di %s: elenco topic "
-            "negato (%d righe trattenute, nessun umano davanti al turno)",
-            caller, len(rows))
-        return []
     modo = _spawn_compartment_mode()
     if modo == "off":
         return rows
@@ -5816,6 +5797,30 @@ def _visible_topic_rows(rows: list, caller: str) -> list:
     """
     if not isinstance(rows, list):
         return rows
+    if is_unattended():
+        # FAIL CLOSED per le sessioni non presidiate (clodia-platform#418 §1),
+        # e PRIMA di ogni altro ramo. Un job non accede ai dati dei topic
+        # (#104): `_unattended_denial` lo applica ai verbi `topic.*`, ma
+        # `runtime.topics` non è uno di quelli e arrivava in fondo — dove, non
+        # avendo il job nessun «qui», la regola della stanza lo lasciava passare
+        # intero. Elenco vuoto invece che verbo negato: è la risposta vera alla
+        # domanda «quali topic vedi da questa sessione».
+        #
+        # In testa, non dentro `_scope_rows_to_this_room`: là sotto il ramo del
+        # token legato a una stanza esce prima, e una sessione non presidiata
+        # che portasse anche un claim di stanza lo scavalcherebbe. Qui sopra non
+        # c'è nessun ramo da cui uscire.
+        #
+        # E fuori da `_spawn_compartment_mode`, di proposito: quella è la leva di
+        # rollout del compartimento per-spawn (#382), questa è un'altra
+        # decisione, e una ritirata dall'una non deve riaprire l'altra.
+        import logging as _lg
+        from .tools.logs import REFMON_LOGGER
+        _lg.getLogger(REFMON_LOGGER).warning(
+            "compartimento spawn · sessione non presidiata di %s: elenco topic "
+            "negato (%d righe trattenute, nessun umano davanti al turno)",
+            caller, len(rows))
+        return []
     if _token_is_bound_to_a_room():
         # Un client MCP di una persona è collegato a UNA stanza: l'elenco è
         # quella stanza, qualunque cosa il carrier partecipi.

@@ -127,6 +127,19 @@ class SessioneNonPresidiataTests(Base):
         with _Claims(chat="chan:SEAL-1:topic-b:clodia", unattended=True):
             self.assertEqual(self.runtime_topics(self.ROWS), ([], 0))
 
+    def test_nemmeno_con_un_token_di_persona_legato_a_una_stanza(self):
+        """Il ramo del token legato a una stanza esce PRIMA del filtro di
+        stanza: finché il taglio dei job stava dentro `_scope_rows_to_this_room`
+        questo caso lo scavalcava e si riprendeva la sua riga. Il fail-closed
+        sta in testa a `_visible_topic_rows` per questo — là sopra non c'è
+        nessun ramo da cui uscire prima.
+        """
+        with _Claims(chat="chan:SEAL-1:topic-b:giovanni", principal="giovanni",
+                     on_behalf=True, unattended=True):
+            self.assertEqual(self.runtime_topics(self.ROWS), ([], 0))
+            self.assertEqual(self.topic_list(self.ROWS), [])
+            self.assertEqual(self.topic_list(self.ROWS, "search"), [])
+
     def test_il_blocco_non_dipende_dalla_maniglia_di_rollout(self):
         """`CLODIA_SPAWN_COMPARTMENT` governa il compartimento per-spawn (#382),
         non il blocco dei job (#104). Legarli significherebbe che una ritirata
