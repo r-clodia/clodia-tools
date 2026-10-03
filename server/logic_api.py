@@ -33,8 +33,24 @@ def _authorized(request: Request) -> bool:
 
 
 def _verb_backup_run(_args: dict) -> dict:
+    """Backup notturno + sorveglianza del restore-test settimanale.
+
+    Il controllo di freschezza sta QUI e non dentro `backup.py` perché è una
+    politica del job, non una proprietà del repository: `run_backup()` continua
+    a rispondere «il repository è integro?», e chi lo esegue ogni notte decide
+    cosa fare dell'informazione «l'ultimo restore-test riuscito è di 14 giorni
+    fa». È il notturno a doversene accorgere: il settimanale che non parte non
+    può notificare di non essere partito (clodia-platform#422).
+    """
     from . import backup
-    return backup.run_backup()
+    res = dict(backup.run_backup())
+    fr = backup.restore_test_freshness(write_baseline=True)
+    res["restore_test"] = fr
+    if fr.get("overdue"):
+        res["ok"] = False
+        res["error"] = (f"restore-test: nessun esito riuscito da {fr.get('days')} "
+                        f"giorni (limite {fr.get('max_days')})")
+    return res
 
 
 def _verb_backup_restore_test(_args: dict) -> dict:
@@ -56,6 +72,16 @@ _ALLOWED = {
 }
 
 
+def _motivo(result: dict) -> str:
+    """Il perché del fallimento, in forma leggibile nella notifica all'owner."""
+    if result.get("error"):
+        return str(result["error"])[:400]
+    codici = {k: v for k, v in result.items()
+              if k.endswith("_rc") and v not in (0, None)}
+    return (", ".join(f"{k}={v}" for k, v in sorted(codici.items()))
+            or "esito non riuscito")[:400]
+
+
 async def logic_run(request: Request):
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -72,6 +98,18 @@ async def logic_run(request: Request):
             status_code=403)
     try:
         result = fn(args if isinstance(args, dict) else {})
+        if isinstance(result, dict) and result.get("ok") is False:
+            # Un verbo che torna `ok: false` ha FALLITO, e lo step con lui.
+            # Senza questa riga il job registrava `last_status: ok` su un
+            # `{"ok": false, "check_rc": 11}` e la notifica d'errore non
+            # partiva: 14 notti di backup non verificati, nessuno avvisato
+            # (clodia-platform#422). La risposta resta **200**: lo scheduler fa
+            # `raise_for_status()` prima di guardare il corpo, e un 500 gli
+            # lascerebbe in mano «500 Server Error» al posto del motivo vero.
+            motivo = _motivo(result)
+            LOG.error("logic-run verb=%s esito non ok: %s", verb, motivo)
+            return JSONResponse({"ok": False, "verb": verb, "error": motivo,
+                                 "result": result})
         LOG.info("logic-run verb=%s ok", verb)
         return JSONResponse({"ok": True, "verb": verb, "result": result})
     except Exception as e:  # noqa: BLE001

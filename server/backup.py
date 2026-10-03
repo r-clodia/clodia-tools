@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import state_paths, vault
@@ -29,6 +30,15 @@ CRED = "backup_config"  # credenziale infra nel vault (no grant per-agente)
 # a mostrare l'ultimo backup ESEGUITO anche quando FALLISCE (un fail non lascia
 # snapshot restic, quindi last_snapshot da solo non basta).
 LAST_RUN_CRED = "backup_last_run"
+# Data dell'ultimo restore-test RIUSCITO (clodia-platform#422). Il restore-test
+# è settimanale: se il suo job non parte, non c'è nessuno che se ne accorga —
+# un job che non gira non può notificare di non aver girato. Il notturno invece
+# parte tutte le notti, e guarda questa data.
+RESTORE_CRED = "backup_last_restore_test"
+#: Oltre questa età senza un restore-test riuscito, il backup notturno fallisce
+#: (e con lui parte la notifica). 8 giorni = una settimana più un giorno di
+#: slittamento, così un sabato spostato non suona l'allarme.
+RESTORE_MAX_DAYS = int(os.environ.get("CLODIA_BACKUP_RESTORE_MAX_DAYS") or 8)
 # Snapshot consistenti dei DB SQLite prima del backup (path relativi alla
 # datadir). Configurabile per-istanza: CLODIA_BACKUP_DBS="a.db,b/c.db".
 # Default vuoto: restic copre comunque l'intera datadir; lo snapshot serve
@@ -45,6 +55,19 @@ _EXCLUDES = ["*.bak-*", "topics-store.bak-*", "**/__pycache__", "**/*.pyc"]
 #: repository non veniva verificato. Osservato il 4 set 2026: snapshot 27fa63c7
 #: creato alle 07:21, run marcato fallito alle 07:22, nessuna verifica.
 _RESTIC_INCOMPLETO = 3
+
+#: restic esce **11** quando non riesce a prendere il lock del repository
+#: («repository is already locked»). È l'esito che il 13 set 2026 si è ripetuto
+#: per 14 notti di fila: un lock lasciato dal PID 984 di un container morto
+#: (`35b58680ee69`) faceva fallire `check` e `forget --prune`, quindi niente
+#: verifica e niente retention, mentre gli snapshot continuavano a crearsi.
+_RESTIC_LOCKED = 11
+#: Oltre questa età, un lock non ha più un proprietario vivo: restic RINFRESCA
+#: il lock di un'operazione in corso ogni ~5 minuti, quindi un lock che non si
+#: rinfresca da un'ora è di un processo che non c'è più. Un'ora è già molto
+#: conservativo (restic stesso usa 30 minuti); si alza con
+#: CLODIA_BACKUP_LOCK_STALE se un backend lentissimo lo rendesse necessario.
+_LOCK_STALE_SECONDS = int(os.environ.get("CLODIA_BACKUP_LOCK_STALE") or 3600)
 
 
 def _spawn_excludes() -> list[str]:
@@ -106,6 +129,92 @@ def _run(args: list[str], cfg: dict, timeout: int = 1800) -> subprocess.Complete
     )
 
 
+# ── lock del repository (clodia-platform#422) ────────────────────────────────
+def _parse_restic_time(s: str | None) -> datetime | None:
+    """Istante scritto da restic (RFC3339 con i NANOSECONDI).
+
+    `datetime.fromisoformat` accetta al massimo 6 cifre di frazione: su
+    `2026-09-13T21:19:02.690411382Z` solleva. Un lock illeggibile risulterebbe
+    «non stale» per sempre — cioè esattamente il guasto che stiamo togliendo.
+    """
+    if not s:
+        return None
+    t = re.sub(r"(\.\d{6})\d+", r"\1", str(s).strip()).replace("Z", "+00:00")
+    try:
+        d = datetime.fromisoformat(t)
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def repository_locks(cfg: dict) -> list[dict]:
+    """I lock presenti sul repository, con il verdetto su quali sono morti.
+
+    Due chiamate a restic (`list locks` + `cat lock <id>`): si fanno solo in
+    diagnosi, mai nel percorso felice di un run. Non solleva mai: un errore qui
+    deve lasciare il backup al suo posto, non buttarlo via.
+    """
+    try:
+        r = _run(["list", "locks"], cfg, timeout=120)
+        if r.returncode != 0:
+            return []
+        ora = datetime.now(timezone.utc)
+        out = []
+        for lid in (r.stdout or "").split():
+            c = _run(["cat", "lock", lid], cfg, timeout=120)
+            if c.returncode != 0:
+                continue
+            try:
+                d = json.loads(c.stdout or "{}")
+            except Exception:  # noqa: BLE001
+                continue
+            t = _parse_restic_time(d.get("time"))
+            eta = (ora - t).total_seconds() if t else None
+            out.append({
+                "id": lid[:8], "time": d.get("time"), "hostname": d.get("hostname"),
+                "pid": d.get("pid"), "exclusive": bool(d.get("exclusive")),
+                "age_hours": round(eta / 3600, 1) if eta is not None else None,
+                # «Provatamente morto»: solo l'età, perché solo l'età è una
+                # prova. Un lock vivo viene rinfrescato; uno fermo da un'ora no.
+                "stale": bool(eta is not None and eta > _LOCK_STALE_SECONDS),
+            })
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _descrivi_lock(elenco: list[dict]) -> str:
+    return "; ".join(
+        f"bloccato da {l.get('hostname')} (pid {l.get('pid')}) dal {l.get('time')}"
+        for l in elenco) or "bloccato (nessun lock leggibile)"
+
+
+def _con_sblocco(args: list[str], cfg: dict, timeout: int, result: dict
+                 ) -> subprocess.CompletedProcess:
+    """Esegue un comando restic e, SE E SOLO SE esce «già bloccato», guarda i
+    lock: se sono tutti morti li rimuove e riprova una volta sola.
+
+    Preventivamente non si sblocca niente: `restic unlock` toglie per età, e
+    togliere il lock di un run concorrente vero è peggio del problema che cura.
+    Qui il permesso di rimuovere lo dà restic stesso, che ha appena dichiarato
+    di non poter lavorare.
+    """
+    r = _run(args, cfg, timeout=timeout)
+    if r.returncode != _RESTIC_LOCKED:
+        return r
+    elenco = result.get("locks")
+    if elenco is None:
+        elenco = result["locks"] = repository_locks(cfg)
+    if not elenco or not all(l["stale"] for l in elenco):
+        return r  # c'è (o potrebbe esserci) un proprietario vivo: non si tocca
+    if result.get("unlocked") is None:
+        u = _run(["unlock"], cfg, timeout=300)
+        result["unlocked"] = u.returncode == 0
+    if not result["unlocked"]:
+        return r
+    return _run(args, cfg, timeout=timeout)
+
+
 # ── configurazione ───────────────────────────────────────────────────────────
 def configure(body: dict) -> dict:
     """Deposita config+creds nel vault. body: {backend, repository, env{}, passphrase,
@@ -158,6 +267,45 @@ def _last_run() -> dict | None:
         return None
 
 
+def _last_restore_test() -> dict | None:
+    if not vault.has_credential(RESTORE_CRED):
+        return None
+    try:
+        return vault.read_internal(RESTORE_CRED)
+    except Exception:
+        return None
+
+
+def restore_test_freshness(write_baseline: bool = False) -> dict:
+    """Da quanto non riesce un restore-test, e se è il caso di gridare.
+
+    `write_baseline=True` (lo usa il NOTTURNO, non la lettura di stato): se non
+    c'è nessun record — prima notte dopo il deploy — non si inventa un allarme
+    su una storia che non esiste: si pianta il paletto da cui contare gli 8
+    giorni. Un restore-test FALLITO non sposta il paletto, altrimenti otto
+    settimane di fallimenti sembrerebbero otto settimane di freschezza.
+    """
+    rec = _last_restore_test()
+    out: dict = {"max_days": RESTORE_MAX_DAYS}
+    if rec is None:
+        if write_baseline:
+            try:
+                vault.deposit(RESTORE_CRED,
+                              {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                               "ok": False, "baseline": True},
+                              cred_type="backup_state", grant_agents=[])
+                out["baseline_written"] = True
+            except Exception:  # noqa: BLE001
+                out["baseline_written"] = False
+        return {**out, "known": False, "overdue": False}
+    t = _parse_restic_time(rec.get("time"))
+    if t is None:
+        return {**out, "known": False, "overdue": False}
+    days = (datetime.now(timezone.utc) - t) / timedelta(days=1)
+    return {**out, "known": not rec.get("baseline"), "time": rec.get("time"),
+            "days": round(days, 1), "overdue": days > RESTORE_MAX_DAYS}
+
+
 def status() -> dict:
     cfg = _cfg()
     if not cfg:
@@ -169,6 +317,11 @@ def status() -> dict:
     lr = _last_run()
     if lr:
         out["last_run"] = {k: lr.get(k) for k in ("time", "ok", "error") if lr.get(k) is not None}
+    # Ultimo restore-test e lock appesi: le due cose che sono mancate allo stato
+    # per 14 giorni (clodia-platform#422). `status()` NON scrive la baseline: è
+    # una lettura, e una lettura non cambia ciò che osserva.
+    out["restore_test"] = restore_test_freshness()
+    out["locks"] = repository_locks(cfg)
     # Ultimo backup VALIDO: l'ultimo snapshot restic (restic tiene solo i successi).
     snaps = _run(["snapshots", "--json", "--latest", "1"], cfg, timeout=120)
     if snaps.returncode == 0:
@@ -255,22 +408,27 @@ def _run_backup() -> dict:
             result["incomplete"] = True
             result["skipped"] = b.stderr[-400:]
         ret = cfg["retention"]
-        f = _run(["forget", "--prune", "--tag", "platform",
-                  "--keep-daily", str(ret.get("daily", 7)),
-                  "--keep-weekly", str(ret.get("weekly", 4)),
-                  "--keep-monthly", str(ret.get("monthly", 6))], cfg, timeout=1800)
+        f = _con_sblocco(["forget", "--prune", "--tag", "platform",
+                          "--keep-daily", str(ret.get("daily", 7)),
+                          "--keep-weekly", str(ret.get("weekly", 4)),
+                          "--keep-monthly", str(ret.get("monthly", 6))],
+                         cfg, 1800, result)
         result["forget_rc"] = f.returncode
-        c = _run(["check"], cfg, timeout=600)
+        c = _con_sblocco(["check"], cfg, 600, result)
         result["check_rc"] = c.returncode
         # `ok` resta la verifica del REPOSITORY: uno snapshot incompleto non è un
         # fallimento, ma non si tace — `incomplete` viaggia nel risultato e
         # l'avviso finisce nello stato, così un'incompletezza che si ripete si
         # vede invece di sparire in un `ok` verde.
-        result["ok"] = c.returncode == 0
+        # `forget` fa parte del verdetto (clodia-platform#422): una retention
+        # che non gira è un backup che cresce senza controllo, e con `ok` legato
+        # al solo `check` sono rimasti 58 snapshot non potati senza che nessuno
+        # lo sapesse.
+        result["ok"] = c.returncode == 0 and f.returncode == 0
         _record_last_run(result["ok"],
                          (f"snapshot incompleto: {result.get('skipped', '')[:200]}"
                           if incompleto else "")
-                         if result["ok"] else f"check_rc={c.returncode}")
+                         if result["ok"] else _motivo_fallimento(result))
         return result
     except Exception as e:
         # Registra il FALLIMENTO (l'ultimo backup eseguito è fallito) poi rilancia.
@@ -278,8 +436,33 @@ def _run_backup() -> dict:
         raise
 
 
+def _motivo_fallimento(result: dict) -> str:
+    """Perché il run non è ok, in una riga che si possa leggere nella notifica.
+
+    «check_rc=11» non dice a nessuno cosa fare; «bloccato da 35b58680ee69
+    (pid 984) dal 13 set» sì — ed è l'informazione che è mancata per 14 giorni.
+    """
+    motivo = f"check_rc={result.get('check_rc')} forget_rc={result.get('forget_rc')}"
+    if result.get("locks"):
+        motivo += " — " + _descrivi_lock(result["locks"])
+    if result.get("unlocked") is False:
+        motivo += " (unlock fallito)"
+    return motivo
+
+
 def restore_test() -> dict:
     res = _restore_test()
+    if (res or {}).get("ok"):
+        # Data dell'ultimo restore-test RIUSCITO: è ciò che il notturno guarda
+        # per accorgersi che il settimanale non sta più girando.
+        try:
+            vault.deposit(RESTORE_CRED,
+                          {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                           "ok": True,
+                           "restored_topics": res.get("restored_topics")},
+                          cred_type="backup_state", grant_agents=[])
+        except Exception:  # noqa: BLE001
+            pass
     from .audit import control as _control
     _control.safe(_control.emit, "backup", "restore_test", "restic",
                   ok=bool((res or {}).get("ok")))
