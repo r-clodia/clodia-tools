@@ -6,7 +6,8 @@ import unittest
 from unittest.mock import patch
 
 from .local_fs import LocalFsStorage
-from .mentions import GOLDEN_CASES, extract_mentions, extract_tags
+from .mentions import (GOLDEN_CASES, cita, extract_mentions, extract_tags,
+                       normalizza)
 from .service import TopicService
 
 
@@ -118,6 +119,74 @@ class EmphasisBoundaryTests(unittest.TestCase):
         self.assertEqual([], extract_mentions("**costa $100 in tutto**"))
 
 
+class CitazioneInteraTests(unittest.TestCase):
+    """clodia-platform#501 · la citazione copre OGNI riga del testo riportato.
+
+    L'incidente sta nell'altra copia (il router non ha aperto nessun turno:
+    `@clodia` + `@clodia-354`, due destinatari per un agente solo), ma la regola
+    è del parser e quindi vive in entrambe. Qui l'effetto si misura dove conta
+    per questo repository: il campo strutturato `mentions`, cioè i badge e le
+    notifiche. Con la citazione su una riga sola, un messaggio di sistema
+    consegnava un badge a un'istanza che non esiste.
+    """
+
+    GOAL = ("clodia-354: i due articoli sono scritti e in cablaggio\n"
+            "@clodia-354 riprendiamo il lavoro e pubblichiamo i due articoli")
+
+    def test_every_line_of_a_quoted_text_is_inert(self) -> None:
+        self.assertEqual([], extract_mentions(cita(self.GOAL)))
+        self.assertEqual([], extract_tags(cita(self.GOAL)))
+
+    def test_an_empty_line_does_not_break_the_quote(self) -> None:
+        """Una riga vuota non citata spezzerebbe il blockquote in due, e fra i
+        due pezzi il testo torna normale — cioè le `@` tornano vive."""
+        self.assertEqual("> a\n>\n> b", cita("a\n\nb"))
+        self.assertEqual([], extract_mentions(cita("a\n\n@mario")))
+
+    def test_the_live_part_of_the_message_still_counts(self) -> None:
+        """Citare il testo riportato non deve zittire il messaggio che lo
+        riporta: il promemoria convoca comunque il suo destinatario."""
+        testo = f"@clodia obiettivo ancora aperto.\n\n{cita(self.GOAL)}\n\nStato: `pinned`."
+        self.assertEqual(["clodia"], extract_mentions(testo))
+
+
+class NormalizzaTests(unittest.TestCase):
+    """`normalizza` riscrive gli indirizzi dove il parser li legge, e solo lì.
+
+    Chi conosce la mappa seed/spawn è il chiamante (in `clodia-logic` il
+    registry): qui si verifica che la riscrittura veda esattamente le stesse
+    zone vive di `_scan` — un `@` in un blocco di codice o in una citazione non
+    si tocca, se no si riscrive un esempio o la frase di un altro.
+    """
+
+    @staticmethod
+    def _a_clodia(_nome: str) -> str:
+        return "clodia"
+
+    def test_a_live_mention_is_rewritten(self) -> None:
+        self.assertEqual("@clodia vai", normalizza("@mario vai", self._a_clodia))
+
+    def test_inert_zones_are_left_alone(self) -> None:
+        for testo in ("usa `@mario` come placeholder",
+                      "```\n@mario guarda\n```",
+                      "> @mario aveva scritto",
+                      "Routing: scegli @mario o @anna.",
+                      "scrivi a mario@bar.com"):
+            with self.subTest(testo=testo):
+                self.assertEqual(testo, normalizza(testo, self._a_clodia))
+
+    def test_a_resolver_that_says_nothing_changes_nothing(self) -> None:
+        self.assertEqual("@mario vai", normalizza("@mario vai", lambda _n: None))
+
+    def test_rewriting_moves_nobody_in_or_out_of_the_recipients(self) -> None:
+        """L'invariante, su tutta la tabella condivisa: chi convocava resta
+        convocato (sotto un nome solo), chi non convocava non si sveglia."""
+        for testo, attesi in GOLDEN_CASES:
+            with self.subTest(testo=testo):
+                self.assertEqual(["clodia"] if attesi else [],
+                                 extract_mentions(normalizza(testo, self._a_clodia)))
+
+
 class PostMessageMentionsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.svc = TopicService(LocalFsStorage(tempfile.mkdtemp()))
@@ -133,6 +202,17 @@ class PostMessageMentionsTests(unittest.TestCase):
     def test_message_without_mentions_has_empty_list(self) -> None:
         msg = self.svc.post_message("SEAL-1", "ch", "owner", "solo testo ordinario")
         self.assertEqual(msg["mentions"], [])
+
+    def test_a_quoted_goal_does_not_reach_the_structured_field(self) -> None:
+        """#501 dal lato di questo repository: il promemoria del goal watch
+        archiviava `mentions: ['clodia', 'clodia-354']` — un badge per
+        un'istanza che non esiste, oltre al turno che non partiva."""
+        testo = ("@clodia obiettivo ancora aperto.\n\n"
+                 + cita("clodia-354: i due articoli sono in cablaggio\n"
+                        "@clodia-354 riprendiamo il lavoro"))
+        msg = self.svc.post_message("SEAL-1", "ch", "system", testo)
+        self.assertEqual(["clodia"], msg["mentions"])
+        self.assertEqual(["clodia"], self.svc.list_messages("SEAL-1", "ch")[-1]["mentions"])
 
     def test_a_bold_mention_reaches_the_structured_field(self) -> None:
         """#457 dal lato di questo repository: senza il fix il messaggio veniva
