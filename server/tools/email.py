@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -21,6 +22,8 @@ from typing import Optional, Sequence, Union
 
 from .. import vault
 from ..whitelist import agent_name, tool_allowed
+
+LOG = logging.getLogger(__name__)
 
 _EMAIL_PY = sys.executable
 _EMAIL_SCRIPT = str(Path(__file__).resolve().parents[2] / "vendor" / "email_client.py")
@@ -173,11 +176,12 @@ def system_mailboxes() -> list[dict]:
     nella whitelist `inbox:`/`outbox:` (vedi `_secrets_env`), quindi chi deve
     autorizzare una casella per un canale ha bisogno di entrambi.
 
-    I legacy di `email_config.json` restano fuori: non hanno una credenziale da
-    cui leggere l'indirizzo, e sono già esenti dalla whitelist
-    (`accounts_not_allowed`) — offrirli in un elenco di «caselle da
-    autorizzare» prometterebbe un'autorizzazione che non serve e non si può
-    scrivere.
+    I legacy di `email_config.json` restano fuori da QUESTO elenco: non hanno
+    una credenziale nella vault da cui leggere l'indirizzo in modo affidabile.
+    Non sono però più esenti dalla whitelist (clodia-platform#503): il loro
+    indirizzo si prende da `_legacy_address` e vale la stessa regola di tutti —
+    chi ne ha uno lo vede comparire in `accounts_not_allowed` finché non è
+    autorizzato.
     """
     return sorted(
         (
@@ -203,7 +207,13 @@ def accounts_not_allowed(direction: str, scope: str | None = None) -> list[str]:
     Sostituisce `accounts_not_granted`: prima la domanda era «questo agente ha
     il grant sulla credenziale», ora è «questo canale ha la casella in
     whitelist» — la stessa distinzione fra assenza e divieto, spostata da CHI a
-    DOVE. Il legacy (email_config.json) resta esente, come lo era dal grant.
+    DOVE.
+
+    Dal 4 ott 2026 (clodia-platform#503) il legacy (email_config.json) NON è
+    più esente: se la sua casella non è in lista l'account compare qui come
+    tutti gli altri. Elencarlo fra i disponibili mentre `_secrets_env` lo
+    rifiuta sarebbe peggio del buco di prima — un account offerto e poi negato
+    al primo uso.
     """
     from .. import egress
     out = []
@@ -213,7 +223,168 @@ def accounts_not_allowed(direction: str, scope: str | None = None) -> list[str]:
         addr = _account_address(row["credential"], row["account"])
         if not egress.mailbox_allowed(direction, addr, scope):
             out.append(row["account"])
-    return sorted(set(out) - _legacy_accounts())
+    for nome in _legacy_accounts():
+        addr = _legacy_address(nome)
+        # Senza indirizzo non è confrontabile e `_secrets_env` lo rifiuta:
+        # dichiararlo non ammesso è il referto vero, non una cautela.
+        if not addr or not egress.mailbox_allowed(direction, addr, scope):
+            out.append(nome)
+    return sorted(set(out))
+
+
+#: Frase con cui si riconosce questo rifiuto senza leggerne il testo:
+#: `main._denial_class` la cerca per classificare la decisione come
+#: `sender_not_vetted` nel registro (#436). Cambiandola qui va cambiata lì —
+#: c'è un test che lo verifica, così la classe non torna "other" in silenzio.
+MITTENTE_NON_VAGLIATO = "mittente non vagliato"
+
+
+def strict_scope() -> str | None:
+    """Lo scope della chiamata SE è un canale a ingresso stretto, altrimenti
+    `None`.
+
+    Un solo posto a cui chiedere «qui filtro?»: i sei verbi di lettura lo
+    interrogano e non ripetono la condizione. Fuori da un canale (un job, una
+    chiamata interna) non c'è scope, quindi non c'è stretto: lì vale la
+    configurazione d'istanza come sempre.
+    """
+    from .. import egress
+    scope = egress._scope_of_call()
+    return scope if scope and egress.ingress_strict(scope) else None
+
+
+def _sender_vetted(sender: str, scope: str) -> bool:
+    """Il mittente di questo messaggio è dichiarato fidato per `scope`?
+
+    `True` solo per chi è nel perimetro della stanza (owner e partecipanti) o
+    per un `mailfrom:` dichiarato nella sua lista — `is_vetted_source` risponde
+    già a entrambe, e in un canale stretto legge la sola lista di qui.
+
+    Mittente non parsabile → `False`, fail-closed come `UNKNOWN` in uscita: un
+    `From:` che non si legge non è una garanzia, è l'assenza di una garanzia.
+    """
+    from .. import egress
+    addr = egress.address_of(sender or "")
+    return bool(addr) and egress.is_vetted_source(f"mailfrom:{addr}", scope)
+
+
+def _record_ingress(verb: str, result: str) -> None:
+    """La decisione di ingresso come RECORD, non solo come filtro silenzioso.
+
+    Stessa forma delle decisioni di uscita (#436) e stessa postura: se il
+    registro non si può scrivere, la lettura non si fa — un filtro di cui non
+    resta traccia è indistinguibile da un filtro che non c'è stato.
+    """
+    from .. import audit as _audit
+    from ..audit import policy as _apol
+    try:
+        _apol.decision(verb, "ingress", result, reason_class="sender_not_vetted")
+    except _audit.AuditWriteError:
+        raise PermissionError(
+            "audit trail non disponibile: la decisione di ingresso non si può "
+            "registrare, quindi la lettura non si fa"
+        ) from None
+    except Exception as e:  # noqa: BLE001 — la decisione vale anche se non registrata
+        LOG.error("audit: decisione di ingresso di %s non registrata (%s)",
+                  verb, type(e).__name__)
+
+
+def _deny_sender(verb: str, sender: str) -> None:
+    """Rifiuta la lettura di un messaggio di mittente non vagliato."""
+    from .. import egress
+    addr = egress.address_of(sender or "") or "?"
+    _record_ingress(verb, "deny")
+    raise PermissionError(
+        f"{MITTENTE_NON_VAGLIATO}: questo canale è a INGRESSO STRETTO e ammette "
+        "solo i messaggi di chi è nella stanza (owner e partecipanti) o di un "
+        f"mittente dichiarato. Per leggere questo messaggio serve mailfrom:{addr} "
+        "negli ingress del canale, e lo aggiunge l'owner."
+    )
+
+
+def _filter_by_sender(rows: object, scope: str, verb: str) -> tuple[list, int]:
+    """Tiene solo i messaggi di mittente vagliato; ritorna anche quanti ne ha
+    tolti.
+
+    Si filtra DOPO il CLI e non con una query IMAP `FROM`: la query la scrive
+    il chiamante, e un filtro che si può riscrivere non è un filtro. Di ciò che
+    viene tolto esce solo il NUMERO — un oggetto o un indirizzo sarebbero il
+    contenuto che stiamo rifiutando, fatto passare dalla porta di servizio.
+    """
+    if not isinstance(rows, list):
+        return ([] if rows is None else rows), 0
+    tenuti = [r for r in rows
+              if isinstance(r, dict) and _sender_vetted(str(r.get("from") or ""), scope)]
+    tolti = len(rows) - len(tenuti)
+    if tolti:
+        _record_ingress(verb, "filter")
+    return tenuti, tolti
+
+
+def _sender_of(account: str, email_id: str, folder: str, direction: str) -> str:
+    """Il `From:` del messaggio `email_id`, letto apposta per vagliarlo.
+
+    SHORTCUT: una fetch IMAP in più, e dell'intero RFC822 — `get-attachment` e
+    `reply` non hanno il mittente nel risultato, e qui serve PRIMA di
+    restituire qualcosa. Regge perché succede solo nei canali stretti e solo
+    sui tre verbi che non lo conoscono già. Quando peserà, la salita è un
+    comando `headers` nel CLI (`RFC822.HEADER`, come fa già `list`) al posto di
+    `read`. Il corpo resta nel gateway: di qui esce solo l'indirizzo.
+    """
+    msg = _run_cli(account, ["read", str(email_id), "--folder", folder],
+                   want_json=True, direction=direction)
+    return str((msg or {}).get("from") or "") if isinstance(msg, dict) else ""
+
+
+def _assert_sender_vetted(verb: str, account: str, email_id: str, folder: str,
+                          scope: str, *, direction: str = "inbox") -> None:
+    """Rifiuta prima di restituire, se il mittente del messaggio non è vagliato.
+
+    `direction` è quella del verbo chiamante, non "inbox" per forza: `reply`
+    usa la casella per SPEDIRE ed è la sua whitelist di uscita che conta
+    (clodia-platform#428) — vagliare il mittente non deve cambiare quale lista
+    governa il verbo.
+    """
+    mittente = _sender_of(account, email_id, folder, direction)
+    if not _sender_vetted(mittente, scope):
+        _deny_sender(verb, mittente)
+
+
+def _legacy_address(account: str) -> str | None:
+    """Indirizzo di un account LEGACY (`secrets/email_config.json`), o `None`.
+
+    Serve perché la whitelist per-casella si scrive sull'INDIRIZZO: senza
+    questo, un account legacy non ha una chiave con cui essere confrontato, ed
+    è esattamente il motivo per cui finora era esente dal controllo.
+    """
+    try:
+        data = json.loads(_legacy_config_file().read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if "accounts" in data:
+        bundle = (data.get("accounts") or {}).get(account)
+    else:
+        bundle = data if account == "demo" else None
+    addr = str((bundle or {}).get("email") or "").strip().lower()
+    return addr or None
+
+
+def _assert_mailbox_allowed(direction: str, addr: str) -> None:
+    """La casella `addr` è usabile in questa direzione da questo canale?
+
+    Un punto solo, perché i chiamanti sono due (credenziale in vault e account
+    legacy) e la regola è una: metterla in entrambi i rami era il modo in cui
+    uno dei due è rimasto senza per un anno.
+    """
+    from .. import egress
+    if egress.mailbox_allowed(direction, addr):
+        return
+    lista = "ingress" if direction == "inbox" else "egress"
+    raise PermissionError(
+        f"la casella '{addr}' non è nella whitelist {direction} di questo "
+        f"canale. Chiedi all'owner di aggiungere {direction}:{addr} agli "
+        f"{lista} del topic (o globalmente, da Integrazioni)."
+    )
 
 
 @contextlib.contextmanager
@@ -236,17 +407,27 @@ def _secrets_env(account: str, direction: str):
     cred = gcred if vault.has_credential(gcred) else (
         mcred if vault.has_credential(mcred) else None)
     if cred is None:
+        # LEGACY (`secrets/email_config.json`): fino a clodia-platform#503 qui si
+        # usciva senza chiedere niente, e la whitelist per-casella non valeva
+        # affatto per questi account — un'esenzione che nessuno aveva deciso,
+        # nata dal ramo «nessuna credenziale in vault, tieni l'ambiente».
+        # Ora si controllano come tutti, per INDIRIZZO. Senza indirizzo non c'è
+        # niente da confrontare: si rifiuta, perché l'alternativa è esentare di
+        # nuovo proprio il caso che non si sa giudicare.
+        addr = _legacy_address(account)
+        if not addr:
+            raise PermissionError(
+                f"l'account legacy '{account}' non dichiara un indirizzo in "
+                "email_config.json: senza indirizzo non è confrontabile con la "
+                f"whitelist {direction} di questo canale e non si usa. Aggiungi "
+                "'email' alla sua voce, o spostalo nella vault."
+            )
+        _assert_mailbox_allowed(direction, addr)
         yield dict(os.environ)
         return
     bundle = vault.read_internal(cred)
     addr = (bundle.get("email") or account).strip().lower()
-    from .. import egress
-    if not egress.mailbox_allowed(direction, addr):
-        raise PermissionError(
-            f"la casella '{addr}' non è nella whitelist {direction} di questo "
-            f"canale. Chiedi all'owner di aggiungere {direction}:{addr} agli "
-            "ingress/egress del topic (o globalmente, da Integrazioni)."
-        )
+    _assert_mailbox_allowed(direction, addr)
     tmp = tempfile.mkdtemp(prefix="email_sec_")
     try:
         if cred == gcred:
@@ -382,17 +563,36 @@ def folders(account: str = "demo") -> dict:
 def list_messages(account: str = "demo", folder: str = "INBOX", limit: int = 10) -> dict:
     """Elenca i messaggi di una cartella (default INBOX)."""
     tool_allowed("email.list")
-    return {
+    out = {
         "account": account,
         "folder": folder,
         "messages": _run_json(account, ["list", "--folder", folder, "--limit", str(limit)]),
     }
+    scope = strict_scope()
+    if scope:
+        out["messages"], tolti = _filter_by_sender(out["messages"], scope, "email.list")
+        out["strict_ingress"] = True
+        if tolti:
+            out["withheld"] = tolti
+            out["note"] = (
+                f"{tolti} messaggi non mostrati: canale a ingresso stretto, il "
+                "mittente non è nella stanza né dichiarato fra gli ingress. "
+                "Di questi messaggi non si vede nulla, nemmeno l'oggetto."
+            )
+    return out
 
 
 def read_message(email_id: str, account: str = "demo", folder: str = "INBOX") -> dict:
     """Legge un singolo messaggio per ID."""
     tool_allowed("email.read")
-    return _run_json(account, ["read", str(email_id), "--folder", folder])
+    out = _run_json(account, ["read", str(email_id), "--folder", folder])
+    scope = strict_scope()
+    # Sul RISULTATO, prima di restituirlo: il mittente è già lì (una seconda
+    # fetch sarebbe una richiesta in più per un dato che abbiamo in mano), e il
+    # corpo non ha ancora lasciato il gateway.
+    if scope and not _sender_vetted(str((out or {}).get("from") or ""), scope):
+        _deny_sender("email.read", str((out or {}).get("from") or ""))
+    return out
 
 
 
@@ -431,6 +631,9 @@ def get_attachment(email_id: str, filename: str, account: str = "demo",
     tool_allowed("email.get_attachment")
     if not filename:
         raise ValueError("'filename' must be provided")
+    scope = strict_scope()
+    if scope:
+        _assert_sender_vetted("email.get_attachment", account, email_id, folder, scope)
     return _run_json(account, ["get-attachment", str(email_id), "--filename", filename,
                                "--folder", folder])
 
@@ -443,6 +646,12 @@ def get_attachment_bytes(email_id: str, filename: str, account: str = "demo",
     tool_allowed("email.save_attachment")
     if not filename:
         raise ValueError("'filename' must be provided")
+    # Stessa lettura di `get_attachment`, altro verbo: la issue nominava solo
+    # quello, ma lasciare scoperto il gemello significherebbe che il filtro si
+    # aggira chiamando la porta accanto.
+    scope = strict_scope()
+    if scope:
+        _assert_sender_vetted("email.save_attachment", account, email_id, folder, scope)
     r = _run_json(account, ["get-attachment", str(email_id), "--filename", filename,
                             "--folder", folder])
     if not isinstance(r, dict) or not r.get("data"):
@@ -457,11 +666,22 @@ def search(query: str, account: str = "demo", folder: str = "INBOX", limit: int 
     tool_allowed("email.search")
     if not query:
         raise ValueError("'query' must be non-empty")
-    return {
+    out = {
         "account": account,
         "query": query,
         "results": _run_json(account, ["search", query, "--folder", folder, "--limit", str(limit)]),
     }
+    scope = strict_scope()
+    if scope:
+        out["results"], tolti = _filter_by_sender(out["results"], scope, "email.search")
+        out["strict_ingress"] = True
+        if tolti:
+            out["withheld"] = tolti
+            out["note"] = (
+                f"{tolti} risultati non mostrati: canale a ingresso stretto, il "
+                "mittente non è nella stanza né dichiarato fra gli ingress."
+            )
+    return out
 
 
 def reply(email_id: str, body: str, account: str = "demo",
@@ -471,6 +691,14 @@ def reply(email_id: str, body: str, account: str = "demo",
     tool_allowed("email.reply")
     if body is None:
         raise ValueError("'body' must be provided (use empty string if intentional)")
+    # Il destinatario di una risposta NON sta negli argomenti: è il mittente del
+    # messaggio originale, cioè contenuto non fidato. In un canale stretto
+    # rispondere a un mittente non vagliato sarebbe il modo di uscire verso
+    # chiunque abbia scritto alla casella — qui quella strada si chiude.
+    scope = strict_scope()
+    if scope:
+        _assert_sender_vetted("email.reply", account, email_id, folder, scope,
+                              direction="outbox")
     args = ["reply", str(email_id), "--body", body, "--folder", folder]
     if cc:
         args += ["--cc", cc]

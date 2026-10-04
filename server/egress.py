@@ -466,8 +466,9 @@ def is_vetted_source(uri: str, scope: str | None = None) -> bool:
     # Anche in ingresso vale l'unione globale + scope: una fonte approvata in una
     # stanza è fidata LÌ. Simmetrico all'uscita, e per la stessa ragione — la
     # lista globale ha un asse solo, quindi una fonte approvata per un topic
-    # diventerebbe fidata per tutti.
-    return any(_matches(uri, r) for r in effective_uris("ingress", scope))
+    # diventerebbe fidata per tutti. In un canale STRETTO l'unione salta e vale
+    # solo la lista di qui (`ingress_rules`).
+    return any(_matches(uri, r) for r in ingress_rules(scope))
 
 
 def perimeter_addresses(scope: str | None = None) -> set[str]:
@@ -538,12 +539,17 @@ def mailbox_allowed(direction: str, email: str, scope: str | None = None) -> boo
     cartella/chat già controllato altrove.
 
     `direction`: "inbox" per leggere, "outbox" per scrivere/rispondere.
+
+    In un canale STRETTO (`ingress_strict`) la domanda in ingresso si pone
+    sulla sola lista di quel canale: una casella dichiarata globalmente non lo
+    allarga.
     """
     addr = (email or "").strip().lower()
     if not addr:
         return False
     uri = f"{direction}:{addr}"
-    rules = effective_uris("ingress" if direction == "inbox" else "egress", scope)
+    rules = (ingress_rules(scope) if direction == "inbox"
+             else effective_uris("egress", scope))
     return any(_matches(uri, r) for r in rules)
 
 
@@ -593,6 +599,60 @@ def calendar_allowed(calendar_id: str, scope: str | None = None) -> bool:
 #: dall'agent-server. Una whitelist scrivibile da chi ne è soggetto non è una
 #: whitelist.
 _SCOPE_KEYS = {"egress": "scope_egress_allow", "ingress": "scope_source_allow"}
+
+#: Flag «ingresso stretto» per scope, nella stessa config e per la stessa
+#: ragione delle liste: un interruttore che spegne un filtro non può stare dove
+#: arriva chi ne è soggetto. Forma: `scope_ingress_strict: {"SEAL-1/acme": true}`.
+#: Si accende a mano nella config del gateway — non c'è verbo né rotta, è una
+#: decisione dell'owner sull'istanza, non un'azione di un turno.
+_SCOPE_STRICT_KEY = "scope_ingress_strict"
+
+
+def ingress_strict(scope: str | None = None, cfg: dict | None = None) -> bool:
+    """Questo canale ammette SOLO le fonti dichiarate nella SUA lista?
+
+    Default `False`: i canali esistenti non cambiano comportamento.
+
+    Quando è acceso, le voci GLOBALI di ingresso non valgono qui
+    (`ingress_rules`). Senza quella sottrazione «stretto» non stringerebbe
+    niente: la lista globale ha un asse solo e una casella dichiarata lì è
+    leggibile da ogni stanza, quindi il canale che vuole ammettere un solo
+    mittente resterebbe aperto a tutta la lista d'istanza — cioè l'interruttore
+    direbbe una cosa e ne farebbe un'altra (clodia-platform#503).
+    """
+    s = scope if scope is not None else _scope_of_call()
+    if not s:
+        return False            # fuori da un canale non c'è una lista da stringere
+    from . import whitelist as _wl
+    c = cfg if cfg is not None else _wl.CONFIG
+    per_scope = (c.get(_SCOPE_STRICT_KEY) or {})
+    if not isinstance(per_scope, dict):
+        LOG.warning("%s: forma non valida (%s), ignorato",
+                    _SCOPE_STRICT_KEY, type(per_scope).__name__)
+        return False
+    voluta = _norm_scope_key(s)
+    # Normalizza entrambi i lati come `scope_uris`: un alias `P1/acme` sotto cui
+    # qualcuno ha acceso lo stretto non deve restare invisibile.
+    return any(_norm_scope_key(str(k)) == voluta and bool(v)
+               for k, v in per_scope.items())
+
+
+def ingress_rules(scope: str | None = None, cfg: dict | None = None) -> list[str]:
+    """Le regole di INGRESSO in vigore per questa chiamata.
+
+    Un punto solo per la domanda «cosa è dichiarato fidato qui»: l'unione
+    globale + scope di sempre, oppure la sola lista dello scope se il canale è
+    stretto. Le due domande — fonte fidata (`is_vetted_source`) e casella
+    leggibile (`mailbox_allowed`) — leggono da qui, così lo stretto non può
+    valere per una e non per l'altra.
+
+    Lo stretto riguarda solo l'INGRESSO: l'uscita (`outbox:`, `mailto:`) resta
+    governata dalla lista di uscita, unione compresa.
+    """
+    s = scope if scope is not None else _scope_of_call()
+    if ingress_strict(s, cfg):
+        return scope_uris("ingress", s, cfg)
+    return effective_uris("ingress", s, cfg)
 
 
 def _scope_of_call() -> str | None:

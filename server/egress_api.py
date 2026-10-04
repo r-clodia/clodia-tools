@@ -183,7 +183,13 @@ async def scope_whitelist_view(request: Request):
     from . import egress
     scope = f"{tier}/{name}"
     eg, ing = egress.scope_uris("egress", scope), egress.scope_uris("ingress", scope)
+    # `strict` in sola lettura: il flag si accende nella config del gateway e
+    # non da qui (clodia-platform#503, scelta A). Esporlo serve a chi guarda la
+    # sidebar: con lo stretto acceso le voci globali non valgono in questa
+    # stanza, e le due liste qui sopra sono TUTTO ciò che è ammesso — senza
+    # questo campo la stessa schermata direbbe il falso per omissione.
     return JSONResponse({"egress": eg, "ingress": ing,
+                         "ingress_strict": egress.ingress_strict(scope),
                          "labels": await _labels(list(eg) + list(ing))})
 
 
