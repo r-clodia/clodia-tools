@@ -4411,7 +4411,12 @@ def _audit_ingress_unsafe(verb: str, a: dict, result: object, vetted) -> None:
 
 def _denial_class(msg: str) -> str:
     """The CLASS of a refusal, never its message (which names files and people)."""
+    from .tools.email import MITTENTE_NON_VAGLIATO
     return ("egress" if "uscita non consentita" in msg
+            # Ingresso stretto (#503): la classe è il motivo, non il verbo —
+            # read, get_attachment, save_attachment e reply rifiutano per lo
+            # stesso fatto, e nel registro deve risultare uno solo.
+            else "sender_not_vetted" if MITTENTE_NON_VAGLIATO in msg
             else "unattended" if "job schedulato" in msg
             else "denied_tools" if "denied_tools" in msg
             else "whitelist" if "non in whitelist" in msg

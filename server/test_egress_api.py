@@ -237,7 +237,22 @@ class ScopeWhitelistViewTests(unittest.TestCase):
                 _with(self._cfg()):
             r = self._call("SEAL-1", "un-altro-topic")
         b = json.loads(r.body)
-        self.assertEqual(b, {"egress": [], "ingress": [], "labels": {}})
+        self.assertEqual(b, {"egress": [], "ingress": [],
+                             "ingress_strict": False, "labels": {}})
+
+    def test_the_strict_flag_travels_with_the_two_lists(self):
+        """Con lo stretto acceso queste due liste sono TUTTO ciò che è ammesso
+        qui, globale esclusa (clodia-platform#503): una sidebar che mostra le
+        liste senza dire che il canale è stretto direbbe il falso per
+        omissione."""
+        import json
+        cfg = {"agents": {}, "scope_ingress_strict": {"SEAL-1/acme": True}}
+        with patch.dict("os.environ", {"CLODIA_ORCHESTRATOR_SECRET": "s3cr3t"}), \
+                _with(cfg):
+            acceso = json.loads(self._call("SEAL-1", "acme").body)
+            spento = json.loads(self._call("SEAL-1", "beta").body)
+        self.assertTrue(acceso["ingress_strict"])
+        self.assertFalse(spento["ingress_strict"])
 
     def test_the_legacy_tier_alias_still_resolves(self):
         """`P1/acme` e `SEAL-1/acme` sono lo stesso posto (`_norm_scope_key`):
