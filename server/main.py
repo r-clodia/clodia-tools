@@ -3589,6 +3589,33 @@ _RESOURCE_READ_VERBS = {
 }
 
 
+def _pack_declares_read(verb: str) -> bool:
+    """Un pack dichiara questo verbo come lettura di una fonte esterna?
+
+    Involucro di `connectors.resolved` con l'eccezione addosso: il registry è
+    costruito da file che stanno fuori dal gateway, e una lettura non deve
+    fallire perché un manifest è rotto. Quando non è consultabile la risposta è
+    «non dichiarato», che riporta il verbo esattamente al comportamento che
+    aveva prima di clodia-platform#517.
+    """
+    try:
+        from .connectors import resolved as _connectors
+        return _connectors.is_declared_read(verb)
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("connettori: lettura dichiarata non verificabile per %s (%s)",
+                    verb, e)
+        return False
+
+
+def _pack_source_uri(verb: str, a: dict) -> str | None:
+    try:
+        from .connectors import resolved as _connectors
+        return _connectors.source_uri(verb, a)
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("connettori: fonte non risolvibile per %s (%s)", verb, e)
+        return None
+
+
 def _source_vetted(verb: str, a: dict, result: object = None) -> bool | None:
     """La sorgente di questa lettura è dichiarata fidata?
 
@@ -3615,6 +3642,20 @@ def _source_vetted(verb: str, a: dict, result: object = None) -> bool | None:
     """
     from . import egress as _eg
     try:
+        # Una lettura DICHIARATA da un pack (clodia-platform#517): la fonte è
+        # quella che il manifest nomina, e si vaglia contro `source_allow` come
+        # la fonte di un verbo nativo. PRIMA del ramo `is_proxied`, che è il
+        # fallback generico «la fonte è il server MCP»: fra sapere quale casella
+        # è stata letta e sapere quale backend ha risposto, la prima è una
+        # risposta e la seconda un'approssimazione.
+        # E se la fonte dichiarata non è leggibile dalla chiamata si esce con
+        # `None` — NON si ricade sul backend. Ricadere sarebbe più permissivo:
+        # `mcp:<pack>.` in `source_allow` spegnerebbe il taint su una lettura di
+        # cui non sappiamo la provenienza, che è il caso che il taint esiste per
+        # coprire.
+        if _pack_declares_read(verb):
+            _declared = _pack_source_uri(verb, a)
+            return _eg.is_vetted_source(_declared) if _declared else None
         # Un backend MCP montato: la fonte è il SERVER, uno per namespace, e si
         # vaglia come qualunque altra — `mcp:normattiva.` in `source_allow`.
         # Il discriminante è `is_proxied`, non il nome: senza, un
@@ -4293,6 +4334,10 @@ def _ingress_source(verb: str, a: dict, result: object = None) -> str | None:
     source, `_source_vetted` judges it."""
     from . import egress as _eg
     a = a or {}
+    # Stessa precedenza di `_source_vetted`, e per la stessa ragione: la fonte
+    # dichiarata dal manifest nomina la risorsa, `mcp:<verbo>` nomina il server.
+    if _pack_declares_read(verb):
+        return _pack_source_uri(verb, a)
     if proxy.is_proxied(verb):
         return f"mcp:{verb}"
     if verb.startswith("web."):
@@ -4771,6 +4816,23 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
         # WHO approved it (`topic.link_add`, review fix B1 of #477). Set on
         # every call, None included, so a value can never outlive its call.
         _GATE_APPROVAL.set(gate_approval)
+        # REGOLA DI NAMESPACE A CALL TIME (clodia-platform#517, AC4). Un
+        # manifest validato all'installazione non dice niente su oggi: i verbi
+        # nativi del gateway crescono a ogni deploy, e un pack che aveva
+        # legittimamente `mail.` deve smettere di essere autoritativo su quei
+        # verbi nel momento in cui il gateway li possiede — alla chiamata
+        # successiva, non alla prossima reinstallazione.
+        # Qui e non dentro `egress.check`: quella non solleva mai, e in modo
+        # `report` si limita a loggare. Un pack che cattura il verbo di un altro
+        # non è una questione di destinazione, è un'autorità che non ha.
+        try:
+            from .connectors import resolved as _connectors
+            _connectors.enforce_namespace(name)
+        except PermissionError:
+            raise
+        except Exception as e:  # noqa: BLE001 — un registry rotto non blocca
+            LOG.warning("connettori: regola di namespace non verificabile per "
+                        "%s (%s)", name, e)
         # WHITELIST DI DESTINAZIONE (clodia-platform#104 §7, passo 5). Uscita da
         # capacità binaria a capacità circoscritta: «può inviare mail» diventa
         # «può inviare mail a queste destinazioni». Dopo il gate, non prima: se
