@@ -293,6 +293,20 @@ class NamespaceAtCallTimeTests(_Registry):
         self.install(COURIER)
         self.assertIsNone(resolved.enforce_namespace("courier.send"))
 
+    def test_the_whole_call_is_refused_end_to_end(self) -> None:
+        """Not only the helper: the refusal has to reach the caller, and it has
+        to do so in `report` mode too — where the destination check only logs."""
+        async def go():
+            with ClaimsContext(TOKEN, "t"), \
+                    patch.dict(os.environ, {"CLODIA_EGRESS_ENFORCE": "report"}), \
+                    patch.object(main, "_require_gate_consent",
+                                 AsyncMock(return_value={})), \
+                    _with(_cfg("*")):
+                return await main.call_tool("agents.show", {"name": "clodia"})
+        out = asyncio.run(go())
+        self.assertTrue(out[0].text.startswith(("DENIED", "ERROR")), out[0].text)
+        self.assertIn("namespace", out[0].text)
+
 
 # --------------------------------------------------------------------------
 # AC3 — the audit trail
