@@ -428,8 +428,20 @@ def current_user() -> dict:
 
 
 def mcp_servers() -> dict:
-    """I server MCP disponibili: i backend montati (Add-MCP) + i namespace nativi."""
+    """I server MCP disponibili: i backend montati (Add-MCP) + i namespace nativi.
+
+    Per i backend OAuth (clodia-platform#532) l'elenco dice anche se il consenso
+    c'è: senza, «montato» si legge come «usabile» e l'agente scopre il contrario
+    chiamando un tool che fallisce.
+    """
+    from .. import mcp_oauth
     backends = whitelist.CONFIG.get("mcp_backends") or []
-    mounted = [_pick(b, ("name", "label", "transport")) for b in backends]
+    mounted = []
+    for b in backends:
+        row = _pick(b, ("name", "label", "transport"))
+        if mcp_oauth.auth_spec(b):
+            row["auth"] = "oauth"
+            row["authorized"] = mcp_oauth.authorization_status(b)["authorized"]
+        mounted.append(row)
     native = ["fs", "agent", "email", "topic", "runtime"]
     return {"native": native, "mcp_backends": mounted, "count": len(mounted)}
