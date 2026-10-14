@@ -33,8 +33,23 @@ import time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 from mcp.client.auth import OAuthClientProvider
-from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+from mcp.client.auth.utils import (
+    build_oauth_authorization_server_metadata_discovery_urls,
+    build_protected_resource_metadata_discovery_urls,
+    create_oauth_metadata_request,
+    handle_auth_metadata_response,
+    handle_protected_resource_response,
+    validate_metadata_issuer,
+)
+from mcp.shared.auth import (
+    OAuthClientInformationFull,
+    OAuthClientMetadata,
+    OAuthMetadata,
+    OAuthToken,
+    ProtectedResourceMetadata,
+)
 
 from . import vault
 
@@ -174,6 +189,14 @@ class VaultTokenStorage:
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
         self._save({"client_info": client_info.model_dump(mode="json", exclude_none=True)})
 
+    # — metadati dell'authorization server (clodia-platform#538) —
+    def metadata(self) -> dict:
+        md = self._bundle().get("as_metadata")
+        return md if isinstance(md, dict) else {}
+
+    def save_metadata(self, md: dict) -> None:
+        self._save({"as_metadata": md})
+
 
 def forget(slug: str) -> bool:
     """Dimentica client registrato e token di un backend (smontaggio/reset)."""
@@ -198,6 +221,95 @@ class _Provider(OAuthClientProvider):
         storage = self.context.storage
         if isinstance(storage, VaultTokenStorage):
             self.context.token_expiry_time = storage.expires_at()
+            await self._restore_metadata(storage)
+
+    # ── Metadati dell'authorization server (clodia-platform#538) ─────────────
+    #
+    # Il refresh dell'SDK prende il token endpoint da `context.oauth_metadata`;
+    # se manca ripiega su `<origin del server MCP>/token`, che è giusto solo
+    # quando AS e server MCP coincidono. Quei metadati l'SDK li scopre durante
+    # il consenso e li tiene in memoria, e qui il provider nasce nuovo a ogni
+    # sessione: senza salvarli, il primo refresh va a un endpoint inventato
+    # (404 su Supabase per leads-mcp, 14 ott 2026) e ogni backend OAuth smette
+    # di funzionare un'ora dopo il consenso.
+
+    async def _restore_metadata(self, storage: "VaultTokenStorage") -> None:
+        md = storage.metadata()
+        try:
+            if isinstance(md.get("oauth"), dict):
+                self.context.oauth_metadata = OAuthMetadata.model_validate(md["oauth"])
+            if isinstance(md.get("resource"), dict):
+                self.context.protected_resource_metadata = (
+                    ProtectedResourceMetadata.model_validate(md["resource"]))
+            if md.get("auth_server_url"):
+                self.context.auth_server_url = str(md["auth_server_url"])
+        except Exception:  # noqa: BLE001 — metadati corrotti = da riscoprire, non un crash
+            LOG.warning("mcp_oauth: metadati AS di %s illeggibili, li riscopro", storage.slug)
+            self.context.oauth_metadata = None
+        tokens = self.context.current_tokens
+        if self.context.oauth_metadata is None and tokens is not None and tokens.refresh_token:
+            # Credenziale salvata prima di #538: token e refresh token ci sono,
+            # i metadati no. Li si riscopre una volta, con gli stessi helper e la
+            # stessa verifica dell'issuer dell'SDK, invece di chiedere un nuovo
+            # consenso per un refresh token buono.
+            try:
+                await self._discover_metadata()
+            except Exception as e:  # noqa: BLE001 — senza metadati resta il percorso di prima
+                LOG.warning("mcp_oauth: discovery dei metadati di %s fallita: %s", storage.slug, e)
+                return
+            self._persist_metadata()
+
+    async def _discover_metadata(self) -> None:
+        async with _discovery_client() as c:
+            for url in build_protected_resource_metadata_discovery_urls(None, self.context.server_url):
+                prm = await handle_protected_resource_response(
+                    await c.send(create_oauth_metadata_request(url)))
+                if prm:
+                    await self._validate_resource_match(prm)
+                    self.context.protected_resource_metadata = prm
+                    self.context.auth_server_url = self._select_authorization_server(
+                        [str(u) for u in prm.authorization_servers])
+                    break
+            expected = self._expected_issuer()
+            for url in build_oauth_authorization_server_metadata_discovery_urls(
+                    self.context.auth_server_url, self.context.server_url):
+                ok, asm = await handle_auth_metadata_response(
+                    await c.send(create_oauth_metadata_request(url)))
+                if not ok:
+                    break
+                if asm:
+                    validate_metadata_issuer(asm, expected)
+                    self.context.oauth_metadata = asm
+                    break
+
+    def _persist_metadata(self) -> None:
+        storage = self.context.storage
+        if not isinstance(storage, VaultTokenStorage) or self.context.oauth_metadata is None:
+            return
+        md: dict[str, Any] = {
+            "oauth": self.context.oauth_metadata.model_dump(mode="json", exclude_none=True)}
+        if self.context.protected_resource_metadata is not None:
+            md["resource"] = self.context.protected_resource_metadata.model_dump(
+                mode="json", exclude_none=True)
+        if self.context.auth_server_url:
+            md["auth_server_url"] = self.context.auth_server_url
+        if md != storage.metadata():
+            storage.save_metadata(md)
+
+    async def _handle_token_response(self, response: httpx.Response) -> None:
+        await super()._handle_token_response(response)
+        self._persist_metadata()
+
+    async def _handle_refresh_response(self, response: httpx.Response) -> bool:
+        ok = await super()._handle_refresh_response(response)
+        if ok:
+            self._persist_metadata()
+        return ok
+
+
+def _discovery_client() -> httpx.AsyncClient:
+    """Client della discovery una tantum (sostituibile nei test)."""
+    return httpx.AsyncClient(timeout=10.0, follow_redirects=True)
 
 
 def client_metadata(auth: dict) -> OAuthClientMetadata:
