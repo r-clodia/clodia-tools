@@ -140,11 +140,14 @@ class VaultEntryTests(unittest.TestCase):
         self.assertIn("sms_x", out["errors"][0])
 
 
-    def test_the_migrating_namespace_keeps_its_core_prefix(self):
-        """comms-pack taking over `telegram` (#522) keeps `telegram_bot_token`;
-        nobody else can name it, and `mailbox` is never a pack's."""
+    def test_the_migrating_namespace_keeps_its_core_prefix_only_after_migration(self):
+        """In production the migrating namespaces are reserved, so nobody has
+        `telegram_…`; a registry reproduced with the reservation lifted (the
+        day #522 lands) lets the telegram namespace use its own prefix."""
         from .connectors.manifest import vault_entry_problem
-        self.assertEqual(vault_entry_problem("telegram_bot_token", "telegram"), "")
+        self.assertTrue(vault_entry_problem("telegram_bot_token", "telegram"))
+        self.assertEqual(vault_entry_problem("telegram_bot_token", "telegram",
+                                             reserved=frozenset()), "")
         self.assertTrue(vault_entry_problem("telegram_bot_token", "sms"))
         self.assertTrue(vault_entry_problem("mailbox_team", "mailbox"))
         self.assertTrue(vault_entry_problem("mcp_x_token", "mcp_x"))

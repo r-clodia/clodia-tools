@@ -101,22 +101,30 @@ CORE_VAULT_PREFIXES = (
     "app_", "backup_", "github_", "gmail_", "google_", "gworkspace_",
     "mailbox_", "mcp_", "openai_", "profile_", "provider_", "scope_",
     "telegram_")
-#: The core prefixes that belong to a connector the gateway still implements
-#: itself, and that the pack it migrates into (epic #527) inherits WITH the
-#: namespace. A pack cannot hold one of these namespaces while the builtin
-#: connector exists (it is refused/ignored), so the exception opens nothing
-#: before the migration happens.
-CORE_VAULT_MIGRATING = {"telegram_": "telegram", "github_": "github",
-                        "google_": "google"}
+#: Namespaces reserved for EVERYONE until the migration issue that moves the
+#: matching core connector into a pack lands (#522 telegram/mail, #523 google,
+#: #525 github, …): the stems of `CORE_VAULT_PREFIXES`. Second verification of
+#: #359: `namespace: google` + `vault_entry: google_studio` loaded, because
+#: `google` is no native namespace and the prefix was exempted by name. Now no
+#: pack can hold these namespaces, so no pack can reach these vault entries.
+#: Added to `core_namespaces()`, which every namespace check reserves.
+MIGRATING_NAMESPACES = frozenset(p.rstrip("_") for p in CORE_VAULT_PREFIXES)
 
 
-def vault_entry_problem(entry: str, namespace: str) -> str:
+def vault_entry_problem(entry: str, namespace: str,
+                        reserved: Iterable[str] | None = None) -> str:
     """Why a PACK connector may not store its credential under `entry`, or "".
 
     The entry lives under the connector's own namespace — `<namespace>` or
-    `<namespace>_…` — and never under a core credential prefix (except the one
-    of the builtin connector whose namespace the pack has taken over).
+    `<namespace>_…` — and never under another core credential prefix. A core
+    prefix whose stem IS the namespace can only occur for a namespace that the
+    namespace rule let through, and in production `MIGRATING_NAMESPACES` are
+    reserved: there is no exemption by name. `reserved` is the namespace
+    reservation in force (default `MIGRATING_NAMESPACES`); only a registry
+    reproduced with an explicit, smaller one — a test of the day after a
+    migration — lets a stem namespace use its own prefix.
     """
+    taken = MIGRATING_NAMESPACES if reserved is None else frozenset(reserved)
     if entry != namespace and not entry.startswith(f"{namespace}_"):
         return (f"vault entry '{entry}' is outside namespace '{namespace}': a "
                 f"connector stores its credential as '{namespace}' or "
@@ -124,7 +132,7 @@ def vault_entry_problem(entry: str, namespace: str) -> str:
     for prefix in CORE_VAULT_PREFIXES:
         if not (entry.startswith(prefix) or entry == prefix.rstrip("_")):
             continue
-        if CORE_VAULT_MIGRATING.get(prefix) == namespace:
+        if prefix.rstrip("_") == namespace and namespace not in taken:
             continue
         return (f"vault entry '{entry}' is a core credential name "
                 f"('{prefix}…'), which a pack cannot write")
@@ -868,7 +876,8 @@ def core_namespaces() -> frozenset[str]:
     from ..main import all_native_verb_names
 
     return frozenset(
-        name.split(".", 1)[0] for name in all_native_verb_names() if "." in name)
+        name.split(".", 1)[0] for name in all_native_verb_names()
+        if "." in name) | MIGRATING_NAMESPACES
 
 
 def check_namespace(namespace: str, verbs: Iterable[str], *,
@@ -1274,7 +1283,7 @@ def parse_connector(raw: Any, *, pack: str,
     if not builtin:
         for p in providers:
             entry = p.credential.vault_entry if p.credential else ""
-            problem = vault_entry_problem(entry, namespace) if entry else ""
+            problem = vault_entry_problem(entry, namespace, reserved) if entry else ""
             if problem:
                 raise ManifestError(f"{where}.providers '{p.id}': {problem}")
 

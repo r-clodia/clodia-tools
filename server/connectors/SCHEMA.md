@@ -130,9 +130,10 @@ by the ordinary http rules.
 
 - `kind: form` — `vault_entry` (under the connector's own namespace:
   `<namespace>` or `<namespace>_<name>`, never a core credential such as
-  `mailbox_…`, `provider_…`, `mcp_…`; the core prefixes of a connector the
-  gateway still implements — `telegram_`, `github_`, `google_` — go with that
-  namespace when it moves into a pack) plus the `fields` the owner fills in (`secret:
+  `mailbox_…`, `provider_…`, `mcp_…`, `google_…`, `telegram_…`. The stems of
+  those prefixes — google, gmail, telegram, github, mailbox, openai, … — are
+  reserved NAMESPACES for every pack until the migration issue of that core
+  connector lands) plus the `fields` the owner fills in (`secret:
   true` for the ones that must never be echoed back);
 - `kind: oauth` — `authorize_url`, `token_url`, `scopes`.
 
