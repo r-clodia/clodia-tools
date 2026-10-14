@@ -63,7 +63,7 @@ PACKS_DIR = "packs"
 #: `stat` of every manifest file: a registry that lags behind the files is a
 #: security defect, not a slow path, so there is no TTL — a handful of `stat()`
 #: per call is the price of never answering with a mapping that was removed.
-_CACHE: tuple[tuple, Registry, tuple[str, ...]] | None = None
+_CACHE: tuple[tuple, Registry, tuple[str, ...], dict] | None = None
 
 
 def _manifest_files() -> list[Path]:
@@ -82,6 +82,91 @@ def _signature(paths: list[Path]) -> tuple:
             continue
         out.append((str(p), st.st_mtime_ns, st.st_size))
     return tuple(out)
+
+
+#: Backend MCP che il CORE monta da sé (il connettore GitHub nativo): non sono
+#: di nessun pack, nemmeno di uno che li dichiari fra i propri `mcp_servers`.
+_CORE_BACKENDS = frozenset({"github"})
+
+
+def _slug(name: str) -> str:
+    """Lo slug con cui `tools_api.register_mcp_core` monta un server MCP."""
+    import re as _re
+    return _re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")[:40]
+
+
+def mounted_backends() -> frozenset[str]:
+    """I namespace dei backend MCP montati adesso (`mcp_backends` di config)."""
+    from .. import proxy
+    return frozenset(proxy._backends())
+
+
+def _plugin_files() -> list[Path]:
+    try:
+        return sorted((_DATA / "plugins").glob("*/plugin.yaml"))
+    except OSError:
+        return []
+
+
+def backend_owners(packs: Mapping[str, Mapping] | None = None) -> dict[str, frozenset[str]]:
+    """`{pack: backend che quel pack monta come propri}`.
+
+    Un pack possiede il backend di un server MCP che dichiara lui stesso: nel
+    `mcp_servers` del proprio `pack.yaml` o in quello dei suoi plugin
+    (`$CLODIA_DATA/plugins/<plugin>/plugin.yaml`, elencati in `plugins:`).
+    Un backend dichiarato da due pack non è di nessuno, e i backend del core
+    (`_CORE_BACKENDS`) non sono mai di un pack.
+    """
+    import yaml
+
+    packs = manifests() if packs is None else packs
+    plugin_servers: dict[str, set[str]] = {}
+    for path in _plugin_files():
+        try:
+            meta = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        servers = meta.get("mcp_servers") if isinstance(meta, Mapping) else None
+        if isinstance(servers, Mapping):
+            plugin_servers[path.parent.name] = {_slug(str(k)) for k in servers}
+    claimed: dict[str, set[str]] = {}
+    for pack, meta in packs.items():
+        own: set[str] = set()
+        servers = meta.get("mcp_servers")
+        if isinstance(servers, Mapping):
+            own |= {_slug(str(k)) for k in servers}
+        plugins = meta.get("plugins")
+        for plugin in plugins if isinstance(plugins, list) else []:
+            name = plugin.get("name") if isinstance(plugin, Mapping) else plugin
+            own |= plugin_servers.get(str(name or ""), set())
+        claimed[pack] = own - _CORE_BACKENDS
+    count: dict[str, int] = {}
+    for own in claimed.values():
+        for b in own:
+            count[b] = count.get(b, 0) + 1
+    return {pack: frozenset(b for b in own if count[b] == 1)
+            for pack, own in claimed.items()}
+
+
+def foreign_backends(pack: str) -> frozenset[str]:
+    """I namespace di backend MCP che `pack` NON può prendersi come namespace.
+
+    Tutti quelli montati, più quelli del core, meno i soli server MCP che il
+    pack monta come propri. Senza questa riserva un pack poteva dichiarare
+    `namespace: github` (o quello di un `normattiva` montato con `mcp.add`) e
+    mappare `github.get_*` come lettura `direction: source` di una fonte scelta
+    da lui — cioè etichettare come fidate le letture di un altro backend e
+    spegnere il taint.
+    """
+    owned = _build_owners().get(pack, frozenset())
+    return (mounted_backends() | _CORE_BACKENDS) - owned
+
+
+def reserved_for(pack: str) -> frozenset[str]:
+    """Namespace riservati per `pack`: quelli nativi e i backend non suoi.
+    (Quelli degli ALTRI pack li riserva `build_registry`.)"""
+    from .manifest import core_namespaces
+    return core_namespaces() | foreign_backends(pack)
 
 
 def manifests() -> dict[str, dict]:
@@ -118,14 +203,43 @@ def problems() -> tuple[str, ...]:
     return _build()[1]
 
 
+def _build_owners() -> dict[str, frozenset[str]]:
+    _build()
+    return _CACHE[3] if _CACHE is not None else {}
+
+
 def _build() -> tuple[Registry, tuple[str, ...]]:
     global _CACHE
-    sig = _signature(_manifest_files())
+    # Nella firma anche i plugin (chi possiede quale server MCP) e i backend
+    # montati: un `mcp.add` fatto dopo la costruzione deve riservare quel
+    # namespace alla chiamata successiva, non al prossimo cambio di pack.yaml.
+    sig = (_signature(_manifest_files()), _signature(_plugin_files()),
+           tuple(sorted(mounted_backends())))
     if _CACHE is not None and _CACHE[0] == sig:
         return _CACHE[1], _CACHE[2]
-    reg, probs = Registry(), ()
+    reg, probs, owners = Registry(), (), {}
     try:
-        reg = build_registry(manifests())
+        packs = manifests()
+        owners = backend_owners(packs)
+        reg = build_registry(packs)
+        # Namespace di backend MCP montati: riservati come quelli nativi, salvo
+        # il server MCP che il pack monta come proprio. Il connettore che ne
+        # prende uno altrui è rifiutato da solo — gli altri restano.
+        mounted = mounted_backends() | _CORE_BACKENDS
+        keep, refused = [], []
+        for c in reg.connectors:
+            if c.namespace in mounted - owners.get(c.pack, frozenset()):
+                refused.append(
+                    f"pack '{c.pack}', connector '{c.id}': namespace "
+                    f"'{c.namespace}' is a mounted MCP backend that is not this "
+                    f"pack's own; a pack cannot claim another backend's verbs")
+            else:
+                keep.append(c)
+        if refused:
+            for r in refused:
+                LOG.error("connectors: %s", r)
+            reg = Registry(connectors=tuple(keep))
+            probs = tuple(refused)
     except ManifestError as e:
         # All-or-nothing is `build_registry`'s own rule (#516): a manifest that
         # collides with another is not half-valid. The consequence here is that
@@ -138,7 +252,7 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
     except Exception as e:  # noqa: BLE001 — never break a call over this
         probs = (f"{type(e).__name__}: {e}",)
         LOG.error("connectors: registry non costruibile (%s)", e)
-    _CACHE = (sig, reg, probs)
+    _CACHE = (sig, reg, probs, owners)
     return reg, probs
 
 
@@ -178,7 +292,10 @@ def namespace_violation(verb: str) -> str:
             continue
         connector, mapping = owned
         try:
+            # Riservati: i namespace nativi E quelli dei backend MCP montati
+            # che non sono di questo pack (clodia-platform#517, review).
             check_namespace(connector.namespace, [mapping.verb],
+                            reserved=reserved_for(connector.pack),
                             where=f"pack '{connector.pack}', connector "
                                   f"'{connector.id}'")
         except ManifestError as e:
