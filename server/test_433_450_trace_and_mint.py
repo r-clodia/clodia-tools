@@ -64,7 +64,8 @@ class MintForwardsEveryClaimTests(unittest.TestCase):
     def test_every_claim_the_local_signer_knows_the_gateway_signs(self) -> None:
         import inspect
         gw = set(inspect.signature(pki_mint.mint_session_token).parameters)
-        for claim in ("origin", "scope_tier", "unattended", "chat", "clearance", "principal"):
+        for claim in ("origin", "scope_tier", "unattended", "chat", "clearance",
+                      "principal", "role"):
             self.assertIn(claim, gw)
 
 

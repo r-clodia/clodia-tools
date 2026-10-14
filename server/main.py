@@ -3077,6 +3077,24 @@ def _all_native_tools() -> list:
     return native
 
 
+def _verb_implemented(name: str) -> bool:
+    """Il dispatch sa servire questo verbo? (clodia-platform#539 §7)
+
+    Nativi **a prescindere dal profilo d'istanza**: `_all_native_tools()` omette
+    rag/eu_corpus quando la feature è spenta, ma il ramo del dispatch c'è lo
+    stesso e la decisione di spegnerli non è questa — qui si risponde «esiste»,
+    non «ti è concesso», e le due domande hanno già ciascuna la propria guardia.
+    Più i backend MCP montati, che sono verbi veri quanto i nativi.
+    """
+    if name in {t.name for t in _all_native_tools()} | \
+            {t.name for t in _EU_CORPUS_TOOLS + _RAG_TOOLS}:
+        return True
+    try:
+        return bool(proxy.is_proxied(name))
+    except Exception:  # noqa: BLE001 — in dubbio, lascia parlare il dispatch
+        return True
+
+
 def all_native_verb_names() -> list[str]:
     """Nomi di TUTTI i verbi nativi del gateway, indipendentemente dal chiamante.
 
@@ -4614,6 +4632,24 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                             detail=f"origin:{_org.get('refused_by')}")
                 LOG.info("origin (osservazione): %s rifiuterebbe %s — catena %s",
                          _org.get("refused_by"), name, " → ".join(_org["chain"]))
+
+        # UN VERBO CHE NON ESISTE NON SI FA APPROVARE (clodia-platform#539 §7).
+        # Stessa regola del blocco non presidiato qui sopra: chiedere un consenso
+        # che non può cambiare l'esito è il difetto di #116. Un verbo sbagliato —
+        # un refuso dell'agente — non è dichiarato nel profilo di nessuno, quindi
+        # `outside_profile` lo trovava fuori profilo e apriva una card: il turno
+        # restava appeso fino alla scadenza del gate e un umano era chiamato ad
+        # approvare `no.such_verb`, che al ritorno sarebbe comunque finito nel
+        # `unknown tool` in fondo al dispatch. Si risponde subito, con lo stesso
+        # errore.
+        #
+        # FAIL-CLOSED: il catalogo è l'unione di ciò che il dispatch sa servire
+        # (verbi nativi, inclusi quelli che il profilo d'istanza spegne) e dei
+        # backend MCP montati. Se un giorno il catalogo fosse incompleto si
+        # rifiuterebbe un verbo buono — rumoroso e correggibile — invece di
+        # saltarne il gate, che è l'errore che non si vede.
+        if not _verb_implemented(name):
+            raise ValueError(f"unknown tool: {name}")
 
         # M-gate: conferma umana su azioni sotto supervisione — UN SOLO meccanismo.
         # (a) VERBI gated (packs/mcp/agents/…): consenso one-shot per-verbo.

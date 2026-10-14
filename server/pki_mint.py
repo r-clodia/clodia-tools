@@ -36,6 +36,15 @@ CAP_PREFIX = "ccap1"
 COLONY_ORG = "clodia-colony"
 CERT_DAYS = 365 * 3
 
+#: Ruolo che l'agent-server dichiara nei token che conia PER SÉ — le chiamate
+#: che fa al gateway come servizio, non per conto di un agente in un turno
+#: (clodia-platform#539 §1). Gemello di `colony.pki.ROLE_AGENT_SERVER` in
+#: clodia-logic: i due nomi devono restare la stessa stringa, perché uno firma e
+#: l'altro verifica. Un valore solo, e il mint rifiuta gli altri: non è un
+#: sistema di ruoli, è l'identità di UN chiamante.
+ROLE_AGENT_SERVER = "agent-server"
+ROLES = (ROLE_AGENT_SERVER,)
+
 
 def _secrets_dir() -> Path:
     return Path(os.environ.get("CLODIA_SECRETS_DIR", "/datadir/secrets"))
@@ -83,7 +92,8 @@ def mint_session_token(agent: str, execution_id: str = "",
                        unattended: bool = False,
                        principal_kind: str | None = None,
                        origin: list[str] | None = None,
-                       scope_tier: str | None = None) -> str:
+                       scope_tier: str | None = None,
+                       role: str | None = None) -> str:
     """Conia un token di sessione ckt1 firmato con l'identity key dell'agente.
     Identico a colony.pki.mint_session_token, ma le chiavi stanno QUI (gateway).
 
@@ -94,6 +104,8 @@ def mint_session_token(agent: str, execution_id: str = "",
     scoped_tools = list(dict.fromkeys(scoped_tools or []))
     if any(t in ("*", "agents") or t.startswith("agents.") for t in scoped_tools):
         raise PermissionError("scoped_tools non può concedere wildcard o tool agents.*")
+    if role is not None and role not in ROLES:
+        raise PermissionError(f"ruolo di sessione sconosciuto: {role!r}")
     key_path = _agent_key_path(agent)
     if not key_path.is_file():
         raise PermissionError(f"agent '{agent}' senza identità (nessuna identity.key nel gateway)")
@@ -127,6 +139,11 @@ def mint_session_token(agent: str, execution_id: str = "",
         # Sessione di un job schedulato: nessun umano davanti al turno. FIRMATO,
         # quindi l'agente non può rimuoverselo (clodia-platform#104).
         payload["unattended"] = True
+    if role:
+        # CHI è questo chiamante, affermato da chi tiene la chiave. Conia solo
+        # chi ha il secret di bootstrap (`mint_api`), che non entra mai
+        # nell'ambiente di uno spawn: un agente non può scriverselo.
+        payload["role"] = role
     if origin:
         payload["origin"] = [str(x) for x in origin]
     if scope_tier:

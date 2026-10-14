@@ -27,6 +27,7 @@ from . import topics_api
 from .tools import email as email_tool
 from .topics.local_fs import LocalFsStorage
 from .topics.service import TopicService
+from .test_519_generic_actions import come_agent_server
 
 _H = {"Authorization": "Bearer ckt1.finto"}
 
@@ -61,7 +62,7 @@ class Base(unittest.TestCase):
 
         self._p = [
             patch.object(topics_api, "_svc", self.svc),
-            patch.object(topics_api, "_authorize", lambda _r: ("davide", None)),
+            patch.object(topics_api, "_authorize", come_agent_server),
             patch.object(email_tool.vault, "store_names", return_value=list(_VAULT)),
             patch.object(email_tool.vault, "read_internal",
                          side_effect=lambda n: dict(_VAULT[n])),

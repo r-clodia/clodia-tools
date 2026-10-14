@@ -269,7 +269,8 @@ def _build_isolated(own: dict, installed: dict
             LOG.error("connectors: pack rifiutati %s (%s)", culprits, e)
 
 
-def _failsafe_from(packs: Mapping[str, Mapping]) -> tuple[str, ...]:
+def _failsafe_from(packs: Mapping[str, Mapping],
+                   others: Mapping[str, Mapping] | None = None) -> tuple[str, ...]:
     """The OUTBOUND verbs the raw manifests of `packs` declare, for packs whose
     connectors could not be built (second verification of #358).
 
@@ -279,6 +280,14 @@ def _failsafe_from(packs: Mapping[str, Mapping]) -> tuple[str, ...]:
     connector's own namespace that is neither native nor builtin — a broken
     manifest must not be able to switch off somebody else's verb. A `prefix:
     true` mapping is kept with a trailing `*`.
+
+    «Somebody else» is not only the gateway (clodia-platform#539 §3): a broken
+    manifest that declares the namespace of ANOTHER pack — or of a mounted MCP
+    backend — used to have those verbs denied too. It fails closed, so it is a
+    denial of service and not a bypass; but the pack paying for it is the one
+    that did nothing wrong, and «install a broken pack to switch off a
+    competitor's verbs» is a cheap move. `others` are the healthy manifests,
+    whose namespaces are off limits exactly like the native ones.
     """
     try:
         from .manifest import core_namespaces
@@ -289,6 +298,22 @@ def _failsafe_from(packs: Mapping[str, Mapping]) -> tuple[str, ...]:
         taken |= {c.namespace for c in _builtin_registry().connectors}
     except Exception:  # noqa: BLE001
         pass
+    try:
+        # I backend MCP montati sono verbi veri di qualcun altro, non meno dei
+        # nativi: l'admin che monta `norm-attiva` non deve vederseli spegnere
+        # dal manifest sbagliato di un pack qualunque.
+        taken |= {_norm(b) for b in (mounted_backends() | _CORE_BACKENDS)}
+    except Exception:  # noqa: BLE001
+        pass
+    for meta in (others or {}).values():
+        entries = meta.get("connectors") if isinstance(meta, Mapping) else None
+        for entry in entries if isinstance(entries, list) else []:
+            if isinstance(entry, Mapping) and entry.get("namespace"):
+                taken.add(str(entry["namespace"]))
+    # Confronto NORMALIZZATO da entrambe le parti: gli slug dei backend usano
+    # `-` e i namespace `_`, e un confronto a stringa mancherebbe proprio il
+    # caso che questa guardia deve cogliere.
+    taken = {_norm(x) for x in taken}
     out: set[str] = set()
     for meta in (packs or {}).values():
         entries = meta.get("connectors") if isinstance(meta, Mapping) else None
@@ -296,7 +321,7 @@ def _failsafe_from(packs: Mapping[str, Mapping]) -> tuple[str, ...]:
             if not isinstance(entry, Mapping):
                 continue
             ns = str(entry.get("namespace") or "")
-            if not ns or ns in taken:
+            if not ns or _norm(ns) in taken:
                 continue
             verbs = entry.get("verbs")
             for v in verbs if isinstance(verbs, list) else []:
@@ -370,7 +395,11 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
             # verification): unmapped would mean unchecked.
             reg = Registry(connectors=tuple(keep), refused=tuple(refused),
                            failsafe_verbs=_failsafe_from(
-                               {p: installed[p] for p in dropped_packs}))
+                               {p: installed[p] for p in dropped_packs},
+                               # I pack SANI: i loro namespace non si spengono
+                               # perché il manifest di un vicino è rotto (§3).
+                               {p: m for p, m in installed.items()
+                                if p not in dropped_packs}))
         if reg.refused:
             # Not a failure of the registry: a pack that collides with a
             # connector this gateway still implements, or with a backend that
