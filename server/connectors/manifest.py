@@ -1162,7 +1162,8 @@ def _binding(raw: Any, where: str) -> str:
     return _one_of(value, BINDINGS, where) if value else ""
 
 
-def _check_action_schemes(actions, owned: set[str], where: str) -> None:
+def _check_action_schemes(actions, owned, where: str, *,
+                          require_forms: bool = False) -> None:
     """Every template of a topic action starts with a LITERAL scheme the
     connector owns: `tg:{chat}` yes, `{url}` or `https://{host}/` no — those
     would let whoever fills the field whitelist any address without the WALLS
@@ -1177,6 +1178,17 @@ def _check_action_schemes(actions, owned: set[str], where: str) -> None:
                         f"{where}.topic_actions '{a.id}'.adds.{key}: '{tpl}' "
                         f"must start with one of the connector's own schemes "
                         f"({', '.join(sorted(owned)) or 'none'}), written out")
+                # Second verification of #360: a scheme with no `forms` accepts
+                # anything (`courier:*` included), so the run-time form check
+                # would check nothing. A pack's action may write only into a
+                # scheme that says what its addresses look like.
+                if require_forms and isinstance(owned, Mapping) \
+                        and not owned[scheme].forms:
+                    raise ManifestError(
+                        f"{where}.topic_actions '{a.id}'.adds.{key}: scheme "
+                        f"'{scheme}' declares no `forms`, so any value — a "
+                        f"wildcard included — would be written; declare its "
+                        f"forms")
 
 
 def _parse_tools_card(raw: Any, where: str) -> ToolsCard:
@@ -1373,7 +1385,8 @@ def parse_connector(raw: Any, *, pack: str,
         # Review of #360: an action writes only into its connector's own
         # vocabulary. An `extends` provider is checked against the vocabulary
         # it joins, in `build_registry`, once that is resolved.
-        _check_action_schemes(actions, {sch.name for sch in schemes}, where)
+        _check_action_schemes(actions, {sch.name: sch for sch in schemes},
+                              where, require_forms=not builtin)
     services = tuple(
         _parse_service(s, f"{where}.services[{i}]", pack=pack)
         for i, s in enumerate(_seq(data.get("services"), f"{where}.services")))
@@ -1699,8 +1712,9 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
                     f"owner, not to another provider"), c.pack)
             try:
                 _check_action_schemes(c.topic_actions,
-                                      {sch.name for sch in target.schemes},
-                                      _at(c.pack, c.id))
+                                      {sch.name: sch for sch in target.schemes},
+                                      _at(c.pack, c.id),
+                                      require_forms=not c.builtin)
             except ManifestError as e:
                 raise _blame(e, c.pack)
         for p in c.providers:

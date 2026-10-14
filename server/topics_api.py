@@ -103,6 +103,56 @@ def _authorize(request: Request):
     return payload.get("agent"), None
 
 
+def _authorize_topic_owner(request: Request):
+    """`_authorize` PLUS «who may change this topic's walls» (review of #360,
+    second verification).
+
+    A connector action writes the topic's ingress/egress lists and binds a
+    channel, without the WALLS gate: so the caller must be the one entitled to
+    decide that, and `_authorize` alone admitted any internal principal —
+    `clodia`'s RUNTIME token (`CLODIA_TOOLS_TOKEN` in every agent's env) got 200
+    and wrote `tg:-100777` plus a binding. Admitted:
+
+    - an on-behalf HUMAN session whose principal is the topic's owner, or a
+      platform admin (`human_role: admin`);
+    - the agent-server itself: a session it mints for its own principal with
+      no execution and no chat (`topics_client._headers()` in clodia-logic),
+      which is the path the webui takes — clodia-logic checks owner/admin
+      (`_require_topic_owner`, `_require_platform_admin`) before forwarding.
+      An AGENT token always carries its `execution_id`, so it never qualifies.
+
+    Everything else: 403. Returns `(who, None)` — the human when on-behalf.
+    """
+    who, err = _authorize(request)
+    if err:
+        return None, err
+    p = getattr(request.state, "auth_payload", None) or {}
+    if p.get("on_behalf"):
+        principal = str(p.get("principal") or "")
+        if (p.get("human_role") or "user") == "admin":
+            return principal or who, None
+        tier = request.path_params.get("tier"); name = request.path_params.get("name")
+        try:
+            owner = (_service().open(tier, name).get("meta") or {}).get("owner")
+        except TopicError:
+            owner = None
+        if principal and owner and principal == owner:
+            return principal, None
+        LOG.warning("topics: %s non è owner di %s/%s né admin: azione sui muri "
+                    "rifiutata", principal or "?", tier, name)
+        return None, JSONResponse(
+            {"error": "solo l'owner del topic (o un admin) può collegare o "
+                      "scollegare un connettore"}, status_code=403)
+    if not str(p.get("execution_id") or "").strip() and not p.get("chat"):
+        return who, None
+    LOG.warning("topics: token di agente (%s, execution %s) rifiutato su "
+                "un'azione sui muri del topic", p.get("agent"),
+                p.get("execution_id"))
+    return None, JSONResponse(
+        {"error": "un agente non collega connettori a un topic: è una decisione "
+                  "dell'owner"}, status_code=403)
+
+
 def _reader(request: Request) -> dict | None:
     """The person behind a read, or None for the runner's own (system) reads."""
     p = getattr(request.state, "auth_payload", None) or {}
@@ -406,7 +456,7 @@ async def drive_folder(request: Request):
     perimetro che `gdrive_root.roots_for_call` legge. action: add|remove|
     set_credential (git — il credential rotation dello scope, indipendente
     da qualunque cartella Drive)."""
-    _, err = _authorize(request)
+    _, err = _authorize_topic_owner(request)
     if err:
         return err
     tier = request.path_params["tier"]; name = request.path_params["name"]
@@ -644,7 +694,7 @@ async def connector_action(request: Request):
     garanzia, aggiunge un clic. Quello che la risposta porta sempre è il TIER
     del topic e lo stato del cap, che è l'informazione con cui decide.
     """
-    principal, err = _authorize(request)
+    principal, err = _authorize_topic_owner(request)
     if err:
         return err
     tier = request.path_params["tier"]; name = request.path_params["name"]
@@ -679,7 +729,7 @@ async def telegram_link(request: Request):
     whitelist egress/ingress `tg:<chat_id>` PIÙ il binding vero — senza il
     secondo il messaggero non riporta nulla anche con la whitelist scritta.
     """
-    principal, err = _authorize(request)
+    principal, err = _authorize_topic_owner(request)
     if err:
         return err
     tier = request.path_params["tier"]; name = request.path_params["name"]
@@ -770,7 +820,7 @@ async def mailbox_link(request: Request):
     della casella scelta. Accettare un `email` dal client farebbe autorizzare
     una casella che non esiste.
     """
-    _, err = _authorize(request)
+    _, err = _authorize_topic_owner(request)
     if err:
         return err
     tier = request.path_params["tier"]; name = request.path_params["name"]

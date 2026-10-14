@@ -188,7 +188,10 @@ action does not declare is an error, and so is a template that does not start
 with one of the connector's OWN schemes written out (`tg:{chat}`, never `{url}`
 or `https://{host}/`; an `extends` provider uses the vocabulary it joins). At
 run time every resolved URI is checked against its scheme's forms and against
-`egress.check_grantable` before anything is written. What the action adds is a *proposal*: the
+`egress.check_grantable` before anything is written. A pack's action may write
+only into a scheme that declares `forms` (a scheme without forms would accept
+`courier:*`). Only the topic's owner or an admin (on-behalf), or the
+agent-server's own session, may run an action — never an agent token. What the action adds is a *proposal*: the
 grant is still the owner's, at the gate.
 
 Since #519 the action is **executed** from this declaration, by the generic
