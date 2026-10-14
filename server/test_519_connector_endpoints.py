@@ -71,8 +71,8 @@ def _client() -> TestClient:
 
 class _Auth:
     def __enter__(self):
-        self._p = patch.object(connectors_api.internal_auth, "authorize",
-                               lambda *a, **k: (_HUMAN, None))
+        from . import tools_api
+        self._p = patch.object(tools_api, "_authorized", lambda request: True)
         self._p.start()
         return self
 

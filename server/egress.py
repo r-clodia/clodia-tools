@@ -98,13 +98,13 @@ def address_of(header: str) -> str:
 
 
 def _registry():
-    """Il registry dei connettori, o un registry vuoto se non è costruibile.
+    """Il registry dei connettori, o un registry DEGRADATO se non è costruibile.
 
     Mai un'eccezione: questo modulo viene chiamato dentro il percorso di ogni
-    verbo. Un registry vuoto non è permissivo — senza schemi nessuna regola è
-    concedibile e nessuna destinazione combacia, quindi si nega — ed è rumoroso,
-    perché `connectors.resolved` logga la ragione. Il caso reale è un deploy
-    rotto, non un pack malfatto: i manifest del gateway stanno nell'immagine.
+    verbo. Un registry vuoto da solo SAREBBE permissivo (review di #358):
+    `spec_for` risponderebbe None e `decide` «non controllato, ammesso». Per
+    questo un guasto torna un registry con `degraded` valorizzato, e `decide`,
+    `scheme_form_ok` e `taint.taints` falliscono chiusi su quello.
     """
     try:
         from .connectors import resolved as _connectors
@@ -112,7 +112,25 @@ def _registry():
     except Exception as e:  # noqa: BLE001
         LOG.error("egress: registry dei connettori non consultabile (%s)", e)
         from .connectors.manifest import Registry
-        return Registry()
+        return Registry(degraded=f"{type(e).__name__}: {e}")
+
+
+def _failsafe_denied(verb: str) -> str:
+    """Il motivo per negare `verb` perché i connettori del gateway mancano, o "".
+
+    Fail-closed (review di #358): senza i manifest del gateway non si sa dove
+    mandi `email.send`, e «non lo so» non può valere «ammesso».
+    """
+    reg = _registry()
+    if not reg.degraded:
+        return ""
+    from .connectors import resolved as _connectors
+    ns = (verb or "").split(".", 1)[0]
+    if ns in _connectors.FAILSAFE_EGRESS_NAMESPACES:
+        return (f"registry dei connettori del gateway non disponibile "
+                f"({reg.degraded}): i verbi in uscita sono negati finché non "
+                f"torna costruibile")
+    return ""
 
 
 def spec_for(verb: str) -> Optional[tuple[str, Callable[[dict], list[str]]]]:
@@ -166,11 +184,9 @@ def canonical(uri: str) -> str:
     s = _registry().scheme(scheme)
     if s is not None and s.lowercase:
         return u.lower()
-    for sch in _registry().schemes():
-        for rule in sch.canonicalise:
-            out = rule.apply(u)
-            if out is not None:
-                return out
+    out = _registry().canonical(u)
+    if out is not None:
+        return out
     if u.lower().startswith(("http://", "https://")):
         # host in minuscolo, il resto no: un path può essere case-sensitive.
         sp = urlsplit(u)
@@ -263,7 +279,11 @@ def scheme_form_ok(scheme: str, rest: str) -> bool:
     causa. Il controllo è `fullmatch` (#518): un prefisso della forma è un altro
     valore, non quel valore.
     """
-    s = _registry().scheme((scheme or "").strip().lower())
+    reg = _registry()
+    if reg.degraded:
+        # Senza i manifest non si sa quali forme valgano: niente si accetta.
+        return False
+    s = reg.scheme((scheme or "").strip().lower())
     if s is None or not s.forms:
         return True
     return any(f.matches(rest) for f in s.forms)
@@ -685,6 +705,11 @@ def decide(agent_cfg: dict, verb: str, arguments: dict) -> dict:
     """
     spec = spec_for(verb)
     if not spec:
+        failsafe = _failsafe_denied(verb)
+        if failsafe:
+            return {"checked": True, "allowed": False, "verb": verb,
+                    "type": "unknown", "destinations": [UNKNOWN], "rules": [],
+                    "refused": [UNKNOWN], "reason": failsafe}
         return {"checked": False, "allowed": True, "verb": verb}
     dtype, extract = spec
     try:

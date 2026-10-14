@@ -66,7 +66,7 @@ PACKS_DIR = "packs"
 #: `stat` of every manifest file: a registry that lags behind the files is a
 #: security defect, not a slow path, so there is no TTL — a handful of `stat()`
 #: per call is the price of never answering with a mapping that was removed.
-_CACHE: tuple[tuple, Registry, tuple[str, ...]] | None = None
+_CACHE: tuple[tuple, Registry, tuple[str, ...], dict] | None = None
 
 
 def _manifest_files() -> list[Path]:
@@ -85,6 +85,91 @@ def _signature(paths: list[Path]) -> tuple:
             continue
         out.append((str(p), st.st_mtime_ns, st.st_size))
     return tuple(out)
+
+
+#: Backend MCP che il CORE monta da sé (il connettore GitHub nativo): non sono
+#: di nessun pack, nemmeno di uno che li dichiari fra i propri `mcp_servers`.
+_CORE_BACKENDS = frozenset({"github"})
+
+
+def _slug(name: str) -> str:
+    """Lo slug con cui `tools_api.register_mcp_core` monta un server MCP."""
+    import re as _re
+    return _re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")[:40]
+
+
+def mounted_backends() -> frozenset[str]:
+    """I namespace dei backend MCP montati adesso (`mcp_backends` di config)."""
+    from .. import proxy
+    return frozenset(proxy._backends())
+
+
+def _plugin_files() -> list[Path]:
+    try:
+        return sorted((_DATA / "plugins").glob("*/plugin.yaml"))
+    except OSError:
+        return []
+
+
+def backend_owners(packs: Mapping[str, Mapping] | None = None) -> dict[str, frozenset[str]]:
+    """`{pack: backend che quel pack monta come propri}`.
+
+    Un pack possiede il backend di un server MCP che dichiara lui stesso: nel
+    `mcp_servers` del proprio `pack.yaml` o in quello dei suoi plugin
+    (`$CLODIA_DATA/plugins/<plugin>/plugin.yaml`, elencati in `plugins:`).
+    Un backend dichiarato da due pack non è di nessuno, e i backend del core
+    (`_CORE_BACKENDS`) non sono mai di un pack.
+    """
+    import yaml
+
+    packs = manifests() if packs is None else packs
+    plugin_servers: dict[str, set[str]] = {}
+    for path in _plugin_files():
+        try:
+            meta = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        servers = meta.get("mcp_servers") if isinstance(meta, Mapping) else None
+        if isinstance(servers, Mapping):
+            plugin_servers[path.parent.name] = {_slug(str(k)) for k in servers}
+    claimed: dict[str, set[str]] = {}
+    for pack, meta in packs.items():
+        own: set[str] = set()
+        servers = meta.get("mcp_servers")
+        if isinstance(servers, Mapping):
+            own |= {_slug(str(k)) for k in servers}
+        plugins = meta.get("plugins")
+        for plugin in plugins if isinstance(plugins, list) else []:
+            name = plugin.get("name") if isinstance(plugin, Mapping) else plugin
+            own |= plugin_servers.get(str(name or ""), set())
+        claimed[pack] = own - _CORE_BACKENDS
+    count: dict[str, int] = {}
+    for own in claimed.values():
+        for b in own:
+            count[b] = count.get(b, 0) + 1
+    return {pack: frozenset(b for b in own if count[b] == 1)
+            for pack, own in claimed.items()}
+
+
+def foreign_backends(pack: str) -> frozenset[str]:
+    """I namespace di backend MCP che `pack` NON può prendersi come namespace.
+
+    Tutti quelli montati, più quelli del core, meno i soli server MCP che il
+    pack monta come propri. Senza questa riserva un pack poteva dichiarare
+    `namespace: github` (o quello di un `normattiva` montato con `mcp.add`) e
+    mappare `github.get_*` come lettura `direction: source` di una fonte scelta
+    da lui — cioè etichettare come fidate le letture di un altro backend e
+    spegnere il taint.
+    """
+    owned = _build_owners().get(pack, frozenset())
+    return (mounted_backends() | _CORE_BACKENDS) - owned
+
+
+def reserved_for(pack: str) -> frozenset[str]:
+    """Namespace riservati per `pack`: quelli nativi e i backend non suoi.
+    (Quelli degli ALTRI pack li riserva `build_registry`.)"""
+    from .manifest import core_namespaces
+    return core_namespaces() | foreign_backends(pack)
 
 
 def manifests() -> dict[str, dict]:
@@ -121,53 +206,148 @@ def problems() -> tuple[str, ...]:
     return _build()[1]
 
 
+def _build_owners() -> dict[str, frozenset[str]]:
+    _build()
+    if _CACHE is not None:
+        return _CACHE[3]
+    try:
+        return backend_owners()
+    except Exception:  # noqa: BLE001 — no owner: every backend stays reserved
+        return {}
+
+
+#: Fail-safe when the gateway's OWN connectors cannot be built (review of
+#: #358, blocker 2). Without them the registry knows no destination and no
+#: source, and an empty registry is permissive: `egress.decide` answers
+#: «not checked, allowed» and `taint.taints` answers False. These two sets are
+#: the namespaces of the builtin manifests' outbound verbs and of their reads
+#: (`test_518_fail_closed` keeps them in step with the manifests): in degraded
+#: mode the first are DENIED and the second TAINT.
+FAILSAFE_EGRESS_NAMESPACES = frozenset({
+    "email", "gdrive", "github", "gsheets", "telegram", "web"})
+FAILSAFE_SOURCE_NAMESPACES = frozenset({
+    "datastore", "email", "gcalendar", "gdocs", "gdrive", "github", "gsheets",
+    "telegram", "topic", "web"})
+
+
+def degraded() -> str:
+    """Why the gateway's own connectors are unavailable, or `""`."""
+    try:
+        return registry().degraded
+    except Exception as e:  # noqa: BLE001
+        return f"{type(e).__name__}: {e}"
+
+
+def _builtin_registry() -> Registry:
+    """The gateway's own connectors alone. Raises when they cannot be built.
+
+    `reserved=frozenset()`: the namespace rule is about PACKS, and deriving the
+    native namespaces imports `server.main` — a dependency the gateway's own
+    manifests do not need and whose transient failure used to leave the PDP
+    without any table at all.
+    """
+    own = _builtin.manifests()
+    return build_registry(own, builtin=tuple(own), reserved=frozenset())
+
+
+def _build_isolated(own: dict, installed: dict) -> tuple[Registry, list[str]]:
+    """The registry with every pack that can be held, and why the others not.
+
+    `build_registry` is all-or-nothing on purpose — a manifest that collides is
+    not half-valid — but the INSTANCE must not be: one malformed or clashing
+    pack used to drop every pack's connectors (and with #517 their egress
+    checks). The packs a refusal is about (`ManifestError.packs`) are removed
+    and the build is retried; a clash removes BOTH sides, so the winner of a
+    contested scheme is never «whoever sorts first». Raises when a refusal
+    names no installed pack (then the floor is the builtins alone).
+    """
+    remaining = dict(installed)
+    dropped: list[str] = []
+    while True:
+        try:
+            return build_registry({**own, **remaining},
+                                  builtin=tuple(own)), dropped
+        except ManifestError as e:
+            culprits = [p for p in e.packs if p in remaining]
+            if not culprits:
+                raise
+            for p in culprits:
+                remaining.pop(p)
+                dropped.append(f"pack '{p}' refused, its connectors are "
+                               f"inactive: {e}")
+            LOG.error("connectors: pack rifiutati %s (%s)", culprits, e)
+
+
 def _build() -> tuple[Registry, tuple[str, ...]]:
     global _CACHE
-    sig = _signature(_manifest_files())
+    # Nella firma anche i plugin (chi possiede quale server MCP) e i backend
+    # montati: un `mcp.add` fatto dopo la costruzione deve riservare quel
+    # namespace alla chiamata successiva, non al prossimo cambio di pack.yaml.
+    sig = (_signature(_manifest_files()), _signature(_plugin_files()),
+           tuple(sorted(mounted_backends())))
     if _CACHE is not None and _CACHE[0] == sig:
         return _CACHE[1], _CACHE[2]
-    reg, probs = Registry(), ()
+    # 1. The floor: the gateway's own connectors. If THEY fail the result is
+    #    a DEGRADED registry — native outbound verbs denied, reads tainted (see
+    #    `FAILSAFE_*`) — and it is never cached: the next call tries again,
+    #    instead of serving «no tables» until somebody touches a pack.yaml.
+    try:
+        base = _builtin_registry()
+    except Exception as e:  # noqa: BLE001 — a broken image, not a broken pack
+        reason = f"{type(e).__name__}: {e}"
+        LOG.error("connectors: i manifest del gateway non sono costruibili "
+                  "(%s): verbi nativi in uscita NEGATI, letture contaminanti",
+                  reason)
+        return Registry(degraded=reason), (reason,)
+    reg, probs, owners = base, (), {}
+    cache = True
     try:
         own = _builtin.manifests()
         installed = {k: v for k, v in manifests().items() if k not in own}
-        reg = build_registry({**own, **installed}, builtin=tuple(own))
+        owners = backend_owners(installed)
+        reg, dropped = _build_isolated(own, installed)
+        refused = list(dropped) + list(reg.refused)
+        # Namespace di backend MCP montati: riservati come quelli nativi, salvo
+        # il server MCP che il pack monta come proprio. Il connettore che ne
+        # prende uno altrui è rifiutato da solo — gli altri restano.
+        mounted = mounted_backends() | _CORE_BACKENDS
+        keep = []
+        for c in reg.connectors:
+            if not c.builtin and \
+                    c.namespace in mounted - owners.get(c.pack, frozenset()):
+                refused.append(
+                    f"pack '{c.pack}', connector '{c.id}': namespace "
+                    f"'{c.namespace}' is a mounted MCP backend that is not this "
+                    f"pack's own; a pack cannot claim another backend's verbs")
+            else:
+                keep.append(c)
+        if len(keep) != len(reg.connectors) or dropped:
+            reg = Registry(connectors=tuple(keep), refused=tuple(refused))
         if reg.refused:
             # Not a failure of the registry: a pack that collides with a
-            # connector this gateway still implements is ignored, by itself.
+            # connector this gateway still implements, or with a backend that
+            # is not its own, is ignored, by itself.
             for line in reg.refused:
                 LOG.warning("connectors: %s", line)
+            probs = tuple(reg.refused)
     except ManifestError as e:
-        # All-or-nothing is `build_registry`'s own rule (#516): a manifest that
-        # collides with another is not half-valid. The consequence is that the
-        # instance falls back to the behaviour it had before #517 — PACK verbs
-        # unmapped — so the refusal has to be loud, and the real place to stop a
-        # malformed manifest is the installation (#519).
-        #
-        # What does NOT fall back is the gateway's own connectors: they are code
-        # in the image, and a pack with a typo must not be able to unmap
-        # `email.send`. Before #518 that was true because the tables were in
-        # Python; it has to stay true now that they are manifests.
+        # A pack manifest the registry cannot hold. The PACK verbs stay
+        # unmapped, loudly; the gateway's own connectors do not fall with it —
+        # a pack with a typo must not be able to unmap `email.send`.
         probs = (str(e),)
-        reg = _builtin_only()
+        reg = base
         LOG.error("connectors: registry non costruibile, i verbi dei pack "
                   "restano senza mappatura (%s)", e)
     except Exception as e:  # noqa: BLE001 — never break a call over this
+        # Not a statement about the manifests (they did not change): not
+        # cached, so a transient failure does not outlive its call.
         probs = (f"{type(e).__name__}: {e}",)
-        reg = _builtin_only()
+        reg = base
+        cache = False
         LOG.error("connectors: registry non costruibile (%s)", e)
-    _CACHE = (sig, reg, probs)
+    if cache:
+        _CACHE = (sig, reg, probs, owners)
     return reg, probs
-
-
-def _builtin_only() -> Registry:
-    """The gateway's own connectors alone. The floor under every failure above."""
-    try:
-        own = _builtin.manifests()
-        return build_registry(own, builtin=tuple(own))
-    except Exception as e:  # noqa: BLE001 — a broken image, not a broken pack
-        LOG.error("connectors: nemmeno i manifest del gateway sono leggibili "
-                  "(%s): nessun connettore, tutto negato", e)
-        return Registry()
 
 
 def invalidate() -> None:
@@ -205,7 +385,10 @@ def namespace_violation(verb: str) -> str:
                 # native namespaces are declared, not a claim over someone's.
                 continue
             try:
+                # Riservati: i namespace nativi E quelli dei backend MCP
+                # montati che non sono di questo pack (#517, review).
                 check_namespace(connector.namespace, [mapping.verb],
+                                reserved=reserved_for(connector.pack),
                                 where=f"pack '{connector.pack}', connector "
                                       f"'{connector.id}'")
             except ManifestError as e:

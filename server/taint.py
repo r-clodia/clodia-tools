@@ -79,11 +79,30 @@ def taints(verb: str) -> bool:
     v = (verb or "").strip()
     if not v:
         return False
+    if _failsafe_taints(v):
+        return True
     if _declared_read(v):
         return True
     if any(v.startswith(p) for p in _declared_taint_prefixes()):
         return True
     return _unvouched_backend(v)
+
+
+def _failsafe_taints(verb: str) -> bool:
+    """I connettori del gateway non sono costruibili: le letture contaminano.
+
+    Fail-closed (review di #358). Con il registry vuoto nessun verbo risultava
+    dichiarato come lettura, quindi `email.read` e `web.fetch` smettevano di
+    contaminare — la direzione d'errore silenziosa di questo modulo.
+    """
+    try:
+        from .connectors import resolved as _connectors
+        if not _connectors.degraded():
+            return False
+        return verb.split(".", 1)[0] in _connectors.FAILSAFE_SOURCE_NAMESPACES
+    except Exception as e:  # noqa: BLE001 — nel dubbio, contamina
+        LOG.warning("taint: stato dei connettori non determinabile (%s)", e)
+        return True
 
 
 def _declared_taint_prefixes() -> tuple:

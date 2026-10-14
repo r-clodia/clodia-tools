@@ -39,10 +39,19 @@ LOG = logging.getLogger("clodia-tools.connectors-api")
 
 
 def _authorize(request: Request):
-    """ckt1, like the other internal routes. `allow_on_behalf` because the webui
-    forwards with the human as principal, and the Tools page is a human place."""
-    payload, err = internal_auth.authorize(request, allow_on_behalf=True, log=LOG)
-    return (payload or {}), err
+    """The ADMIN check of the Tools routes (`tools_api._authorized`).
+
+    Review of #359: `internal_auth.authorize(allow_on_behalf=True)` let ANY
+    human session through. The real callers are an admin at the Tools page
+    (on-behalf with `human_role: admin`) and `pack_import` in clodia-logic,
+    which mints a plain session token for its principal (`clodia`) — both pass
+    here, a non-admin session does not.
+    """
+    from . import tools_api
+    if not tools_api._authorized(request):
+        LOG.warning("connectors: richiesta non autorizzata (serve un admin)")
+        return {}, JSONResponse({"error": "unauthorized"}, status_code=401)
+    return {}, None
 
 
 def _allowed(cid: str) -> bool:
