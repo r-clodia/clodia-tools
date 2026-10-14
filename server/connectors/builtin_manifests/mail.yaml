@@ -111,6 +111,12 @@ connectors:
             - 'inbox:{address}'
           egress:
             - 'outbox:{address}'
+    tools_card:
+      setup_label: Gestisci caselle
+      blurb: >-
+        Connettore multi-casella: aggiungi/togli mailbox IMAP/SMTP (info@,
+        IONOS, …). Le caselle si autorizzano per canale, non per agente.
+      scope: IMAP/SMTP
     # Posta in arrivo: il mittente non è controllato. `email.read` non è qui
     # perché ha UNA fonte dichiarata sopra, e una fonte vagliata non contamina;
     # questi tre mescolano più mittenti in una risposta sola, quindi non c'è

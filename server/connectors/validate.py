@@ -133,7 +133,9 @@ def summary(connector) -> dict:
                           for a in connector.topic_actions],
         "tools_card": ({"setup_label": connector.tools_card.setup_label,
                         "status_verb": connector.tools_card.status_verb,
-                        "docs_url": connector.tools_card.docs_url}
+                        "docs_url": connector.tools_card.docs_url,
+                        "blurb": connector.tools_card.blurb,
+                        "scope": connector.tools_card.scope}
                        if connector.tools_card else None),
         "taint": list(connector.taint_prefixes),
     }

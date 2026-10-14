@@ -810,12 +810,22 @@ class TopicAction:
 
 @dataclass(frozen=True)
 class ToolsCard:
-    """What the Tools page shows for this connector: setup, status, test."""
+    """What the Tools page shows for this connector: setup, status, test.
+
+    `blurb` and `scope` are the card's COPY — what this connector does, and
+    the perimeter it touches. Until #520 they lived in a per-connector table
+    inside clodia-web, which is the table the issue removes: a connector
+    arriving with a pack had no way to say anything about itself, and the page
+    could only draw it as an unnamed box. The text is the connector's, so it
+    arrives with the connector.
+    """
 
     setup_label: str = ""
     status_verb: str = ""
     test_verb: str = ""
     docs_url: str = ""
+    blurb: str = ""
+    scope: str = ""
 
 
 @dataclass(frozen=True)
@@ -1213,6 +1223,8 @@ def _parse_tools_card(raw: Any, where: str) -> ToolsCard:
                           required=False),
         test_verb=_text(data.get("test_verb"), f"{where}.test_verb", required=False),
         docs_url=_text(data.get("docs_url"), f"{where}.docs_url", required=False),
+        blurb=_text(data.get("blurb"), f"{where}.blurb", required=False),
+        scope=_text(data.get("scope"), f"{where}.scope", required=False),
     )
 
 

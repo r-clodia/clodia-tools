@@ -265,7 +265,14 @@ def _cred_type(connector) -> str:
 
 
 #: Built-in connectors whose credential has a dedicated handler in `tools_api`.
-_LEGACY_CONNECT = {"github": "github_connect"}
+#: Ognuno fa, attorno al deposito, qualcosa che il deposito generico non fa e
+#: che non va perso: GitHub monta/smonta il backend MCP ufficiale, Telegram
+#: valida il token con `getMe` e memorizza l'@username, OpenAI passa per il
+#: gating `integrations` del profilo. La rotta generica delega, così le due URL
+#: restano UN comportamento e la webui può chiamarne una sola (#520).
+_LEGACY_CONNECT = {"github": "github_connect",
+                   "telegram": "telegram_connect",
+                   "openai-images": "openai_connect"}
 
 
 async def _delegate(handler_name: str, request: Request, connector):

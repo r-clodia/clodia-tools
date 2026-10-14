@@ -91,6 +91,12 @@ connectors:
             - 'gdrive:folder/{folder}'
           egress:
             - 'gdrive:folder/{folder}'
+    tools_card:
+      setup_label: Connetti Google
+      blurb: >-
+        Gmail, Drive, Documenti e Calendar in un solo consenso (un token
+        OAuth): lettura/invio email + accesso ai file dell'owner.
+      scope: Gmail · Drive · Docs · Calendar
     verbs:
       # Dove finisce il contenuto, o con CHI viene condiviso: `gdrive.share` è
       # uscita verso una PERSONA, non verso una cartella. Per questo i due non

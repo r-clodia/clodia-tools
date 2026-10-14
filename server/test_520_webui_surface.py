@@ -216,6 +216,87 @@ class AdminOnlyTravelsTests(_NoPacks):
                  "adds": {"egress": ["tg:{v}"]}}, "c.topic_actions[0]")
 
 
+class ToolsCardCopyTests(_NoPacks):
+    """La card di Tools si descrive da sé.
+
+    Fino a #520 il testo di ogni card («Gmail, Drive, Documenti e Calendar in
+    un solo consenso…») stava in una tabella dentro clodia-web, indicizzata per
+    NOME del connettore: un connettore arrivato con un pack non aveva modo di
+    dire niente di sé, e la pagina poteva solo disegnarlo come una scatola
+    senza nome. Il testo è del connettore, quindi arriva con lui.
+    """
+
+    def _cards(self) -> dict:
+        with _Session({"agent": "clodia", "principal": "davide",
+                       "on_behalf": True, "human_role": "admin"}):
+            rows = self.c.get("/tools/connectors", headers=_H).json()["connectors"]
+        return {r["id"]: r for r in rows}
+
+    def test_the_five_base_cards_describe_themselves(self):
+        cards = self._cards()
+        for cid in ("google", "mail", "telegram", "github", "openai-images"):
+            with self.subTest(connettore=cid):
+                self.assertIn(cid, cards, "connettore sparito dal registry")
+                card = cards[cid]["tools_card"]
+                self.assertIsNotNone(card, f"{cid} non dichiara la propria card")
+                self.assertTrue(card["blurb"].strip(), f"{cid}: blurb vuoto")
+                self.assertTrue(card["scope"].strip(), f"{cid}: scope vuoto")
+
+    def test_a_connector_without_a_card_says_so(self):
+        """`core` e `datastore` non sono card di Tools: `None` è la risposta
+        giusta, e la pagina non deve inventarne una."""
+        cards = self._cards()
+        for cid in ("core", "datastore"):
+            with self.subTest(connettore=cid):
+                self.assertIsNone(cards[cid]["tools_card"])
+
+
+class CredentialFormTests(_NoPacks):
+    """I connettori che si collegano con un form lo dichiarano, e il deposito
+    resta quello di prima."""
+
+    def test_the_paste_key_connectors_declare_their_field(self):
+        with _Session({"agent": "clodia", "principal": "davide",
+                       "on_behalf": True, "human_role": "admin"}):
+            rows = self.c.get("/tools/connectors", headers=_H).json()["connectors"]
+        per_id = {r["id"]: r for r in rows}
+        atteso = {"github": ("github_pat", "token"),
+                  "telegram": ("telegram_bot_token", "token"),
+                  "openai-images": ("openai_api_key", "api_key")}
+        for cid, (entry, campo) in atteso.items():
+            with self.subTest(connettore=cid):
+                provider = per_id[cid]["providers"][0]
+                self.assertEqual(provider["kind"], "form")
+                self.assertEqual(provider["vault_entry"], entry)
+                nomi = [f["name"] for f in provider["fields"]]
+                self.assertEqual(nomi, [campo])
+                self.assertTrue(provider["fields"][0]["secret"],
+                                "una credenziale si digita nascosta")
+
+    def test_a_builtin_credential_is_still_deposited_by_its_own_handler(self):
+        """Il nome del campo dichiarato è quello che l'handler nativo legge.
+
+        Attorno al deposito ognuno fa qualcosa che il deposito generico non fa:
+        GitHub monta il backend MCP, Telegram valida il token con `getMe` e
+        salva l'@username, OpenAI passa per il gating del profilo. Se la rotta
+        generica scrivesse da sé, quelle cose sparirebbero e il sintomo
+        arriverebbe altrove — un bot connesso senza @username, un MCP non
+        montato.
+        """
+        import inspect
+        from . import tools_api
+        for cid, atteso in (("github", "github_connect"),
+                            ("telegram", "telegram_connect"),
+                            ("openai-images", "openai_connect")):
+            with self.subTest(connettore=cid):
+                nome = connectors_api._LEGACY_CONNECT[cid]
+                self.assertEqual(nome, atteso)
+                sorgente = inspect.getsource(getattr(tools_api, nome))
+                campo = {"github": "pat", "telegram": "token",
+                         "openai-images": "api_key"}[cid]
+                self.assertIn(f'body.get("{campo}")', sorgente)
+
+
 class DriveActionTests(_NoPacks):
     """La parità del bottone Drive: incollare l'URL deve continuare a valere."""
 
