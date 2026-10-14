@@ -132,8 +132,14 @@ class TheDeclarationSaysTheSameTests(unittest.TestCase):
         vaglio del mittente senza che nessun invio fallisca."""
         self.assertEqual(self.scheme.name, "tg")
         self.assertTrue(self.scheme.is_source and self.scheme.is_egress)
-        self.assertIn("tg", egress.EGRESS_SCHEMES)
-        self.assertIn("tg", egress.SOURCE_SCHEMES)
+        # Il lato gateway si misura chiedendo, non leggendo `EGRESS_SCHEMES` e
+        # `SOURCE_SCHEMES`: quelle due tuple sono fra ciò che #518 cancella, e un
+        # test che le nomina morirebbe esattamente nel commit che dovrebbe
+        # sorvegliare. `check_grantable` rifiuta uno schema non ammesso IN QUELLA
+        # direzione prima di qualunque altro controllo, quindi è la stessa
+        # domanda — ed è l'unica che si possa ancora porre dopo.
+        self.assertTrue(_accettato_dal_gateway("egress", "-1001234567890"))
+        self.assertTrue(_accettato_dal_gateway("ingress", "-1001234567890"))
 
     def test_it_carries_the_same_danger_sentence(self):
         self.assertEqual(self.scheme.danger, egress.danger_note("tg:123"))
