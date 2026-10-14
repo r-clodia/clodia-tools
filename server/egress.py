@@ -59,8 +59,7 @@ from __future__ import annotations
 
 import logging
 import os
-import re
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 from urllib.parse import urlsplit
 
 LOG = logging.getLogger("clodia-tools.egress")
@@ -76,19 +75,13 @@ def mode() -> str:
     return m if m in ("off", "report", "gate", "on") else "gate"
 
 
-# ── destination extractors ───────────────────────────────────────────────────
-# One per outbound verb. Each returns the list of destinations the call would
-# reach. An empty list means "no destination readable from the arguments", which
-# is NOT the same as "no destination": it becomes UNKNOWN and is denied.
-
-def _emails(a: dict) -> list[str]:
-    out = []
-    for field in ("to", "cc", "bcc"):
-        raw = a.get(field) or ""
-        # Un solo campo può portare più indirizzi.
-        out += [f"mailto:{x.strip().lower()}"
-                for x in str(raw).replace(";", ",").split(",") if x.strip()]
-    return out
+# ── where a call goes, and what a read comes from ────────────────────────────
+# Not a table any more. Every connector — the ones this gateway implements as
+# much as the ones a pack brings — declares its own verbs in a connector
+# manifest, and `connectors.resolved` answers the two questions this module
+# asks (clodia-platform#518). The gateway's own declarations live in
+# `connectors/builtin_manifests/`, so that moving a connector into a pack
+# (#522-#525) is a file moving, not a table being edited.
 
 
 def address_of(header: str) -> str:
@@ -96,160 +89,71 @@ def address_of(header: str) -> str:
 
     Serve a `email.reply`, il cui destinatario non sta negli argomenti: viene dal
     messaggio a cui si risponde. Funzione pura e separata dalla chiamata IMAP,
-    così il parsing è testabile senza rete.
+    così il parsing è testabile senza rete. Vive in `connectors.normalise`, dove
+    la usa anche la mappatura dichiarata di `email.read`: una sola definizione di
+    «qual è l'indirizzo» invece di due che divergono.
     """
-    h = (header or "").strip()
-    if "<" in h and ">" in h:
-        h = h[h.index("<") + 1:h.index(">")]
-    h = h.strip().strip('"').strip("'").lower()
-    return h if "@" in h else ""
+    from .connectors.normalise import address_of as _address_of
+    return _address_of(header)
 
 
-def _chat(a: dict) -> list[str]:
-    c = str(a.get("chat_id") or "").strip()
-    return [f"tg:{c}"] if c else []
+def _registry():
+    """Il registry dei connettori, o un registry DEGRADATO se non è costruibile.
 
-
-def _http(a: dict) -> list[str]:
-    """URL di destinazione ridotto a schema://host/ — su TLS il path non è
-    comunque visibile a un proxy, e una whitelist che promette granularità che
-    non ha è peggio di una che dichiara la propria."""
-    url = str(a.get("url") or "").strip()
-    if not url:
-        return []
-    u = urlsplit(url)
-    h = (u.hostname or "").lower()
-    return [f"{u.scheme or 'https'}://{h}/"] if h else []
-
-
-def _repo(a: dict) -> list[str]:
-    owner, repo = str(a.get("owner") or "").strip(), str(a.get("repo") or "").strip()
-    return [f"https://github.com/{owner}/{repo}".lower()] if owner and repo else []
-
-
-def _drive_target(a: dict) -> list[str]:
-    """Dove finisce il contenuto, o con CHI viene condiviso.
-
-    `gdrive.share` è uscita verso una PERSONA, non verso una cartella: la
-    destinazione è l'indirizzo, ed è per questo che i due non si fondono. Con la
-    notazione URI la differenza si vede — `mailto:` contro `gdrive:folder/`.
+    Mai un'eccezione: questo modulo viene chiamato dentro il percorso di ogni
+    verbo. Un registry vuoto da solo SAREBBE permissivo (review di #358):
+    `spec_for` risponderebbe None e `decide` «non controllato, ammesso». Per
+    questo un guasto torna un registry con `degraded` valorizzato, e `decide`,
+    `scheme_form_ok` e `taint.taints` falliscono chiusi su quello.
     """
-    out = []
-    for field in ("email", "folder_id", "parent_id"):
-        v = str(a.get(field) or "").strip()
-        if not v:
-            continue
-        out.append(f"mailto:{v.lower()}" if field == "email"
-                   else f"gdrive:folder/{v}")
-    return out
-
-
-def _spreadsheet(a: dict) -> list[str]:
-    v = str(a.get("spreadsheet_id") or "").strip()
-    return [f"gsheets:{v}"] if v else []
-
-
-#: verb → (destination type, extractor). A verb absent from this table is not
-#: checked here. That is deliberate and limited: the table is the gateway's
-#: explicit list of what it knows how to constrain, and #119's fail-closed rule
-#: covers the scoring side. Widening it is one line per verb.
-_SPECS: dict[str, tuple[str, Callable[[dict], list[str]]]] = {
-    "email.send": ("email", _emails),
-    # No `to` in the arguments: the recipient comes from the message being
-    # replied to, i.e. from untrusted content. Extractor returns nothing on
-    # purpose → UNKNOWN → denied unless the type explicitly allows "*".
-    "email.reply": ("email", _emails),
-    "telegram.send": ("telegram", _chat),
-    "telegram.send_file": ("telegram", _chat),
-    "web.post": ("http", _http),
-    "gdrive.upload": ("drive", _drive_target),
-    "gdrive.share": ("drive", _drive_target),
-    "gdrive.mkdir": ("drive", _drive_target),
-    "gdrive.move": ("drive", _drive_target),
-    # `folder_id` lo aggiunge `call_tool` leggendo il parent del file da Drive.
-    "gdrive.update": ("drive", _drive_target),
-    "gsheets.add_tab": ("gsheets", _spreadsheet),
-    "gsheets.append_rows": ("gsheets", _spreadsheet),
-    "gsheets.write_range": ("gsheets", _spreadsheet),
-}
-
-#: GitHub write verbs are proxied MCP tools, so they are matched by name rather
-#: than declared one by one — the upstream list changes without us.
-_GITHUB_WRITE = (
-    "create_", "update_", "delete_", "push_", "fork_", "merge_", "add_",
-    "issue_write", "pull_request_review_write", "sub_issue_write",
-    "request_copilot_review",
-)
-
-
-def _repo_url(a: dict) -> list[str]:
-    """Repository dai verbi NATIVI del gateway, che lo passano come URL intero.
-
-    Il backend MCP di GitHub manda `owner` + `repo`; `github.pull_request` manda
-    `repo` già in forma di URL, e `github.push` non lo manda affatto — sa solo la
-    directory. Chi chiama risolve il remote e lo aggiunge come `repo`: qui si
-    legge, non si tocca il filesystem.
-
-    Cos'è «la forma di un repository» lo decide `normalize_repo`, e lo decide da
-    solo: un guard di scheme qui sarebbe una SECONDA definizione della stessa
-    forma, e le due divergono al primo cambio. È già accaduto con lo shorthand
-    `owner/repo`: accettato dal verbo, scartato qui prima di arrivarci, e il
-    rifiuto risultante — UNKNOWN, «destinazione non leggibile» — mandava a
-    dichiarare `egress_allow.github` per una forma che era solo scritta corta.
-
-    Il perimetro non si allarga: si passa da «negato perché illeggibile» a
-    «letto e confrontato con la whitelist», che è ciò che già accade alla forma
-    lunga dello stesso repository. Un repository non approvato resta negato (o
-    gated, se nuovo).
-    """
-    u = str(a.get("repo") or "").strip()
-    if not u:
-        return []
     try:
-        from .tools.github_repo import normalize_repo
-        dest = normalize_repo(u).lower()
-    except Exception:  # noqa: BLE001 — non è un repository: illeggibile
-        return []
-    # `file://` non è un'uscita: è il filesystem del GATEWAY. `normalize_repo`
-    # lo rifiuta già, ma solo finché `ALLOW_LOCAL_REPOS` resta chiuso — e la
-    # proprietà 3 (illeggibile ⇒ negato) non deve dipendere da un seam dei test.
-    if not dest.startswith(("http://", "https://")):
-        return []
-    return [dest]
+        from .connectors import resolved as _connectors
+        return _connectors.registry()
+    except Exception as e:  # noqa: BLE001
+        LOG.error("egress: registry dei connettori non consultabile (%s)", e)
+        from .connectors.manifest import Registry
+        return Registry(degraded=f"{type(e).__name__}: {e}")
 
 
-#: Verbi nativi del gateway che ESCONO. `clone`/`pull` portano dentro e non
-#: hanno una destinazione da approvare: il perimetro di ciò che si può tirare è
-#: già la lista dei repository approvati.
-_GITHUB_NATIVE_OUT = ("push", "pull_request")
+def _failsafe_denied(verb: str) -> str:
+    """Il motivo per negare `verb` perché i connettori del gateway mancano, o "".
+
+    Fail-closed (review di #358): senza i manifest del gateway non si sa dove
+    mandi `email.send`, e «non lo so» non può valere «ammesso».
+    """
+    reg = _registry()
+    from .connectors import resolved as _connectors
+    try:
+        _denied = _connectors.failsafe_denied(verb)
+    except Exception as e:  # noqa: BLE001
+        LOG.error("egress: fail-safe dei pack non valutabile (%s)", e)
+        _denied = False
+    if _denied:
+        return (f"il manifest del pack che dichiara '{verb}' non è utilizzabile "
+                f"({'; '.join(_connectors.problems())[:300]}): il verbo è negato "
+                f"finché non torna valido, invece di uscire senza controllo")
+    if not reg.degraded:
+        return ""
+    ns = (verb or "").split(".", 1)[0]
+    if ns in _connectors.FAILSAFE_EGRESS_NAMESPACES:
+        return (f"registry dei connettori del gateway non disponibile "
+                f"({reg.degraded}): i verbi in uscita sono negati finché non "
+                f"torna costruibile")
+    return ""
 
 
 def spec_for(verb: str) -> Optional[tuple[str, Callable[[dict], list[str]]]]:
-    if verb in _SPECS:
-        return _SPECS[verb]
-    if verb.startswith("github."):
-        tail = verb.split(".", 1)[1]
-        # I nativi PRIMA: `push_files` del backend inizia per `push_`, ma `push`
-        # nudo non combaciava con nessun prefisso e restava fuori dal PDP —
-        # cioè il verbo che pubblica davvero non era governato dal perimetro,
-        # solo dal gate. Misurato il 16 ago 2026.
-        if tail in _GITHUB_NATIVE_OUT:
-            return ("github", _repo_url)
-        if any(tail.startswith(p) or tail == p for p in _GITHUB_WRITE):
-            return ("github", _repo)
-    # Verbi serviti da un PACK (clodia-platform#517): la mappatura
-    # verbo→destinazione la dichiara il manifest del connettore, e da qui in giù
-    # il verbo è indistinguibile da uno nativo — stessa whitelist, stesso gate,
-    # stesso `flow.egress`. DOPO le tabelle native, mai prima: un pack non può
-    # ridefinire dove va a finire un verbo del gateway, e la regola di namespace
-    # (#516, riapplicata a call time) glielo vieta già a monte. Questo ordine è
-    # la seconda difesa, quella che regge anche se la prima fosse aggirata.
+    """`(tipo di destinazione, estrattore)` per un verbo che ESCE, o None.
+
+    Un verbo assente non è controllato qui. È deliberato e limitato: la
+    dichiarazione di un connettore è l'elenco esplicito di ciò che il gateway sa
+    come vincolare, e la regola fail-closed di #119 copre il lato punteggio.
+    """
     try:
         from .connectors import resolved as _connectors
         return _connectors.spec_for(verb)
     except Exception as e:  # noqa: BLE001 — un registry rotto non è un verdetto
-        LOG.warning("egress: connettori dei pack non consultabili per %s (%s)",
-                    verb, e)
+        LOG.warning("egress: connettori non consultabili per %s (%s)", verb, e)
         return None
 
 
@@ -259,23 +163,10 @@ def spec_for(verb: str) -> Optional[tuple[str, Callable[[dict], list[str]]]]:
 #: URL di cartella Drive è ciò che si copia dalla barra del browser: se la
 #: whitelist non lo accettasse, la notazione URI sarebbe un trabocchetto invece
 #: di un aiuto — si incolla, non combacia, e nessuno capisce perché.
-#: `gdrive://<id>` e `gdrive:folder/<id>` sono **la stessa risorsa in due
-#: codifiche**, come l'URL del browser: accettarne una sola trasformerebbe una
-#: questione di stile in un errore di configurazione silenzioso.
-_CANON = (
-    # forma con authority: gdrive://<id> e gdrive://folder/<id>
-    (re.compile(r"^gdrive://(?:folder/)?([\w-]+)/?$"),
-     lambda m: f"gdrive:folder/{m.group(1)}"),
-    (re.compile(r"^gsheets://([\w-]+)/?$"), lambda m: f"gsheets:{m.group(1)}"),
-    (re.compile(r"^https?://drive\.google\.com/drive/(?:u/\d+/)?folders/([\w-]+)"),
-     lambda m: f"gdrive:folder/{m.group(1)}"),
-    (re.compile(r"^https?://docs\.google\.com/spreadsheets/d/([\w-]+)"),
-     lambda m: f"gsheets:{m.group(1)}"),
-    (re.compile(r"^https?://docs\.google\.com/document/d/([\w-]+)"),
-     lambda m: f"gdrive:doc/{m.group(1)}"),
-    (re.compile(r"^https?://drive\.google\.com/file/d/([\w-]+)"),
-     lambda m: f"gdrive:file/{m.group(1)}"),
-)
+#: Le regole non stanno più qui: le dichiara lo SCHEMA, nel manifest del
+#: connettore che lo possiede (`canonicalise:`), perché «gdrive://<id> e
+#: gdrive:folder/<id> sono la stessa risorsa in due codifiche» è una frase su
+#: Drive, non sul gateway.
 
 
 def canonical(uri: str) -> str:
@@ -287,22 +178,24 @@ def canonical(uri: str) -> str:
     u = (uri or "").strip()
     if not u:
         return ""
-    # Indirizzi in MINUSCOLO. Non è cosmetica: `_emails()` estrae la destinazione
-    # di una chiamata con `.lower()`, quindi una voce in whitelist con una
+    # Indirizzi in MINUSCOLO. Non è cosmetica: l'estrattore di una chiamata
+    # produce la destinazione in minuscolo, quindi una voce in whitelist con una
     # maiuscola non combacerebbe MAI — approvata e inefficace. Finché le liste si
     # riempivano solo dal dialog del gate il caso non si presentava (l'URI lo
     # costruiva il codice); da quando l'owner le scrive a mano è la prima cosa che
     # succede, e il sintomo sarebbe «l'ho messa in lista e chiede ancora».
     #
-    # Il dominio è case-insensitive per standard; la local part in teoria no, ma
-    # nessun provider reale la distingue e soprattutto il confronto a valle è già
-    # in minuscolo: la coerenza fra i due lati vale più della lettera dell'RFC.
-    if u.lower().startswith(("mailto:", "mailfrom:", "inbox:", "outbox:")):
+    # QUALI schemi siano insensibili al caso lo dice il connettore che li
+    # possiede (`lowercase: true`), non una lista qui: il dominio è
+    # case-insensitive per standard, la local part in teoria no, e quella
+    # valutazione appartiene a chi conosce il protocollo.
+    scheme = u.partition(":")[0].lower()
+    s = _registry().scheme(scheme)
+    if s is not None and s.lowercase:
         return u.lower()
-    for rx, to in _CANON:
-        m = rx.match(u)
-        if m:
-            return to(m)
+    out = _registry().canonical(u)
+    if out is not None:
+        return out
     if u.lower().startswith(("http://", "https://")):
         # host in minuscolo, il resto no: un path può essere case-sensitive.
         sp = urlsplit(u)
@@ -349,100 +242,60 @@ def _matches(dest: str, rule: str) -> bool:
         if r_s != d_s:
             return False
         return r_rest.startswith("*") and d_rest.endswith(r_rest[1:])
-    if r.split(":", 1)[0] in _HIERARCHICAL and d.startswith(r):
+    if hierarchical(r.split(":", 1)[0]) and d.startswith(r):
         return True
     return False
 
 
 #: Schemi in cui il prefisso ha senso (c'è un percorso). Per gli altri il match
 #: è esatto o wildcard: aprire per prefisso un indirizzo email o una chat id
-#: aprirebbe destinazioni che nessuno ha approvato.
-#: `mcp` è gerarchico sul namespace: `mcp:normattiva.` copre
-#: `normattiva.search` e `normattiva.get` senza elencarli, e senza
-#: coprire `normattiva-mirror.`.
-_HIERARCHICAL = ("http", "https", "gdrive", "mcp")
+#: aprirebbe destinazioni che nessuno ha approvato. Lo dichiara lo schema
+#: (`hierarchical: true`), perché «qui esiste una gerarchia» è una proprietà del
+#: protocollo e la conosce chi lo porta: `mcp:normattiva.` copre
+#: `normattiva.search` senza coprire `normattiva-mirror.`, `mailto:a@b.it` non
+#: copre `mailto:a@b.it.evil`.
 
-#: Schemi ammessi in USCITA e in INGRESSO. Le due liste sono separate perché
-#: l'errore ha direzioni diverse: sbagliare una destinazione è rumoroso (un invio
-#: bloccato), sbagliare una fonte è SILENZIOSO — un taint che non si accende, e
-#: tutti i gate a valle che non scattano. Un `mailfrom:` nella lista di uscita è
-#: un errore di configurazione e va rifiutato, non ignorato.
-#: `outbox:<email>` non è il DESTINATARIO di un messaggio (quello è `mailto:`),
-#: è la CASELLA con cui un verbo scrive — chi può spedire come
-#: studio@davidecarboni.it. Sostituisce il grant-per-agente sulla credenziale
-#: nel vault (clodia-platform#refactor whitelist-mailbox, 18 set 2026): prima
-#: "questo agente ha il grant sulla credenziale mailbox_studio", ora "questo
-#: canale ha outbox:studio@davidecarboni.it in whitelist" — la domanda diventa
-#: DOVE, non CHI, coerente con tutto il resto di questo modulo.
-#: `gcal:<calendar_id>` è il calendario che i verbi `gcalendar.*` possono
-#: toccare quando la credenziale Google è confinata a una cartella di Drive
-#: (clodia-platform#429). Il calendario non sta in una cartella, quindi la
-#: radice di Drive non dice nulla su di esso: prima veniva chiuso del tutto, e
-#: il rifiuto proponeva «serve un account non confinato» — un rimedio che
-#: nessuno poteva applicare, e che ha prodotto quattro riconnessioni OAuth
-#: inutili. La domanda giusta è la stessa di `outbox:`/`gdrive:folder/`: QUALE
-#: risorsa, dichiarata una per una. Lo schema sta in uscita e non in ingresso
-#: perché governa l'AUTORITÀ sulla risorsa (leggere e scrivere eventi), non la
-#: fiducia nel contenuto che ne arriva — il taint di un evento letto resta la
-#: domanda separata di `SOURCE_SCHEMES`.
-EGRESS_SCHEMES = ("mailto", "tg", "http", "https", "gdrive", "gsheets", "outbox",
-                  "gcal")
-#: `gdrive` fra le fonti: una cartella Drive vagliata è una fonte fidata, ed è il
-#: caso che rende operativa questa lista — un topic collegato a una cartella di cui
-#: l'owner risponde non deve contaminare a ogni lettura.
-#: `mcp:<namespace>.` — un server MCP la cui RISPOSTA è scritta da un'unica
-#: istituzione, non da un terzo qualsiasi: `mcp:normattiva.` restituisce il
-#: testo di legge, e chi interroga sceglie QUALE norma, non cosa c'è scritto.
-#: Il criterio è questo, e non è «viene da un pack»: un pack vaglia il
-#: SERVER, non i byte che il server ripete — `web.fetch` sta in un pack e
-#: ripete il web aperto. L'appartenenza a un contenitore non è una proprietà
-#: del contenuto, e attribuirla spegnerebbe il taint sulla fonte più larga
-#: che esista, nella direzione d'errore che non si vede.
-#: `tg` anche fra le fonti (clodia-platform#363): con il relay conversazionale
-#: dell'epic #359 Telegram è un INGRESSO come la posta, non solo una
-#: destinazione. Una chat vagliata è una fonte fidata allo stesso titolo di un
-#: `mailfrom:`, e per lo stesso motivo va dichiarata una per una.
-#: `inbox:<email>` è il simmetrico di `outbox:` in lettura: quale casella un
-#: verbo può SCARICARE, non da chi arriva il singolo messaggio (quello resta
-#: `mailfrom:`, e continua a governare il taint del contenuto). Le due
-#: domande sono indipendenti — un canale può leggere `mailbox_studio` e allo
-#: stesso tempo trattare come non fidato ogni messaggio che non venga da un
-#: mittente del perimetro.
-#: `topic:<tier>/<nome>` è un ALTRO topic della colonia, collegato a questo
-#: (clodia-platform#477). Esiste solo in ingresso: un topic non è una
-#: destinazione verso cui si esce — scrivere nei file di un altro topic non si
-#: può, il mount del collegamento è in sola lettura — ed è invece una fonte, da
-#: cui si legge. Dichiararlo non rende fidato tutto ciò che quella stanza
-#: contiene: l'etichetta di provenienza del singolo file continua a valere e
-#: viaggia col file (`main._source_vetted`), quindi un allegato `untrusted`
-#: letto attraverso un collegamento contamina come contaminerebbe a casa sua.
-#: Quello che si dichiara qui è la STANZA: il suo summary, le sue istruzioni, i
-#: file che ci hanno messo i suoi partecipanti.
-#: Review fix B2: a FILE read through a link is judged exactly as its own topic
-#: would judge it (label, Drive folder, that topic's source list), so this entry
-#: never makes an unlabelled file of the other room vetted. It is written only
-#: once BOTH owners have consented to the link, and `link_remove` takes back
-#: the entries the link itself added.
-SOURCE_SCHEMES = ("mailfrom", "tg", "http", "https", "gdrive", "gsheets", "mcp",
-                  "inbox", "topic")
 
-#: Le due forme di `tg:`, e non ce n'è una terza. La distinzione fra un gruppo e
-#: una persona la porta la FORMA, non un parametro a parte: un parametro
-#: potrebbe contraddire l'uri, e allora ci sarebbero due dichiarazioni per una
-#: cosa sola.
-#:
-#: `tg:<chat_id>`  gruppo — l'id numerico, negativo per i supergruppi, ed è lo
-#:                 stesso valore che `_chat()` estrae da `telegram.send`.
-#: `tg:@<handle>`  persona — SOLO chi ha un handle. Un utente senza handle non è
-#:                 registrabile come fonte: limite deliberato dell'epic #359,
-#:                 non tecnico — l'id numerico di una persona non si legge in
-#:                 chat e nessuno potrebbe verificarlo rileggendo la lista.
-_TG_GROUP = re.compile(r"^-?\d+$")
-#: 5-32 caratteri fra lettere, cifre e underscore, come da regole Telegram. Non
-#: normalizziamo il caso qui: `_matches` confronta già in minuscolo da entrambi
-#: i lati, e riscrivere l'uri renderebbe `@TheRealDadabit` irriconoscibile a chi
-#: rilegge la lista cercando quello che ci aveva scritto.
-_TG_HANDLE = re.compile(r"^@[A-Za-z0-9_]{5,32}$")
+def hierarchical(scheme: str) -> bool:
+    s = _registry().scheme((scheme or "").strip().lower())
+    return bool(s and s.hierarchical)
+
+
+def egress_schemes() -> tuple[str, ...]:
+    """Schemi ammessi in USCITA, dai connettori dichiarati.
+
+    Separati da quelli d'ingresso perché l'errore ha direzioni diverse:
+    sbagliare una destinazione è rumoroso (un invio bloccato), sbagliare una
+    fonte è SILENZIOSO — un taint che non si accende, e tutti i gate a valle che
+    non scattano. Un `mailfrom:` nella lista di uscita è un errore di
+    configurazione e va rifiutato, non ignorato.
+    """
+    return _registry().scheme_names("egress")
+
+
+def source_schemes() -> tuple[str, ...]:
+    """Schemi ammessi in INGRESSO, dai connettori dichiarati."""
+    return _registry().scheme_names("source")
+
+
+def scheme_form_ok(scheme: str, rest: str) -> bool:
+    """`rest` ha una delle forme che lo schema dichiara? Se non ne dichiara
+    nessuna, qualunque forma va bene.
+
+    Serve dove un valore DEVE avere la forma dello schema per poter mai
+    combaciare: una voce `tg:pippo` in whitelist sarebbe approvata e inefficace,
+    e il sintomo — «l'ho messa in lista e chiede ancora» — non nominerebbe la
+    causa. Il controllo è `fullmatch` (#518): un prefisso della forma è un altro
+    valore, non quel valore.
+    """
+    reg = _registry()
+    if reg.degraded:
+        # Senza i manifest non si sa quali forme valgano: niente si accetta.
+        return False
+    s = reg.scheme((scheme or "").strip().lower())
+    if s is None or not s.forms:
+        return True
+    return any(f.matches(rest) for f in s.forms)
 
 
 def is_vetted_source(uri: str, scope: str | None = None) -> bool:
@@ -757,7 +610,8 @@ def allowed_uris(cfg: dict | None = None) -> list[str]:
                     LOG.info("egress: migrata voce legacy %s/%s → %s (era di '%s')",
                              dtype, r, u, name)
     out = [canonical(u) for u in out]
-    bad = [u for u in out if u != "*" and u.partition(":")[0] not in EGRESS_SCHEMES]
+    bad = [u for u in out if u != "*"
+           and u.partition(":")[0] not in egress_schemes()]
     for u in bad:
         LOG.warning("egress: voce con schema non ammesso in uscita, IGNORATA: %s", u)
     # Voce DEGENERE: un prefisso senza nulla dopo apre l'intero tipo — `gdrive:folder/`
@@ -771,6 +625,25 @@ def allowed_uris(cfg: dict | None = None) -> list[str]:
     return [u for u in out if u not in drop]
 
 
+def _container_prefixes(scheme: str) -> tuple[str, ...]:
+    """I prefissi «contenitore» di uno schema: `folder/`, `doc/`, `file/`.
+
+    Derivati, non elencati: sono la parte letterale che precede il primo gruppo
+    nei template di canonicalizzazione dello schema (`gdrive:folder/{1}` →
+    `folder/`). Una regola che si ferma lì non vincola nulla — `gdrive:folder/`
+    aprirebbe tutto Drive — e il giorno che un connettore aggiunge un
+    contenitore, la sua regola di canonicalizzazione lo dice già.
+    """
+    out = []
+    s = _registry().scheme(scheme)
+    for rule in (s.canonicalise if s else ()):
+        head = rule.template.partition("{")[0]
+        rest = head.partition(":")[2]
+        if rest:
+            out.append(rest)
+    return tuple(out)
+
+
 def _is_degenerate(uri: str) -> bool:
     """True se la regola non vincola nulla dentro il proprio schema."""
     scheme, sep, rest = uri.partition(":")
@@ -780,18 +653,22 @@ def _is_degenerate(uri: str) -> bool:
     if scheme in ("http", "https"):
         # `https://` senza host non vincola; `https://host/` sì.
         return not (urlsplit(uri).hostname or "")
-    if scheme == "mcp":
-        # `mcp:` nudo dichiarerebbe fidato ogni server montato, presente e futuro:
-        # è la regola che una lista opt-in non deve poter esprimere per sbaglio.
-        return rest in ("", ".")
-    # `gdrive:folder/`, `mailto:`, `tg:` → niente dopo il separatore
-    return rest in ("", "/") or rest.rstrip("/").endswith(":") or rest in ("folder/", "doc/")
+    # Niente dopo i due punti, o soli separatori: `mailto:`, `tg:`, `mcp:`,
+    # `mcp:.` — quest'ultima dichiarerebbe fidato ogni server montato, presente
+    # e futuro, ed è la regola che una lista opt-in non deve poter esprimere per
+    # sbaglio. `mcp:normattiva.` invece vincola, e resta valida.
+    if not rest.strip("/.: "):
+        return True
+    if rest.rstrip("/").endswith(":"):
+        return True
+    # Un contenitore vuoto dello schema: `gdrive:folder/`, `gdrive:doc/`.
+    return rest in _container_prefixes(scheme)
 
 
 def source_uris(cfg: dict | None = None) -> list[str]:
     """Whitelist GLOBALE delle fonti fidate (leggere da qui non contamina).
 
-    Lista separata da quella di uscita, di proposito: vedi `SOURCE_SCHEMES`.
+    Lista separata da quella di uscita, di proposito: vedi `source_schemes`.
     Vuota per default — e va tenuta piccola e statica, perché è configurazione
     dell'istanza e non qualcosa da approvare in un dialog: la prima injection che
     chiedesse «aggiungi questo dominio alle fonti fidate» spegnerebbe il taint per
@@ -800,7 +677,7 @@ def source_uris(cfg: dict | None = None) -> list[str]:
     from . import whitelist as _wl
     c = cfg if cfg is not None else _wl.CONFIG
     out = [str(x).strip() for x in (c.get("source_allow") or []) if str(x).strip()]
-    bad = [u for u in out if u.partition(":")[0] not in SOURCE_SCHEMES]
+    bad = [u for u in out if u.partition(":")[0] not in source_schemes()]
     for u in bad:
         LOG.warning("source: voce con schema non ammesso in ingresso, IGNORATA: %s", u)
     return [u for u in out if u not in bad]
@@ -837,6 +714,11 @@ def decide(agent_cfg: dict, verb: str, arguments: dict) -> dict:
     """
     spec = spec_for(verb)
     if not spec:
+        failsafe = _failsafe_denied(verb)
+        if failsafe:
+            return {"checked": True, "allowed": False, "verb": verb,
+                    "type": "unknown", "destinations": [UNKNOWN], "rules": [],
+                    "refused": [UNKNOWN], "reason": failsafe}
         return {"checked": False, "allowed": True, "verb": verb}
     dtype, extract = spec
     try:
@@ -881,39 +763,32 @@ def gate_key(dtype: str, dest: str) -> str:
 #: sbagliare, essere stale, e soprattutto sposterebbe la decisione dal giudizio
 #: dell'owner a un'interrogazione. Se lo aggiunge lui è chiaro — il compito del
 #: dialog è dirgli **cosa** sta concedendo, non decidere al suo posto.
-_DANGER = {
-    "github": ("un repository su github.com. Se è pubblico, tutto ciò che viene "
-               "spinto lì è visibile a chiunque e resta nella storia del repo "
-               "anche se cancellato dopo."),
-    "http": ("un sistema di terzi raggiunto via HTTP. Non sai come tratta ciò "
-             "che riceve, né per quanto lo conserva."),
-    "mailto": ("un indirizzo email. Una volta inviato, il messaggio non è più "
-               "richiamabile e la copia resta sul server del destinatario."),
-    "tg": ("una chat su Telegram, cioè su un'infrastruttura non tua."),
-    "gsheets": ("un foglio Google. Se è condiviso, lo vede chi ha il link."),
-    "gcal": ("un calendario Google: chi lo approva concede di LEGGERE l'agenda "
-             "(con titoli, luoghi e invitati) e di scriverci eventi, che "
-             "arrivano come invito a chi è in lista. Non è confinabile a una "
-             "cartella: il perimetro è il calendario stesso."),
-}
-
-
 def danger_note(uri: str) -> str:
     """Avvertenza sulla classe di destinazione, o stringa vuota.
 
     Serve nel dialog di approvazione: approvare una destinazione la rende
     silenziosa da lì in avanti, quindi è il momento in cui l'informazione deve
     essere completa. Non blocca niente.
+
+    Il testo lo scrive il connettore. Due sorgenti, nell'ordine: una regola per
+    URI (`danger_uris:`), per chi vive su uno schema condiviso — GitHub non
+    possiede `https:` ma sa cosa significa spingere su github.com — e poi
+    l'avvertenza dello schema stesso. Nessuna delle due interroga la rete:
+    sapere se un repo è pubblico richiederebbe l'API GitHub, che può sbagliare,
+    essere stale, e soprattutto sposterebbe la decisione dal giudizio dell'owner
+    a un'interrogazione. Se lo aggiunge lui è chiaro — il compito del dialog è
+    dirgli COSA sta concedendo, non decidere al suo posto.
     """
     u = (uri or "").strip().lower()
     if not u or u == "*":
         return ("QUALUNQUE destinazione di questo tipo, senza ulteriori domande." if u == "*"
                 else "")
-    scheme = u.partition(":")[0]
-    if scheme in ("http", "https"):
-        host = urlsplit(u).hostname or ""
-        return _DANGER["github"] if host.endswith("github.com") else _DANGER["http"]
-    return _DANGER.get(scheme, "")
+    reg = _registry()
+    rule = reg.danger_for(u)
+    if rule:
+        return rule
+    scheme = reg.scheme(u.partition(":")[0])
+    return scheme.danger if scheme else ""
 
 
 def gate_reason(agent: str, verb: str, dtype: str, dests: list[str]) -> str:
@@ -1097,8 +972,8 @@ def remember(agent: str, dtype: str, dests: list[str]) -> list[str]:
 # ── verbi di amministrazione delle liste (gated) ─────────────────────────────
 
 _DIRECTIONS = {
-    "egress": ("egress_allow", EGRESS_SCHEMES, "destinazione ammessa"),
-    "ingress": ("source_allow", SOURCE_SCHEMES, "fonte fidata"),
+    "egress": ("egress_allow", egress_schemes, "destinazione ammessa"),
+    "ingress": ("source_allow", source_schemes, "fonte fidata"),
 }
 
 
@@ -1148,41 +1023,39 @@ def check_grantable(direction: str, uri: str) -> str:
         raise ValueError(
             f"'{u}' non vincola nulla dentro il suo schema: aprirebbe l'intero "
             f"tipo. Indica la risorsa completa.")
-    # La forma di `tg:` si controlla nelle DUE direzioni, perché è una proprietà
-    # dello schema e non della direzione. In ingresso rifiuta il wildcard, che
-    # spegnerebbe il taint su tutto Telegram; in uscita rifiuta una voce che non
-    # potrebbe MAI combaciare — `_chat()` produce sempre `tg:<chat_id>`, quindi
-    # `tg:pippo` sarebbe approvata e inefficace, e il sintomo («l'ho messa in
-    # lista e chiede ancora») non nominerebbe la causa.
-    # `gcal:*` non è degenere per `_is_degenerate` (c'è qualcosa dopo i due
-    # punti) ma combacia con QUALUNQUE calendario: sarebbe il permesso più largo
-    # del modulo, scritto in tre caratteri e indistinguibile in lista da una
-    # voce puntuale. Chi vuole davvero tutto scrive `*`, che qui è già rifiutato
-    # e nella config si vede rileggendola. Un dominio (`gcal:*@tomato.blue`)
-    # resta concedibile: quello vincola qualcosa.
-    if scheme == "gcal" and rest.strip() == "*":
+    # Il WILDCARD di schema. `gcal:*` non è degenere per `_is_degenerate` (c'è
+    # qualcosa dopo i due punti) ma combacia con QUALUNQUE calendario: sarebbe
+    # il permesso più largo del modulo, scritto in tre caratteri e
+    # indistinguibile in lista da una voce puntuale. Chi vuole davvero tutto
+    # scrive `*`, già rifiutato qui sopra e visibile rileggendo la config. Quali
+    # schemi non lo ammettono lo dice il connettore (`wildcard: false`): è una
+    # frase su cosa significhi «tutto» in quel vocabolario. Un dominio
+    # (`gcal:*@tomato.blue`) resta concedibile: quello vincola qualcosa.
+    sch = _registry().scheme(scheme)
+    if sch is not None and not sch.wildcard and rest.strip() == "*":
         raise ValueError(
-            "'gcal:*' aprirebbe qualunque calendario dell'account, cioè l'intera "
-            "agenda: indica il calendario (`gcal:<id>`, di solito l'indirizzo "
-            "email) oppure un dominio (`gcal:*@esempio.it`).")
-    # `topic:` vuole LIVELLO e NOME. `topic:SEAL-1/` non è degenere per
-    # `_is_degenerate` (c'è un livello), e `topic` non è fra gli schemi
-    # gerarchici: quella voce non combacerebbe con NESSUN topic, cioè sarebbe
-    # approvata e inefficace — e il sintomo («l'ho messa in lista e contamina
-    # ancora») non nominerebbe la causa. Stessa ragione del controllo su `tg:`.
-    if scheme == "topic" and not re.match(r"^[A-Za-z0-9-]+/[a-z0-9][a-z0-9_-]*$",
-                                          rest.strip()):
+            f"'{scheme}:*' aprirebbe l'intero {sch.label or scheme}: indica la "
+            f"risorsa, oppure un dominio (`{scheme}:*@esempio.it`).")
+    # La FORMA si controlla nelle due direzioni, perché è una proprietà dello
+    # schema e non della direzione. In ingresso rifiuta il wildcard su `tg:`,
+    # che spegnerebbe il taint su tutto Telegram; in uscita rifiuta una voce che
+    # non potrebbe MAI combaciare — l'estrattore di `telegram.send` produce
+    # sempre `tg:<chat_id>`, quindi `tg:pippo` sarebbe approvata e inefficace, e
+    # il sintomo («l'ho messa in lista e chiede ancora») non nominerebbe la
+    # causa. Stessa ragione per `topic:`, che vuole LIVELLO e NOME: un livello
+    # intero non è una fonte di cui qualcuno risponda.
+    #
+    # Solo per gli schemi NON gerarchici: dove il prefisso è una regola valida
+    # (`https://host/`, `gdrive:folder/<id>/`, `mcp:ns.`) una regola non ha la
+    # forma di una risorsa, e pretenderla rifiuterebbe esattamente le voci che
+    # il modello vuole.
+    if not hierarchical(scheme) and not scheme_form_ok(scheme, rest.strip()):
+        forme = ", ".join(
+            f"`{scheme}:{f.example or f.pattern.pattern}` ({f.label})"
+            for f in (sch.forms if sch else ()))
         raise ValueError(
-            f"'{u}' non è un topic: si scrive 'topic:<tier>/<nome>', per esempio "
-            f"'topic:SEAL-1/acme'. Niente wildcard e niente livello da solo: un "
-            f"livello intero non è una fonte di cui qualcuno risponda.")
-    if scheme == "tg" and not (_TG_GROUP.match(rest) or _TG_HANDLE.match(rest)):
-        raise ValueError(
-            f"'{u}' non è una chat Telegram: si scrive 'tg:<chat_id>' per un "
-            f"gruppo (id numerico) o 'tg:@handle' per una persona (5-32 fra "
-            f"lettere, cifre e underscore). Niente wildcard e niente percorsi: "
-            f"un uid non è un percorso, e un utente senza handle non è "
-            f"registrabile.")
+            f"'{u}' non ha una forma che lo schema '{scheme}' riconosca, quindi "
+            f"non combacerebbe con nessuna chiamata. Forme ammesse: {forme}.")
     return u
 
 
@@ -1375,12 +1248,13 @@ def _direction(direction: str):
     d = (direction or "").strip().lower()
     if d not in _DIRECTIONS:
         raise ValueError(f"direzione '{direction}' sconosciuta: egress | ingress")
-    return _DIRECTIONS[d]
+    key, schemes, label = _DIRECTIONS[d]
+    return key, schemes(), label
 
 
 def summary(agent_cfg: dict | None = None) -> dict:
     """Per introspezione/UI: modo, destinazioni ammesse, fonti fidate."""
     return {"mode": mode(), "egress_allow": allowed_uris(),
             "source_allow": source_uris(),
-            "egress_schemes": list(EGRESS_SCHEMES),
-            "source_schemes": list(SOURCE_SCHEMES)}
+            "egress_schemes": list(egress_schemes()),
+            "source_schemes": list(source_schemes())}

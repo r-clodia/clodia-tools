@@ -47,6 +47,8 @@ MANIFEST_VERSION = 1
 
 DIRECTIONS = ("source", "egress", "both")
 VERB_DIRECTIONS = ("egress", "source")
+#: Where a mapping reads its value from: the call's arguments, or its answer.
+READS_FROM = ("arguments", "result")
 
 #: Platform-intrinsic schemes. They are not a connector's to declare — #518
 #: leaves exactly these in a core manifest — but a pack may *point at* the
@@ -64,6 +66,18 @@ CORE_SCHEMES = tuple(CORE_SCHEME_DIRECTION)
 CREDENTIAL_KINDS = ("form", "oauth")
 HEALTH_KINDS = ("http", "tcp", "command")
 RESTART_POLICIES = ("always", "on-failure", "never")
+
+#: Bounds on a pack-supplied regular expression and on what it is run against.
+#: See `_compiled` for why they exist and why they are checked at load time.
+MAX_PATTERN_LENGTH = 200
+MAX_VALUE_LENGTH = 2048
+
+#: Value transforms the GATEWAY implements, that a verb mapping may name. A
+#: closed list on purpose: these are the three things today's extractors do that
+#: a template cannot (lowercase a host, drop a port, resolve a repository
+#: shorthand), and a pack that could supply the transform itself would be
+#: rewriting what a URL means on this instance. See `normalise.py`.
+NORMALISERS = ("url_origin", "repo_url", "repo_pair", "email_from")
 
 _ID = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
 _NAMESPACE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
@@ -148,14 +162,341 @@ def _matching(value: str, pattern: re.Pattern[str], where: str) -> str:
     return value
 
 
-def _compiled(raw: Any, where: str) -> re.Pattern[str]:
+# ---- regex cost analysis (review of #358) ----------------------------------
+
+try:  # Python ≥ 3.11
+    from re import _constants as _sre_c, _parser as _sre_p
+except ImportError:  # pragma: no cover — older interpreters
+    import sre_constants as _sre_c  # type: ignore[no-redef]
+    import sre_parse as _sre_p  # type: ignore[no-redef]
+
+#: A bounded repeat with a larger maximum costs like an unbounded one on a
+#: value of `MAX_VALUE_LENGTH` characters, so it is counted as one.
+_BIG_REPEAT = 32
+#: Unbounded repeats that can fight over the same characters, in sequence. Two
+#: is quadratic on at most `MAX_VALUE_LENGTH` characters (~10 ms); three is
+#: cubic (`\d*\d*\d*x` on 2000 characters: 6.4 s).
+MAX_AMBIGUOUS_CHAIN = 2
+#: Repeats of any kind in one pattern. `a?a?a?…aaa…` is exponential without a
+#: single unbounded repeat: the bound is on how many choices a pattern can make.
+MAX_REPEATS = 10
+#: Alternations in one pattern, for the same reason.
+MAX_BRANCHES = 4
+
+_REPEATS = {_sre_c.MAX_REPEAT, _sre_c.MIN_REPEAT}
+if hasattr(_sre_c, "POSSESSIVE_REPEAT"):
+    _REPEATS.add(_sre_c.POSSESSIVE_REPEAT)
+_REFUSED_OPS = {_sre_c.GROUPREF, _sre_c.GROUPREF_EXISTS, _sre_c.ASSERT,
+                _sre_c.ASSERT_NOT}
+#: The alphabet a character class is evaluated on: enough to tell which classes
+#: can overlap, which is all the analysis needs.
+_SAMPLE = tuple(range(0, 256)) + (0x100, 0x3B1, 0x4E00, 0x2028, 0x1F600)
+_ALL = frozenset(_SAMPLE)
+_CATEGORY_RE = {
+    "CATEGORY_DIGIT": r"\d", "CATEGORY_NOT_DIGIT": r"\D",
+    "CATEGORY_SPACE": r"\s", "CATEGORY_NOT_SPACE": r"\S",
+    "CATEGORY_WORD": r"\w", "CATEGORY_NOT_WORD": r"\W",
+}
+
+
+def _category_chars(cat) -> frozenset[int]:
+    rx = _CATEGORY_RE.get(str(cat))
+    if rx is None:
+        return _ALL
+    probe = re.compile(rx)
+    return frozenset(c for c in _SAMPLE if probe.fullmatch(chr(c)))
+
+
+def _class_chars(items) -> frozenset[int]:
+    negate, out = False, set()
+    for op, av in items:
+        if op is _sre_c.NEGATE:
+            negate = True
+        elif op is _sre_c.LITERAL:
+            out.add(av)
+        elif op is _sre_c.RANGE:
+            out.update(c for c in _SAMPLE if av[0] <= c <= av[1])
+        elif op is _sre_c.CATEGORY:
+            out.update(_category_chars(av))
+        else:
+            return _ALL
+    return frozenset(_ALL - out) if negate else frozenset(out)
+
+
+def _chars(sub) -> frozenset[int]:
+    """Every character `sub` can consume, approximated on `_SAMPLE`."""
+    out: set[int] = set()
+    for op, av in sub:
+        if op is _sre_c.LITERAL:
+            out.add(av)
+        elif op is _sre_c.NOT_LITERAL:
+            out |= _ALL - {av}
+        elif op is _sre_c.ANY:
+            return _ALL
+        elif op is _sre_c.IN:
+            out |= _class_chars(av)
+        elif op in _REPEATS:
+            out |= _chars(av[2])
+        elif op is _sre_c.SUBPATTERN:
+            out |= _chars(av[-1])
+        elif op is _sre_c.BRANCH:
+            for alt in av[1]:
+                out |= _chars(alt)
+        elif op is _sre_c.AT:
+            continue
+        else:
+            out |= _ALL
+    return frozenset(out)
+
+
+def _single(op, av) -> frozenset[int] | None:
+    """The character set of a one-character element, or None."""
+    if op is _sre_c.LITERAL:
+        return frozenset({av})
+    if op is _sre_c.IN:
+        return _class_chars(av)
+    if op is _sre_c.NOT_LITERAL:
+        return frozenset(_ALL - {av})
+    if op is _sre_c.ANY:
+        return _ALL
+    return None
+
+
+def _contains_repeat_or_branch(sub) -> bool:
+    for op, av in sub:
+        if op in _REPEATS and av[1] > 1:
+            return True
+        if op is _sre_c.BRANCH:
+            return True
+        if op is _sre_c.SUBPATTERN and _contains_repeat_or_branch(av[-1]):
+            return True
+        if op in _REPEATS and _contains_repeat_or_branch(av[2]):
+            return True
+        if op is getattr(_sre_c, "ATOMIC_GROUP", None) and \
+                _contains_repeat_or_branch(av):
+            return True
+    return False
+
+
+def _nullable(sub) -> bool:
+    for op, av in sub:
+        if op is _sre_c.AT:
+            continue
+        if op in _REPEATS:
+            if av[0] > 0 and not _nullable(av[2]):
+                return False
+            continue
+        if op is _sre_c.SUBPATTERN:
+            if not _nullable(av[-1]):
+                return False
+            continue
+        if op is _sre_c.BRANCH:
+            if not any(_nullable(alt) for alt in av[1]):
+                return False
+            continue
+        return False
+    return True
+
+
+def _regex_cost_problem(pattern: str) -> str:
+    """Why this pattern's matching cost is not bounded, or `""`.
+
+    Structural, on the parse tree (`re._parser`), not on the text: a textual
+    heuristic is bypassed by an extra pair of parentheses (`((a+))+b`). The
+    rules, each of which closes one family of super-linear matches:
+
+    - a repeat (max > 1) whose body holds another repeat or an alternation —
+      `(a+)+`, `((a+))+`, `(a|aa)+`, `(?:a|a)*` (exponential);
+    - a repeat (max > 1) whose body can match the empty string — `(a?)*`;
+    - more than `MAX_AMBIGUOUS_CHAIN` unbounded repeats in a run where they can
+      consume the same characters — `\\d*\\d*\\d*x` (polynomial). A run is
+      broken by a mandatory character the previous repeat cannot consume (the
+      `@` in `[^@]+@[^@]+`): that repeat's extent is then fixed;
+    - more than `MAX_REPEATS` repeats or `MAX_BRANCHES` alternations at all;
+    - back-references and lookarounds, which no URI form needs.
+    """
+    try:
+        tree = _sre_p.parse(pattern)
+    except re.error as exc:
+        return f"invalid regular expression ({exc})"
+    counts = {"repeats": 0, "branches": 0}
+    chains: list[int] = [0]
+    last: list[frozenset[int] | None] = [None]
+
+    def walk(sub, breaking: bool) -> str:
+        for op, av in sub:
+            if op in _REFUSED_OPS:
+                return "back-references and lookarounds are not allowed"
+            if op in _REPEATS:
+                lo, hi, body = av
+                counts["repeats"] += 1
+                if hi > 1 and _contains_repeat_or_branch(body):
+                    return ("a repeated group contains another repeat or an "
+                            "alternation (exponential backtracking)")
+                if hi > 1 and _nullable(body):
+                    return "a repeated group can match the empty string"
+                if hi == _sre_c.MAXREPEAT or hi > _BIG_REPEAT:
+                    chains[-1] += 1
+                    last[0] = _chars(body)
+                    if chains[-1] > MAX_AMBIGUOUS_CHAIN:
+                        return (f"more than {MAX_AMBIGUOUS_CHAIN} unbounded "
+                                f"repeats compete for the same characters "
+                                f"(polynomial backtracking)")
+                elif hi <= 1:
+                    err = walk(body, False)
+                    if err:
+                        return err
+                continue
+            if op is _sre_c.SUBPATTERN:
+                err = walk(av[-1], breaking)
+                if err:
+                    return err
+                continue
+            if op is getattr(_sre_c, "ATOMIC_GROUP", None):
+                err = walk(av, breaking)
+                if err:
+                    return err
+                continue
+            if op is _sre_c.BRANCH:
+                counts["branches"] += 1
+                for alt in av[1]:
+                    err = walk(alt, False)
+                    if err:
+                        return err
+                continue
+            one = _single(op, av)
+            if one is not None and breaking and last[0] is not None \
+                    and not (one & last[0]):
+                chains.append(0)
+                last[0] = None
+        return ""
+
+    err = walk(tree, True)
+    if err:
+        return err
+    if counts["repeats"] > MAX_REPEATS:
+        return f"more than {MAX_REPEATS} repeats"
+    if counts["branches"] > MAX_BRANCHES:
+        return f"more than {MAX_BRANCHES} alternations"
+    return ""
+
+
+#: Longest value a PACK regex is ever applied to (second verification of
+#: #358). Longer values are refused for pack schemes, never matched.
+PACK_MAX_INPUT = 256
+#: The safe subset a PACK regex must stay in. Heuristics on the parse tree
+#: (above) kept being bypassed — bounded repeats, literals that earlier repeats
+#: can also consume, character classes outside the sampled alphabet — so a pack
+#: gets a grammar small enough to be bounded by construction instead:
+PACK_MAX_REPEATS = 2      # quantified atoms with max > 1, bounded or not
+PACK_MAX_OPTIONALS = 2    # `x?` atoms
+PACK_MAX_BRANCHES = 1     # alternations
+PACK_MAX_ALTERNATIVES = 4
+_SINGLE_ATOMS = {_sre_c.LITERAL, _sre_c.NOT_LITERAL, _sre_c.IN, _sre_c.ANY,
+                 getattr(_sre_c, "CATEGORY", None)}
+
+
+def _pack_regex_problem(pattern: str) -> str:
+    """Why `pattern` is outside the pack subset, or `""`.
+
+    - at most `PACK_MAX_REPEATS` quantified atoms with max > 1 (`*`, `+`,
+      `{m,n}` — bounded and unbounded count alike), `PACK_MAX_OPTIONALS` `?`;
+    - a quantifier applies to ONE character atom (`a`, `[a-z]`, `\\d`, `.`),
+      never to a group;
+    - at most one alternation, of at most four alternatives, with no
+      quantifier anywhere inside it;
+    - no back-references, no lookarounds, no conditionals.
+
+    With fullmatch on at most `PACK_MAX_INPUT` characters that is at most
+    O(n²) × 2² × 4 steps, whatever the pattern says.
+    """
+    try:
+        tree = _sre_p.parse(pattern)
+    except re.error as exc:
+        return f"invalid regular expression ({exc})"
+    counts = {"repeat": 0, "optional": 0, "branch": 0}
+
+    def walk(sub, in_branch: bool) -> str:
+        for op, av in sub:
+            if op in _REFUSED_OPS:
+                return "back-references, lookarounds and conditionals are not allowed"
+            if op in _REPEATS:
+                lo, hi, body = av
+                if len(body) != 1 or body[0][0] not in _SINGLE_ATOMS:
+                    return ("a quantifier may apply only to a single character "
+                            "or character class, never to a group")
+                if in_branch:
+                    return "no quantifier inside an alternation"
+                counts["repeat" if hi > 1 else "optional"] += 1
+                continue
+            if op is _sre_c.SUBPATTERN:
+                err = walk(av[-1], in_branch)
+                if err:
+                    return err
+                continue
+            if op is _sre_c.BRANCH:
+                counts["branch"] += 1
+                if len(av[1]) > PACK_MAX_ALTERNATIVES:
+                    return f"more than {PACK_MAX_ALTERNATIVES} alternatives"
+                for alt in av[1]:
+                    err = walk(alt, True)
+                    if err:
+                        return err
+                continue
+            if op in _SINGLE_ATOMS or op is _sre_c.AT:
+                continue
+            return f"construct '{op}' is not allowed"
+        return ""
+
+    err = walk(tree, False)
+    if err:
+        return err
+    if counts["repeat"] > PACK_MAX_REPEATS:
+        return (f"more than {PACK_MAX_REPEATS} quantified atoms with a maximum "
+                f"above one")
+    if counts["optional"] > PACK_MAX_OPTIONALS:
+        return f"more than {PACK_MAX_OPTIONALS} optional atoms"
+    if counts["branch"] > PACK_MAX_BRANCHES:
+        return f"more than {PACK_MAX_BRANCHES} alternation"
+    return ""
+
+
+def _compiled(raw: Any, where: str, *, builtin: bool = False) -> re.Pattern[str]:
     """A regex from the manifest, compiled here so a typo fails at load.
 
     Compiled eagerly and on purpose: a pattern that only blows up the first time
     a real destination is checked would turn an authoring mistake into a runtime
     denial in the middle of someone's turn.
+
+    **Bounded cost** (review of clodia-tools#353). These patterns come from a
+    pack and run inside the gateway's event loop on every destination check, so
+    a catastrophic one — `(a+)+$` against a long non-matching value — would not
+    merely be slow: it would hold the loop for everybody. Python's `re` has no
+    timeout, and `regex`'s is not a dependency we have, so the bound has to be
+    on the pattern and on the input instead of on the clock:
+
+    - the pattern is capped in length;
+    - the parse tree is checked by `_regex_cost_problem` (nested or ambiguous
+      repeats, competing unbounded repeats, too many choices) — structurally,
+      so an extra pair of parentheses does not hide `(a+)+`;
+    - every match (`Form`, `Canonicalisation`, `DangerRule`) is a `fullmatch`
+      on a value of at most `MAX_VALUE_LENGTH` characters.
+
+    Refused at load, not at match time: a pack whose pattern is dangerous must
+    fail where an owner can read the message, not in the middle of a turn.
     """
     pattern = _text(raw, where)
+    if len(pattern) > MAX_PATTERN_LENGTH:
+        raise ManifestError(
+            f"{where}: regular expression is {len(pattern)} characters, over the "
+            f"{MAX_PATTERN_LENGTH} this gateway will evaluate. A URI form that "
+            f"needs more than that is describing something other than a URI")
+    problem = (_regex_cost_problem(pattern) if builtin
+               else _pack_regex_problem(pattern))
+    if problem:
+        raise ManifestError(
+            f"{where}: '{pattern}' is refused: {problem}. This pattern would run "
+            f"in the gateway's loop on every check, so its cost must be bounded")
     try:
         return re.compile(pattern)
     except re.error as exc:
@@ -172,14 +513,27 @@ def _placeholders(template: str) -> list[str]:
 
 @dataclass(frozen=True)
 class Form:
-    """One accepted shape of a URI under a scheme (`tg:-100123`, `tg:@handle`)."""
+    """One accepted shape of a URI under a scheme (`tg:-100123`, `tg:@handle`).
+
+    `fullmatch`, never `match` (review of clodia-tools#353, applied here because
+    #518 is where these patterns start deciding): with `^-?\\d+` as the group
+    form, `match` accepts `-100123garbage` — a value that would be granted as a
+    chat and could never be the chat anyone meant. A form says what the whole
+    value looks like; a prefix of it is a different value.
+    """
 
     label: str
     pattern: re.Pattern[str]
     example: str = ""
+    #: `PACK_MAX_INPUT` for a pack's pattern, `MAX_VALUE_LENGTH` for ours.
+    max_input: int = PACK_MAX_INPUT
 
     def matches(self, rest: str) -> bool:
-        return bool(self.pattern.match(rest))
+        if len(rest or "") > self.max_input:
+            # A pattern cannot cost more than the bound checked at load time
+            # unless the *input* is unbounded. Nothing legitimate reaches this.
+            return False
+        return bool(self.pattern.fullmatch(rest or ""))
 
 
 @dataclass(frozen=True)
@@ -188,12 +542,38 @@ class Canonicalisation:
 
     pattern: re.Pattern[str]
     template: str
+    max_input: int = PACK_MAX_INPUT
 
     def apply(self, uri: str) -> str | None:
-        m = self.pattern.match(uri)
+        # Bounded input and `fullmatch` (review of #358): the pattern is
+        # pack-supplied and the URI attacker-supplied.
+        if not uri or len(uri) > self.max_input:
+            return None
+        m = self.pattern.fullmatch(uri)
         if not m:
             return None
         return _PLACEHOLDER.sub(lambda g: m.group(int(g.group(1))), self.template)
+
+
+@dataclass(frozen=True)
+class DangerRule:
+    """A warning about the URIs of a connector that lives on a SHARED scheme.
+
+    `Scheme.danger` covers the schemes a connector owns. GitHub owns none — its
+    destinations are ordinary `https://github.com/<owner>/<repo>` URLs — yet
+    «if the repository is public, everything pushed there is visible to anyone»
+    is precisely what an owner needs to read at the gate, and it cannot hang off
+    `https:` as a whole. So the connector that knows those hosts declares the
+    warning for them, and nobody has to write `github.com` in `egress.py`.
+    """
+
+    pattern: re.Pattern[str]
+    text: str
+    max_input: int = PACK_MAX_INPUT
+
+    def matches(self, uri: str) -> bool:
+        return bool(uri) and len(uri) <= self.max_input and bool(
+            self.pattern.fullmatch(uri))
 
 
 @dataclass(frozen=True)
@@ -206,6 +586,14 @@ class Scheme:
     icon: str = ""
     danger: str = ""
     hierarchical: bool = False
+    #: The whole URI is case-insensitive, so it is stored lowercased — the mail
+    #: family. Not cosmetic: the extractors lowercase the destination of a call,
+    #: so a whitelist entry with a capital would never match, i.e. would be
+    #: granted and ineffective.
+    lowercase: bool = False
+    #: `<scheme>:*` is a legitimate rule. False for a scheme where covering
+    #: everything is not a perimeter at all (`gcal:*` is the whole agenda).
+    wildcard: bool = True
     forms: tuple[Form, ...] = ()
     canonicalise: tuple[Canonicalisation, ...] = ()
 
@@ -259,19 +647,43 @@ class VerbMapping:
     extractors in `egress.py` do today. `template` builds the URI from it and
     defaults to `<scheme>:{value}`; `multi` says the argument may carry a list,
     the way `email.send` carries several recipients.
+
+    A verb may be mapped **more than once** (#518): `email.send` reads `to`,
+    `cc` and `bcc`, and `gdrive.upload` reads a folder *and* a person to share
+    with — two schemes for one call. One mapping per argument, so the grammar
+    says what the extractor said, instead of hiding several arguments behind a
+    name only the gateway understands.
+
+    `prefix: true` makes `verb` a prefix instead of a name. It exists for the
+    verbs of a proxied MCP backend, whose list changes upstream without us —
+    `github.create_*` is the same decision whichever noun follows.
+
+    `normalise` names one of `NORMALISERS`, for the three transforms a template
+    cannot express. With it, `arg` may be omitted: the transform reads the
+    arguments it needs.
     """
 
     verb: str
     direction: str
     scheme: str
-    arg: str
+    arg: str = ""
     template: str = ""
     multi: bool = False
     dtype: str = ""
+    prefix: bool = False
+    normalise: str = ""
+    #: `arguments` (default) or `result`. A read whose source is only knowable
+    #: from the ANSWER — the sender of a mail — is read from the result, which
+    #: the gateway already has in hand when it judges the call.
+    reads: str = "arguments"
 
     def uri_for(self, value: str) -> str:
         template = self.template or f"{self.scheme}:{{value}}"
         return template.replace("{value}", value)
+
+    def covers(self, verb: str) -> bool:
+        """Does this mapping describe `verb`? Exact name, or prefix if declared."""
+        return verb.startswith(self.verb) if self.prefix else verb == self.verb
 
 
 @dataclass(frozen=True)
@@ -366,11 +778,19 @@ class Connector:
     schemes: tuple[Scheme, ...] = ()
     providers: tuple[Provider, ...] = ()
     verbs: tuple[VerbMapping, ...] = ()
+    danger_rules: tuple[DangerRule, ...] = ()
     taint_prefixes: tuple[str, ...] = ()
     topic_actions: tuple[TopicAction, ...] = ()
     tools_card: ToolsCard | None = None
     services: tuple[Service, ...] = ()
     storage_remote: StorageRemote | None = None
+    #: Shipped by the gateway itself (`builtin/*.yaml`) rather than installed
+    #: with a pack. Those files are the connectors this gateway still implements
+    #: natively, declared in the same grammar so the PDP has one source — see
+    #: `builtin.py`. They are code, not input: they may declare the intrinsic
+    #: schemes, they are not checked against the reserved namespaces (they *are*
+    #: the gateway's namespaces), and they win any collision with a pack.
+    builtin: bool = False
 
     @property
     def owns_vocabulary(self) -> bool:
@@ -430,23 +850,41 @@ def check_namespace(namespace: str, verbs: Iterable[str], *,
 # parsing
 # --------------------------------------------------------------------------
 
-def _parse_form(raw: Any, where: str) -> Form:
+def _max_input(builtin: bool) -> int:
+    return MAX_VALUE_LENGTH if builtin else PACK_MAX_INPUT
+
+
+def _parse_form(raw: Any, where: str, builtin: bool = False) -> Form:
     data = _mapping(raw, where)
     label = _text(data.get("label"), f"{where}.label", required=False)
-    pattern = _compiled(data.get("pattern"), f"{where}.pattern")
+    pattern = _compiled(data.get("pattern"), f"{where}.pattern", builtin=builtin)
     example = _text(data.get("example"), f"{where}.example", required=False)
-    if example and not pattern.match(example):
+    if example and not pattern.fullmatch(example):
         # The cheapest possible proof that the regex says what the author meant.
         raise ManifestError(
             f"{where}: example '{example}' does not match the declared pattern "
             f"'{pattern.pattern}'")
-    return Form(label=label, pattern=pattern, example=example)
+    return Form(label=label, pattern=pattern, example=example,
+                max_input=_max_input(builtin))
 
 
-def _parse_canonicalisation(raw: Any, where: str) -> Canonicalisation:
+def _parse_canonicalisation(raw: Any, where: str, scheme: str,
+                            builtin: bool = False) -> Canonicalisation:
     data = _mapping(raw, where)
-    pattern = _compiled(data.get("from"), f"{where}.from")
+    pattern = _compiled(data.get("from"), f"{where}.from", builtin=builtin)
     template = _text(data.get("to"), f"{where}.to")
+    # Review of #358: a rule rewrites a URI into THIS scheme, and it rewrites
+    # it into something taken from the URI. `{from: '^.*', to: '*'}` turned
+    # every whitelist rule into `*`.
+    if not template.startswith(f"{scheme}:"):
+        raise ManifestError(
+            f"{where}.to: '{template}' must produce a '{scheme}:' URI; a "
+            f"scheme canonicalises into itself, never into another scheme or "
+            f"into a wildcard")
+    if not _placeholders(template):
+        raise ManifestError(
+            f"{where}.to: '{template}' uses no capture group, so every URI it "
+            f"matches would become the same destination")
     for ref in _placeholders(template):
         if not ref.isdigit():
             raise ManifestError(
@@ -456,20 +894,21 @@ def _parse_canonicalisation(raw: Any, where: str) -> Canonicalisation:
             raise ManifestError(
                 f"{where}.to: group {{{ref}}} does not exist in '{pattern.pattern}' "
                 f"(it captures {pattern.groups})")
-    return Canonicalisation(pattern=pattern, template=template)
+    return Canonicalisation(pattern=pattern, template=template,
+                            max_input=_max_input(builtin))
 
 
-def _parse_scheme(raw: Any, where: str) -> Scheme:
+def _parse_scheme(raw: Any, where: str, builtin: bool = False) -> Scheme:
     data = _mapping(raw, where)
     name = _matching(_text(data.get("scheme"), f"{where}.scheme"), _SCHEME,
                      f"{where}.scheme")
     direction = _one_of(_text(data.get("direction"), f"{where}.direction"),
                         DIRECTIONS, f"{where}.direction")
     forms = tuple(
-        _parse_form(f, f"{where}.forms[{i}]")
+        _parse_form(f, f"{where}.forms[{i}]", builtin)
         for i, f in enumerate(_seq(data.get("forms"), f"{where}.forms")))
     canon = tuple(
-        _parse_canonicalisation(c, f"{where}.canonicalise[{i}]")
+        _parse_canonicalisation(c, f"{where}.canonicalise[{i}]", name, builtin)
         for i, c in enumerate(
             _seq(data.get("canonicalise"), f"{where}.canonicalise")))
     return Scheme(
@@ -479,6 +918,8 @@ def _parse_scheme(raw: Any, where: str) -> Scheme:
         icon=_text(data.get("icon"), f"{where}.icon", required=False),
         danger=_text(data.get("danger"), f"{where}.danger", required=False),
         hierarchical=_flag(data.get("hierarchical"), f"{where}.hierarchical"),
+        lowercase=_flag(data.get("lowercase"), f"{where}.lowercase"),
+        wildcard=_flag(data.get("wildcard"), f"{where}.wildcard", default=True),
         forms=forms,
         canonicalise=canon,
     )
@@ -546,7 +987,19 @@ def _parse_verb(raw: Any, where: str) -> VerbMapping:
                         VERB_DIRECTIONS, f"{where}.direction")
     scheme = _matching(_text(data.get("scheme"), f"{where}.scheme"), _SCHEME,
                        f"{where}.scheme")
-    arg = _matching(_text(data.get("arg"), f"{where}.arg"), _ARG, f"{where}.arg")
+    normalise = _text(data.get("normalise"), f"{where}.normalise", required=False)
+    if normalise:
+        _one_of(normalise, NORMALISERS, f"{where}.normalise")
+    arg = _text(data.get("arg"), f"{where}.arg", required=not normalise)
+    if arg:
+        _matching(arg, _ARG, f"{where}.arg")
+    reads = _one_of(
+        _text(data.get("reads"), f"{where}.reads", required=False,
+              default="arguments"), READS_FROM, f"{where}.reads")
+    if reads == "result" and direction != "source":
+        raise ManifestError(
+            f"{where}.reads: only a read can take its destination from the "
+            f"result; an outbound call is judged before it happens")
     template = _text(data.get("template"), f"{where}.template", required=False)
     if template and "{value}" not in template:
         raise ManifestError(
@@ -560,6 +1013,9 @@ def _parse_verb(raw: Any, where: str) -> VerbMapping:
         template=template,
         multi=_flag(data.get("multi"), f"{where}.multi"),
         dtype=_text(data.get("dtype"), f"{where}.dtype", required=False),
+        prefix=_flag(data.get("prefix"), f"{where}.prefix"),
+        normalise=normalise,
+        reads=reads,
     )
 
 
@@ -682,12 +1138,17 @@ _OWNER_ONLY = ("schemes", "verbs", "taint", "topic_actions")
 
 
 def parse_connector(raw: Any, *, pack: str,
-                    reserved: Iterable[str] | None = None) -> Connector:
+                    reserved: Iterable[str] | None = None,
+                    builtin: bool = False) -> Connector:
     """One entry of the `connectors:` block, validated on its own.
 
     `reserved` is passed through to `check_namespace`; cross-connector checks
     (duplicate ids, unknown `extends`, scheme owned twice) belong to
     `build_registry`, which is the only place that can see them.
+
+    `builtin` marks a manifest the gateway ships with itself: it may declare the
+    platform-intrinsic schemes, because that is where they are now declared, and
+    its namespaces are the gateway's own. Nothing on disk can set it.
     """
     where = _at(pack)
     data = _mapping(raw, where)
@@ -724,11 +1185,11 @@ def parse_connector(raw: Any, *, pack: str,
                 f"contributes nothing")
 
     schemes = tuple(
-        _parse_scheme(s, f"{where}.schemes[{i}]")
+        _parse_scheme(s, f"{where}.schemes[{i}]", builtin)
         for i, s in enumerate(_seq(data.get("schemes"), f"{where}.schemes")))
     seen_schemes: set[str] = set()
     for s in schemes:
-        if s.name in CORE_SCHEMES:
+        if s.name in CORE_SCHEMES and not builtin:
             raise ManifestError(
                 f"{where}: scheme '{s.name}' is platform-intrinsic and stays in "
                 f"the core manifest; a pack may map verbs onto it but not "
@@ -736,10 +1197,10 @@ def parse_connector(raw: Any, *, pack: str,
         if s.name in seen_schemes:
             raise ManifestError(f"{where}: scheme '{s.name}' declared twice")
         seen_schemes.add(s.name)
-    if not (schemes or extends or data.get("providers")):
+    if not (schemes or extends or data.get("providers") or data.get("verbs")):
         raise ManifestError(
-            f"{where}: declares no scheme, no provider and extends nothing, so "
-            f"it is an empty connector")
+            f"{where}: declares no scheme, no verb and no provider, and extends "
+            f"nothing, so it is an empty connector")
 
     providers = tuple(
         _parse_provider(p, f"{where}.providers[{i}]", pack=pack)
@@ -753,32 +1214,24 @@ def parse_connector(raw: Any, *, pack: str,
     verbs = tuple(
         _parse_verb(v, f"{where}.verbs[{i}]")
         for i, v in enumerate(_seq(data.get("verbs"), f"{where}.verbs")))
-    check_namespace(namespace, [v.verb for v in verbs], reserved=reserved,
-                    where=where)
-    for v in verbs:
-        if v.scheme in seen_schemes:
-            direction = next(s.direction for s in schemes if s.name == v.scheme)
-        elif v.scheme in CORE_SCHEME_DIRECTION:
-            direction = CORE_SCHEME_DIRECTION[v.scheme]
-        else:
-            raise ManifestError(
-                f"{where}: verb '{v.verb}' maps to scheme '{v.scheme}', which "
-                f"this connector does not declare and which is not one of the "
-                f"platform schemes ({', '.join(CORE_SCHEMES)})")
-        if v.direction == "egress" and direction not in ("egress", "both"):
-            raise ManifestError(
-                f"{where}: verb '{v.verb}' writes to scheme '{v.scheme}', "
-                f"declared as '{direction}'")
-        if v.direction == "source" and direction not in ("source", "both"):
-            raise ManifestError(
-                f"{where}: verb '{v.verb}' reads from scheme '{v.scheme}', "
-                f"declared as '{direction}'")
+    if not builtin:
+        check_namespace(namespace, [v.verb for v in verbs], reserved=reserved,
+                        where=where)
+    danger_rules = tuple(
+        DangerRule(
+            pattern=_compiled(_mapping(d, f"{where}.danger_uris[{i}]").get("match"),
+                              f"{where}.danger_uris[{i}].match", builtin=builtin),
+            text=_text(_mapping(d, f"{where}.danger_uris[{i}]").get("text"),
+                       f"{where}.danger_uris[{i}].text"),
+            max_input=_max_input(builtin))
+        for i, d in enumerate(_seq(data.get("danger_uris"),
+                                   f"{where}.danger_uris")))
 
     taint = tuple(
         _text(t, f"{where}.taint[{i}]")
         for i, t in enumerate(_seq(data.get("taint"), f"{where}.taint")))
     for prefix in taint:
-        if not prefix.startswith(f"{namespace}."):
+        if not builtin and not prefix.startswith(f"{namespace}."):
             raise ManifestError(
                 f"{where}: taint prefix '{prefix}' is outside namespace "
                 f"'{namespace}'. Declaring what does not taint a channel is a "
@@ -828,22 +1281,26 @@ def parse_connector(raw: Any, *, pack: str,
         schemes=schemes,
         providers=providers,
         verbs=verbs,
+        danger_rules=danger_rules,
         taint_prefixes=taint,
         topic_actions=actions,
         tools_card=_parse_tools_card(card, f"{where}.tools_card") if card else None,
         services=services,
         storage_remote=storage,
+        builtin=builtin,
     )
 
 
 def load_manifest(pack_manifest: Mapping[str, Any], *, pack: str,
-                  reserved: Iterable[str] | None = None) -> list[Connector]:
+                  reserved: Iterable[str] | None = None,
+                  builtin: bool = False) -> list[Connector]:
     """The `connectors:` block of one `pack.yaml`. No block → no connector."""
     raw = pack_manifest.get("connectors")
     if raw is None:
         return []
     entries = _seq(raw, f"{_at(pack)}: connectors")
-    return [parse_connector(e, pack=pack, reserved=reserved) for e in entries]
+    return [parse_connector(e, pack=pack, reserved=reserved, builtin=builtin)
+            for e in entries]
 
 
 def parse_services(pack_manifest: Mapping[str, Any], *, pack: str,
@@ -870,9 +1327,85 @@ class Registry:
     """
 
     connectors: tuple[Connector, ...] = ()
+    #: Connectors dropped while building, with the reason. A pack that collides
+    #: with a gateway connector is refused on its own, not by making the whole
+    #: registry unbuildable: the alternative would be one malformed pack taking
+    #: the PDP's tables down with it.
+    refused: tuple[str, ...] = ()
+    #: Non-empty when the gateway's OWN connectors could not be built: the
+    #: reason. The PDP then fails closed instead of reading «no mapping» as
+    #: «nothing to check» (review of #358).
+    degraded: str = ""
+    #: Outbound verbs of installed packs whose connectors could not be built:
+    #: denied instead of «unmapped, allowed» (`resolved._failsafe_from`).
+    failsafe_verbs: tuple[str, ...] = ()
 
     def by_id(self, cid: str) -> Connector | None:
         return next((c for c in self.connectors if c.id == cid), None)
+
+    def scheme(self, name: str) -> Scheme | None:
+        return next((s for s in self.schemes() if s.name == name), None)
+
+    def mappings_for(self, verb: str,
+                     direction: str) -> tuple[tuple[Connector, VerbMapping], ...]:
+        """Every `(connector, mapping)` that describes `verb`, in declaration order.
+
+        A verb may be mapped more than once — `email.send` to `to`, `cc` and
+        `bcc` — and the destinations of one call are the union.
+
+        An exact name wins over a prefix, and a builtin wins over a pack: the
+        gateway's own connectors are consulted first for the same reason
+        `egress.spec_for` consulted its tables before the registry (#517), and
+        a prefix is a statement about the verbs nobody has named, so it must
+        not quietly capture one that somebody has.
+        """
+        hits = [(c, v) for c in self.connectors for v in c.verbs
+                if v.direction == direction and v.covers(verb)]
+        for builtin in (True, False):
+            for exact in (True, False):
+                picked = tuple((c, v) for c, v in hits
+                               if c.builtin is builtin and (not v.prefix) is exact)
+                if picked:
+                    return picked
+        return ()
+
+    def danger_for(self, uri: str) -> str:
+        """The warning for this URI from a connector that claims its hosts, or
+        `""`. Builtins first, so a pack cannot soften the gateway's own text.
+
+        A PACK's rules apply only to URIs of a scheme that pack owns (review of
+        #358): otherwise a pack matching every `https:` URI would replace the
+        core warning of the shared scheme with its own text.
+        """
+        scheme = (uri or "").partition(":")[0].lower()
+        for c in sorted(self.connectors, key=lambda c: not c.builtin):
+            if not c.builtin and scheme not in {s.name for s in c.schemes}:
+                continue
+            for rule in c.danger_rules:
+                if rule.matches(uri):
+                    return rule.text
+        return ""
+
+    def canonical(self, uri: str) -> str | None:
+        """The first canonicalisation rule that rewrites `uri`, or None.
+
+        A PACK's rules apply only to URIs of the scheme that declares them
+        (review of #358): `canonicalise: [{from: '^.*', to: '*'}]` on a pack
+        scheme used to rewrite every whitelist rule into `*`. The gateway's own
+        rules may read a shared scheme — that is how a Drive URL copied from
+        the browser becomes `gdrive:folder/<id>` — because they are code in
+        the image, not input.
+        """
+        scheme = (uri or "").partition(":")[0].lower()
+        for c in sorted(self.connectors, key=lambda c: not c.builtin):
+            for sch in c.schemes:
+                if not c.builtin and sch.name != scheme:
+                    continue
+                for rule in sch.canonicalise:
+                    out = rule.apply(uri)
+                    if out is not None:
+                        return out
+        return None
 
     def vocabularies(self) -> tuple[Connector, ...]:
         return tuple(c for c in self.connectors if c.owns_vocabulary)
@@ -907,7 +1440,8 @@ class Registry:
 
 
 def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
-                   reserved: Iterable[str] | None = None) -> Registry:
+                   reserved: Iterable[str] | None = None,
+                   builtin: Iterable[str] = ()) -> Registry:
     """Resolve the connectors of every installed pack, in two passes.
 
     `manifests` maps pack name → the parsed `pack.yaml`. Two passes because
@@ -915,14 +1449,52 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
     may well be installed before the pack that owns the mail vocabulary, and a
     first-pass failure there would mean a connector that works or not depending
     on the day it was installed.
+
+    `builtin` names the manifests the gateway ships with itself (#518). They are
+    parsed first and with the gateway's own privileges, and they **win** any
+    collision with an installed pack: while the gateway still implements a
+    connector natively, a pack claiming the same id or the same scheme is
+    refused on its own — not merged, and not fatal to the registry. Letting the
+    pack win would mean an installed manifest redefining what `mailto:` means
+    while the native implementation is still the thing doing the sending.
     """
     reserved_set = set(core_namespaces() if reserved is None else reserved)
+    builtin_names = list(dict.fromkeys(builtin))
+    refused: list[str] = []
     parsed: list[Connector] = []
-    for pack in sorted(manifests):
+    for pack in builtin_names:
+        parsed.extend(load_manifest(manifests[pack], pack=pack, builtin=True))
+    builtin_ids = {c.id for c in parsed}
+    builtin_schemes = {s.name for c in parsed for s in c.schemes}
+    if reserved is None:
+        # The namespaces of the gateway's own connectors are reserved against
+        # the packs — belt and braces, since `core_namespaces()` already derives
+        # them from the native verbs those connectors implement. Not added when
+        # the caller passes `reserved` explicitly: that is how a registry from
+        # BEFORE the gateway owned a namespace is reproduced, which is the only
+        # way to hold a mapping that is illegitimate today (#517, call time).
+        reserved_set.update(c.namespace for c in parsed)
+
+    for pack in sorted(set(manifests) - set(builtin_names)):
         # Each pack is checked against the gateway's namespaces *and* against the
         # namespaces already claimed by the packs parsed before it.
         for connector in load_manifest(manifests[pack], pack=pack,
                                        reserved=reserved_set):
+            clash = ""
+            if connector.id in builtin_ids:
+                clash = f"connector id '{connector.id}'"
+            else:
+                taken = [s.name for s in connector.schemes
+                         if s.name in builtin_schemes]
+                if taken:
+                    clash = f"scheme '{taken[0]}'"
+            if clash:
+                refused.append(
+                    f"{_at(pack, connector.id)}: {clash} is still implemented by "
+                    f"this gateway, so the pack's connector is ignored. It "
+                    f"becomes effective when that implementation moves into a "
+                    f"pack (epic clodia-platform#527)")
+                continue
             parsed.append(connector)
         reserved_set.update(
             c.namespace for c in parsed if c.pack == pack)
@@ -969,4 +1541,50 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
                     f"declared by both '{other.pack}' and '{c.pack}'")
             provider_owner[key] = c
 
-    return Registry(connectors=tuple(parsed))
+    _check_verb_schemes(parsed)
+    return Registry(connectors=tuple(parsed), refused=tuple(refused))
+
+
+def _check_verb_schemes(connectors: list[Connector]) -> None:
+    """Every mapping points at a scheme that EXISTS on this instance, in the
+    right direction.
+
+    Checked here and not inside `parse_connector`, because a connector alone
+    cannot answer it: a pack may legitimately map its own verb onto a vocabulary
+    someone else owns — a courier pack that sends mail is checked against the
+    very same `mailto:` whitelist, which is the point of #517 — and the
+    gateway's own files are organised by connector, so `gdocs.read` writes into
+    the `gdrive:` vocabulary of the Google connector next to it. What stays
+    forbidden is *declaring* someone else's scheme: using a vocabulary is not
+    owning it.
+    """
+    declared = {s.name: s.direction for c in connectors for s in c.schemes}
+    declared.update({k: v for k, v in CORE_SCHEME_DIRECTION.items()
+                     if k not in declared})
+    dtypes: dict[tuple[str, str], set[str]] = {}
+    for c in connectors:
+        for v in c.verbs:
+            dtypes.setdefault((v.verb, v.direction), set()).add(v.dtype)
+    for (verb, _d), seen in dtypes.items():
+        if len({t for t in seen if t}) > 1:
+            raise ManifestError(
+                f"verb '{verb}' is mapped with two destination types "
+                f"({', '.join(sorted(t for t in seen if t))}); the gate would "
+                f"name the call differently depending on which argument it read")
+    for c in connectors:
+        for v in c.verbs:
+            direction = declared.get(v.scheme)
+            if direction is None:
+                raise ManifestError(
+                    f"{_at(c.pack, c.id)}: verb '{v.verb}' maps to scheme "
+                    f"'{v.scheme}', which no installed connector declares and "
+                    f"which is not one of the platform schemes "
+                    f"({', '.join(CORE_SCHEMES)})")
+            if v.direction == "egress" and direction not in ("egress", "both"):
+                raise ManifestError(
+                    f"{_at(c.pack, c.id)}: verb '{v.verb}' writes to scheme "
+                    f"'{v.scheme}', declared as '{direction}'")
+            if v.direction == "source" and direction not in ("source", "both"):
+                raise ManifestError(
+                    f"{_at(c.pack, c.id)}: verb '{v.verb}' reads from scheme "
+                    f"'{v.scheme}', declared as '{direction}'")

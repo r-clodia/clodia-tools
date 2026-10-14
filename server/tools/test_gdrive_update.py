@@ -91,11 +91,13 @@ class UpdateTests(unittest.TestCase):
 class EgressTests(unittest.TestCase):
     def test_the_destination_is_the_folder_of_the_file(self):
         from .. import egress, main
-        self.assertIn("gdrive.update", egress._SPECS)
+        self.assertIsNotNone(egress.spec_for("gdrive.update"))
         with patch.object(gdrive, "_service", return_value=(_Svc("x"), "davide")):
             self.assertEqual(main._drive_parent_of({"file_id": "DOC1"}), "F1")
-        self.assertEqual(egress._drive_target({"file_id": "DOC1", "folder_id": "F1"}),
-                         ["gdrive:folder/F1"])
+        self.assertEqual(
+            egress.spec_for("gdrive.update")[1]({"file_id": "DOC1",
+                                                 "folder_id": "F1"}),
+            ["gdrive:folder/F1"])
 
     def test_an_unresolvable_parent_is_an_unknown_destination(self):
         from .. import main

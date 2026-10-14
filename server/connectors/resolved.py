@@ -37,16 +37,20 @@ registry straight from manifests.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from . import builtin as _builtin
+from . import normalise as _normalise
 from .manifest import (
     Connector,
     ManifestError,
     Registry,
+    Scheme,
     VerbMapping,
     build_registry,
     check_namespace,
@@ -194,7 +198,96 @@ def problems() -> tuple[str, ...]:
 
 def _build_owners() -> dict[str, frozenset[str]]:
     _build()
-    return _CACHE[3] if _CACHE is not None else {}
+    if _CACHE is not None:
+        return _CACHE[3]
+    try:
+        return backend_owners()
+    except Exception:  # noqa: BLE001 — no owner: every backend stays reserved
+        return {}
+
+
+#: Fail-safe when the gateway's OWN connectors cannot be built (review of
+#: #358, blocker 2). Without them the registry knows no destination and no
+#: source, and an empty registry is permissive: `egress.decide` answers
+#: «not checked, allowed» and `taint.taints` answers False. These two sets are
+#: the namespaces of the builtin manifests' outbound verbs and of their reads
+#: (`test_518_fail_closed` keeps them in step with the manifests): in degraded
+#: mode the first are DENIED and the second TAINT.
+FAILSAFE_EGRESS_NAMESPACES = frozenset({
+    "email", "gdrive", "github", "gsheets", "telegram", "web"})
+FAILSAFE_SOURCE_NAMESPACES = frozenset({
+    "datastore", "email", "gcalendar", "gdocs", "gdrive", "github", "gsheets",
+    "telegram", "topic", "web"})
+
+
+def degraded() -> str:
+    """Why the gateway's own connectors are unavailable, or `""`."""
+    try:
+        return registry().degraded
+    except Exception as e:  # noqa: BLE001
+        return f"{type(e).__name__}: {e}"
+
+
+def _builtin_registry() -> Registry:
+    """The gateway's own connectors alone. Raises when they cannot be built.
+
+    `reserved=frozenset()`: the namespace rule is about PACKS, and deriving the
+    native namespaces imports `server.main` — a dependency the gateway's own
+    manifests do not need and whose transient failure used to leave the PDP
+    without any table at all.
+    """
+    own = _builtin.manifests()
+    return build_registry(own, builtin=tuple(own), reserved=frozenset())
+
+
+def _failsafe_from(packs: Mapping[str, Mapping]) -> tuple[str, ...]:
+    """The OUTBOUND verbs the raw manifests of `packs` declare, for packs whose
+    connectors could not be built (second verification of #358).
+
+    Without the registry those verbs are simply unmapped, and an unmapped verb
+    is «not checked, allowed»: a pack whose manifest is broken would send
+    anywhere. Read from the raw YAML, best effort, and only verbs inside the
+    connector's own namespace that is neither native nor builtin — a broken
+    manifest must not be able to switch off somebody else's verb. A `prefix:
+    true` mapping is kept with a trailing `*`.
+    """
+    try:
+        from .manifest import core_namespaces
+        taken = set(core_namespaces())
+    except Exception:  # noqa: BLE001
+        taken = set()
+    try:
+        taken |= {c.namespace for c in _builtin_registry().connectors}
+    except Exception:  # noqa: BLE001
+        pass
+    out: set[str] = set()
+    for meta in (packs or {}).values():
+        entries = meta.get("connectors") if isinstance(meta, Mapping) else None
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, Mapping):
+                continue
+            ns = str(entry.get("namespace") or "")
+            if not ns or ns in taken:
+                continue
+            verbs = entry.get("verbs")
+            for v in verbs if isinstance(verbs, list) else []:
+                if not isinstance(v, Mapping) or v.get("direction") != "egress":
+                    continue
+                verb = str(v.get("verb") or "")
+                if verb.startswith(f"{ns}."):
+                    out.add(verb + ("*" if v.get("prefix") else ""))
+    return tuple(sorted(out))
+
+
+def failsafe_denied(verb: str) -> bool:
+    """True when `verb` is an outbound verb of a pack the registry could not
+    hold (see `_failsafe_from`): it fails closed instead of passing unchecked."""
+    for v in registry().failsafe_verbs:
+        if v.endswith("*") and verb.startswith(v[:-1]):
+            return True
+        if verb == v:
+            return True
+    return False
 
 
 def _build() -> tuple[Registry, tuple[str, ...]]:
@@ -205,42 +298,74 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
     sig = (_signature(_manifest_files()), _mount_signature())
     if _CACHE is not None and _CACHE[0] == sig:
         return _CACHE[1], _CACHE[2]
-    reg, probs, owners = Registry(), (), {}
+    # 1. The floor: the gateway's own connectors. If THEY fail the result is
+    #    a DEGRADED registry — native outbound verbs denied, reads tainted (see
+    #    `FAILSAFE_*`) — and it is never cached: the next call tries again,
+    #    instead of serving «no tables» until somebody touches a pack.yaml.
     try:
-        packs = manifests()
-        owners = backend_owners(packs)
-        reg = build_registry(packs)
+        base = _builtin_registry()
+    except Exception as e:  # noqa: BLE001 — a broken image, not a broken pack
+        reason = f"{type(e).__name__}: {e}"
+        LOG.error("connectors: i manifest del gateway non sono costruibili "
+                  "(%s): verbi nativi in uscita NEGATI, letture contaminanti",
+                  reason)
+        try:
+            fs = _failsafe_from(manifests())
+        except Exception:  # noqa: BLE001
+            fs = ()
+        return Registry(degraded=reason, failsafe_verbs=fs), (reason,)
+    reg, probs, owners = base, (), {}
+    cache = True
+    try:
+        own = _builtin.manifests()
+        installed = {k: v for k, v in manifests().items() if k not in own}
+        owners = backend_owners(installed)
+        reg = build_registry({**own, **installed}, builtin=tuple(own))
+        refused = list(reg.refused)
         # Namespace di backend MCP montati: riservati come quelli nativi, salvo
         # il server MCP che il pack monta come proprio. Il connettore che ne
         # prende uno altrui è rifiutato da solo — gli altri restano.
         mounted = mounted_backends() | _CORE_BACKENDS
-        keep, refused = [], []
+        keep = []
         for c in reg.connectors:
-            if _norm(c.namespace) in mounted - owners.get(c.pack, frozenset()):
+            if not c.builtin and \
+                    _norm(c.namespace) in mounted - owners.get(c.pack, frozenset()):
                 refused.append(
                     f"pack '{c.pack}', connector '{c.id}': namespace "
                     f"'{c.namespace}' is a mounted MCP backend that is not this "
                     f"pack's own; a pack cannot claim another backend's verbs")
             else:
                 keep.append(c)
-        if refused:
-            for r in refused:
-                LOG.error("connectors: %s", r)
-            reg = Registry(connectors=tuple(keep))
-            probs = tuple(refused)
+        if len(keep) != len(reg.connectors):
+            reg = Registry(connectors=tuple(keep), refused=tuple(refused))
+        if reg.refused:
+            # Not a failure of the registry: a pack that collides with a
+            # connector this gateway still implements, or with a backend that
+            # is not its own, is ignored, by itself.
+            for line in reg.refused:
+                LOG.warning("connectors: %s", line)
+            probs = tuple(reg.refused)
     except ManifestError as e:
-        # All-or-nothing is `build_registry`'s own rule (#516): a manifest that
-        # collides with another is not half-valid. The consequence here is that
-        # the instance falls back to the behaviour it had before this issue —
-        # pack verbs unmapped — so the refusal has to be loud, and the real
-        # place to stop a malformed manifest is the installation (#519).
+        # A pack manifest the registry cannot hold. The PACK verbs stay
+        # unmapped, loudly; the gateway's own connectors do not fall with it —
+        # a pack with a typo must not be able to unmap `email.send`.
         probs = (str(e),)
+        reg = dataclasses.replace(base, failsafe_verbs=_failsafe_from(installed))
         LOG.error("connectors: registry non costruibile, i verbi dei pack "
                   "restano senza mappatura (%s)", e)
     except Exception as e:  # noqa: BLE001 — never break a call over this
+        # Not a statement about the manifests (they did not change): not
+        # cached, so a transient failure does not outlive its call.
         probs = (f"{type(e).__name__}: {e}",)
+        try:
+            fs = _failsafe_from(manifests())
+        except Exception:  # noqa: BLE001
+            fs = ()
+        reg = dataclasses.replace(base, failsafe_verbs=fs)
+        cache = False
         LOG.error("connectors: registry non costruibile (%s)", e)
-    _CACHE = (sig, reg, probs, owners)
+    if cache:
+        _CACHE = (sig, reg, probs, owners)
     return reg, probs
 
 
@@ -254,12 +379,10 @@ def invalidate() -> None:
 # the two questions the PDP asks
 # --------------------------------------------------------------------------
 
-def _owned(verb: str, direction: str) -> tuple[Connector, VerbMapping] | None:
-    for c in registry().connectors:
-        for v in c.verbs:
-            if v.verb == verb and v.direction == direction:
-                return c, v
-    return None
+def _owned(verb: str, direction: str) -> tuple[tuple[Connector, VerbMapping], ...]:
+    """Every mapping that describes this call — a verb may have more than one
+    (`email.send` reads `to`, `cc` and `bcc`)."""
+    return registry().mappings_for(verb, direction)
 
 
 def namespace_violation(verb: str) -> str:
@@ -275,19 +398,20 @@ def namespace_violation(verb: str) -> str:
     the next reinstall.
     """
     for direction in ("egress", "source"):
-        owned = _owned(verb, direction)
-        if owned is None:
-            continue
-        connector, mapping = owned
-        try:
-            # Riservati: i namespace nativi E quelli dei backend MCP montati
-            # che non sono di questo pack (clodia-platform#517, review).
-            check_namespace(connector.namespace, [mapping.verb],
-                            reserved=reserved_for(connector.pack),
-                            where=f"pack '{connector.pack}', connector "
-                                  f"'{connector.id}'")
-        except ManifestError as e:
-            return str(e)
+        for connector, mapping in _owned(verb, direction):
+            if connector.builtin:
+                # A gateway file is the gateway's own authority: it is where the
+                # native namespaces are declared, not a claim over someone's.
+                continue
+            try:
+                # Riservati: i namespace nativi E quelli dei backend MCP
+                # montati che non sono di questo pack (#517, review).
+                check_namespace(connector.namespace, [mapping.verb],
+                                reserved=reserved_for(connector.pack),
+                                where=f"pack '{connector.pack}', connector "
+                                      f"'{connector.id}'")
+            except ManifestError as e:
+                return str(e)
     return ""
 
 
@@ -307,8 +431,8 @@ def enforce_namespace(verb: str) -> None:
             f"namespace, quindi la chiamata non si fa. {reason}")
 
 
-def _mapping(verb: str, direction: str) -> VerbMapping | None:
-    """The declared mapping, or None — never a mapping that breaks the rule.
+def _mappings(verb: str, direction: str) -> tuple[VerbMapping, ...]:
+    """The declared mappings, or `()` — never a mapping that breaks the rule.
 
     A violating mapping is not merely ignored: `enforce_namespace` refuses the
     call outright. Both are needed, and they are not the same statement. Ignoring
@@ -317,30 +441,49 @@ def _mapping(verb: str, direction: str) -> VerbMapping | None:
     PDP for someone else's verb simply by naming it.
     """
     owned = _owned(verb, direction)
-    if owned is None:
-        return None
-    return None if namespace_violation(verb) else owned[1]
+    if not owned or namespace_violation(verb):
+        return ()
+    return tuple(m for _c, m in owned)
+
+
+def egress_mappings(verb: str) -> tuple[VerbMapping, ...]:
+    return _mappings(verb, "egress")
+
+
+def source_mappings(verb: str) -> tuple[VerbMapping, ...]:
+    return _mappings(verb, "source")
 
 
 def egress_mapping(verb: str) -> VerbMapping | None:
-    return _mapping(verb, "egress")
+    """The first declared destination mapping. For the callers that ask «is this
+    verb mapped at all» — the full answer is `egress_mappings`."""
+    mappings = egress_mappings(verb)
+    return mappings[0] if mappings else None
 
 
 def source_mapping(verb: str) -> VerbMapping | None:
-    return _mapping(verb, "source")
+    mappings = source_mappings(verb)
+    return mappings[0] if mappings else None
 
 
-def destinations(mapping: VerbMapping, arguments: dict | None) -> list[str]:
+def destinations(mapping: VerbMapping, arguments: dict | None,
+                 result: object = None) -> list[str]:
     """The URIs this call reaches, the way `egress.py`'s extractors build them.
 
-    Case is left as the manifest produced it: `egress._matches` lowercases both
-    sides, so normalising here would only mangle what the gate card shows and
-    what `remember()` writes down for identifiers that are case-sensitive
-    (a Drive id, a Telegram handle).
+    Case is left as the manifest produced it unless the SCHEME says the whole
+    URI is case-insensitive (`lowercase: true`, the mail family): `egress._matches`
+    lowercases both sides, so normalising everything here would only mangle what
+    the gate card shows and what `remember()` writes down for identifiers that
+    are case-sensitive (a Drive id, a Telegram handle) — while for an address it
+    is the difference between a whitelist entry that matches and one that was
+    granted and can never fire.
     """
-    raw = (arguments or {}).get(mapping.arg)
-    if mapping.multi:
-        items: list[Any]
+    source = result if mapping.reads == "result" else arguments
+    data = source if isinstance(source, dict) else {}
+    raw = data.get(mapping.arg) if mapping.arg else None
+    if mapping.normalise:
+        items: list[Any] = _normalise.apply(mapping.normalise, str(raw or ""), data)
+    elif mapping.multi:
         if isinstance(raw, (list, tuple)):
             items = list(raw)
         else:
@@ -348,35 +491,59 @@ def destinations(mapping: VerbMapping, arguments: dict | None) -> list[str]:
             items = str(raw or "").replace(";", ",").split(",")
     else:
         items = [raw]
+    lower = _lowercases(mapping.scheme)
     out = []
     for item in items:
         value = str(item or "").strip()
-        if value:
-            out.append(mapping.uri_for(value))
+        if not value:
+            continue
+        uri = mapping.uri_for(value)
+        out.append(uri.lower() if lower else uri)
     return out
 
 
+def _lowercases(scheme: str) -> bool:
+    s: Scheme | None = registry().scheme(scheme)
+    return bool(s and s.lowercase)
+
+
 def spec_for(verb: str):
-    """`(destination type, extractor)` for a pack verb, the shape `egress` wants."""
-    mapping = egress_mapping(verb)
-    if mapping is None:
+    """`(destination type, extractor)` for a mapped verb, the shape `egress` wants.
+
+    The destinations of one call are the union of its mappings, in declaration
+    order: `gdrive.upload` can name a folder *and* a person to share with, and
+    both have to be inside the perimeter for the call to happen.
+    """
+    mappings = egress_mappings(verb)
+    if not mappings:
         return None
-    return (mapping.dtype or mapping.scheme,
-            lambda a, _m=mapping: destinations(_m, a))
+    first = mappings[0]
+
+    def extract(arguments: dict, _ms=mappings) -> list[str]:
+        out: list[str] = []
+        for m in _ms:
+            for uri in destinations(m, arguments):
+                if uri not in out:
+                    out.append(uri)
+        return out
+
+    return (first.dtype or first.scheme, extract)
 
 
-def source_uri(verb: str, arguments: dict | None) -> str | None:
+def source_uri(verb: str, arguments: dict | None,
+               result: object = None) -> str | None:
     """The ONE source of a declared read, or None when there is not exactly one.
 
     Not exactly one is not an accident to paper over: `email.list` and
     `telegram.inbox` mix several senders in one answer, and the gateway already
     refuses to name a source for them rather than name the wrong one. A `multi:`
-    read falls in the same bucket.
+    read falls in the same bucket, and so does a verb whose mappings disagree.
     """
-    mapping = source_mapping(verb)
-    if mapping is None:
-        return None
-    uris = destinations(mapping, arguments)
+    uris: list[str] = []
+    for m in source_mappings(verb):
+        for uri in destinations(m, arguments, result):
+            if uri not in uris:
+                uris.append(uri)
     return uris[0] if len(uris) == 1 else None
 
 
@@ -387,4 +554,4 @@ def is_declared_read(verb: str) -> bool:
     `taint._TAINTING_EXACT` is that statement made verb by verb. A pack that
     declares `direction: source` has said the same thing about its own verb.
     """
-    return source_mapping(verb) is not None
+    return bool(source_mappings(verb))

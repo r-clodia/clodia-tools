@@ -34,6 +34,13 @@ class UriExtractionTests(unittest.TestCase):
         with _with(_cfg("*")):
             return egress.decide({}, verb, args)["destinations"]
 
+    def _extract(self, verb, args):
+        """Le destinazioni grezze, senza il passaggio da `decide` — che una
+        lista vuota la traduce in UNKNOWN. Qui serve distinguere «non si legge»
+        da «si legge e non è in lista»."""
+        spec = egress.spec_for(verb)
+        return spec[1](args) if spec else None
+
     def test_email_fields_become_mailto(self):
         self.assertEqual(
             self._dests("email.send", {"to": "A@Tomato.blue, b@x.it", "cc": "c@y.it"}),
@@ -62,10 +69,12 @@ class UriExtractionTests(unittest.TestCase):
         leggibile» — cioè si manda a toccare `egress_allow` per una forma che lo
         schema del verbo dichiara valida. Il PDP gira prima del verbo: la nozione
         di «forma di un repository» deve essere UNA."""
-        self.assertEqual(egress._repo_url({"repo": "acme/tool"}),
+        self.assertEqual(self._dests("github.pull_request", {"repo": "acme/tool"}),
                          ["https://github.com/acme/tool"])
-        self.assertEqual(egress._repo_url({"repo": "https://github.com/Acme/Tool.git"}),
-                         ["https://github.com/acme/tool"])
+        self.assertEqual(
+            self._dests("github.pull_request",
+                        {"repo": "https://github.com/Acme/Tool.git"}),
+            ["https://github.com/acme/tool"])
 
     def test_what_is_not_a_repository_stays_unreadable(self):
         """La proprietà 3 del modulo: una destinazione che non si legge dalla
@@ -77,9 +86,12 @@ class UriExtractionTests(unittest.TestCase):
         for brutto in ("", "acme", "../etc/passwd", "/datadir/vault",
                        "acme/tool/extra"):
             with self.subTest(brutto):
-                self.assertEqual(egress._repo_url({"repo": brutto}), [])
+                self.assertEqual(self._extract("github.pull_request",
+                                               {"repo": brutto}), [])
         with patch.object(gh, "ALLOW_LOCAL_REPOS", True):
-            self.assertEqual(egress._repo_url({"repo": "file:///datadir/vault"}), [])
+            self.assertEqual(
+                self._extract("github.pull_request",
+                              {"repo": "file:///datadir/vault"}), [])
 
     def test_drive_share_is_a_person_not_a_folder(self):
         """`gdrive.share` è uscita verso una PERSONA: con l'URI la differenza si
@@ -639,7 +651,7 @@ class TelegramSourceTests(unittest.TestCase):
             self.addCleanup(pt.stop)
 
     def test_tg_is_a_source_scheme(self):
-        self.assertIn("tg", egress.SOURCE_SCHEMES)
+        self.assertIn("tg", egress.source_schemes())
 
     def test_a_group_chat_id_is_grantable_as_a_source(self):
         self.assertEqual(egress.check_grantable("ingress", "tg:-1001234567890"),

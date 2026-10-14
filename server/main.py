@@ -2794,7 +2794,11 @@ def _telegram_chat_id_or_raise(arguments: dict) -> None:
     """
     from . import egress as _eg
     cid = str(arguments.get("chat_id") or "").strip()
-    if _eg._TG_GROUP.match(cid) or _eg._TG_HANDLE.match(cid):
+    # Le forme ammesse le dichiara lo schema del connettore, non una regex qui:
+    # una seconda copia di «com'è fatta una chat» divergerebbe dalla prima al
+    # primo cambiamento, e il valore accettato qui ma non concedibile là
+    # produrrebbe un invio che nessuno può mettere in whitelist.
+    if _eg.scheme_form_ok("tg", cid) and cid:
         return
     legato = None
     canale = current_channel()
@@ -3578,21 +3582,8 @@ _TOPIC_READ_VERBS = frozenset({
     "topic.read_file", "topic.read_document", "topic.files", "topic.fetch",
 })
 
-#: Verbi che leggono una risorsa Drive/Workspace PER ID: la fonte è quella
-#: risorsa, e l'argomento che la identifica è diverso per ognuno. Senza questa
-#: mappa un `gsheets.read` su un foglio dichiarato fidato contaminerebbe comunque
-#: — la regola «verbo + fonte» applicata a metà.
-_RESOURCE_READ_VERBS = {
-    "gsheets.read": ("spreadsheet_id", "gsheets:{}"),
-    "gsheets.list_tabs": ("spreadsheet_id", "gsheets:{}"),
-    "gdocs.read": ("document_id", "gdrive:doc/{}"),
-    "gdrive.download": ("file_id", "gdrive:file/{}"),
-    "datastore.read": ("datastore", "datastore:{}"),
-}
-
-
 def _pack_declares_read(verb: str) -> bool:
-    """Un pack dichiara questo verbo come lettura di una fonte esterna?
+    """Un CONNETTORE dichiara questo verbo come lettura di una fonte esterna?
 
     Involucro di `connectors.resolved` con l'eccezione addosso: il registry è
     costruito da file che stanno fuori dal gateway, e una lettura non deve
@@ -3609,10 +3600,10 @@ def _pack_declares_read(verb: str) -> bool:
         return False
 
 
-def _pack_source_uri(verb: str, a: dict) -> str | None:
+def _pack_source_uri(verb: str, a: dict, result: object = None) -> str | None:
     try:
         from .connectors import resolved as _connectors
-        return _connectors.source_uri(verb, a)
+        return _connectors.source_uri(verb, a, result)
     except Exception as e:  # noqa: BLE001
         LOG.warning("connettori: fonte non risolvibile per %s (%s)", verb, e)
         return None
@@ -3656,7 +3647,7 @@ def _source_vetted(verb: str, a: dict, result: object = None) -> bool | None:
         # cui non sappiamo la provenienza, che è il caso che il taint esiste per
         # coprire.
         if _pack_declares_read(verb):
-            _declared = _pack_source_uri(verb, a)
+            _declared = _pack_source_uri(verb, a, result)
             return _eg.is_vetted_source(_declared) if _declared else None
         # Un backend MCP montato: la fonte è il SERVER, uno per namespace, e si
         # vaglia come qualunque altra — `mcp:normattiva.` in `source_allow`.
@@ -3668,18 +3659,6 @@ def _source_vetted(verb: str, a: dict, result: object = None) -> bool | None:
         if verb.startswith("web."):
             url = str((a or {}).get("url") or "").strip()
             return _eg.is_vetted_source(url) if url else None
-        if verb == "email.read":
-            src = ""
-            if isinstance(result, dict):
-                src = str(result.get("from")
-                          or (result.get("message") or {}).get("from") or "")
-            addr = _eg.address_of(src)
-            return _eg.is_vetted_source(f"mailfrom:{addr}") if addr else None
-        spec = _RESOURCE_READ_VERBS.get(verb)
-        if spec:
-            field, tmpl = spec
-            rid = str((a or {}).get(field) or "").strip()
-            return _eg.is_vetted_source(tmpl.format(rid)) if rid else None
         if verb not in _TOPIC_READ_VERBS:
             return None
         tier, name = (a or {}).get("tier"), (a or {}).get("name")
@@ -4334,26 +4313,15 @@ def _ingress_source(verb: str, a: dict, result: object = None) -> str | None:
 
     Mirrors the branches of `_source_vetted`, without its I/O: it names the
     source, `_source_vetted` judges it."""
-    from . import egress as _eg
     a = a or {}
     # Stessa precedenza di `_source_vetted`, e per la stessa ragione: la fonte
     # dichiarata dal manifest nomina la risorsa, `mcp:<verbo>` nomina il server.
     if _pack_declares_read(verb):
-        return _pack_source_uri(verb, a)
+        return _pack_source_uri(verb, a, result)
     if proxy.is_proxied(verb):
         return f"mcp:{verb}"
     if verb.startswith("web."):
         return _source_url(a.get("url"))
-    if verb == "email.read":
-        src = ""
-        if isinstance(result, dict):
-            src = str(result.get("from") or (result.get("message") or {}).get("from") or "")
-        addr = _eg.address_of(src)
-        return f"mailfrom:{addr}" if addr else None
-    spec = _RESOURCE_READ_VERBS.get(verb)
-    if spec:
-        rid = str(a.get(spec[0]) or "").strip()
-        return spec[1].format(rid) if rid else None
     if verb in _TOPIC_READ_VERBS and a.get("tier") and a.get("name") and a.get("path"):
         # A listing (`topic.files`) has no single source: not an ingress.
         # Through a link the source is the topic that owns the bytes (#477).

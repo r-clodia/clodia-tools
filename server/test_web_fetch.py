@@ -50,7 +50,8 @@ class WebFetchTests(unittest.TestCase):
         """`egress.py` sa già ridurre un URL a schema://host/ — vale anche in
         ingresso, ed è quello che `_source_vetted` interroga per web.*."""
         self.assertEqual(
-            egress._http({"url": "https://EUR-Lex.europa.eu/legal-content/IT/"}),
+            egress.spec_for("web.post")[1](
+                {"url": "https://EUR-Lex.europa.eu/legal-content/IT/"}),
             ["https://eur-lex.europa.eu/"],
         )
 

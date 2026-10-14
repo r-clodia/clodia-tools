@@ -1,0 +1,47 @@
+# Telegram, come il gateway lo implementa oggi (clodia-platform#518).
+# La migrazione #522 sposta questo file in comms-pack e lo cancella da qui.
+#
+# Nessun `seal_cap`: il tetto SEAL di un binding non è un campo del manifest
+# (decisione dell'epic #527). `_CHANNEL_SEAL_CAP` resta dov'è finché la
+# migrazione non porta via il connettore che cappa — scostamento dichiarato
+# nella PR di #518.
+name: gateway-telegram
+connectors:
+  - id: telegram
+    manifest_version: 1
+    namespace: telegram
+    label: Telegram
+    schemes:
+      # Le due forme di `tg:`, e non ce n'è una terza: la distinzione fra un
+      # gruppo e una persona la porta la FORMA, non un parametro a parte.
+      # In uscita una voce che non ha una di queste due forme sarebbe approvata
+      # e inefficace; in ingresso un wildcard spegnerebbe il taint su tutto
+      # Telegram.
+      - scheme: tg
+        direction: both
+        label: Chat Telegram
+        danger: 'una chat su Telegram, cioè su un''infrastruttura non tua.'
+        forms:
+          - label: gruppo
+            pattern: '-?\d+'
+            example: '-1001234567890'
+          - label: persona
+            pattern: '@[A-Za-z0-9_]{5,32}'
+            example: '@dadabit'
+    verbs:
+      - verb: telegram.send
+        direction: egress
+        scheme: tg
+        arg: chat_id
+        dtype: telegram
+      - verb: telegram.send_file
+        direction: egress
+        scheme: tg
+        arg: chat_id
+        dtype: telegram
+    # Chat in arrivo: chi scrive nel gruppo non è controllato, e una risposta
+    # mescola più autori.
+    taint:
+      - telegram.inbox
+      - telegram.receive
+      - telegram.pull

@@ -97,9 +97,10 @@ class DocumentedExamplesTests(unittest.TestCase):
         registry = M.build_registry(self.examples, reserved=NO_RESERVED)
         gdrive = next(s for s in registry.schemes() if s.name == "gdrive")
         rules = gdrive.canonicalise
-        url = "https://drive.google.com/drive/u/0/folders/1AbCdEfGhIjKlMnOpQrStUv"
+        # A pack canonicalises only its own scheme (review of #358); browser
+        # URLs stay with the gateway's own manifest until the migration.
+        url = "gdrive://1AbCdEfGhIjKlMnOpQrStUv"
         got = next(r.apply(url) for r in rules if r.apply(url))
-        # Same answer `egress.canonical()` gives today for the same URL.
         self.assertEqual(got, "gdrive:folder/1AbCdEfGhIjKlMnOpQrStUv")
 
     def test_topic_action_declares_what_it_would_add(self):
@@ -302,13 +303,28 @@ class RefusalTests(unittest.TestCase):
             "canonicalise": [{"from": r"^x/(\w+)$", "to": "demo:{2}"}]}]),
             "{2}")
 
+    def _refused_at_build(self, data: dict, needle: str):
+        """Refused when the registry is built, not when the entry is parsed.
+
+        Since clodia-platform#518 a connector may map its verbs onto a
+        vocabulary someone else owns — using a scheme is not owning it — so
+        whether a scheme exists is a question only the whole registry can
+        answer. It is still a refusal of the manifest, at the only moment it can
+        be made.
+        """
+        with self.assertRaises(M.ManifestError) as cm:
+            M.build_registry({"p": {"connectors": [data]}}, reserved=NO_RESERVED)
+        self.assertIn(needle, str(cm.exception))
+        return str(cm.exception)
+
     def test_a_verb_pointing_at_a_scheme_nobody_declares(self):
-        self._refused(self._with(verbs=[{"verb": "demo.send", "direction": "egress",
-                                         "scheme": "nope", "arg": "to"}]),
-                      "nope")
+        self._refused_at_build(
+            self._with(verbs=[{"verb": "demo.send", "direction": "egress",
+                               "scheme": "nope", "arg": "to"}]),
+            "nope")
 
     def test_a_verb_writing_to_a_source_only_scheme(self):
-        self._refused(self._with(
+        self._refused_at_build(self._with(
             schemes=[{"scheme": "demo", "direction": "source"}],
             verbs=[{"verb": "demo.send", "direction": "egress",
                     "scheme": "demo", "arg": "to"}]),

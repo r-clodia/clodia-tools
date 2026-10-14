@@ -1,0 +1,111 @@
+# Google Workspace, come il gateway lo implementa oggi (clodia-platform#518).
+# Migrazione #523: questo file si sposta in google-pack e sparisce da qui.
+#
+# Un solo connettore per tre namespace di verbi (`gdrive.`, `gsheets.`,
+# `gdocs.`, `gcalendar.`): i file del gateway sono organizzati per CONNETTORE,
+# non per namespace, perché è il connettore che possiede il vocabolario in cui
+# tutti e quattro scrivono. Per un pack la regola resta quella di #516 — un
+# namespace solo — ed è `build_registry` a controllarlo.
+name: gateway-google
+connectors:
+  - id: google
+    manifest_version: 1
+    namespace: gdrive
+    label: Google Workspace
+    schemes:
+      - scheme: gdrive
+        direction: both
+        label: Cartella o file di Drive
+        hierarchical: true
+        forms:
+          - label: cartella
+            pattern: 'folder/[\w-]+'
+            example: 'folder/1AbCdEfGhIjKlMnOpQrStUv'
+          - label: file
+            pattern: 'file/[\w-]+'
+            example: 'file/1AbCdEfGhIjKlMnOpQrStUv'
+          - label: documento
+            pattern: 'doc/[\w-]+'
+            example: 'doc/1AbCdEfGhIjKlMnOpQrStUv'
+        # Le forme che un umano scrive naturalmente, ricondotte alla forma
+        # canonica: un URL di cartella è ciò che si copia dalla barra del
+        # browser, e `gdrive://<id>` è la stessa risorsa in un'altra codifica.
+        canonicalise:
+          - from: '^gdrive://(?:folder/)?([\w-]+)/?$'
+            to: 'gdrive:folder/{1}'
+          - from: '^https?://drive\.google\.com/drive/(?:u/\d+/)?folders/([\w-]+)(?:[/?#].*)?'
+            to: 'gdrive:folder/{1}'
+          - from: '^https?://docs\.google\.com/document/d/([\w-]+)(?:[/?#].*)?'
+            to: 'gdrive:doc/{1}'
+          - from: '^https?://drive\.google\.com/file/d/([\w-]+)(?:[/?#].*)?'
+            to: 'gdrive:file/{1}'
+      - scheme: gsheets
+        direction: both
+        label: Foglio Google
+        danger: 'un foglio Google. Se è condiviso, lo vede chi ha il link.'
+        canonicalise:
+          - from: '^gsheets://([\w-]+)/?$'
+            to: 'gsheets:{1}'
+          - from: '^https?://docs\.google\.com/spreadsheets/d/([\w-]+)(?:[/?#].*)?'
+            to: 'gsheets:{1}'
+      # `gcal:` sta in USCITA e non in ingresso perché governa l'AUTORITÀ sulla
+      # risorsa (leggere l'agenda e scriverci eventi), non la fiducia nel
+      # contenuto che ne arriva. `gcal:*` non è concedibile: sarebbe il permesso
+      # più largo del modulo, scritto in tre caratteri e indistinguibile in
+      # lista da una voce puntuale. Un dominio (`gcal:*@esempio.it`) sì.
+      - scheme: gcal
+        direction: egress
+        label: Calendario Google
+        wildcard: false
+        danger: >-
+          un calendario Google: chi lo approva concede di LEGGERE l'agenda (con
+          titoli, luoghi e invitati) e di scriverci eventi, che arrivano come
+          invito a chi è in lista. Non è confinabile a una cartella: il
+          perimetro è il calendario stesso.
+    providers:
+      - id: workspace
+        label: Account Google
+        credential:
+          kind: oauth
+          authorize_url: https://accounts.google.com/o/oauth2/v2/auth
+          token_url: https://oauth2.googleapis.com/token
+          scopes:
+            - https://www.googleapis.com/auth/drive
+            - https://www.googleapis.com/auth/spreadsheets
+            - https://www.googleapis.com/auth/calendar
+    verbs:
+      # Dove finisce il contenuto, o con CHI viene condiviso: `gdrive.share` è
+      # uscita verso una PERSONA, non verso una cartella. Per questo i due non
+      # si fondono — `mailto:` contro `gdrive:folder/` — ed è anche il motivo
+      # per cui un verbo porta più di una mappatura.
+      - {verb: gdrive.upload, direction: egress, scheme: mailto, arg: email, dtype: drive}
+      - {verb: gdrive.upload, direction: egress, scheme: gdrive, arg: folder_id, template: 'gdrive:folder/{value}', dtype: drive}
+      - {verb: gdrive.upload, direction: egress, scheme: gdrive, arg: parent_id, template: 'gdrive:folder/{value}', dtype: drive}
+      - {verb: gdrive.share, direction: egress, scheme: mailto, arg: email, dtype: drive}
+      - {verb: gdrive.share, direction: egress, scheme: gdrive, arg: folder_id, template: 'gdrive:folder/{value}', dtype: drive}
+      - {verb: gdrive.share, direction: egress, scheme: gdrive, arg: parent_id, template: 'gdrive:folder/{value}', dtype: drive}
+      - {verb: gdrive.mkdir, direction: egress, scheme: mailto, arg: email, dtype: drive}
+      - {verb: gdrive.mkdir, direction: egress, scheme: gdrive, arg: folder_id, template: 'gdrive:folder/{value}', dtype: drive}
+      - {verb: gdrive.mkdir, direction: egress, scheme: gdrive, arg: parent_id, template: 'gdrive:folder/{value}', dtype: drive}
+      - {verb: gdrive.move, direction: egress, scheme: mailto, arg: email, dtype: drive}
+      - {verb: gdrive.move, direction: egress, scheme: gdrive, arg: folder_id, template: 'gdrive:folder/{value}', dtype: drive}
+      - {verb: gdrive.move, direction: egress, scheme: gdrive, arg: parent_id, template: 'gdrive:folder/{value}', dtype: drive}
+      # `folder_id` lo aggiunge `call_tool` leggendo il parent del file da Drive.
+      - {verb: gdrive.update, direction: egress, scheme: mailto, arg: email, dtype: drive}
+      - {verb: gdrive.update, direction: egress, scheme: gdrive, arg: folder_id, template: 'gdrive:folder/{value}', dtype: drive}
+      - {verb: gdrive.update, direction: egress, scheme: gdrive, arg: parent_id, template: 'gdrive:folder/{value}', dtype: drive}
+      - {verb: gsheets.add_tab, direction: egress, scheme: gsheets, arg: spreadsheet_id, dtype: gsheets}
+      - {verb: gsheets.append_rows, direction: egress, scheme: gsheets, arg: spreadsheet_id, dtype: gsheets}
+      - {verb: gsheets.write_range, direction: egress, scheme: gsheets, arg: spreadsheet_id, dtype: gsheets}
+      # Letture di una risorsa PER ID: la fonte è quella risorsa, e l'argomento
+      # che la identifica è diverso per ognuna. Senza queste righe un
+      # `gsheets.read` su un foglio dichiarato fidato contaminerebbe comunque —
+      # la regola «verbo + fonte» applicata a metà.
+      - {verb: gsheets.read, direction: source, scheme: gsheets, arg: spreadsheet_id}
+      - {verb: gsheets.list_tabs, direction: source, scheme: gsheets, arg: spreadsheet_id}
+      - {verb: gdocs.read, direction: source, scheme: gdrive, arg: document_id, template: 'gdrive:doc/{value}'}
+      - {verb: gdrive.download, direction: source, scheme: gdrive, arg: file_id, template: 'gdrive:file/{value}'}
+    # Un elenco di eventi mescola più autori in una risposta: non c'è UNA fonte
+    # da vagliare, quindi contamina e basta.
+    taint:
+      - gcalendar.list_events
