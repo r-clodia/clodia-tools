@@ -241,6 +241,10 @@ class ToolsCardCopyTests(_NoPacks):
                 self.assertIsNotNone(card, f"{cid} non dichiara la propria card")
                 self.assertTrue(card["blurb"].strip(), f"{cid}: blurb vuoto")
                 self.assertTrue(card["scope"].strip(), f"{cid}: scope vuoto")
+                # Il disegno è un asset del frontend, la SCELTA è del
+                # connettore: finché la decideva la pagina, la deduceva dal
+                # nome — cioè sapeva chi sono i connettori.
+                self.assertTrue(card["icon"].strip(), f"{cid}: icona non scelta")
 
     def test_a_connector_without_a_card_says_so(self):
         """`core` e `datastore` non sono card di Tools: `None` è la risposta

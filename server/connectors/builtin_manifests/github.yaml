@@ -22,6 +22,7 @@ connectors:
               label: Personal access token
               secret: true
     tools_card:
+      icon: github
       setup_label: Connetti con un PAT
       blurb: >-
         Repo, issue, PR e code search via il server MCP ufficiale GitHub (tool

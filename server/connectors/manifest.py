@@ -826,6 +826,12 @@ class ToolsCard:
     docs_url: str = ""
     blurb: str = ""
     scope: str = ""
+    #: Quale GLIFO la pagina disegna per questo connettore. Il disegno è un
+    #: asset del frontend — un logo è un file SVG, non un dato del gateway — ma
+    #: la SCELTA è del connettore: finché la decideva il frontend, lo faceva
+    #: deducendola dal nome, cioè sapendo chi sono i connettori. Un nome che la
+    #: pagina non conosce ricade sul glifo generico.
+    icon: str = ""
 
 
 @dataclass(frozen=True)
@@ -1225,6 +1231,7 @@ def _parse_tools_card(raw: Any, where: str) -> ToolsCard:
         docs_url=_text(data.get("docs_url"), f"{where}.docs_url", required=False),
         blurb=_text(data.get("blurb"), f"{where}.blurb", required=False),
         scope=_text(data.get("scope"), f"{where}.scope", required=False),
+        icon=_text(data.get("icon"), f"{where}.icon", required=False),
     )
 
 

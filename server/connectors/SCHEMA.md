@@ -68,9 +68,16 @@ That is a connector which only needs a credential — image generation is one.
 | `danger_uris` | no | warnings for URIs of a shared scheme (`match` + `text`) |
 | `taint` | no | MCP prefixes of this pack whose answers do not taint a channel |
 | `topic_actions` | no | buttons the connector adds to a topic |
-| `tools_card` | no | what the Tools page shows |
+| `tools_card` | no | what the Tools page shows: `setup_label`, `status_verb`, `test_verb`, `docs_url`, `blurb`, `scope`, `icon` |
 | `services` | no | long-running processes, see #515 |
 | `storage_remote` | no | topic storage backend the pack provides, see #524 |
+
+`blurb`, `scope` and `icon` (#520) are the card's COPY and its glyph. The
+drawing is a frontend asset — a logo is an SVG file, not gateway data — but the
+CHOICE is the connector's: while the page decided it, it decided by NAME, which
+is the per-connector knowledge the issue removes. A connector without a
+`tools_card` is a vocabulary, not a card, and the Tools page does not draw it;
+an `icon` the page does not know falls back to the generic glyph.
 
 There is **no `seal_cap`**, and writing one is an error. The epic decided there
 is no SEAL ceiling on a binding: the owner decides per binding at the gate, and

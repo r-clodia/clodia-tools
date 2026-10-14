@@ -112,6 +112,7 @@ connectors:
           egress:
             - 'outbox:{address}'
     tools_card:
+      icon: email
       setup_label: Gestisci caselle
       blurb: >-
         Connettore multi-casella: aggiungi/togli mailbox IMAP/SMTP (info@,

@@ -27,6 +27,7 @@ connectors:
               label: API key
               secret: true
     tools_card:
+      icon: openai
       setup_label: Incolla la API key
       blurb: >-
         Generazione avatar/immagini via gpt-image-2 (PFP degli agenti). La

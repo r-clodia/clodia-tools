@@ -135,7 +135,8 @@ def summary(connector) -> dict:
                         "status_verb": connector.tools_card.status_verb,
                         "docs_url": connector.tools_card.docs_url,
                         "blurb": connector.tools_card.blurb,
-                        "scope": connector.tools_card.scope}
+                        "scope": connector.tools_card.scope,
+                        "icon": connector.tools_card.icon}
                        if connector.tools_card else None),
         "taint": list(connector.taint_prefixes),
     }

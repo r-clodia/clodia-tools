@@ -92,6 +92,7 @@ connectors:
           egress:
             - 'gdrive:folder/{folder}'
     tools_card:
+      icon: google
       setup_label: Connetti Google
       blurb: >-
         Gmail, Drive, Documenti e Calendar in un solo consenso (un token

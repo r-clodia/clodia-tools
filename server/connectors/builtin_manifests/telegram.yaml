@@ -71,6 +71,7 @@ connectors:
               label: Token del bot (@BotFather)
               secret: true
     tools_card:
+      icon: telegram
       setup_label: Collega un bot
       status_verb: telegram.status
       blurb: >-
