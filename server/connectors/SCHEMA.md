@@ -181,7 +181,11 @@ call actually happens — two implementations of it would be one too many.
 
 `id`, `label`, `fields[]`, `binding` (optional; only `channel`), and `adds:` with `ingress:` /
 `egress:` templates over the action's own fields. A template naming a field the
-action does not declare is an error. What the action adds is a *proposal*: the
+action does not declare is an error, and so is a template that does not start
+with one of the connector's OWN schemes written out (`tg:{chat}`, never `{url}`
+or `https://{host}/`; an `extends` provider uses the vocabulary it joins). At
+run time every resolved URI is checked against its scheme's forms and against
+`egress.check_grantable` before anything is written. What the action adds is a *proposal*: the
 grant is still the owner's, at the gate.
 
 Since #519 the action is **executed** from this declaration, by the generic

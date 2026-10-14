@@ -1061,6 +1061,23 @@ def _binding(raw: Any, where: str) -> str:
     return _one_of(value, BINDINGS, where) if value else ""
 
 
+def _check_action_schemes(actions, owned: set[str], where: str) -> None:
+    """Every template of a topic action starts with a LITERAL scheme the
+    connector owns: `tg:{chat}` yes, `{url}` or `https://{host}/` no — those
+    would let whoever fills the field whitelist any address without the WALLS
+    gate (review of #360)."""
+    for a in actions:
+        for key, templates in (("ingress", a.adds_ingress),
+                               ("egress", a.adds_egress)):
+            for tpl in templates:
+                scheme, sep, _rest = tpl.partition(":")
+                if not sep or scheme not in owned or "{" in scheme:
+                    raise ManifestError(
+                        f"{where}.topic_actions '{a.id}'.adds.{key}: '{tpl}' "
+                        f"must start with one of the connector's own schemes "
+                        f"({', '.join(sorted(owned)) or 'none'}), written out")
+
+
 def _parse_tools_card(raw: Any, where: str) -> ToolsCard:
     data = _mapping(raw, where)
     return ToolsCard(
@@ -1250,6 +1267,11 @@ def parse_connector(raw: Any, *, pack: str,
         _parse_topic_action(a, f"{where}.topic_actions[{i}]")
         for i, a in enumerate(
             _seq(data.get("topic_actions"), f"{where}.topic_actions")))
+    if not extends:
+        # Review of #360: an action writes only into its connector's own
+        # vocabulary. An `extends` provider is checked against the vocabulary
+        # it joins, in `build_registry`, once that is resolved.
+        _check_action_schemes(actions, {sch.name for sch in schemes}, where)
     services = tuple(
         _parse_service(s, f"{where}.services[{i}]", pack=pack)
         for i, s in enumerate(_seq(data.get("services"), f"{where}.services")))
@@ -1570,6 +1592,12 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
                     f"{_at(c.pack, c.id)}: extends '{c.extends}', which is "
                     f"itself an extension; a provider attaches to the vocabulary "
                     f"owner, not to another provider"), c.pack)
+            try:
+                _check_action_schemes(c.topic_actions,
+                                      {sch.name for sch in target.schemes},
+                                      _at(c.pack, c.id))
+            except ManifestError as e:
+                raise _blame(e, c.pack)
         for p in c.providers:
             key = (c.vocabulary, p.id)
             other = provider_owner.get(key)

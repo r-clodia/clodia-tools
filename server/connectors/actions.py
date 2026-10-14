@@ -170,7 +170,24 @@ def state(connector: Connector, action: TopicAction, tier: str,
         out["seal"] = _seal_state(connector, tier, name)
         out["bound"] = _bound_chat(tier, name)
         out["connected"] = out["bound"] is not None
+    else:
+        # The owner decides with the topic's tier in front of them, for EVERY
+        # action (#519): what is being authorised and at which SEAL level.
+        out["seal"] = {"tier": _topic_tier(tier, name), "cap": None,
+                       "requires_ack": False, "ack": None}
+    out["tier"] = out["seal"]["tier"]
     return out
+
+
+def _topic_tier(tier: str, name: str) -> str:
+    """The SEAL tier the topic declares (its meta), else the one in the path."""
+    from ..topics.service import TopicError
+    from ..topics_api import _service
+    try:
+        return str(_service().open(tier, name).get("meta", {}).get("tier")
+                   or tier)
+    except TopicError:
+        return tier
 
 
 def _seal_state(connector: Connector, tier: str, name: str) -> dict:
@@ -209,6 +226,47 @@ def _bound_chat(tier: str, name: str) -> str | None:
     return None
 
 
+def _owned_schemes(connector: Connector) -> set[str]:
+    """The schemes this connector's actions may write: its own, or — for a
+    provider that `extends` a vocabulary — the vocabulary owner's."""
+    own = {sch.name for sch in connector.schemes}
+    if connector.extends:
+        target = _resolved.registry().by_id(connector.extends)
+        if target is not None:
+            own |= {sch.name for sch in target.schemes}
+    return own
+
+
+def check_uris(connector: Connector, uris: dict[str, list[str]]) -> None:
+    """Every URI an action would write, checked BEFORE anything is written.
+
+    Review of #360: the values of free-text fields were not checked at all and
+    a template could write any scheme — `adds.egress: ['{url}']` let a topic
+    caller whitelist `https://evil.example/*` without the WALLS gate. Now:
+
+    - the scheme must be one the connector owns (refused at load as well);
+    - the rest must match one of that scheme's forms (`fullmatch`);
+    - the entry must be grantable in its direction (`egress.check_grantable`:
+      no `*`, no degenerate entry, no wildcard on a scheme that forbids it).
+    """
+    from .. import egress as eg
+    owned = _owned_schemes(connector)
+    for direzione, voci in uris.items():
+        for uri in voci:
+            scheme, sep, rest = uri.partition(":")
+            if not sep or scheme not in owned:
+                raise ActionError(
+                    f"'{uri}' non è un indirizzo di uno schema del connettore "
+                    f"'{connector.id}' ({', '.join(sorted(owned)) or 'nessuno'})")
+            if not eg.scheme_form_ok(scheme, rest):
+                raise ActionError(
+                    f"'{rest}' non ha la forma di un indirizzo '{scheme}:'")
+            try:
+                eg.check_grantable(direzione, uri)
+            except ValueError as e:
+                raise ActionError(str(e)[:300])
+
+
 def apply(connector: Connector, action: TopicAction, tier: str, name: str, *,
           body: dict, principal: str = "") -> dict:
     """Esegue l'azione dichiarata: whitelist, e binding se è dichiarato.
@@ -216,6 +274,11 @@ def apply(connector: Connector, action: TopicAction, tier: str, name: str, *,
     `body["action"]` sceglie fra `connect` e `disconnect` — gli stessi due verbi
     delle rotte di oggi, perché un connettore si attacca e si stacca, e un terzo
     stato non esiste.
+
+    Ordine (review di #360): tutto si VERIFICA prima di scrivere qualunque cosa
+    (valori, forme, schemi, cap SEAL, chat già collegata altrove); poi la
+    whitelist; il binding per ULTIMO, così un errore sulla whitelist non lascia
+    un binding orfano.
     """
     from .. import egress as eg
     from ..topics.service import TopicError
@@ -224,13 +287,15 @@ def apply(connector: Connector, action: TopicAction, tier: str, name: str, *,
     verso = str((body or {}).get("action") or "connect").strip()
     if verso not in ("connect", "disconnect"):
         raise ActionError(f"azione sconosciuta: {verso}")
-    # Il topic deve ESISTERE: le liste per scope sono chiavi di config, e una
-    # voce scritta per un topic non ancora creato sarebbe ereditata da chi un
-    # giorno lo creerà con quel nome (review di #310).
-    try:
-        _service().open(tier, name)
-    except TopicError as e:
-        raise ActionError(f"topic {tier}/{name} inesistente: {str(e)[:160]}")
+    # Il topic deve ESISTERE per scriverci: le liste per scope sono chiavi di
+    # config, e una voce scritta per un topic non ancora creato sarebbe
+    # ereditata da chi un giorno lo creerà con quel nome (review di #310).
+    # Togliere invece si può sempre — com'era sulle rotte di prima.
+    if verso == "connect":
+        try:
+            _service().open(tier, name)
+        except TopicError as e:
+            raise TopicMissing(f"topic {tier}/{name} inesistente: {str(e)[:160]}")
 
     scope = f"{tier}/{name}"
     if verso == "disconnect" and action.binding == "channel":
@@ -238,26 +303,39 @@ def apply(connector: Connector, action: TopicAction, tier: str, name: str, *,
 
     values = resolve_values(action, body or {})
     uris = render(action, values)
-    if action.binding == "channel":
-        _bind_channel(connector, tier, name, values, body or {},
-                      principal=principal)
-    for direzione, voci in (("ingress", uris["ingress"]),
-                            ("egress", uris["egress"])):
-        for uri in voci:
-            if verso == "connect":
-                eg.scope_allow(direzione, scope, uri)
-            else:
-                eg.scope_revoke(direzione, scope, uri)
+    check_uris(connector, uris)
+    chat = ""
+    if verso == "connect" and action.binding == "channel":
+        chat = _prepare_channel(connector, tier, name, values, body or {},
+                                principal=principal)
+    try:
+        for direzione, voci in (("ingress", uris["ingress"]),
+                                ("egress", uris["egress"])):
+            for uri in voci:
+                if verso == "connect":
+                    eg.scope_allow(direzione, scope, uri)
+                else:
+                    eg.scope_revoke(direzione, scope, uri)
+    except ValueError as e:
+        raise ActionError(str(e)[:200])
+    if chat:
+        from ..tools import telegram_bindings as tb
+        tb.set_binding(chat, "messaggero", tier, name)
     return state(connector, action, tier, name)
 
 
-def _bind_channel(connector: Connector, tier: str, name: str,
-                  values: dict, body: dict, *, principal: str = "") -> None:
-    """Il binding vero del canale, oltre alla whitelist.
+class TopicMissing(ActionError):
+    """The topic an action would write into does not exist."""
 
-    Sono DUE passi e vanno fatti insieme: senza il secondo il messaggero non
-    riporta niente anche con la whitelist scritta, ed è il sintomo che ha fatto
-    nascere `telegram-link` (Davide, 23 set 2026).
+
+def _prepare_channel(connector: Connector, tier: str, name: str,
+                     values: dict, body: dict, *, principal: str = "") -> str:
+    """Le verifiche del binding di canale, PRIMA di scrivere qualunque cosa.
+
+    Il binding vero (`tb.set_binding`) lo fa `apply` per ultimo: sono due passi
+    e vanno insieme — senza il secondo il messaggero non riporta niente anche
+    con la whitelist scritta (Davide, 23 set 2026) — ma un errore sulla
+    whitelist non deve lasciare un binding senza le sue voci.
     """
     from ..topics.service import TopicError, _check_channel_cap
     from ..topics_api import _service
@@ -286,7 +364,7 @@ def _bind_channel(connector: Connector, tier: str, name: str,
         _check_channel_cap({"type": connector.id}, meta.get("tier", tier), meta)
     except TopicError as e:
         raise ActionError(str(e)[:400])
-    tb.set_binding(chat, "messaggero", tier, name)
+    return chat
 
 
 def _disconnect_channel(connector: Connector, action: TopicAction, tier: str,

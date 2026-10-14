@@ -223,14 +223,35 @@ class OptionSetTests(unittest.TestCase):
                         self.assertEqual(set(opzione["values"]), set(attesi))
 
 
+#: A pack connector with a form credential under its own namespace, and one
+#: with an OAuth credential: the generic connect route is for PACKS.
+SMS_PACK = {"name": "sms-pack", "connectors": [{
+    "id": "sms", "manifest_version": 1, "namespace": "sms", "label": "SMS",
+    "schemes": [{"scheme": "sms", "direction": "egress"}],
+    "providers": [
+        {"id": "twilio", "label": "Twilio", "credential": {
+            "kind": "form", "vault_entry": "sms_twilio",
+            "fields": [{"name": "token", "secret": True}]}},
+    ]}, {
+    "id": "fax", "manifest_version": 1, "namespace": "fax", "label": "Fax",
+    "schemes": [{"scheme": "fax", "direction": "egress"}],
+    "providers": [
+        {"id": "cloud", "label": "Cloud", "credential": {
+            "kind": "oauth", "authorize_url": "https://x.example/a",
+            "token_url": "https://x.example/t"}}]}]}
+
+
 class ConnectTests(unittest.TestCase):
     def setUp(self) -> None:
+        from . import tools_api
         resolved.invalidate()
         self.addCleanup(resolved.invalidate)
         self.depositi: list[tuple] = []
         self.rimossi: list[str] = []
-        for p in (patch.object(connectors_api.internal_auth, "authorize",
-                               lambda *a, **k: (_HUMAN, None)),
+        for p in (patch.object(tools_api, "_authorized", lambda request: True),
+                  patch.object(resolved, "manifests",
+                               lambda: {"sms-pack": SMS_PACK}),
+                  patch.object(vault, "credential_type", lambda e: None),
                   patch.object(vault, "deposit",
                                lambda e, b, **k: self.depositi.append((e, b, k))),
                   patch.object(vault, "remove",
@@ -240,57 +261,63 @@ class ConnectTests(unittest.TestCase):
         self.c = TestClient(Starlette(routes=connectors_api.routes))
 
     def test_a_form_credential_is_deposited_where_the_manifest_says(self) -> None:
-        r = self.c.post("/internal/tools/connectors/github/connect",
-                        json={"token": "ghp_segretissimo"}, headers=_H)
+        r = self.c.post("/internal/tools/connectors/sms/connect",
+                        json={"token": "tw_segretissimo"}, headers=_H)
         self.assertEqual(r.status_code, 200, r.text)
         (entry, bundle, kw), = self.depositi
-        self.assertEqual(entry, "github_pat")
-        self.assertEqual(bundle, {"token": "ghp_segretissimo"})
+        self.assertEqual(entry, "sms_twilio")
+        self.assertEqual(bundle, {"token": "tw_segretissimo"})
         # Credenziale di infrastruttura: nessun grant per-agente.
         self.assertEqual(kw.get("grant_agents"), [])
+        self.assertEqual(kw.get("cred_type"), "connector:sms")
 
     def test_the_answer_never_carries_the_secret(self) -> None:
-        r = self.c.post("/internal/tools/connectors/github/connect",
-                        json={"token": "ghp_segretissimo"}, headers=_H)
-        self.assertNotIn("ghp_segretissimo", r.text)
+        r = self.c.post("/internal/tools/connectors/sms/connect",
+                        json={"token": "tw_segretissimo"}, headers=_H)
+        self.assertNotIn("tw_segretissimo", r.text)
         self.assertEqual(set(r.json()),
                          {"connected", "connector", "provider", "vault_entry"})
 
     def test_an_undeclared_field_is_not_written(self) -> None:
-        self.c.post("/internal/tools/connectors/github/connect",
+        self.c.post("/internal/tools/connectors/sms/connect",
                     json={"token": "x", "sudo": "true"}, headers=_H)
         (_entry, bundle, _kw), = self.depositi
         self.assertEqual(set(bundle), {"token"})
 
     def test_empty_fields_disconnect(self) -> None:
-        r = self.c.post("/internal/tools/connectors/github/connect",
+        r = self.c.post("/internal/tools/connectors/sms/connect",
                         json={"token": ""}, headers=_H)
         self.assertFalse(r.json()["connected"])
-        self.assertEqual(self.rimossi, ["github_pat"])
+        self.assertEqual(self.rimossi, ["sms_twilio"])
         self.assertEqual(self.depositi, [])
 
     def test_oauth_does_not_pass_through_here(self) -> None:
         """Un consenso OAuth ha credenziali d'applicazione, uno stato fra le due
         gambe e un callback: renderlo generico senza il manifest che lo descrive
         sarebbe riscriverlo. Resta alle rotte del provider."""
-        r = self.c.post("/internal/tools/connectors/google/connect",
+        r = self.c.post("/internal/tools/connectors/fax/connect",
                         json={}, headers=_H)
         self.assertEqual(r.status_code, 400)
         self.assertIn("oauth", r.json()["error"].lower())
+
+    def test_a_builtin_without_a_handler_is_refused(self) -> None:
+        r = self.c.post("/internal/tools/connectors/google/connect",
+                        json={}, headers=_H)
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(self.depositi, [])
 
     def test_an_unknown_connector_is_a_404(self) -> None:
         r = self.c.post("/internal/tools/connectors/citofono/connect",
                         json={}, headers=_H)
         self.assertEqual(r.status_code, 404)
 
-    def test_the_route_requires_the_internal_auth(self) -> None:
-        bare = TestClient(Starlette(routes=connectors_api.routes))
-        with patch.object(connectors_api.internal_auth, "authorize",
-                          lambda *a, **k: (None, connectors_api.JSONResponse(
-                              {"error": "unauthorized"}, status_code=401))):
+    def test_the_route_requires_the_admin_check(self) -> None:
+        from . import tools_api
+        with patch.object(tools_api, "_authorized", lambda request: False):
             self.assertEqual(
-                bare.post("/internal/tools/connectors/github/connect",
-                          json={}).status_code, 401)
+                self.c.post("/internal/tools/connectors/sms/connect",
+                            json={"token": "x"}).status_code, 401)
+        self.assertEqual(self.depositi, [])
 
 
 if __name__ == "__main__":  # pragma: no cover

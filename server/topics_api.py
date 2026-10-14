@@ -660,6 +660,8 @@ async def connector_action(request: Request):
             return JSONResponse({"error": "bad_json"}, status_code=400)
         return JSONResponse(ca.apply(connector, action, tier, name,
                                      body=body or {}, principal=principal or ""))
+    except ca.TopicMissing as e:
+        return JSONResponse({"error": str(e)[:400]}, status_code=404)
     except ca.ActionError as e:
         return JSONResponse({"error": str(e)[:400]}, status_code=400)
 
@@ -696,6 +698,10 @@ async def telegram_link(request: Request):
     body = dict(body or {})
     if "chat_id" in body:
         body.setdefault("chat", body.get("chat_id"))
+    # Parità con la rotta di prima (review di #360): il campo mancante si
+    # chiama `chat_id` in questa lingua, e si controlla prima del topic.
+    if body.get("action") == "connect" and not str(body.get("chat") or "").strip():
+        return JSONResponse({"error": "richiesto 'chat_id'"}, status_code=400)
     try:
         out = ca.apply(connector, action, tier, name, body=body,
                        principal=principal or "")
@@ -706,8 +712,9 @@ async def telegram_link(request: Request):
             stato = {"seal": ca.state(connector, action, tier, name)["seal"]}
         except Exception:  # noqa: BLE001 — l'errore vero è quello sopra
             stato = {}
-        codice = 404 if "inesistente" in testo else 400
-        return JSONResponse({"error": testo[:400], **stato}, status_code=codice)
+        # 400 anche per un topic inesistente, come prima: questa rotta non ha
+        # mai risposto 404.
+        return JSONResponse({"error": testo[:400], **stato}, status_code=400)
     return JSONResponse(_telegram_shape(out))
 
 

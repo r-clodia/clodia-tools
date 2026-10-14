@@ -31,9 +31,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import instance_profile, internal_auth, vault
+from . import instance_profile, vault
 from .connectors import resolved as _resolved
 from .connectors import validate as _validate
+from .connectors.manifest import vault_entry_problem
 
 LOG = logging.getLogger("clodia-tools.connectors-api")
 
@@ -147,6 +148,19 @@ async def connect(request: Request):
     if connector is None:
         return JSONResponse({"error": f"connettore '{cid}' non installato"},
                             status_code=404)
+    if connector.builtin:
+        # Review of #360: a connector the gateway implements itself has a
+        # credential whose SHAPE its native code reads (`github_pat` is
+        # `{"value": pat}`, read by `proxy._resolve_secrets`) and side effects
+        # around it (the MCP backend, `_connector_guard`, the integrations
+        # profile). The generic route delegates to that handler, so the two
+        # URLs are one behaviour; with no handler it refuses.
+        legacy = _LEGACY_CONNECT.get(cid)
+        if legacy is None:
+            return JSONResponse(
+                {"error": f"il connettore '{cid}' è del gateway: si collega "
+                          f"dalla sua pagina, non da qui"}, status_code=400)
+        return await _delegate(legacy, request, connector)
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
@@ -168,6 +182,18 @@ async def connect(request: Request):
                       f"form: la sua credenziale è "
                       f"'{cred.kind if cred else 'assente'}'"},
             status_code=400)
+    # The vault entry is the connector's own (review of #359/#360). Checked at
+    # load already; again here because what the route writes or REMOVES must
+    # never be decided by a file on a volume the gateway does not own.
+    problem = vault_entry_problem(cred.vault_entry, connector.namespace)
+    owner_type = _cred_type(connector)
+    esistente = vault.credential_type(cred.vault_entry)
+    if not problem and esistente is not None and esistente != owner_type:
+        problem = (f"la voce di vault '{cred.vault_entry}' esiste già e non è "
+                   f"di questo connettore")
+    if problem:
+        LOG.warning("connettore '%s': voce di vault rifiutata (%s)", cid, problem)
+        return JSONResponse({"error": problem}, status_code=409)
 
     bundle = {}
     mancanti = []
@@ -189,7 +215,7 @@ async def connect(request: Request):
     if mancanti:
         return JSONResponse({"error": "campi richiesti mancanti: "
                                       + ", ".join(mancanti)}, status_code=400)
-    vault.deposit(cred.vault_entry, bundle, cred_type="api_key",
+    vault.deposit(cred.vault_entry, bundle, cred_type=owner_type,
                   grant_agents=[])
     # Mai il contenuto nei log: solo che è successo, e su quale voce.
     LOG.info("connettore '%s': credenziale '%s' depositata (%d campi)", cid,
@@ -197,6 +223,36 @@ async def connect(request: Request):
     return JSONResponse({"connected": True, "connector": cid,
                          "provider": provider.id,
                          "vault_entry": cred.vault_entry})
+
+
+def _cred_type(connector) -> str:
+    """The vault `type` a connector's credential is written with: it is how the
+    route later recognises an entry as THIS connector's before touching it."""
+    return f"connector:{connector.id}"
+
+
+#: Built-in connectors whose credential has a dedicated handler in `tools_api`.
+_LEGACY_CONNECT = {"github": "github_connect"}
+
+
+async def _delegate(handler_name: str, request: Request, connector):
+    """Run the legacy handler and answer in the generic route's shape."""
+    import json as _json
+
+    from . import tools_api
+    resp = await getattr(tools_api, handler_name)(request)
+    if resp.status_code != 200:
+        return resp
+    try:
+        body = _json.loads(resp.body)
+    except Exception:  # noqa: BLE001
+        return resp
+    provider = connector.providers[0] if connector.providers else None
+    cred = provider.credential if provider else None
+    return JSONResponse({"connected": bool(body.get("connected")),
+                         "connector": connector.id,
+                         "provider": provider.id if provider else "",
+                         "vault_entry": cred.vault_entry if cred else ""})
 
 
 routes = [
