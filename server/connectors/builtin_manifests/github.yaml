@@ -1,0 +1,77 @@
+# GitHub, come il gateway lo governa oggi (clodia-platform#518).
+# Migrazione #525: questo file si sposta in it-pack e sparisce da qui.
+#
+# GitHub non possiede nessuno schema: le sue destinazioni sono normali URL
+# `https://github.com/<owner>/<repo>`, controllati dalle regole http ordinarie,
+# che sono il percorso generico più stretto che esista. Quello che dichiara è
+# DOVE finiscono i suoi verbi e CHE AVVERTENZA mostrare sui suoi host.
+name: gateway-github
+connectors:
+  - id: github
+    manifest_version: 1
+    namespace: github
+    label: GitHub
+    providers:
+      - id: pat
+        label: Personal access token
+        credential:
+          kind: form
+          vault_entry: github_pat
+          fields:
+            - name: token
+              label: Personal access token
+              secret: true
+    danger_uris:
+      # Sapere se un repo è pubblico richiederebbe l'API GitHub, che può
+      # sbagliare ed essere stale, e sposterebbe la decisione dal giudizio
+      # dell'owner a un'interrogazione. Il compito del dialog è dirgli COSA sta
+      # concedendo, non decidere al suo posto.
+      # Un solo gruppo quantificato, e il dot-boundary è dentro: `evilgithub.com`
+      # non combacia, al contrario di un `endswith("github.com")`.
+      - match: '^https?://(?:[a-z0-9.-]+\.)?github\.com(?:[:/]|$)'
+        text: >-
+          un repository su github.com. Se è pubblico, tutto ciò che viene spinto
+          lì è visibile a chiunque e resta nella storia del repo anche se
+          cancellato dopo.
+    verbs:
+      # Verbi NATIVI che escono: portano il repository come URL intero (o non lo
+      # portano affatto, e chi chiama risolve il remote e lo aggiunge).
+      # `clone`/`pull` portano DENTRO e non hanno una destinazione da approvare:
+      # il perimetro di ciò che si può tirare è già la lista dei repository
+      # approvati.
+      - verb: github.push
+        direction: egress
+        scheme: https
+        arg: repo
+        template: '{value}'
+        normalise: repo_url
+        dtype: github
+      - verb: github.pull_request
+        direction: egress
+        scheme: https
+        arg: repo
+        template: '{value}'
+        normalise: repo_url
+        dtype: github
+      # Verbi di SCRITTURA del backend MCP: sono proxati e l'elenco cambia
+      # upstream senza di noi, quindi si nominano per prefisso. Mandano
+      # `owner` + `repo` separati.
+      - {verb: 'github.create_', prefix: true, direction: egress, scheme: https, arg: repo, template: '{value}', normalise: repo_pair, dtype: github}
+      - {verb: 'github.update_', prefix: true, direction: egress, scheme: https, arg: repo, template: '{value}', normalise: repo_pair, dtype: github}
+      - {verb: 'github.delete_', prefix: true, direction: egress, scheme: https, arg: repo, template: '{value}', normalise: repo_pair, dtype: github}
+      - {verb: 'github.push_', prefix: true, direction: egress, scheme: https, arg: repo, template: '{value}', normalise: repo_pair, dtype: github}
+      - {verb: 'github.fork_', prefix: true, direction: egress, scheme: https, arg: repo, template: '{value}', normalise: repo_pair, dtype: github}
+      - {verb: 'github.merge_', prefix: true, direction: egress, scheme: https, arg: repo, template: '{value}', normalise: repo_pair, dtype: github}
+      - {verb: 'github.add_', prefix: true, direction: egress, scheme: https, arg: repo, template: '{value}', normalise: repo_pair, dtype: github}
+      - {verb: 'github.issue_write', prefix: true, direction: egress, scheme: https, arg: repo, template: '{value}', normalise: repo_pair, dtype: github}
+      - {verb: 'github.pull_request_review_write', prefix: true, direction: egress, scheme: https, arg: repo, template: '{value}', normalise: repo_pair, dtype: github}
+      - {verb: 'github.sub_issue_write', prefix: true, direction: egress, scheme: https, arg: repo, template: '{value}', normalise: repo_pair, dtype: github}
+      - {verb: 'github.request_copilot_review', prefix: true, direction: egress, scheme: https, arg: repo, template: '{value}', normalise: repo_pair, dtype: github}
+    # Le letture di GitHub sono interamente contenuto di terzi, e l'elenco dei
+    # verbi upstream cambia senza di noi: prefissi, non nomi.
+    taint:
+      - github.get_
+      - github.list_
+      - github.search_
+      - github.issue_read
+      - github.pull_request_read

@@ -47,6 +47,8 @@ MANIFEST_VERSION = 1
 
 DIRECTIONS = ("source", "egress", "both")
 VERB_DIRECTIONS = ("egress", "source")
+#: Where a mapping reads its value from: the call's arguments, or its answer.
+READS_FROM = ("arguments", "result")
 
 #: Platform-intrinsic schemes. They are not a connector's to declare — #518
 #: leaves exactly these in a core manifest — but a pack may *point at* the
@@ -64,6 +66,25 @@ CORE_SCHEMES = tuple(CORE_SCHEME_DIRECTION)
 CREDENTIAL_KINDS = ("form", "oauth")
 HEALTH_KINDS = ("http", "tcp", "command")
 RESTART_POLICIES = ("always", "on-failure", "never")
+
+#: Bounds on a pack-supplied regular expression and on what it is run against.
+#: See `_compiled` for why they exist and why they are checked at load time.
+MAX_PATTERN_LENGTH = 200
+MAX_VALUE_LENGTH = 2048
+
+#: A quantified group inside another quantifier — `(a+)+`, `(a*)*`, `(a{2,}){3}`.
+#: Every textbook catastrophic-backtracking pattern has this shape, and no URI
+#: form needs it. `?` on the outer group is deliberately not a trigger: it
+#: bounds the repetition to one, which is what `(?:folder/)?` does.
+_NESTED_QUANTIFIER = re.compile(
+    r"\([^()]*(?:[+*]|\{\d+,?\d*\})[^()]*\)\s*(?:[+*]|\{\d+,?\d*\})")
+
+#: Value transforms the GATEWAY implements, that a verb mapping may name. A
+#: closed list on purpose: these are the three things today's extractors do that
+#: a template cannot (lowercase a host, drop a port, resolve a repository
+#: shorthand), and a pack that could supply the transform itself would be
+#: rewriting what a URL means on this instance. See `normalise.py`.
+NORMALISERS = ("url_origin", "repo_url", "repo_pair", "email_from")
 
 _ID = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
 _NAMESPACE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
@@ -154,8 +175,35 @@ def _compiled(raw: Any, where: str) -> re.Pattern[str]:
     Compiled eagerly and on purpose: a pattern that only blows up the first time
     a real destination is checked would turn an authoring mistake into a runtime
     denial in the middle of someone's turn.
+
+    **Bounded cost** (review of clodia-tools#353). These patterns come from a
+    pack and run inside the gateway's event loop on every destination check, so
+    a catastrophic one — `(a+)+$` against a long non-matching value — would not
+    merely be slow: it would hold the loop for everybody. Python's `re` has no
+    timeout, and `regex`'s is not a dependency we have, so the bound has to be
+    on the pattern and on the input instead of on the clock:
+
+    - the pattern is capped in length;
+    - a quantified group that is itself quantified is refused by name, which is
+      the shape every catastrophic-backtracking example shares;
+    - `Form.matches` refuses an over-long value before matching.
+
+    Refused at load, not at match time: a pack whose pattern is dangerous must
+    fail where an owner can read the message, not in the middle of a turn.
     """
     pattern = _text(raw, where)
+    if len(pattern) > MAX_PATTERN_LENGTH:
+        raise ManifestError(
+            f"{where}: regular expression is {len(pattern)} characters, over the "
+            f"{MAX_PATTERN_LENGTH} this gateway will evaluate. A URI form that "
+            f"needs more than that is describing something other than a URI")
+    nested = _NESTED_QUANTIFIER.search(pattern)
+    if nested:
+        raise ManifestError(
+            f"{where}: '{nested.group(0)}' is a quantified group inside another "
+            f"quantifier, the shape that makes a regular expression take "
+            f"exponential time on a value that does not match. Refused: this "
+            f"pattern runs in the gateway's loop on every check")
     try:
         return re.compile(pattern)
     except re.error as exc:
@@ -172,14 +220,25 @@ def _placeholders(template: str) -> list[str]:
 
 @dataclass(frozen=True)
 class Form:
-    """One accepted shape of a URI under a scheme (`tg:-100123`, `tg:@handle`)."""
+    """One accepted shape of a URI under a scheme (`tg:-100123`, `tg:@handle`).
+
+    `fullmatch`, never `match` (review of clodia-tools#353, applied here because
+    #518 is where these patterns start deciding): with `^-?\\d+` as the group
+    form, `match` accepts `-100123garbage` — a value that would be granted as a
+    chat and could never be the chat anyone meant. A form says what the whole
+    value looks like; a prefix of it is a different value.
+    """
 
     label: str
     pattern: re.Pattern[str]
     example: str = ""
 
     def matches(self, rest: str) -> bool:
-        return bool(self.pattern.match(rest))
+        if len(rest or "") > MAX_VALUE_LENGTH:
+            # A pattern cannot cost more than the bound checked at load time
+            # unless the *input* is unbounded. Nothing legitimate reaches this.
+            return False
+        return bool(self.pattern.fullmatch(rest or ""))
 
 
 @dataclass(frozen=True)
@@ -197,6 +256,26 @@ class Canonicalisation:
 
 
 @dataclass(frozen=True)
+class DangerRule:
+    """A warning about the URIs of a connector that lives on a SHARED scheme.
+
+    `Scheme.danger` covers the schemes a connector owns. GitHub owns none — its
+    destinations are ordinary `https://github.com/<owner>/<repo>` URLs — yet
+    «if the repository is public, everything pushed there is visible to anyone»
+    is precisely what an owner needs to read at the gate, and it cannot hang off
+    `https:` as a whole. So the connector that knows those hosts declares the
+    warning for them, and nobody has to write `github.com` in `egress.py`.
+    """
+
+    pattern: re.Pattern[str]
+    text: str
+
+    def matches(self, uri: str) -> bool:
+        return bool(uri) and len(uri) <= MAX_VALUE_LENGTH and bool(
+            self.pattern.search(uri))
+
+
+@dataclass(frozen=True)
 class Scheme:
     """A URI scheme with its direction, its shapes and its gate warning."""
 
@@ -206,6 +285,14 @@ class Scheme:
     icon: str = ""
     danger: str = ""
     hierarchical: bool = False
+    #: The whole URI is case-insensitive, so it is stored lowercased — the mail
+    #: family. Not cosmetic: the extractors lowercase the destination of a call,
+    #: so a whitelist entry with a capital would never match, i.e. would be
+    #: granted and ineffective.
+    lowercase: bool = False
+    #: `<scheme>:*` is a legitimate rule. False for a scheme where covering
+    #: everything is not a perimeter at all (`gcal:*` is the whole agenda).
+    wildcard: bool = True
     forms: tuple[Form, ...] = ()
     canonicalise: tuple[Canonicalisation, ...] = ()
 
@@ -259,19 +346,43 @@ class VerbMapping:
     extractors in `egress.py` do today. `template` builds the URI from it and
     defaults to `<scheme>:{value}`; `multi` says the argument may carry a list,
     the way `email.send` carries several recipients.
+
+    A verb may be mapped **more than once** (#518): `email.send` reads `to`,
+    `cc` and `bcc`, and `gdrive.upload` reads a folder *and* a person to share
+    with — two schemes for one call. One mapping per argument, so the grammar
+    says what the extractor said, instead of hiding several arguments behind a
+    name only the gateway understands.
+
+    `prefix: true` makes `verb` a prefix instead of a name. It exists for the
+    verbs of a proxied MCP backend, whose list changes upstream without us —
+    `github.create_*` is the same decision whichever noun follows.
+
+    `normalise` names one of `NORMALISERS`, for the three transforms a template
+    cannot express. With it, `arg` may be omitted: the transform reads the
+    arguments it needs.
     """
 
     verb: str
     direction: str
     scheme: str
-    arg: str
+    arg: str = ""
     template: str = ""
     multi: bool = False
     dtype: str = ""
+    prefix: bool = False
+    normalise: str = ""
+    #: `arguments` (default) or `result`. A read whose source is only knowable
+    #: from the ANSWER — the sender of a mail — is read from the result, which
+    #: the gateway already has in hand when it judges the call.
+    reads: str = "arguments"
 
     def uri_for(self, value: str) -> str:
         template = self.template or f"{self.scheme}:{{value}}"
         return template.replace("{value}", value)
+
+    def covers(self, verb: str) -> bool:
+        """Does this mapping describe `verb`? Exact name, or prefix if declared."""
+        return verb.startswith(self.verb) if self.prefix else verb == self.verb
 
 
 @dataclass(frozen=True)
@@ -366,11 +477,19 @@ class Connector:
     schemes: tuple[Scheme, ...] = ()
     providers: tuple[Provider, ...] = ()
     verbs: tuple[VerbMapping, ...] = ()
+    danger_rules: tuple[DangerRule, ...] = ()
     taint_prefixes: tuple[str, ...] = ()
     topic_actions: tuple[TopicAction, ...] = ()
     tools_card: ToolsCard | None = None
     services: tuple[Service, ...] = ()
     storage_remote: StorageRemote | None = None
+    #: Shipped by the gateway itself (`builtin/*.yaml`) rather than installed
+    #: with a pack. Those files are the connectors this gateway still implements
+    #: natively, declared in the same grammar so the PDP has one source — see
+    #: `builtin.py`. They are code, not input: they may declare the intrinsic
+    #: schemes, they are not checked against the reserved namespaces (they *are*
+    #: the gateway's namespaces), and they win any collision with a pack.
+    builtin: bool = False
 
     @property
     def owns_vocabulary(self) -> bool:
@@ -479,6 +598,8 @@ def _parse_scheme(raw: Any, where: str) -> Scheme:
         icon=_text(data.get("icon"), f"{where}.icon", required=False),
         danger=_text(data.get("danger"), f"{where}.danger", required=False),
         hierarchical=_flag(data.get("hierarchical"), f"{where}.hierarchical"),
+        lowercase=_flag(data.get("lowercase"), f"{where}.lowercase"),
+        wildcard=_flag(data.get("wildcard"), f"{where}.wildcard", default=True),
         forms=forms,
         canonicalise=canon,
     )
@@ -546,7 +667,19 @@ def _parse_verb(raw: Any, where: str) -> VerbMapping:
                         VERB_DIRECTIONS, f"{where}.direction")
     scheme = _matching(_text(data.get("scheme"), f"{where}.scheme"), _SCHEME,
                        f"{where}.scheme")
-    arg = _matching(_text(data.get("arg"), f"{where}.arg"), _ARG, f"{where}.arg")
+    normalise = _text(data.get("normalise"), f"{where}.normalise", required=False)
+    if normalise:
+        _one_of(normalise, NORMALISERS, f"{where}.normalise")
+    arg = _text(data.get("arg"), f"{where}.arg", required=not normalise)
+    if arg:
+        _matching(arg, _ARG, f"{where}.arg")
+    reads = _one_of(
+        _text(data.get("reads"), f"{where}.reads", required=False,
+              default="arguments"), READS_FROM, f"{where}.reads")
+    if reads == "result" and direction != "source":
+        raise ManifestError(
+            f"{where}.reads: only a read can take its destination from the "
+            f"result; an outbound call is judged before it happens")
     template = _text(data.get("template"), f"{where}.template", required=False)
     if template and "{value}" not in template:
         raise ManifestError(
@@ -560,6 +693,9 @@ def _parse_verb(raw: Any, where: str) -> VerbMapping:
         template=template,
         multi=_flag(data.get("multi"), f"{where}.multi"),
         dtype=_text(data.get("dtype"), f"{where}.dtype", required=False),
+        prefix=_flag(data.get("prefix"), f"{where}.prefix"),
+        normalise=normalise,
+        reads=reads,
     )
 
 
@@ -682,12 +818,17 @@ _OWNER_ONLY = ("schemes", "verbs", "taint", "topic_actions")
 
 
 def parse_connector(raw: Any, *, pack: str,
-                    reserved: Iterable[str] | None = None) -> Connector:
+                    reserved: Iterable[str] | None = None,
+                    builtin: bool = False) -> Connector:
     """One entry of the `connectors:` block, validated on its own.
 
     `reserved` is passed through to `check_namespace`; cross-connector checks
     (duplicate ids, unknown `extends`, scheme owned twice) belong to
     `build_registry`, which is the only place that can see them.
+
+    `builtin` marks a manifest the gateway ships with itself: it may declare the
+    platform-intrinsic schemes, because that is where they are now declared, and
+    its namespaces are the gateway's own. Nothing on disk can set it.
     """
     where = _at(pack)
     data = _mapping(raw, where)
@@ -728,7 +869,7 @@ def parse_connector(raw: Any, *, pack: str,
         for i, s in enumerate(_seq(data.get("schemes"), f"{where}.schemes")))
     seen_schemes: set[str] = set()
     for s in schemes:
-        if s.name in CORE_SCHEMES:
+        if s.name in CORE_SCHEMES and not builtin:
             raise ManifestError(
                 f"{where}: scheme '{s.name}' is platform-intrinsic and stays in "
                 f"the core manifest; a pack may map verbs onto it but not "
@@ -736,10 +877,10 @@ def parse_connector(raw: Any, *, pack: str,
         if s.name in seen_schemes:
             raise ManifestError(f"{where}: scheme '{s.name}' declared twice")
         seen_schemes.add(s.name)
-    if not (schemes or extends or data.get("providers")):
+    if not (schemes or extends or data.get("providers") or data.get("verbs")):
         raise ManifestError(
-            f"{where}: declares no scheme, no provider and extends nothing, so "
-            f"it is an empty connector")
+            f"{where}: declares no scheme, no verb and no provider, and extends "
+            f"nothing, so it is an empty connector")
 
     providers = tuple(
         _parse_provider(p, f"{where}.providers[{i}]", pack=pack)
@@ -753,32 +894,23 @@ def parse_connector(raw: Any, *, pack: str,
     verbs = tuple(
         _parse_verb(v, f"{where}.verbs[{i}]")
         for i, v in enumerate(_seq(data.get("verbs"), f"{where}.verbs")))
-    check_namespace(namespace, [v.verb for v in verbs], reserved=reserved,
-                    where=where)
-    for v in verbs:
-        if v.scheme in seen_schemes:
-            direction = next(s.direction for s in schemes if s.name == v.scheme)
-        elif v.scheme in CORE_SCHEME_DIRECTION:
-            direction = CORE_SCHEME_DIRECTION[v.scheme]
-        else:
-            raise ManifestError(
-                f"{where}: verb '{v.verb}' maps to scheme '{v.scheme}', which "
-                f"this connector does not declare and which is not one of the "
-                f"platform schemes ({', '.join(CORE_SCHEMES)})")
-        if v.direction == "egress" and direction not in ("egress", "both"):
-            raise ManifestError(
-                f"{where}: verb '{v.verb}' writes to scheme '{v.scheme}', "
-                f"declared as '{direction}'")
-        if v.direction == "source" and direction not in ("source", "both"):
-            raise ManifestError(
-                f"{where}: verb '{v.verb}' reads from scheme '{v.scheme}', "
-                f"declared as '{direction}'")
+    if not builtin:
+        check_namespace(namespace, [v.verb for v in verbs], reserved=reserved,
+                        where=where)
+    danger_rules = tuple(
+        DangerRule(
+            pattern=_compiled(_mapping(d, f"{where}.danger_uris[{i}]").get("match"),
+                              f"{where}.danger_uris[{i}].match"),
+            text=_text(_mapping(d, f"{where}.danger_uris[{i}]").get("text"),
+                       f"{where}.danger_uris[{i}].text"))
+        for i, d in enumerate(_seq(data.get("danger_uris"),
+                                   f"{where}.danger_uris")))
 
     taint = tuple(
         _text(t, f"{where}.taint[{i}]")
         for i, t in enumerate(_seq(data.get("taint"), f"{where}.taint")))
     for prefix in taint:
-        if not prefix.startswith(f"{namespace}."):
+        if not builtin and not prefix.startswith(f"{namespace}."):
             raise ManifestError(
                 f"{where}: taint prefix '{prefix}' is outside namespace "
                 f"'{namespace}'. Declaring what does not taint a channel is a "
@@ -828,22 +960,26 @@ def parse_connector(raw: Any, *, pack: str,
         schemes=schemes,
         providers=providers,
         verbs=verbs,
+        danger_rules=danger_rules,
         taint_prefixes=taint,
         topic_actions=actions,
         tools_card=_parse_tools_card(card, f"{where}.tools_card") if card else None,
         services=services,
         storage_remote=storage,
+        builtin=builtin,
     )
 
 
 def load_manifest(pack_manifest: Mapping[str, Any], *, pack: str,
-                  reserved: Iterable[str] | None = None) -> list[Connector]:
+                  reserved: Iterable[str] | None = None,
+                  builtin: bool = False) -> list[Connector]:
     """The `connectors:` block of one `pack.yaml`. No block → no connector."""
     raw = pack_manifest.get("connectors")
     if raw is None:
         return []
     entries = _seq(raw, f"{_at(pack)}: connectors")
-    return [parse_connector(e, pack=pack, reserved=reserved) for e in entries]
+    return [parse_connector(e, pack=pack, reserved=reserved, builtin=builtin)
+            for e in entries]
 
 
 def parse_services(pack_manifest: Mapping[str, Any], *, pack: str,
@@ -870,9 +1006,49 @@ class Registry:
     """
 
     connectors: tuple[Connector, ...] = ()
+    #: Connectors dropped while building, with the reason. A pack that collides
+    #: with a gateway connector is refused on its own, not by making the whole
+    #: registry unbuildable: the alternative would be one malformed pack taking
+    #: the PDP's tables down with it.
+    refused: tuple[str, ...] = ()
 
     def by_id(self, cid: str) -> Connector | None:
         return next((c for c in self.connectors if c.id == cid), None)
+
+    def scheme(self, name: str) -> Scheme | None:
+        return next((s for s in self.schemes() if s.name == name), None)
+
+    def mappings_for(self, verb: str,
+                     direction: str) -> tuple[tuple[Connector, VerbMapping], ...]:
+        """Every `(connector, mapping)` that describes `verb`, in declaration order.
+
+        A verb may be mapped more than once — `email.send` to `to`, `cc` and
+        `bcc` — and the destinations of one call are the union.
+
+        An exact name wins over a prefix, and a builtin wins over a pack: the
+        gateway's own connectors are consulted first for the same reason
+        `egress.spec_for` consulted its tables before the registry (#517), and
+        a prefix is a statement about the verbs nobody has named, so it must
+        not quietly capture one that somebody has.
+        """
+        hits = [(c, v) for c in self.connectors for v in c.verbs
+                if v.direction == direction and v.covers(verb)]
+        for builtin in (True, False):
+            for exact in (True, False):
+                picked = tuple((c, v) for c, v in hits
+                               if c.builtin is builtin and (not v.prefix) is exact)
+                if picked:
+                    return picked
+        return ()
+
+    def danger_for(self, uri: str) -> str:
+        """The warning for this URI from a connector that claims its hosts, or
+        `""`. Builtins first, so a pack cannot soften the gateway's own text."""
+        for c in sorted(self.connectors, key=lambda c: not c.builtin):
+            for rule in c.danger_rules:
+                if rule.matches(uri):
+                    return rule.text
+        return ""
 
     def vocabularies(self) -> tuple[Connector, ...]:
         return tuple(c for c in self.connectors if c.owns_vocabulary)
@@ -907,7 +1083,8 @@ class Registry:
 
 
 def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
-                   reserved: Iterable[str] | None = None) -> Registry:
+                   reserved: Iterable[str] | None = None,
+                   builtin: Iterable[str] = ()) -> Registry:
     """Resolve the connectors of every installed pack, in two passes.
 
     `manifests` maps pack name → the parsed `pack.yaml`. Two passes because
@@ -915,14 +1092,52 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
     may well be installed before the pack that owns the mail vocabulary, and a
     first-pass failure there would mean a connector that works or not depending
     on the day it was installed.
+
+    `builtin` names the manifests the gateway ships with itself (#518). They are
+    parsed first and with the gateway's own privileges, and they **win** any
+    collision with an installed pack: while the gateway still implements a
+    connector natively, a pack claiming the same id or the same scheme is
+    refused on its own — not merged, and not fatal to the registry. Letting the
+    pack win would mean an installed manifest redefining what `mailto:` means
+    while the native implementation is still the thing doing the sending.
     """
     reserved_set = set(core_namespaces() if reserved is None else reserved)
+    builtin_names = list(dict.fromkeys(builtin))
+    refused: list[str] = []
     parsed: list[Connector] = []
-    for pack in sorted(manifests):
+    for pack in builtin_names:
+        parsed.extend(load_manifest(manifests[pack], pack=pack, builtin=True))
+    builtin_ids = {c.id for c in parsed}
+    builtin_schemes = {s.name for c in parsed for s in c.schemes}
+    if reserved is None:
+        # The namespaces of the gateway's own connectors are reserved against
+        # the packs — belt and braces, since `core_namespaces()` already derives
+        # them from the native verbs those connectors implement. Not added when
+        # the caller passes `reserved` explicitly: that is how a registry from
+        # BEFORE the gateway owned a namespace is reproduced, which is the only
+        # way to hold a mapping that is illegitimate today (#517, call time).
+        reserved_set.update(c.namespace for c in parsed)
+
+    for pack in sorted(set(manifests) - set(builtin_names)):
         # Each pack is checked against the gateway's namespaces *and* against the
         # namespaces already claimed by the packs parsed before it.
         for connector in load_manifest(manifests[pack], pack=pack,
                                        reserved=reserved_set):
+            clash = ""
+            if connector.id in builtin_ids:
+                clash = f"connector id '{connector.id}'"
+            else:
+                taken = [s.name for s in connector.schemes
+                         if s.name in builtin_schemes]
+                if taken:
+                    clash = f"scheme '{taken[0]}'"
+            if clash:
+                refused.append(
+                    f"{_at(pack, connector.id)}: {clash} is still implemented by "
+                    f"this gateway, so the pack's connector is ignored. It "
+                    f"becomes effective when that implementation moves into a "
+                    f"pack (epic clodia-platform#527)")
+                continue
             parsed.append(connector)
         reserved_set.update(
             c.namespace for c in parsed if c.pack == pack)
@@ -969,4 +1184,50 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
                     f"declared by both '{other.pack}' and '{c.pack}'")
             provider_owner[key] = c
 
-    return Registry(connectors=tuple(parsed))
+    _check_verb_schemes(parsed)
+    return Registry(connectors=tuple(parsed), refused=tuple(refused))
+
+
+def _check_verb_schemes(connectors: list[Connector]) -> None:
+    """Every mapping points at a scheme that EXISTS on this instance, in the
+    right direction.
+
+    Checked here and not inside `parse_connector`, because a connector alone
+    cannot answer it: a pack may legitimately map its own verb onto a vocabulary
+    someone else owns — a courier pack that sends mail is checked against the
+    very same `mailto:` whitelist, which is the point of #517 — and the
+    gateway's own files are organised by connector, so `gdocs.read` writes into
+    the `gdrive:` vocabulary of the Google connector next to it. What stays
+    forbidden is *declaring* someone else's scheme: using a vocabulary is not
+    owning it.
+    """
+    declared = {s.name: s.direction for c in connectors for s in c.schemes}
+    declared.update({k: v for k, v in CORE_SCHEME_DIRECTION.items()
+                     if k not in declared})
+    dtypes: dict[tuple[str, str], set[str]] = {}
+    for c in connectors:
+        for v in c.verbs:
+            dtypes.setdefault((v.verb, v.direction), set()).add(v.dtype)
+    for (verb, _d), seen in dtypes.items():
+        if len({t for t in seen if t}) > 1:
+            raise ManifestError(
+                f"verb '{verb}' is mapped with two destination types "
+                f"({', '.join(sorted(t for t in seen if t))}); the gate would "
+                f"name the call differently depending on which argument it read")
+    for c in connectors:
+        for v in c.verbs:
+            direction = declared.get(v.scheme)
+            if direction is None:
+                raise ManifestError(
+                    f"{_at(c.pack, c.id)}: verb '{v.verb}' maps to scheme "
+                    f"'{v.scheme}', which no installed connector declares and "
+                    f"which is not one of the platform schemes "
+                    f"({', '.join(CORE_SCHEMES)})")
+            if v.direction == "egress" and direction not in ("egress", "both"):
+                raise ManifestError(
+                    f"{_at(c.pack, c.id)}: verb '{v.verb}' writes to scheme "
+                    f"'{v.scheme}', declared as '{direction}'")
+            if v.direction == "source" and direction not in ("source", "both"):
+                raise ManifestError(
+                    f"{_at(c.pack, c.id)}: verb '{v.verb}' reads from scheme "
+                    f"'{v.scheme}', declared as '{direction}'")

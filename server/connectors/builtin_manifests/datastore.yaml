@@ -1,0 +1,21 @@
+# I datastore, come il gateway li espone oggi (clodia-platform#518).
+#
+# Un datastore può portare testo di origine esterna (note OSINT, estratti di
+# terzi): non è testo che l'agente ha prodotto, quindi leggerlo contamina. Lo
+# schema `datastore:` esiste perché la fonte abbia un NOME — è l'URI che finisce
+# nell'evento `flow.ingress` — e perché l'owner possa dichiarare fidato UN
+# datastore invece di subire il taint su tutti. Prima la fonte aveva un nome in
+# `main._RESOURCE_READ_VERBS` ma nessuno schema in cui esistere, quindi quel
+# nome non poteva essere messo in lista: dichiarabile a metà, cioè mai.
+name: gateway-datastore
+connectors:
+  - id: datastore
+    manifest_version: 1
+    namespace: datastore
+    label: Datastore
+    schemes:
+      - scheme: datastore
+        direction: source
+        label: Datastore
+    verbs:
+      - {verb: datastore.read, direction: source, scheme: datastore, arg: datastore}

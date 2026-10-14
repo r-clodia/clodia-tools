@@ -61,11 +61,17 @@ class NoVerbsTests(unittest.TestCase):
                 self.assertIsNone(gate.gate_class(f"{ns}.qualunque"))
 
     def test_nothing_taints(self):
-        from . import taint
+        """Dalla #518 i verbi che contaminano li dichiarano i connettori: un
+        namespace rimosso non deve comparire né fra i prefissi contaminanti né
+        fra le letture dichiarate."""
+        from .connectors import resolved as connectors
+        reg = connectors.registry()
+        nominati = [p for p in reg.taint_prefixes()] + [
+            v.verb for c in reg.connectors for v in c.verbs]
         for ns in RIMOSSI:
             with self.subTest(ns):
                 self.assertEqual(
-                    [v for v in taint._TAINTING_EXACT if v.startswith(f"{ns}.")], [])
+                    [v for v in nominati if v.startswith(f"{ns}.")], [])
 
 
 class NoPlumbingTests(unittest.TestCase):

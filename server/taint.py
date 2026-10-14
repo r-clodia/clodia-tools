@@ -48,59 +48,87 @@ _STATE = "clodia-tools-taint.json"
 #: senza di essa l'umano declassifica alla cieca (#104 §4).
 _MAX_SOURCES = 5
 
-#: Verbi che PRODUCONO contaminazione: restituiscono contenuto di terzi. È la
-#: rilettura della colonna `untrusted_input` del catalogo richiesta dalla §4 —
-#: da «questo agente è esposto» a «questo verbo produce taint».
-#:
-#: Tabella locale al gateway di proposito, come `_SPECS` in egress.py: il
-#: catalogo trifecta vive in clodia-logic e il gateway non lo monta. Il prezzo è
-#: tenerle allineate; il beneficio è che il punto in cui il taint NASCE non
-#: dipende da un file che sta dall'altra parte del confine.
-_TAINTING_EXACT = frozenset({
-    # posta e chat in arrivo: il mittente non è controllato
-    "email.read", "email.list", "email.search", "email.get_attachment",
-    "telegram.inbox", "telegram.receive", "telegram.pull",
-    # file e documenti caricati in un topic da chiunque
-    "topic.read_file", "topic.read_document", "topic.fetch",
-    # documenti esterni
-    "gdrive.download", "gdocs.read", "gsheets.read", "gsheets.list_tabs",
-    "gcalendar.list_events",
-    # datastore di un pack: possono portare testo di origine esterna (es. note
-    # OSINT), non è testo che l'agente ha prodotto
-    "datastore.read",
-    # corpora e board di terzi
-})
-
-#: Prefissi: il web aperto e GitHub in lettura sono interamente contenuto di
-#: terzi, e l'elenco dei verbi upstream cambia senza di noi.
-_TAINTING_PREFIX = ("web.fetch", "web.download", "web.search", "web.render", "web.get",
-                    "github.get_", "github.list_", "github.search_",
-                    "github.issue_read", "github.pull_request_read",
-                    "normattiva.", "contabilita.", "sedia.")
-
-
 def taints(verb: str) -> bool:
-    """True se `verb` fa entrare contenuto non controllato nel contesto."""
+    """True se `verb` fa entrare contenuto non controllato nel contesto.
+
+    Tre risposte, in ordine, e nessuna tabella di nomi in questo file
+    (clodia-platform#518):
+
+    1. il verbo ha una FONTE dichiarata (`direction: source` nel manifest del
+       suo connettore). Dire «questo verbo legge da fuori» e dire «questo verbo
+       contamina» è la stessa frase, e chi dichiara la fonte l'ha già detta;
+    2. il connettore lo elenca fra i propri prefissi contaminanti (`taint:`) —
+       per le letture che NON hanno una fonte sola da vagliare: un elenco di
+       mail, una inbox, un calendario mescolano più autori in una risposta;
+    3. altrimenti, il verbo è servito da un BACKEND MCP montato e non è una
+       scrittura ⇒ contamina.
+
+    Il punto 3 è il cambiamento di #518, ed è più stretto di prima, non più
+    largo: la tabella vecchia elencava tre prefissi di pack (`normattiva.`,
+    `contabilita.`, `sedia.`) e qualunque altro backend — uno montato ieri, uno
+    che arriva con un pack nuovo — non contaminava affatto. Quella è la
+    direzione d'errore silenziosa: un taint che non si accende non produce
+    nessun segnale. Ora la domanda non è COME SI CHIAMA il backend ma se
+    qualcuno risponda di ciò che restituisce, e la risposta la dà l'owner
+    dichiarando `mcp:<namespace>.` fra le fonti fidate — esattamente la leva che
+    esisteva già per i tre nomi scritti a mano.
+
+    Le scritture sono fuori: un verbo con una destinazione dichiarata manda
+    fuori qualcosa, non porta dentro niente.
+    """
     v = (verb or "").strip()
-    if v in _TAINTING_EXACT or v.startswith(_TAINTING_PREFIX):
+    if not v:
+        return False
+    if _declared_read(v):
         return True
-    return _declared_read(v)
+    if any(v.startswith(p) for p in _declared_taint_prefixes()):
+        return True
+    return _unvouched_backend(v)
+
+
+def _declared_taint_prefixes() -> tuple:
+    """I prefissi che i connettori dichiarano come contaminanti.
+
+    Import differito e silenzioso in caso di guasto, come gli altri di questo
+    modulo: una misura che rompe il turno che sta misurando è peggio della
+    misura mancante (vedi `note_verb`).
+    """
+    try:
+        from .connectors import resolved as _connectors
+        return _connectors.registry().taint_prefixes()
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("taint: prefissi dei connettori non consultabili (%s)", e)
+        return ()
+
+
+def _unvouched_backend(verb: str) -> bool:
+    """Un verbo servito da un backend MCP montato, che non è una scrittura.
+
+    «Servito da un backend» non è un giudizio sul contenuto — un server di
+    terzi ripete il web aperto tanto quanto un verbo `web.` — ed è per questo
+    che la risposta è «contamina», non «fidato». Il contrario lo dichiara
+    l'owner con `mcp:<namespace>.` in `source_allow`, e lo applica
+    `main._source_vetted`: lì la domanda diventa «di questo server risponde
+    qualcuno», che è quella giusta.
+    """
+    try:
+        from . import proxy
+        if not proxy.is_proxied(verb):
+            return False
+        from . import egress
+        return egress.spec_for(verb) is None
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("taint: backend non determinabile per %s (%s)", verb, e)
+        return False
 
 
 def _declared_read(verb: str) -> bool:
-    """Un pack ha dichiarato questo verbo come lettura di una fonte esterna
-    (`direction: source` nel manifest del connettore, clodia-platform#517).
+    """Un connettore ha dichiarato questo verbo come lettura di una fonte
+    esterna (`direction: source` nel manifest, clodia-platform#517).
 
-    Le due tabelle qui sopra dicono «questo verbo porta dentro roba di terzi»
-    verbo per verbo; un pack che dichiara una fonte ha detto la stessa cosa del
-    proprio. Senza questa riga il vaglio della fonte fatto in `_source_vetted`
-    non arriverebbe mai a `note_verb`: un `mail.read` di pack non sarebbe
-    contaminante a prescindere dalla sua provenienza, cioè l'opposto di «come un
-    verbo nativo».
-
-    Import differito come gli altri di questo modulo, e silenzioso in caso di
-    guasto: una misura che rompe il turno che sta misurando è peggio della
-    misura mancante (vedi `note_verb`).
+    Senza questa riga il vaglio della fonte fatto in `_source_vetted` non
+    arriverebbe mai a `note_verb`: un `mail.read` non sarebbe contaminante a
+    prescindere dalla sua provenienza, cioè l'opposto di «come un verbo nativo».
     """
     try:
         from .connectors import resolved as _connectors

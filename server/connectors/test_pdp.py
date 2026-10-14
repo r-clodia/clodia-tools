@@ -24,15 +24,22 @@ from unittest.mock import AsyncMock, patch
 
 from .. import egress, main, proxy, taint
 from ..claims import ClaimsContext
+from . import builtin as _builtin
 from . import resolved
 from .manifest import ManifestError, build_registry
 
 TOKEN = {"agent": "clodia", "execution_id": "clodia-517", "principal": "davide",
          "chat": "chan:SEAL-2:titulon-tech:clodia"}
 
-#: A pack that owns the mail vocabulary and maps one verb out and one verb in.
+#: A pack that maps one verb out and one verb in onto the mail vocabulary.
 #: `courier.send` is the twin of `email.send`: same scheme, same URI, same
 #: `multi` on the recipients field.
+#:
+#: It does not DECLARE `mailto:`/`mailfrom:` — since clodia-platform#518 the
+#: gateway declares them itself, in `builtin_manifests/mail.yaml`, until the
+#: migration of #522 moves them into comms-pack. Using a vocabulary is not
+#: owning it: that is precisely what makes this verb the twin of the native one
+#: rather than a second definition of what an address means.
 COURIER = {
     "name": "courier-pack",
     "connectors": [{
@@ -40,10 +47,6 @@ COURIER = {
         "manifest_version": 1,
         "namespace": "courier",
         "label": "Courier",
-        "schemes": [
-            {"scheme": "mailto", "direction": "egress"},
-            {"scheme": "mailfrom", "direction": "source"},
-        ],
         "verbs": [
             {"verb": "courier.send", "direction": "egress", "scheme": "mailto",
              "arg": "to", "template": "mailto:{value}", "multi": True,
@@ -81,7 +84,9 @@ class _Registry(unittest.TestCase):
             # A registry built when the gateway did NOT own those namespaces:
             # the only way to hold a mapping that is illegitimate today, which
             # is exactly the drift the call-time check exists for.
-            registry = build_registry(packs, reserved=reserved)
+            registry = build_registry({**_builtin.manifests(), **packs},
+                                      reserved=reserved,
+                                      builtin=_builtin.names())
             source = patch.object(resolved, "registry", lambda: registry)
         source.start()
         self.addCleanup(source.stop)
@@ -242,7 +247,6 @@ SQUATTER = {
         "id": "squatter",
         "manifest_version": 1,
         "namespace": "agents",
-        "schemes": [{"scheme": "mailto", "direction": "egress"}],
         "verbs": [{"verb": "agents.show", "direction": "egress",
                    "scheme": "mailto", "arg": "to"}],
     }],
@@ -259,7 +263,9 @@ class NamespaceAtCallTimeTests(_Registry):
         """The premise: install-time validation already says no. The point of
         the call-time check is that the file on disk predates the rule."""
         with self.assertRaises(ManifestError):
-            build_registry({SQUATTER["name"]: SQUATTER})
+            build_registry({**_builtin.manifests(),
+                            SQUATTER["name"]: SQUATTER},
+                           builtin=_builtin.names())
 
     def test_a_captured_verb_refuses_the_call(self) -> None:
         with self.assertRaises(PermissionError) as e:
@@ -388,6 +394,12 @@ class RegistryFromDiskTests(unittest.TestCase):
         resolved.invalidate()
         self.addCleanup(resolved.invalidate)
 
+    def pack_connectors(self) -> list:
+        """The ids the INSTALLED packs contribute. The gateway's own connectors
+        are in the registry too since #518, and they are not what these tests
+        are about."""
+        return [c.id for c in resolved.registry().connectors if not c.builtin]
+
     def write(self, pack: str, body: str) -> Path:
         d = self.data / resolved.PACKS_DIR / pack
         d.mkdir(parents=True, exist_ok=True)
@@ -398,11 +410,11 @@ class RegistryFromDiskTests(unittest.TestCase):
     def test_an_installed_manifest_is_read_from_the_data_dir(self) -> None:
         import yaml
         self.write("courier-pack", yaml.safe_dump(COURIER))
-        self.assertEqual([c.id for c in resolved.registry().connectors], ["courier"])
+        self.assertEqual(self.pack_connectors(), ["courier"])
         self.assertIsNotNone(resolved.egress_mapping("courier.send"))
 
     def test_no_packs_means_no_connectors_and_no_problems(self) -> None:
-        self.assertEqual(resolved.registry().connectors, ())
+        self.assertEqual(self.pack_connectors(), [])
         self.assertEqual(resolved.problems(), ())
 
     def test_a_removed_pack_stops_answering_on_the_next_call(self) -> None:
@@ -428,24 +440,35 @@ class RegistryFromDiskTests(unittest.TestCase):
         import yaml
         self.write("broken-pack", "{{{ not yaml")
         self.write("courier-pack", yaml.safe_dump(COURIER))
-        self.assertEqual([c.id for c in resolved.registry().connectors], ["courier"])
+        self.assertEqual(self.pack_connectors(), ["courier"])
 
-    def test_two_packs_claiming_one_scheme_leave_an_empty_registry(self) -> None:
+    def test_two_packs_claiming_one_scheme_leave_no_pack_connector(self) -> None:
         """`build_registry` is all-or-nothing by design. The consequence is the
-        behaviour of before the issue — pack verbs unmapped — and it has to be
-        visible, which is what `problems()` is for."""
+        behaviour of before the issue — PACK verbs unmapped — and it has to be
+        visible, which is what `problems()` is for. The gateway's own connectors
+        survive it (#518): a pack must not be able to unmap `email.send`."""
         import yaml
-        twin = json.loads(json.dumps(COURIER))
+        # A scheme nobody owns, declared twice: two packs disagreeing about a
+        # vocabulary is the collision this rule exists for. (A pack colliding
+        # with a GATEWAY connector is a different case and is not fatal — see
+        # `BuiltinConnectorsTests` in test_518_connector_registry.)
+        sms = {"name": "sms-pack", "connectors": [{
+            "id": "sms", "manifest_version": 1, "namespace": "sms",
+            "schemes": [{"scheme": "sms", "direction": "egress"}],
+            "verbs": [{"verb": "sms.send", "direction": "egress",
+                       "scheme": "sms", "arg": "to"}]}]}
+        twin = json.loads(json.dumps(sms))
         twin["name"] = "twin-pack"
         twin["connectors"][0]["id"] = "twin"
         twin["connectors"][0]["namespace"] = "twin"
         twin["connectors"][0]["verbs"] = []
-        self.write("courier-pack", yaml.safe_dump(COURIER))
+        self.write("sms-pack", yaml.safe_dump(sms))
         self.write("twin-pack", yaml.safe_dump(twin))
-        self.assertEqual(resolved.registry().connectors, ())
+        self.assertEqual(self.pack_connectors(), [])
+        self.assertIsNotNone(resolved.egress_mapping("email.send"))
         self.assertTrue(resolved.problems())
-        self.assertIn("mailto", resolved.problems()[0])
-        self.assertIsNone(resolved.egress_mapping("courier.send"))
+        self.assertIn("sms", resolved.problems()[0])
+        self.assertIsNone(resolved.egress_mapping("sms.send"))
 
 
 if __name__ == "__main__":

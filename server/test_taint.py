@@ -108,10 +108,31 @@ class TierAliasStateTests(unittest.TestCase):
 class TaintingVerbTests(unittest.TestCase):
     def test_verbs_that_return_third_party_content_taint(self):
         for verb in ("web.fetch", "email.read", "github.get_file_contents",
-                     "github.list_issues", "topic.read_file", "gdrive.download",
-                     "normattiva.search"):
+                     "github.list_issues", "topic.read_file", "gdrive.download"):
             with self.subTest(verb=verb):
                 self.assertTrue(taint.taints(verb))
+
+    def test_a_verb_of_a_mounted_backend_taints_without_being_named(self):
+        """Il cambiamento di clodia-platform#518, e va nella direzione stretta.
+
+        Prima la tabella elencava tre prefissi di pack (`normattiva.`,
+        `contabilita.`, `sedia.`) e QUALUNQUE altro backend montato non
+        contaminava: un pack nuovo entrava in una stanza senza accendere niente,
+        che è l'errore che non si vede. Ora la domanda non è come si chiama il
+        backend ma se qualcuno risponda di ciò che restituisce — e quella
+        risposta la dà l'owner con `mcp:<ns>.` fra le fonti fidate, dove
+        `main._source_vetted` la legge.
+        """
+        with patch("server.proxy.is_proxied", lambda v: v.startswith("sedia.")):
+            self.assertTrue(taint.taints("sedia.cerca"))
+            self.assertFalse(taint.taints("altro.cerca"))
+
+    def test_a_backend_verb_that_sends_does_not_taint(self):
+        """Una scrittura manda fuori qualcosa, non porta dentro niente: la
+        mappatura di destinazione è ciò che la distingue da una lettura."""
+        with patch("server.proxy.is_proxied", lambda v: True):
+            self.assertFalse(taint.taints("github.create_issue"))
+            self.assertFalse(taint.taints("github.push"))
 
     def test_send_only_and_control_verbs_do_not_taint(self):
         """A verb that only pushes data out brings nothing INTO the context, and
@@ -289,18 +310,39 @@ class SourceResolutionTests(unittest.TestCase):
     sei verbi con una fonte identificabile contaminavano comunque sempre.
     """
 
-    def test_every_tainting_verb_with_one_source_resolves_it(self):
-        from . import main
-        resolved = set(main._TOPIC_READ_VERBS) | set(main._RESOURCE_READ_VERBS) \
-            | {"email.read"}
-        # Chi resta mescola più fonti in una risposta: non c'è UNA fonte da
-        # vagliare, e dichiararne una sarebbe peggio che ammettere di non poterlo
-        # fare. Se un giorno uno di questi diventa a fonte singola, va spostato.
-        mixed = {"email.list", "email.search", "email.get_attachment",
-                 "telegram.inbox", "telegram.receive", "telegram.pull",
-                 "gcalendar.list_events"}
-        unaccounted = {v for v in taint._TAINTING_EXACT
-                       if v not in resolved and v not in mixed}
-        self.assertEqual(unaccounted, set(),
-                         f"verbi che contaminano senza fonte né motivo: {unaccounted}")
+    def test_a_verb_is_either_a_vettable_source_or_always_tainting(self):
+        """Dalla #518 la domanda si legge nel registry invece che in due tabelle.
+
+        Un verbo con una FONTE dichiarata si vaglia: `gsheets.read` su un foglio
+        fidato non contamina. Un verbo elencato fra i prefissi contaminanti
+        contamina sempre, perché mescola più fonti in una risposta. Le due cose
+        insieme sarebbero una contraddizione: la fonte sarebbe vagliabile e il
+        vaglio non servirebbe a niente — la metà di regola che #438 ha chiuso.
+        """
+        from .connectors import resolved as connectors
+        reg = connectors.registry()
+        sources = {v.verb for c in reg.connectors for v in c.verbs
+                   if v.direction == "source"}
+        for prefix in reg.taint_prefixes():
+            with self.subTest(prefix=prefix):
+                collide = sorted(v for v in sources if v.startswith(prefix))
+                self.assertEqual(collide, [], f"{prefix} ha anche una fonte")
+
+    def test_a_declared_source_actually_resolves_to_one(self):
+        """E la fonte dichiarata si risolve davvero dagli argomenti: una
+        mappatura che non produce mai un URI vagliabile contaminerebbe sempre,
+        in silenzio."""
+        from .connectors import resolved as connectors
+        sample = {"spreadsheet_id": "S", "document_id": "D", "file_id": "F",
+                  "datastore": "osint", "url": "https://x.it/a", "from": "a@b.it",
+                  "chat_id": "-100", "sender": "a@b.it"}
+        reg = connectors.registry()
+        for c in reg.connectors:
+            for v in c.verbs:
+                if v.direction != "source":
+                    continue
+                with self.subTest(verb=v.verb):
+                    args = sample if v.reads == "arguments" else {}
+                    out = connectors.source_uri(v.verb, args, sample)
+                    self.assertTrue(out, f"{v.verb} non nomina nessuna fonte")
 

@@ -29,10 +29,14 @@ class SchemeListsTests(unittest.TestCase):
              "gcal"})
 
     def test_source_schemes(self):
+        # `datastore` is the ONE deliberate addition of #518, and it is a fix:
+        # `datastore.read` already named its source `datastore:<id>` in the
+        # audit trail, but no scheme accepted that shape, so the owner could
+        # never declare one trusted — a source declarable in half, i.e. never.
         self.assertEqual(
             set(egress.summary()["source_schemes"]),
             {"mailfrom", "tg", "http", "https", "gdrive", "gsheets", "mcp",
-             "inbox", "topic"})
+             "inbox", "topic", "datastore"})
 
 
 class SpecTests(unittest.TestCase):
@@ -192,6 +196,8 @@ class GrantableTests(unittest.TestCase):
         ("ingress", "mcp:normattiva."),
         ("ingress", "topic:SEAL-1/acme"),
         ("ingress", "tg:-100123"),
+        # See `test_source_schemes`: grantable from #518 on, deliberately.
+        ("ingress", "datastore:osint"),
     ]
     KO = [
         # wrong direction
@@ -216,7 +222,7 @@ class GrantableTests(unittest.TestCase):
         ("ingress", "topic:*"),
         # unknown scheme
         ("egress", "ftp://a.it/"),
-        ("ingress", "datastore:x"),
+        ("egress", "datastore:x"),   # source only, never a destination
     ]
 
     def test_grantable(self):

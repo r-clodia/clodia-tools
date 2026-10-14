@@ -64,7 +64,8 @@ That is a connector which only needs a credential — image generation is one.
 | `extends` | no | id of the vocabulary this entry contributes a provider to |
 | `schemes` | – | see below; mutually exclusive with `extends` |
 | `providers` | no | implementations, each with its credential |
-| `verbs` | no | verb → destination and read → source |
+| `verbs` | no | verb → destination and read → source; a verb may appear more than once |
+| `danger_uris` | no | warnings for URIs of a shared scheme (`match` + `text`) |
 | `taint` | no | MCP prefixes of this pack whose answers do not taint a channel |
 | `topic_actions` | no | buttons the connector adds to a topic |
 | `tools_card` | no | what the Tools page shows |
@@ -83,10 +84,19 @@ the gate shows the topic's tier. Today's `_CHANNEL_SEAL_CAP` and
 | `scheme` | yes | the URI scheme, without the colon |
 | `direction` | yes | `source`, `egress` or `both` — today's `SOURCE_SCHEMES` / `EGRESS_SCHEMES` |
 | `forms[]` | no | accepted shapes: `label`, `pattern`, optional `example` |
-| `hierarchical` | no | a rule covers what is below it — today's `_HIERARCHICAL` |
+| `hierarchical` | no | a rule covers what is below it |
+| `lowercase` | no | the whole URI is case-insensitive and is stored lowercased (the mail family) |
+| `wildcard` | no | default `true`; `false` where `<scheme>:*` would be the whole thing and not a perimeter (`gcal:`) |
 | `label`, `icon` | no | presentation |
 | `danger` | no | the warning shown at the gate — today's `_DANGER` |
 | `canonicalise[]` | no | `from` (regex) → `to` (template over `{1}`, `{2}`…) — today's `_CANON` |
+
+A form matches with **`fullmatch`**: `^-?\d+` accepts `-100123`, not
+`-100123garbage`. A pattern is also bounded at load — capped in length, and
+refused if it contains a quantified group inside another quantifier (`(a+)+`),
+the shape of every catastrophic-backtracking example. These patterns run in the
+gateway's event loop on every check and `re` has no timeout, so the bound is on
+the pattern, not on the clock.
 
 An `example` that does not match its own `pattern` is an error: it is the
 cheapest available proof that the regex says what the author meant. A
@@ -94,7 +104,8 @@ canonicalisation template that refers to a capture group the pattern does not
 have is an error too.
 
 `http`, `https`, `topic` and `mcp` are **platform-intrinsic**: a pack may point a
-verb at them, but declaring them in `schemes:` is refused. GitHub works that way
+verb at them, but declaring them in `schemes:` is refused — they are declared in
+the gateway's own core manifest (see below). GitHub works that way
 — its destinations are ordinary `https://github.com/<owner>/<repo>` URLs, checked
 by the ordinary http rules.
 
@@ -116,7 +127,24 @@ by the ordinary http rules.
 | `arg` | yes | the argument the destination is read from |
 | `template` | no | how the URI is built; defaults to `<scheme>:{value}` |
 | `multi` | no | the argument may carry a list (several recipients) |
-| `dtype` | no | the destination type shown at the gate (today's first element of `_SPECS`) |
+| `dtype` | no | the destination type shown at the gate |
+| `prefix` | no | `verb` is a prefix, for the verbs of a proxied backend that change upstream (`github.create_`) |
+| `normalise` | no | one of the gateway's transforms: `url_origin`, `repo_url`, `repo_pair`, `email_from`. With it, `arg` may be omitted |
+| `reads` | no | `arguments` (default) or `result` — the sender of a mail is only in the answer |
+
+**A verb may be mapped more than once.** `email.send` reads `to`, `cc` and
+`bcc`; `gdrive.upload` writes into a folder *and* may share with a person, which
+is a second scheme. The destinations of one call are the union, and all of them
+have to be inside the perimeter. Two mappings of one verb may not disagree on
+`dtype`: the gate would name the same call differently depending on which
+argument it read.
+
+**Using a vocabulary is not owning it.** A verb may point at any scheme declared
+on the instance, not only at the ones its own connector declares: a courier pack
+that sends mail is checked against the very same `mailto:` whitelist, which is
+what makes it indistinguishable from the native verb (#517). What stays
+forbidden is *declaring* someone else's scheme. Whether a scheme exists is
+therefore checked when the registry is built, not when one entry is parsed.
 
 **The namespace rule is not negotiable.** A pack maps only verbs it owns; a
 manifest naming someone else's verb is refused *as a whole*, with the offending
@@ -143,6 +171,32 @@ manifest that declares one), `workdir`, `credentials` (vault entry names),
 
 State lives under `<datadir>/services/<pack>/<service>/` — `Service.state_dir`
 computes it, so the path is not written down twice.
+
+## The gateway's own manifests
+
+`connectors/builtin_manifests/*.yaml` are manifests the gateway ships with
+itself (#518). They are read with the same grammar and land in the same
+registry; they are what the PDP reads while a connector is still implemented in
+gateway code rather than in a pack:
+
+| file | holds | leaves with |
+|---|---|---|
+| `core.yaml` | `http:`, `https:`, `topic:`, `mcp:` | never: this is the core manifest |
+| `mail.yaml` | the mail vocabulary and `email.*` | #522 |
+| `telegram.yaml` | `tg:` and `telegram.*` | #522 |
+| `google.yaml` | `gdrive:`, `gsheets:`, `gcal:` and their verbs | #523 |
+| `github.yaml` | the GitHub verbs on `https:`, and its warning | #525 |
+| `datastore.yaml` | `datastore:` and `datastore.read` | — |
+
+They are code, not input: they live in the image, next to the modules that
+implement them. Three privileges follow, and nothing on disk can obtain them:
+they may declare the intrinsic schemes, they are not checked against the
+reserved namespaces (they *are* the gateway's namespaces, and one file may span
+several), and they **win** a collision — a pack declaring the same connector id
+or the same scheme is refused on its own, without taking the registry down with
+it. Letting the pack win would mean an installed manifest redefining what
+`mailto:` means while the native implementation is still the thing doing the
+sending. Each migration deletes its file in the change that adds the pack.
 
 ---
 
@@ -488,14 +542,18 @@ connectors:
 
 ## Known gaps of v1, deliberately left open
 
-- **Shorthand normalisation for GitHub repositories.** `owner/repo` becomes a
-  full URL through `github_repo.normalize_repo`, not through a `canonicalise`
-  rule: letting a pack rewrite `https:` URLs would hand it the meaning of every
-  URL on the instance. Whether this becomes a per-verb rule is a question for
-  #518, with the tables in front of us.
-- **Nothing reads this module yet.** Building the registry and deleting
-  `egress.py`'s tables is #518; applying the mappings at call time is #517; the
-  generic HTTP endpoints are #519; the webui rendered from the registry is #520.
+- **Shorthand normalisation for GitHub repositories.** Answered by #518, and the
+  answer is `normalise: repo_url`: a verb mapping NAMES one of the gateway's own
+  transforms instead of supplying it. `owner/repo` still becomes a full URL
+  through `github_repo.normalize_repo` — letting a pack rewrite `https:` URLs
+  would hand it the meaning of every URL on the instance — and the list of
+  transforms is closed, in `manifest.NORMALISERS`.
+- **Who reads this.** The PDP does: #517 applies the mappings at call time and
+  #518 made the registry the only place the gateway knows a connector from.
+  What is still missing is the generic HTTP endpoints (#519, which also refuses
+  a malformed manifest at install time — until then `pack_import` drops the
+  `connectors:` block and no PACK reaches the registry) and the webui rendered
+  from it (#520).
 - **Install-time refusal.** `pack_import` in `clodia-logic` will ask the gateway
   to validate a `connectors:` block the way it already asks `/flow-allow` for the
   flow declarations. That endpoint is #519.

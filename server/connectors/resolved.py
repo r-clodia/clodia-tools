@@ -43,10 +43,13 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from . import builtin as _builtin
+from . import normalise as _normalise
 from .manifest import (
     Connector,
     ManifestError,
     Registry,
+    Scheme,
     VerbMapping,
     build_registry,
     check_namespace,
@@ -125,21 +128,46 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
         return _CACHE[1], _CACHE[2]
     reg, probs = Registry(), ()
     try:
-        reg = build_registry(manifests())
+        own = _builtin.manifests()
+        installed = {k: v for k, v in manifests().items() if k not in own}
+        reg = build_registry({**own, **installed}, builtin=tuple(own))
+        if reg.refused:
+            # Not a failure of the registry: a pack that collides with a
+            # connector this gateway still implements is ignored, by itself.
+            for line in reg.refused:
+                LOG.warning("connectors: %s", line)
     except ManifestError as e:
         # All-or-nothing is `build_registry`'s own rule (#516): a manifest that
-        # collides with another is not half-valid. The consequence here is that
-        # the instance falls back to the behaviour it had before this issue —
-        # pack verbs unmapped — so the refusal has to be loud, and the real
-        # place to stop a malformed manifest is the installation (#519).
+        # collides with another is not half-valid. The consequence is that the
+        # instance falls back to the behaviour it had before #517 — PACK verbs
+        # unmapped — so the refusal has to be loud, and the real place to stop a
+        # malformed manifest is the installation (#519).
+        #
+        # What does NOT fall back is the gateway's own connectors: they are code
+        # in the image, and a pack with a typo must not be able to unmap
+        # `email.send`. Before #518 that was true because the tables were in
+        # Python; it has to stay true now that they are manifests.
         probs = (str(e),)
+        reg = _builtin_only()
         LOG.error("connectors: registry non costruibile, i verbi dei pack "
                   "restano senza mappatura (%s)", e)
     except Exception as e:  # noqa: BLE001 — never break a call over this
         probs = (f"{type(e).__name__}: {e}",)
+        reg = _builtin_only()
         LOG.error("connectors: registry non costruibile (%s)", e)
     _CACHE = (sig, reg, probs)
     return reg, probs
+
+
+def _builtin_only() -> Registry:
+    """The gateway's own connectors alone. The floor under every failure above."""
+    try:
+        own = _builtin.manifests()
+        return build_registry(own, builtin=tuple(own))
+    except Exception as e:  # noqa: BLE001 — a broken image, not a broken pack
+        LOG.error("connectors: nemmeno i manifest del gateway sono leggibili "
+                  "(%s): nessun connettore, tutto negato", e)
+        return Registry()
 
 
 def invalidate() -> None:
@@ -152,12 +180,10 @@ def invalidate() -> None:
 # the two questions the PDP asks
 # --------------------------------------------------------------------------
 
-def _owned(verb: str, direction: str) -> tuple[Connector, VerbMapping] | None:
-    for c in registry().connectors:
-        for v in c.verbs:
-            if v.verb == verb and v.direction == direction:
-                return c, v
-    return None
+def _owned(verb: str, direction: str) -> tuple[tuple[Connector, VerbMapping], ...]:
+    """Every mapping that describes this call — a verb may have more than one
+    (`email.send` reads `to`, `cc` and `bcc`)."""
+    return registry().mappings_for(verb, direction)
 
 
 def namespace_violation(verb: str) -> str:
@@ -173,16 +199,17 @@ def namespace_violation(verb: str) -> str:
     the next reinstall.
     """
     for direction in ("egress", "source"):
-        owned = _owned(verb, direction)
-        if owned is None:
-            continue
-        connector, mapping = owned
-        try:
-            check_namespace(connector.namespace, [mapping.verb],
-                            where=f"pack '{connector.pack}', connector "
-                                  f"'{connector.id}'")
-        except ManifestError as e:
-            return str(e)
+        for connector, mapping in _owned(verb, direction):
+            if connector.builtin:
+                # A gateway file is the gateway's own authority: it is where the
+                # native namespaces are declared, not a claim over someone's.
+                continue
+            try:
+                check_namespace(connector.namespace, [mapping.verb],
+                                where=f"pack '{connector.pack}', connector "
+                                      f"'{connector.id}'")
+            except ManifestError as e:
+                return str(e)
     return ""
 
 
@@ -202,8 +229,8 @@ def enforce_namespace(verb: str) -> None:
             f"namespace, quindi la chiamata non si fa. {reason}")
 
 
-def _mapping(verb: str, direction: str) -> VerbMapping | None:
-    """The declared mapping, or None — never a mapping that breaks the rule.
+def _mappings(verb: str, direction: str) -> tuple[VerbMapping, ...]:
+    """The declared mappings, or `()` — never a mapping that breaks the rule.
 
     A violating mapping is not merely ignored: `enforce_namespace` refuses the
     call outright. Both are needed, and they are not the same statement. Ignoring
@@ -212,30 +239,49 @@ def _mapping(verb: str, direction: str) -> VerbMapping | None:
     PDP for someone else's verb simply by naming it.
     """
     owned = _owned(verb, direction)
-    if owned is None:
-        return None
-    return None if namespace_violation(verb) else owned[1]
+    if not owned or namespace_violation(verb):
+        return ()
+    return tuple(m for _c, m in owned)
+
+
+def egress_mappings(verb: str) -> tuple[VerbMapping, ...]:
+    return _mappings(verb, "egress")
+
+
+def source_mappings(verb: str) -> tuple[VerbMapping, ...]:
+    return _mappings(verb, "source")
 
 
 def egress_mapping(verb: str) -> VerbMapping | None:
-    return _mapping(verb, "egress")
+    """The first declared destination mapping. For the callers that ask «is this
+    verb mapped at all» — the full answer is `egress_mappings`."""
+    mappings = egress_mappings(verb)
+    return mappings[0] if mappings else None
 
 
 def source_mapping(verb: str) -> VerbMapping | None:
-    return _mapping(verb, "source")
+    mappings = source_mappings(verb)
+    return mappings[0] if mappings else None
 
 
-def destinations(mapping: VerbMapping, arguments: dict | None) -> list[str]:
+def destinations(mapping: VerbMapping, arguments: dict | None,
+                 result: object = None) -> list[str]:
     """The URIs this call reaches, the way `egress.py`'s extractors build them.
 
-    Case is left as the manifest produced it: `egress._matches` lowercases both
-    sides, so normalising here would only mangle what the gate card shows and
-    what `remember()` writes down for identifiers that are case-sensitive
-    (a Drive id, a Telegram handle).
+    Case is left as the manifest produced it unless the SCHEME says the whole
+    URI is case-insensitive (`lowercase: true`, the mail family): `egress._matches`
+    lowercases both sides, so normalising everything here would only mangle what
+    the gate card shows and what `remember()` writes down for identifiers that
+    are case-sensitive (a Drive id, a Telegram handle) — while for an address it
+    is the difference between a whitelist entry that matches and one that was
+    granted and can never fire.
     """
-    raw = (arguments or {}).get(mapping.arg)
-    if mapping.multi:
-        items: list[Any]
+    source = result if mapping.reads == "result" else arguments
+    data = source if isinstance(source, dict) else {}
+    raw = data.get(mapping.arg) if mapping.arg else None
+    if mapping.normalise:
+        items: list[Any] = _normalise.apply(mapping.normalise, str(raw or ""), data)
+    elif mapping.multi:
         if isinstance(raw, (list, tuple)):
             items = list(raw)
         else:
@@ -243,35 +289,59 @@ def destinations(mapping: VerbMapping, arguments: dict | None) -> list[str]:
             items = str(raw or "").replace(";", ",").split(",")
     else:
         items = [raw]
+    lower = _lowercases(mapping.scheme)
     out = []
     for item in items:
         value = str(item or "").strip()
-        if value:
-            out.append(mapping.uri_for(value))
+        if not value:
+            continue
+        uri = mapping.uri_for(value)
+        out.append(uri.lower() if lower else uri)
     return out
 
 
+def _lowercases(scheme: str) -> bool:
+    s: Scheme | None = registry().scheme(scheme)
+    return bool(s and s.lowercase)
+
+
 def spec_for(verb: str):
-    """`(destination type, extractor)` for a pack verb, the shape `egress` wants."""
-    mapping = egress_mapping(verb)
-    if mapping is None:
+    """`(destination type, extractor)` for a mapped verb, the shape `egress` wants.
+
+    The destinations of one call are the union of its mappings, in declaration
+    order: `gdrive.upload` can name a folder *and* a person to share with, and
+    both have to be inside the perimeter for the call to happen.
+    """
+    mappings = egress_mappings(verb)
+    if not mappings:
         return None
-    return (mapping.dtype or mapping.scheme,
-            lambda a, _m=mapping: destinations(_m, a))
+    first = mappings[0]
+
+    def extract(arguments: dict, _ms=mappings) -> list[str]:
+        out: list[str] = []
+        for m in _ms:
+            for uri in destinations(m, arguments):
+                if uri not in out:
+                    out.append(uri)
+        return out
+
+    return (first.dtype or first.scheme, extract)
 
 
-def source_uri(verb: str, arguments: dict | None) -> str | None:
+def source_uri(verb: str, arguments: dict | None,
+               result: object = None) -> str | None:
     """The ONE source of a declared read, or None when there is not exactly one.
 
     Not exactly one is not an accident to paper over: `email.list` and
     `telegram.inbox` mix several senders in one answer, and the gateway already
     refuses to name a source for them rather than name the wrong one. A `multi:`
-    read falls in the same bucket.
+    read falls in the same bucket, and so does a verb whose mappings disagree.
     """
-    mapping = source_mapping(verb)
-    if mapping is None:
-        return None
-    uris = destinations(mapping, arguments)
+    uris: list[str] = []
+    for m in source_mappings(verb):
+        for uri in destinations(m, arguments, result):
+            if uri not in uris:
+                uris.append(uri)
     return uris[0] if len(uris) == 1 else None
 
 
@@ -282,4 +352,4 @@ def is_declared_read(verb: str) -> bool:
     `taint._TAINTING_EXACT` is that statement made verb by verb. A pack that
     declares `direction: source` has said the same thing about its own verb.
     """
-    return source_mapping(verb) is not None
+    return bool(source_mappings(verb))

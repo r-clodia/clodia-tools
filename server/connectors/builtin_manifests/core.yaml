@@ -1,0 +1,75 @@
+# The platform-intrinsic schemes, and nothing else (clodia-platform#518).
+#
+# `http:`, `https:`, `topic:` and `mcp:` are not a connector's to declare: they
+# mean something on this instance no matter which packs are installed, which is
+# why `parse_connector` refuses them from a pack. Here is where they are
+# declared instead — the "core manifest" the issue asks for.
+#
+# This file does NOT move into a pack. The other builtin files do, one per
+# migration of the epic (#522–#525), and each migration deletes its own.
+name: gateway-core
+connectors:
+  - id: core
+    manifest_version: 1
+    namespace: web
+    label: Piattaforma
+    schemes:
+      - scheme: http
+        direction: both
+        label: Endpoint HTTP
+        hierarchical: true
+        danger: >-
+          un sistema di terzi raggiunto via HTTP. Non sai come tratta ciò che
+          riceve, né per quanto lo conserva.
+      - scheme: https
+        direction: both
+        label: Endpoint HTTPS
+        hierarchical: true
+        danger: >-
+          un sistema di terzi raggiunto via HTTP. Non sai come tratta ciò che
+          riceve, né per quanto lo conserva.
+      # Un ALTRO topic della colonia, collegato a questo (#477). Solo in
+      # ingresso: in un topic collegato non si scrive, il mount è in sola
+      # lettura. La forma vuole livello E nome — `topic:SEAL-1/` non
+      # combacerebbe con nessun topic, cioè sarebbe approvata e inefficace.
+      - scheme: topic
+        direction: source
+        label: Topic della colonia
+        forms:
+          - label: topic
+            pattern: '[A-Za-z0-9-]+/[a-z0-9][a-z0-9_-]*'
+            example: 'SEAL-1/acme'
+      # Un backend MCP montato: la fonte è il SERVER, uno per namespace.
+      # Gerarchico sul namespace: `mcp:normattiva.` copre `normattiva.search`
+      # senza coprire `normattiva-mirror.`.
+      - scheme: mcp
+        direction: source
+        label: Backend MCP
+        hierarchical: true
+    verbs:
+      - verb: web.post
+        direction: egress
+        scheme: http
+        arg: url
+        template: '{value}'
+        normalise: url_origin
+        dtype: http
+    # Verbi che PORTANO DENTRO contenuto di terzi. È la domanda «questo verbo
+    # produce taint», e la risposta non dipende da chi lo chiama.
+    #
+    # `web.` per prefisso: il web aperto è interamente contenuto di terzi e i
+    # verbi si aggiungono. La FONTE di una lettura web — l'URL — resta nel
+    # gateway e non qui: `http:`/`https:` sono schemi della piattaforma, un URL
+    # si vaglia per prefisso e l'URI della fonte si normalizza togliendo query e
+    # frammento, che è una regola sulla forma degli URL, non su un connettore.
+    # `topic.` perché un file di un topic lo carica chiunque — lì il vaglio non
+    # è l'URI ma l'ETICHETTA del file, e lo fa `main._source_vetted`.
+    taint:
+      - web.fetch
+      - web.download
+      - web.search
+      - web.render
+      - web.get
+      - topic.read_file
+      - topic.read_document
+      - topic.fetch
