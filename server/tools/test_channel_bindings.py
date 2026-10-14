@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -163,6 +167,130 @@ class FacciataTelegramTests(_Base):
         self.scrivi_vecchio({"-100": {"instance": "messaggero-1", "tier": "SEAL-1",
                                       "topic": "acme"}})
         self.assertEqual(tb.get_for_topic("SEAL-1", "acme"), "-100")
+
+
+class LegacyIllegibileTests(_Base):
+    """Review of tools#356: a legacy file that cannot be read must not be
+    turned into an empty, permanent migration. Nothing is written, the error is
+    loud, and repairing the old file is enough for the next call to migrate."""
+
+    LEGACY = {"-100": {"instance": "messaggero-1", "tier": "SEAL-1", "topic": "acme"}}
+
+    def _assert_not_migrated_then_repairable(self):
+        with self.assertLogs(cb.LOG, level="ERROR"):
+            self.assertEqual(cb.load("telegram", base=self.dir), {})
+        self.assertFalse(self.nuovo.exists(), "an unreadable old file must not be migrated")
+        with self.assertRaises(cb.LegacyBindingsUnreadable):
+            cb.set_binding("telegram", "-999", "m", "SEAL-1", "x", base=self.dir)
+        with self.assertRaises(cb.LegacyBindingsUnreadable):
+            cb.remove("telegram", "-100", base=self.dir)
+        with self.assertRaises(cb.LegacyBindingsUnreadable):
+            cb.migrate_legacy(base=self.dir)
+        self.assertFalse(self.nuovo.exists())
+        # Repair: the next call migrates for real.
+        self.scrivi_vecchio(self.LEGACY)
+        self.assertEqual(cb.load("telegram", base=self.dir), self.LEGACY)
+        self.assertTrue(self.nuovo.is_file())
+
+    def test_json_non_valido_non_migra_e_si_ripara(self):
+        self.vecchio.write_text("{ rotto", encoding="utf-8")
+        self._assert_not_migrated_then_repairable()
+
+    def test_json_lista_non_migra_e_non_esplode(self):
+        """A JSON list used to raise AttributeError on every bindings call."""
+        self.vecchio.write_text(json.dumps([{"instance": "m"}]), encoding="utf-8")
+        self._assert_not_migrated_then_repairable()
+
+    def test_oserror_in_lettura_non_migra(self):
+        self.scrivi_vecchio(self.LEGACY)
+        vero = Path.read_text
+        vecchio = self.vecchio
+
+        def read_text(self_p, *a, **k):
+            if self_p == vecchio:
+                raise PermissionError(13, "Permission denied", str(self_p))
+            return vero(self_p, *a, **k)
+
+        with patch.object(Path, "read_text", read_text):
+            with self.assertLogs(cb.LOG, level="ERROR"):
+                self.assertEqual(cb.load("telegram", base=self.dir), {})
+            self.assertFalse(self.nuovo.exists())
+        self.assertEqual(cb.load("telegram", base=self.dir), self.LEGACY)
+
+    def test_il_cli_esce_non_zero(self):
+        from . import migrate_channel_bindings as mcb
+        self.vecchio.write_text("[]", encoding="utf-8")
+        with patch.dict("os.environ", {"CLODIA_DATA": str(self.dir)}), \
+                patch("sys.stderr", new_callable=__import__("io").StringIO) as err:
+            self.assertEqual(mcb.main([]), 2)
+        self.assertIn("ERROR", err.getvalue())
+        self.assertFalse(self.nuovo.exists())
+
+    def test_gia_migrato_con_vecchio_rotto_non_fallisce(self):
+        """After the migration the old file is only compared against: a
+        broken one is reported, not fatal."""
+        self.scrivi_vecchio(self.LEGACY)
+        cb.load(base=self.dir)
+        self.vecchio.write_text("{ rotto", encoding="utf-8")
+        esito = cb.migrate_legacy(base=self.dir)
+        self.assertTrue(esito["already"])
+        self.assertEqual(cb.load("telegram", base=self.dir), self.LEGACY)
+
+
+class ConcorrenzaTests(_Base):
+    """Review of tools#356: read-modify-write must be serialised and writes
+    atomic, or concurrent listens lose each other's bindings."""
+
+    N = 12
+
+    def _lento(self):
+        vero = cb._read_json
+
+        def lento(p):
+            d = vero(p)
+            time.sleep(0.01)  # widen the read→write window
+            return d
+        return patch.object(cb, "_read_json", lento)
+
+    def test_scritture_concorrenti_nei_thread_non_si_perdono(self):
+        errori = []
+
+        def scrivi(i):
+            try:
+                cb.set_binding("telegram", str(i), "m", "SEAL-1", f"t{i}", base=self.dir)
+            except Exception as e:  # noqa: BLE001
+                errori.append(e)
+
+        with self._lento():
+            th = [threading.Thread(target=scrivi, args=(i,)) for i in range(self.N)]
+            for t in th:
+                t.start()
+            for t in th:
+                t.join()
+        self.assertEqual(errori, [])
+        self.assertEqual(sorted(cb.load("telegram", base=self.dir), key=int),
+                         [str(i) for i in range(self.N)])
+        self.assertEqual([x.name for x in self.dir.iterdir() if x.suffix == ".tmp"], [])
+
+    def test_scritture_concorrenti_fra_processi_non_si_perdono(self):
+        """Two gateway processes on the same datadir: the flock serialises them."""
+        codice = (
+            "import sys, time\n"
+            "from server.tools import channel_bindings as cb\n"
+            "vero = cb._read_json\n"
+            "def lento(p):\n"
+            "    d = vero(p); time.sleep(0.01); return d\n"
+            "cb._read_json = lento\n"
+            "base, k = sys.argv[1], sys.argv[2]\n"
+            "for i in range(6):\n"
+            "    cb.set_binding('telegram', f'{k}{i}', 'm', 'SEAL-1', 't', base=base)\n"
+        )
+        root = Path(__file__).resolve().parents[2]
+        procs = [subprocess.Popen([sys.executable, "-c", codice, str(self.dir), k], cwd=root)
+                 for k in ("a", "b", "c")]
+        for pr in procs:
+            self.assertEqual(pr.wait(timeout=60), 0)
+        self.assertEqual(len(cb.load("telegram", base=self.dir)), 18)
 
 
 if __name__ == "__main__":

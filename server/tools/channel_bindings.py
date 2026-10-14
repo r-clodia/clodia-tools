@@ -31,10 +31,18 @@ idempotente — vedi il suo docstring per la regola sul file vecchio.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
+import tempfile
+import threading
 from pathlib import Path
+
+try:  # POSIX: serialises writers across processes (gateway workers, CLI)
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX
+    fcntl = None
 
 LOG = logging.getLogger("clodia-tools.channel_bindings")
 
@@ -62,28 +70,109 @@ def _legacy_path(base=None) -> Path:
     return _data_dir(base) / LEGACY_FILENAME
 
 
+class LegacyBindingsUnreadable(RuntimeError):
+    """`telegram-bindings.json` exists but cannot be read or is not a JSON
+    object. Migrating from it would write an empty registry and, since the new
+    file's existence is what marks the migration as done, lose every binding
+    for good. So nothing is migrated and nothing is written until the old file
+    is repaired (or removed on purpose)."""
+
+
 def _read_json(p: Path) -> dict:
     if not p.is_file():
         return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8")) or {}
+        d = json.loads(p.read_text(encoding="utf-8")) or {}
     except (OSError, json.JSONDecodeError):
         return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _read_legacy(base=None) -> dict | None:
+    """The legacy file as a dict; None if it does not exist. Raises
+    `LegacyBindingsUnreadable` if it exists but is unreadable, not JSON, or not
+    a JSON object — never a silent `{}`, which is what turned a corrupt file
+    into a permanent, empty migration."""
+    p = _legacy_path(base)
+    if not p.is_file():
+        return None
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise LegacyBindingsUnreadable(
+            f"{p} exists but cannot be read/parsed ({type(e).__name__}: {e}); "
+            f"migration to {FILENAME} refused until it is repaired") from e
+    if d is None:
+        return {}
+    if not isinstance(d, dict):
+        raise LegacyBindingsUnreadable(
+            f"{p} is a JSON {type(d).__name__}, not an object; migration to "
+            f"{FILENAME} refused until it is repaired")
+    return {str(k): v for k, v in d.items() if isinstance(v, dict)}
+
+
+# ── concurrency ──────────────────────────────────────────────────────────────
+#: In-process: the gateway serves verbs from several threads. Cross-process:
+#: an flock on a sibling lock file (a second worker, the migration CLI). Every
+#: read-modify-write — and the migration — runs under both.
+_THREAD_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _locked(base=None):
+    d = _data_dir(base)
+    with _THREAD_LOCK:
+        if fcntl is None or not d.is_dir():
+            yield
+            return
+        fd = os.open(str(d / (FILENAME + ".lock")), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
 
 def _write_doc(doc: dict, base=None) -> None:
+    """Atomic write: a uniquely named temp file in the same directory, fsync,
+    then `os.replace`. A reader (the relay) sees the old or the new document,
+    never a torn one; two writers never share a temp file."""
     p = _path(base)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(p)
+    fd, tmp = tempfile.mkstemp(prefix=FILENAME + ".", suffix=".tmp", dir=str(p.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(doc, ensure_ascii=False, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, p)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
-def _doc(base=None) -> dict:
-    """Il documento intero, migrando dal file vecchio la prima volta."""
+def _doc(base=None, *, for_write: bool = False) -> dict:
+    """Il documento intero, migrando dal file vecchio la prima volta.
+
+    Caller must hold `_locked(base)`. If the legacy file exists but is
+    unreadable the migration is NOT done (it is retried on the next call, so
+    repairing the old file is enough): a read serves an empty registry, a write
+    raises `LegacyBindingsUnreadable` — writing would create the new file and
+    mark the migration as done with every legacy binding missing."""
     p = _path(base)
     if not p.is_file() and _legacy_path(base).is_file():
-        migrate_legacy(base=base)
+        try:
+            _migrate_unlocked(base=base)
+        except LegacyBindingsUnreadable as e:
+            LOG.error("channel-bindings: %s", e)
+            if for_write:
+                raise
+            return {"version": VERSION, "connectors": {}}
     doc = _read_json(p)
     conn = doc.get("connectors")
     if not isinstance(conn, dict):
@@ -95,7 +184,8 @@ def _doc(base=None) -> dict:
 def load(connector: str | None = None, *, base=None) -> dict:
     """Tutti i binding (`{connettore: {chat_id: binding}}`) oppure, dato un
     connettore, i suoi soli binding (`{chat_id: binding}`)."""
-    conn = _doc(base)["connectors"]
+    with _locked(base):
+        conn = _doc(base)["connectors"]
     if connector is None:
         return conn
     return dict(conn.get(connector) or {})
@@ -104,7 +194,9 @@ def load(connector: str | None = None, *, base=None) -> dict:
 def connectors(*, base=None) -> list:
     """Gli id dei connettori che hanno almeno un binding. È ciò su cui il relay
     cicla: nessun binding di un trasporto ⇒ quel trasporto non si interroga."""
-    return [c for c, b in _doc(base)["connectors"].items() if b]
+    with _locked(base):
+        conn = _doc(base)["connectors"]
+    return [c for c, b in conn.items() if b]
 
 
 def get(connector: str, chat_id, *, base=None) -> dict | None:
@@ -114,25 +206,27 @@ def get(connector: str, chat_id, *, base=None) -> dict | None:
 # ── scrittura ────────────────────────────────────────────────────────────────
 def set_binding(connector: str, chat_id, instance: str, tier: str, topic: str,
                 *, base=None) -> dict:
-    doc = _doc(base)
-    doc["version"] = VERSION
-    per_conn = dict(doc["connectors"].get(connector) or {})
-    per_conn[str(chat_id)] = {"instance": instance, "tier": tier, "topic": topic}
-    doc["connectors"][connector] = per_conn
-    _write_doc(doc, base)
-    return per_conn[str(chat_id)]
+    with _locked(base):
+        doc = _doc(base, for_write=True)
+        doc["version"] = VERSION
+        per_conn = dict(doc["connectors"].get(connector) or {})
+        per_conn[str(chat_id)] = {"instance": instance, "tier": tier, "topic": topic}
+        doc["connectors"][connector] = per_conn
+        _write_doc(doc, base)
+        return per_conn[str(chat_id)]
 
 
 def remove(connector: str, chat_id, *, base=None) -> bool:
-    doc = _doc(base)
-    per_conn = dict(doc["connectors"].get(connector) or {})
-    if str(chat_id) not in per_conn:
-        return False
-    del per_conn[str(chat_id)]
-    doc["connectors"][connector] = per_conn
-    doc["version"] = VERSION
-    _write_doc(doc, base)
-    return True
+    with _locked(base):
+        doc = _doc(base, for_write=True)
+        per_conn = dict(doc["connectors"].get(connector) or {})
+        if str(chat_id) not in per_conn:
+            return False
+        del per_conn[str(chat_id)]
+        doc["connectors"][connector] = per_conn
+        doc["version"] = VERSION
+        _write_doc(doc, base)
+        return True
 
 
 def replace(connector: str, bindings: dict, *, base=None) -> None:
@@ -140,10 +234,11 @@ def replace(connector: str, bindings: dict, *, base=None) -> None:
     altri. Serve al ripristino di `topics/retier.py`, che fa e disfa in blocco:
     scrivere l'intero documento da lì cancellerebbe i trasporti che quella
     transazione non ha nemmeno guardato."""
-    doc = _doc(base)
-    doc["connectors"][connector] = {str(k): dict(v) for k, v in (bindings or {}).items()}
-    doc["version"] = VERSION
-    _write_doc(doc, base)
+    with _locked(base):
+        doc = _doc(base, for_write=True)
+        doc["connectors"][connector] = {str(k): dict(v) for k, v in (bindings or {}).items()}
+        doc["version"] = VERSION
+        _write_doc(doc, base)
 
 
 # ── migrazione one-shot da telegram-bindings.json ────────────────────────────
@@ -163,11 +258,25 @@ def migrate_legacy(*, base=None, dry_run: bool = False) -> dict:
     perché una divergenza silenziosa fra due file è il modo peggiore di
     scoprirla.
 
+    If the old file exists but cannot be read/parsed or is not a JSON object,
+    raises `LegacyBindingsUnreadable` and writes nothing (not even in a
+    non-dry run): the next call retries, so repairing the old file is enough.
+
     Ritorna `{"migrated": [chat_id…], "already": bool, "orphans": [chat_id…]}`.
     """
-    legacy = _read_json(_legacy_path(base))
-    legacy = {str(k): v for k, v in legacy.items() if isinstance(v, dict)}
+    with _locked(base):
+        return _migrate_unlocked(base=base, dry_run=dry_run)
+
+
+def _migrate_unlocked(*, base=None, dry_run: bool = False) -> dict:
     if _path(base).is_file():
+        try:
+            legacy = _read_legacy(base) or {}
+        except LegacyBindingsUnreadable as e:
+            # Already migrated: the new file is authoritative, the old one is
+            # only compared against. Say so, but do not fail.
+            LOG.warning("channel-bindings already migrated; orphan check skipped: %s", e)
+            legacy = {}
         doc = _read_json(_path(base))
         presenti = set((doc.get("connectors") or {}).get(LEGACY_CONNECTOR) or {})
         orphans = sorted(set(legacy) - presenti)
@@ -177,6 +286,7 @@ def migrate_legacy(*, base=None, dry_run: bool = False) -> dict:
                 "NON vengono rifuse (%s). Rifonderle rimetterebbe in piedi binding "
                 "tolti di proposito.", len(orphans), LEGACY_FILENAME, ", ".join(orphans))
         return {"migrated": [], "already": True, "orphans": orphans}
+    legacy = _read_legacy(base) or {}
     piano = sorted(legacy)
     if not dry_run:
         _write_doc({"version": VERSION,
