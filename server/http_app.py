@@ -179,6 +179,9 @@ def build_app() -> Starlette:
     from .audit_api import routes as audit_routes
     # Egress proxy records (#463): what the agents' proxy saw, joined to the turn.
     from .egress_proxy_api import routes as egress_proxy_routes
+    # Connettori, generici (#519): elenco dal registry per la webui, e convalida
+    # del blocco `connectors:` di un pack prima che l'agent-server lo registri.
+    from .connectors_api import routes as connectors_routes
     from .audit.trace import TraceparentMiddleware
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
@@ -186,7 +189,7 @@ def build_app() -> Starlette:
                 *telegram_routes, *agents_routes, *vault_routes,
                 *tool_routes, *mint_routes, *gate_routes, *logic_routes,
                 *egress_routes, *proxy_auth_routes, *rag_routes,
-                *audit_routes, *egress_proxy_routes],
+                *audit_routes, *egress_proxy_routes, *connectors_routes],
         # Chi è in volo, su tutte le rotte (clodia-platform#316). Attorno a tutto
         # e non alle due rotte della issue: nell'incidente del 7 set le rotte
         # «innocenti» erano quelle in timeout, e un contatore puntato sui

@@ -1118,11 +1118,30 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
         # way to hold a mapping that is illegitimate today (#517, call time).
         reserved_set.update(c.namespace for c in parsed)
 
+    builtin_namespaces = {c.namespace for c in parsed}
     for pack in sorted(set(manifests) - set(builtin_names)):
         # Each pack is checked against the gateway's namespaces *and* against the
         # namespaces already claimed by the packs parsed before it.
-        for connector in load_manifest(manifests[pack], pack=pack,
-                                       reserved=reserved_set):
+        for entry in _seq((manifests[pack] or {}).get("connectors"),
+                          f"{_at(pack)}: connectors"):
+            # The namespace of a connector the GATEWAY still implements is read
+            # before parsing, because `check_namespace` would refuse the whole
+            # manifest for it — and that would make the pack of the pending
+            # migration uninstallable (comms-pack declares `telegram.` while the
+            # native verbs still exist, clodia-platform#519). It is the same
+            # situation as the id and scheme collisions below and it gets the
+            # same answer: the connector is ignored, loudly, and becomes
+            # effective by itself the day the builtin file goes away.
+            ns = str((entry or {}).get("namespace") or "") \
+                if isinstance(entry, Mapping) else ""
+            if ns and ns in builtin_namespaces:
+                refused.append(
+                    f"{_at(pack, str((entry or {}).get('id') or '?'))}: namespace "
+                    f"'{ns}' is still implemented by this gateway, so the pack's "
+                    f"connector is ignored. It becomes effective when that "
+                    f"implementation moves into a pack (epic clodia-platform#527)")
+                continue
+            connector = parse_connector(entry, pack=pack, reserved=reserved_set)
             clash = ""
             if connector.id in builtin_ids:
                 clash = f"connector id '{connector.id}'"
