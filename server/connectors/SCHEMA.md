@@ -228,6 +228,26 @@ manifest that declares one), `workdir`, `credentials` (vault entry names),
 State lives under `<datadir>/services/<pack>/<service>/` — `Service.state_dir`
 computes it, so the path is not written down twice.
 
+**At run time** (`server/services/`, #515), and this is the contract a pack
+author writes against:
+
+- the process is started by the gateway's supervisor, which reconciles what the
+  packs declare with what is alive: declaring a service is enough to have it
+  started at boot and at install, and removing the pack stops it;
+- it runs under a **dedicated OS user** of its own, and its environment is built
+  from scratch — `PATH`/`PYTHONPATH` of the pack runtime, `HOME` and
+  `CLODIA_SERVICE_STATE_DIR` (the directory above, the only writable one it
+  gets), `CLODIA_SERVICE_PACK`, `CLODIA_SERVICE_NAME`, and one
+  `CLODIA_CREDENTIAL_<NAME>` per declared credential, holding that vault entry
+  as JSON. Nothing of the gateway's own environment reaches it;
+- a declared credential that is not in the vault keeps the service **stopped**:
+  a process that is up and fails every call is worse than one that says why;
+- the `health.target` must be on **loopback**: a service is reachable by the
+  gateway only, and a health check pointing outside declares the opposite;
+- `stdout`/`stderr` go to `service.log` inside the state dir;
+- status, last error and restart count appear on the Tools page
+  (`GET /tools`, `GET /internal/connectors`).
+
 ## The gateway's own manifests
 
 `connectors/builtin_manifests/*.yaml` are manifests the gateway ships with

@@ -130,12 +130,25 @@ async def _lifespan(_app):
                 LOG.warning("configurazione non operativa: %s", warning)
         except Exception as e:  # noqa: BLE001 - diagnostica best-effort
             LOG.warning("controllo coerenza configurazione fallito: %s", e)
+        # Servizi lungo-vivi dichiarati dai pack (clodia-platform#515). Il ciclo
+        # riconcilia processi vivi e servizi dichiarati: il primo giro è l'avvio
+        # al boot, i successivi coprono install e rimozione di un pack. Non
+        # blocca il boot e non muore con un pack rotto.
+        from . import services as _services
+        servizi = asyncio.create_task(_services.reconcile_loop())
         try:
             yield
         finally:
             guardia.cancel()
             checkpoints.cancel()
             retention.cancel()
+            servizi.cancel()
+            # In un thread: fermare un servizio è SIGTERM e attesa, e il loop
+            # qui sta chiudendo le connessioni degli agenti.
+            try:
+                await asyncio.to_thread(_services.stop_all)
+            except Exception as e:  # noqa: BLE001 - l'arresto non deve esplodere
+                LOG.error("services: arresto non pulito: %s", e)
 
 
 def build_app() -> Starlette:

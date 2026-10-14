@@ -419,7 +419,13 @@ def connectors_snapshot() -> list[dict]:
 async def list_tools(request: Request):
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    return JSONResponse({"connectors": connectors_snapshot()})
+    # `services`: i processi lungo-vivi dichiarati dai pack, con stato e ultimo
+    # errore (clodia-platform#515). Stessa rotta dei connettori perché è la
+    # stessa pagina: un connettore che ha bisogno di un processo è rotto quanto
+    # quel processo, e finora non c'era modo di vederlo da fuori.
+    from . import services as _services
+    return JSONResponse({"connectors": connectors_snapshot(),
+                         "services": _services.snapshot()})
 
 
 class McpRegisterError(ValueError):
