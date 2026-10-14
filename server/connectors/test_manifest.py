@@ -105,8 +105,11 @@ class DocumentedExamplesTests(unittest.TestCase):
     def test_topic_action_declares_what_it_would_add(self):
         registry = M.build_registry(self.examples, reserved=NO_RESERVED)
         action = next(a for a in registry.topic_actions() if a.id == "telegram-link")
-        self.assertEqual(action.adds_ingress, ("tg:{chat}",))
-        self.assertEqual(action.adds_egress, ("tg:{chat}",))
+        # `chat_id` and not `chat`: it is the name the route reads today
+        # (`topics_api.telegram_link`), and the parity test of #522 compares the
+        # two sides field by field.
+        self.assertEqual(action.adds_ingress, ("tg:{chat_id}",))
+        self.assertEqual(action.adds_egress, ("tg:{chat_id}",))
         self.assertEqual(action.binding, "channel")
 
     def test_a_credential_only_connector_is_legal(self):
