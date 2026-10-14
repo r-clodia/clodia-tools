@@ -334,6 +334,15 @@ def get_secret(agent: str, credential: str) -> dict:
     return bundle
 
 
+def credential_type(credential: str) -> Optional[str]:
+    """The declared `type` of a credential, `""` when it exists without one,
+    None when there is no such credential. Never the value."""
+    spec = (_load_policy().get("credentials") or {}).get(credential)
+    if isinstance(spec, dict):
+        return str(spec.get("type") or "")
+    return "" if has_credential(credential) else None
+
+
 def read_internal(credential: str) -> dict:
     """Lettura interna del gateway, NON mediata da un agente: per le credenziali
     di **infrastruttura del gateway stesso** (es. il client OAuth dell'app,

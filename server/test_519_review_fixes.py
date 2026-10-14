@@ -30,7 +30,8 @@ def _sms(namespace="sms", entry=None, scheme=None, **extra) -> dict:
         "id": ns.replace("_", "-"), "manifest_version": 1, "namespace": ns,
         "label": ns,
         "schemes": [{"scheme": scheme or ns.replace("_", "-"),
-                     "direction": "egress"}],
+                     "direction": "egress",
+                     "forms": [{"label": "id", "pattern": "[a-z0-9-]{1,32}"}]}],
         "providers": [{"id": "p", "label": "P", "credential": {
             "kind": "form", "vault_entry": entry or f"{ns}_token",
             "fields": [{"name": "token", "secret": True}]}}],

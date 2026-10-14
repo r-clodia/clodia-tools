@@ -88,6 +88,25 @@ connectors:
         arg: from
         reads: result
         normalise: email_from
+    # Il bottone del topic: si sceglie una casella GIÀ configurata nel sistema e
+    # quella diventa in un colpo solo ingress ed egress di questo topic. Il
+    # campo ha un insieme di valori (`options: mailboxes`), non testo libero:
+    # l'indirizzo che finisce in whitelist lo risolve il gateway, perché una
+    # whitelist scritta da chi ne è soggetto non è una whitelist. Nessun
+    # binding: qui si autorizza soltanto — leggere la posta resta compito dei
+    # verbi email, il connettore decide DOVE, non chi né quando.
+    topic_actions:
+      - id: mailbox-link
+        label: Autorizza una casella
+        fields:
+          - name: account
+            label: Casella di sistema
+            options: mailboxes
+        adds:
+          ingress:
+            - 'inbox:{address}'
+          egress:
+            - 'outbox:{address}'
     # Posta in arrivo: il mittente non è controllato. `email.read` non è qui
     # perché ha UNA fonte dichiarata sopra, e una fonte vagliata non contamina;
     # questi tre mescolano più mittenti in una risposta sola, quindi non c'è

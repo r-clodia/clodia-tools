@@ -1,0 +1,394 @@
+"""Topic actions, applied from what the manifest declares.
+
+clodia-platform#519. «Collega questa stanza a quella chat» and «autorizza questa
+casella per questa stanza» were two routes with two bodies and two answers, and
+a third connector meant a third route plus a deploy. A `topic_actions:` entry
+already says everything the route needs — which fields the owner fills in, which
+ingress and egress entries result, whether a binding follows — so here the
+action is *executed* from the declaration, and `topics_api` keeps only the HTTP
+shell.
+
+Three things this module is careful about, in order of how badly they would hurt:
+
+1. **A template is rendered with values the GATEWAY resolved, never with what
+   the client sent**, whenever the field declares an option set. The mailbox
+   action is the case: the address that ends up in `inbox:`/`outbox:` comes from
+   `system_mailboxes()`, because a whitelist written by whoever is subject to it
+   is not a whitelist. A free-text field (a chat id) is of course the client's —
+   but that value is then checked against the scheme's own forms, so it cannot
+   be anything the whitelist would not accept.
+2. **Nothing is granted that the manifest did not declare.** The action can only
+   write the URIs its own templates produce, and only into the scope of the
+   topic it was called on.
+3. **The owner is the one calling.** These helpers do not authenticate: the
+   route does, owner-only, as today. They do refuse an action that is not
+   declared, a field that was not declared, and a value that cannot match.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from typing import Any
+
+from . import resolved as _resolved
+from .manifest import ActionField, Connector, TopicAction
+
+LOG = logging.getLogger("clodia-tools.connectors")
+
+_PLACEHOLDER = re.compile(r"\{([A-Za-z0-9_]+)\}")
+
+
+class ActionError(ValueError):
+    """Something the owner can fix, with the message they should read."""
+
+
+# --------------------------------------------------------------------------
+# option sets: values the gateway supplies, instead of free text
+# --------------------------------------------------------------------------
+
+def _mailbox_options() -> list[dict]:
+    """The system mailboxes, as `{value, label, values}`.
+
+    `values` carries the ADDRESS, which is what a template interpolates: the
+    account name is what the owner recognises, the address is what the whitelist
+    compares. Keeping both is the whole reason a chosen option is richer than
+    the string that was chosen.
+    """
+    from ..tools import email as email_tool
+    return [{"value": row["account"],
+             "label": f"{row['account']} · {row['email']}",
+             "values": {"account": row["account"], "address": row["email"]}}
+            for row in email_tool.system_mailboxes()]
+
+
+#: Closed list, like `NORMALISERS`: a pack may point a field at one of these,
+#: never supply one. An option set is «values this gateway vouches for», and a
+#: pack that could define one would be vouching on the gateway's behalf.
+OPTION_SETS = {"mailboxes": _mailbox_options}
+
+
+def options_for(field: ActionField) -> list[dict] | None:
+    source = getattr(field, "options", "")
+    if not source:
+        return None
+    resolver = OPTION_SETS.get(source)
+    if resolver is None:  # refused at load; defensive here
+        raise ActionError(f"insieme di valori '{source}' sconosciuto")
+    return resolver()
+
+
+# --------------------------------------------------------------------------
+# finding and rendering an action
+# --------------------------------------------------------------------------
+
+def find(connector_id: str, action_id: str) -> tuple[Connector, TopicAction]:
+    reg = _resolved.registry()
+    connector = reg.by_id(connector_id)
+    if connector is None:
+        raise ActionError(f"connettore '{connector_id}' non installato")
+    action = next((a for a in connector.topic_actions if a.id == action_id), None)
+    if action is None:
+        dichiarate = ", ".join(a.id for a in connector.topic_actions) or "nessuna"
+        raise ActionError(
+            f"il connettore '{connector_id}' non dichiara l'azione "
+            f"'{action_id}' (dichiarate: {dichiarate})")
+    return connector, action
+
+
+def resolve_values(action: TopicAction, body: dict) -> dict[str, str]:
+    """`{nome: valore}` per i campi dichiarati, e solo per quelli.
+
+    Un campo con un insieme di valori accetta la SCELTA e restituisce i valori
+    che il gateway le associa; un campo libero accetta la stringa. Un campo non
+    dichiarato viene ignorato: il corpo della richiesta non può introdurre
+    variabili nei template.
+    """
+    out: dict[str, str] = {}
+    for field in action.fields:
+        raw = str((body or {}).get(field.name) or "").strip()
+        opts = options_for(field)
+        if opts is not None:
+            scelta = next((o for o in opts if o["value"] == raw), None)
+            if scelta is None:
+                ammesse = ", ".join(o["value"] for o in opts) or "nessuna"
+                raise ActionError(
+                    f"'{raw or '(vuoto)'}' non è fra i valori che questa "
+                    f"istanza offre per '{field.name}': {ammesse}. Si sceglie "
+                    f"fra quelli esistenti, non se ne creano da qui")
+            out.update({k: str(v) for k, v in scelta["values"].items()})
+            out.setdefault(field.name, raw)
+            continue
+        if not raw and field.required:
+            raise ActionError(f"richiesto '{field.name}'")
+        out[field.name] = raw
+    return out
+
+
+def render(action: TopicAction, values: dict[str, str]) -> dict[str, list[str]]:
+    """Gli URI che questa azione scriverebbe. Solo i suoi template."""
+    def _one(template: str) -> str:
+        def _sub(m):
+            key = m.group(1)
+            if key not in values:
+                raise ActionError(
+                    f"il template '{template}' nomina '{key}', che l'azione non "
+                    f"dichiara fra i propri campi")
+            return values[key]
+        return _PLACEHOLDER.sub(_sub, template)
+
+    return {"ingress": [_one(t) for t in action.adds_ingress],
+            "egress": [_one(t) for t in action.adds_egress]}
+
+
+# --------------------------------------------------------------------------
+# applying it
+# --------------------------------------------------------------------------
+
+def state(connector: Connector, action: TopicAction, tier: str,
+          name: str) -> dict:
+    """Cosa c'è ADESSO, per questa azione su questo topic.
+
+    `entries` sono le voci di QUESTA stanza che un'azione già applicata ha
+    lasciato: è l'unica cosa che si può togliere da qui, e non distinguerla da
+    un'autorizzazione globale farebbe sembrare rotto il bottone «scollega».
+    """
+    from .. import egress as eg
+    scope = f"{tier}/{name}"
+    locali = {"ingress": set(eg.scope_uris("ingress", scope)),
+              "egress": set(eg.scope_uris("egress", scope))}
+    out: dict[str, Any] = {
+        "connector": connector.id,
+        "action": action.id,
+        "label": action.label,
+        "binding": action.binding,
+        "fields": [{"name": f.name, "label": f.label, "required": f.required,
+                    "placeholder": f.placeholder,
+                    "options": options_for(f)} for f in action.fields],
+        "entries": {k: sorted(v) for k, v in locali.items()},
+    }
+    if action.binding == "channel":
+        out["seal"] = _seal_state(connector, tier, name)
+        out["bound"] = _bound_chat(tier, name)
+        out["connected"] = out["bound"] is not None
+    else:
+        # The owner decides with the topic's tier in front of them, for EVERY
+        # action (#519): what is being authorised and at which SEAL level.
+        out["seal"] = {"tier": _topic_tier(tier, name), "cap": None,
+                       "requires_ack": False, "ack": None}
+    out["tier"] = out["seal"]["tier"]
+    return out
+
+
+def _topic_tier(tier: str, name: str) -> str:
+    """The SEAL tier the topic declares (its meta), else the one in the path."""
+    from ..topics.service import TopicError
+    from ..topics_api import _service
+    try:
+        return str(_service().open(tier, name).get("meta", {}).get("tier")
+                   or tier)
+    except TopicError:
+        return tier
+
+
+def _seal_state(connector: Connector, tier: str, name: str) -> dict:
+    """Il cap SEAL del channel su questo topic (#405), per la UI.
+
+    Resta la logica di oggi, letta per tipo di channel: #519 non tocca il cap —
+    cade con la migrazione del connettore che cappa (#522), decisione
+    dell'orchestratore del 14/10.
+    """
+    from ..topics.service import (CHANNEL_SEAL_ACK, _tier_rank,
+                                  channel_cap_acked, channel_seal_cap)
+    from ..topics_api import _service
+    from ..topics.service import TopicError
+    try:
+        meta = _service().open(tier, name).get("meta", {})
+    except TopicError:
+        meta = {}
+    cap = channel_seal_cap(connector.id)
+    t = meta.get("tier", tier)
+    morde = cap is not None and _tier_rank(t) > cap
+    return {"tier": t, "cap": f"SEAL-{cap}" if cap is not None else None,
+            "requires_ack": bool(morde
+                                 and not channel_cap_acked(meta, connector.id, t)),
+            "ack": meta.get(CHANNEL_SEAL_ACK)}
+
+
+def _bound_chat(tier: str, name: str) -> str | None:
+    # SHORTCUT: il registro dei binding è ancora quello di Telegram. Regge
+    #           finché il solo binding `channel` è il suo. Quando clodia-tools#356
+    #           (#521) è in main, questo legge il registro generico per chiave
+    #           (connettore + chat) e la riga qui sotto sparisce.
+    from ..tools import telegram_bindings as tb
+    for cid, b in tb.load().items():
+        if (b.get("tier"), b.get("topic")) == (tier, name):
+            return cid
+    return None
+
+
+def _owned_schemes(connector: Connector) -> set[str]:
+    """The schemes this connector's actions may write: its own, or — for a
+    provider that `extends` a vocabulary — the vocabulary owner's."""
+    own = {sch.name for sch in connector.schemes}
+    if connector.extends:
+        target = _resolved.registry().by_id(connector.extends)
+        if target is not None:
+            own |= {sch.name for sch in target.schemes}
+    return own
+
+
+def check_uris(connector: Connector, uris: dict[str, list[str]]) -> None:
+    """Every URI an action would write, checked BEFORE anything is written.
+
+    Review of #360: the values of free-text fields were not checked at all and
+    a template could write any scheme — `adds.egress: ['{url}']` let a topic
+    caller whitelist `https://evil.example/*` without the WALLS gate. Now:
+
+    - the scheme must be one the connector owns (refused at load as well);
+    - the rest must match one of that scheme's forms (`fullmatch`);
+    - the entry must be grantable in its direction (`egress.check_grantable`:
+      no `*`, no degenerate entry, no wildcard on a scheme that forbids it).
+    """
+    from .. import egress as eg
+    owned = _owned_schemes(connector)
+    for direzione, voci in uris.items():
+        for uri in voci:
+            scheme, sep, rest = uri.partition(":")
+            if not sep or scheme not in owned:
+                raise ActionError(
+                    f"'{uri}' non è un indirizzo di uno schema del connettore "
+                    f"'{connector.id}' ({', '.join(sorted(owned)) or 'nessuno'})")
+            if not eg.scheme_form_ok(scheme, rest):
+                raise ActionError(
+                    f"'{rest}' non ha la forma di un indirizzo '{scheme}:'")
+            try:
+                eg.check_grantable(direzione, uri)
+            except ValueError as e:
+                raise ActionError(str(e)[:300])
+
+
+def apply(connector: Connector, action: TopicAction, tier: str, name: str, *,
+          body: dict, principal: str = "") -> dict:
+    """Esegue l'azione dichiarata: whitelist, e binding se è dichiarato.
+
+    `body["action"]` sceglie fra `connect` e `disconnect` — gli stessi due verbi
+    delle rotte di oggi, perché un connettore si attacca e si stacca, e un terzo
+    stato non esiste.
+
+    Ordine (review di #360): tutto si VERIFICA prima di scrivere qualunque cosa
+    (valori, forme, schemi, cap SEAL, chat già collegata altrove); poi la
+    whitelist; il binding per ULTIMO, così un errore sulla whitelist non lascia
+    un binding orfano.
+    """
+    from .. import egress as eg
+    from ..topics.service import TopicError
+    from ..topics_api import _service
+
+    verso = str((body or {}).get("action") or "connect").strip()
+    if verso not in ("connect", "disconnect"):
+        raise ActionError(f"azione sconosciuta: {verso}")
+    # Il topic deve ESISTERE per scriverci: le liste per scope sono chiavi di
+    # config, e una voce scritta per un topic non ancora creato sarebbe
+    # ereditata da chi un giorno lo creerà con quel nome (review di #310).
+    # Togliere invece si può sempre — com'era sulle rotte di prima.
+    if verso == "connect":
+        try:
+            _service().open(tier, name)
+        except TopicError as e:
+            raise TopicMissing(f"topic {tier}/{name} inesistente: {str(e)[:160]}")
+
+    scope = f"{tier}/{name}"
+    if verso == "disconnect" and action.binding == "channel":
+        return _disconnect_channel(connector, action, tier, name, scope)
+
+    values = resolve_values(action, body or {})
+    uris = render(action, values)
+    check_uris(connector, uris)
+    chat = ""
+    if verso == "connect" and action.binding == "channel":
+        chat = _prepare_channel(connector, tier, name, values, body or {},
+                                principal=principal)
+    try:
+        for direzione, voci in (("ingress", uris["ingress"]),
+                                ("egress", uris["egress"])):
+            for uri in voci:
+                if verso == "connect":
+                    eg.scope_allow(direzione, scope, uri)
+                else:
+                    eg.scope_revoke(direzione, scope, uri)
+    except ValueError as e:
+        raise ActionError(str(e)[:200])
+    if chat:
+        from ..tools import telegram_bindings as tb
+        tb.set_binding(chat, "messaggero", tier, name)
+    return state(connector, action, tier, name)
+
+
+class TopicMissing(ActionError):
+    """The topic an action would write into does not exist."""
+
+
+def _prepare_channel(connector: Connector, tier: str, name: str,
+                     values: dict, body: dict, *, principal: str = "") -> str:
+    """Le verifiche del binding di canale, PRIMA di scrivere qualunque cosa.
+
+    Il binding vero (`tb.set_binding`) lo fa `apply` per ultimo: sono due passi
+    e vanno insieme — senza il secondo il messaggero non riporta niente anche
+    con la whitelist scritta (Davide, 23 set 2026) — ma un errore sulla
+    whitelist non deve lasciare un binding senza le sue voci.
+    """
+    from ..topics.service import TopicError, _check_channel_cap
+    from ..topics_api import _service
+    # SHORTCUT: vedi `_bound_chat`. Un binding di canale è ancora quello di
+    #           Telegram; con #521 in main diventa il registro generico.
+    from ..tools import telegram_bindings as tb
+
+    chat = next((v for k, v in values.items() if k != "account" and v), "")
+    if not chat:
+        raise ActionError("richiesto l'identificativo della chat")
+    esistente = tb.get(chat)
+    if esistente and (esistente.get("tier"), esistente.get("topic")) != (tier, name):
+        raise ActionError(
+            f"chat {chat} già collegata a {esistente.get('tier')}/"
+            f"{esistente.get('topic')}: disconnettila lì prima "
+            f"(una chat → un solo topic)")
+    svc = _service()
+    try:
+        # Presa d'atto dell'owner sul cap SEAL (#405): PRIMA della verifica,
+        # perché è ciò che la rende superabile. Qui il principal è l'umano
+        # owner del topic — la rotta è owner-only — quindi è l'unico punto
+        # della piattaforma in cui quel consenso può nascere.
+        if body.get("accept_seal_downgrade"):
+            svc.accept_channel_cap(tier, name, connector.id, by=principal or "")
+        meta = svc.open(tier, name).get("meta", {})
+        _check_channel_cap({"type": connector.id}, meta.get("tier", tier), meta)
+    except TopicError as e:
+        raise ActionError(str(e)[:400])
+    return chat
+
+
+def _disconnect_channel(connector: Connector, action: TopicAction, tier: str,
+                        name: str, scope: str) -> dict:
+    """Stacca il canale: binding, presa d'atto e voci che l'azione aveva scritto.
+
+    La presa d'atto muore col collegamento anche quando il binding non c'era
+    più: è il gesto «questa stanza non parla con quel canale», e lasciarla in
+    piedi farebbe passare il prossimo aggancio in silenzio.
+    """
+    from .. import egress as eg
+    from ..topics.service import TopicError
+    from ..topics_api import _service
+    from ..tools import telegram_bindings as tb
+
+    try:
+        _service().revoke_channel_cap_ack(tier, name)
+    except TopicError:
+        pass
+    chat = _bound_chat(tier, name)
+    if chat is not None:
+        tb.remove(chat)
+        for direzione, voci in render(action, {f.name: chat
+                                               for f in action.fields}).items():
+            for uri in voci:
+                eg.scope_revoke(direzione, scope, uri)
+    return state(connector, action, tier, name)

@@ -81,6 +81,19 @@ MAX_VALUE_LENGTH = 2048
 #: rewriting what a URL means on this instance. See `normalise.py`.
 NORMALISERS = ("url_origin", "repo_url", "repo_pair", "email_from")
 
+#: Insiemi di valori che il GATEWAY offre a un campo di un'azione di topic, al
+#: posto del testo libero (clodia-platform#519). Lista chiusa come
+#: `NORMALISERS`, e per la stessa ragione: un insieme di valori è «cose di cui
+#: questa istanza risponde», e un pack che potesse definirne uno risponderebbe
+#: al posto suo. Le implementazioni stanno in `actions.OPTION_SETS`.
+OPTION_SETS = ("mailboxes",)
+
+#: I nomi che ciascun insieme RISOLVE, interpolabili nei template dell'azione
+#: oltre ai nomi dei campi. Dichiarati qui perché la grammatica deve poterli
+#: convalidare al caricamento; `actions.OPTION_SETS` li produce, e un test
+#: verifica che le due facce dicano la stessa cosa.
+OPTION_SET_VALUES = {"mailboxes": ("account", "address")}
+
 _ID = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
 _NAMESPACE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _SCHEME = re.compile(r"^[a-z][a-z0-9+.-]{0,31}$")
@@ -749,10 +762,22 @@ class VerbMapping:
 
 @dataclass(frozen=True)
 class ActionField:
+    """Un campo dell'azione: testo libero, oppure una scelta fra valori che il
+    gateway fornisce (`options:`).
+
+    La differenza non è di comodità, è di fiducia: il valore scelto da un
+    insieme viene RISOLTO dal gateway — della casella si prende l'indirizzo che
+    conosce lui — mentre un testo libero è del client e come tale va confrontato
+    con le forme dello schema. Senza la distinzione, l'azione sulle caselle
+    accetterebbe dal corpo della richiesta l'indirizzo da autorizzare, e una
+    whitelist scritta da chi ne è soggetto non è una whitelist.
+    """
+
     name: str
     label: str = ""
     required: bool = True
     placeholder: str = ""
+    options: str = ""
 
 
 @dataclass(frozen=True)
@@ -1095,8 +1120,18 @@ def _parse_topic_action(raw: Any, where: str) -> TopicAction:
                            default=True),
             placeholder=_text(fdata.get("placeholder"),
                               f"{where}.fields[{i}].placeholder", required=False),
+            options=_one_of(
+                _text(fdata.get("options"), f"{where}.fields[{i}].options",
+                      required=False, default=""),
+                ("",) + OPTION_SETS, f"{where}.fields[{i}].options"),
         ))
+    # I nomi interpolabili: quelli dei campi, più i valori che un insieme
+    # RISOLVE. `{address}` esiste perché la casella scelta porta con sé il
+    # proprio indirizzo — ed è l'indirizzo, non il nome dell'account, la cosa
+    # che finisce in whitelist.
     known = {f.name for f in fields}
+    for f in fields:
+        known.update(OPTION_SET_VALUES.get(f.options, ()))
     adds = _mapping(data.get("adds") or {}, f"{where}.adds")
     out: dict[str, tuple[str, ...]] = {}
     for key in ("ingress", "egress"):
@@ -1125,6 +1160,35 @@ def _binding(raw: Any, where: str) -> str:
     that silently adds the whitelist entries and skips the binding."""
     value = _text(raw, where, required=False)
     return _one_of(value, BINDINGS, where) if value else ""
+
+
+def _check_action_schemes(actions, owned, where: str, *,
+                          require_forms: bool = False) -> None:
+    """Every template of a topic action starts with a LITERAL scheme the
+    connector owns: `tg:{chat}` yes, `{url}` or `https://{host}/` no — those
+    would let whoever fills the field whitelist any address without the WALLS
+    gate (review of #360)."""
+    for a in actions:
+        for key, templates in (("ingress", a.adds_ingress),
+                               ("egress", a.adds_egress)):
+            for tpl in templates:
+                scheme, sep, _rest = tpl.partition(":")
+                if not sep or scheme not in owned or "{" in scheme:
+                    raise ManifestError(
+                        f"{where}.topic_actions '{a.id}'.adds.{key}: '{tpl}' "
+                        f"must start with one of the connector's own schemes "
+                        f"({', '.join(sorted(owned)) or 'none'}), written out")
+                # Second verification of #360: a scheme with no `forms` accepts
+                # anything (`courier:*` included), so the run-time form check
+                # would check nothing. A pack's action may write only into a
+                # scheme that says what its addresses look like.
+                if require_forms and isinstance(owned, Mapping) \
+                        and not owned[scheme].forms:
+                    raise ManifestError(
+                        f"{where}.topic_actions '{a.id}'.adds.{key}: scheme "
+                        f"'{scheme}' declares no `forms`, so any value — a "
+                        f"wildcard included — would be written; declare its "
+                        f"forms")
 
 
 def _parse_tools_card(raw: Any, where: str) -> ToolsCard:
@@ -1317,6 +1381,12 @@ def parse_connector(raw: Any, *, pack: str,
         _parse_topic_action(a, f"{where}.topic_actions[{i}]")
         for i, a in enumerate(
             _seq(data.get("topic_actions"), f"{where}.topic_actions")))
+    if not extends:
+        # Review of #360: an action writes only into its connector's own
+        # vocabulary. An `extends` provider is checked against the vocabulary
+        # it joins, in `build_registry`, once that is resolved.
+        _check_action_schemes(actions, {sch.name: sch for sch in schemes},
+                              where, require_forms=not builtin)
     services = tuple(
         _parse_service(s, f"{where}.services[{i}]", pack=pack)
         for i, s in enumerate(_seq(data.get("services"), f"{where}.services")))
@@ -1640,6 +1710,13 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
                     f"{_at(c.pack, c.id)}: extends '{c.extends}', which is "
                     f"itself an extension; a provider attaches to the vocabulary "
                     f"owner, not to another provider"), c.pack)
+            try:
+                _check_action_schemes(c.topic_actions,
+                                      {sch.name: sch for sch in target.schemes},
+                                      _at(c.pack, c.id),
+                                      require_forms=not c.builtin)
+            except ManifestError as e:
+                raise _blame(e, c.pack)
         for p in c.providers:
             key = (c.vocabulary, p.id)
             other = provider_owner.get(key)

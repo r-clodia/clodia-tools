@@ -103,6 +103,56 @@ def _authorize(request: Request):
     return payload.get("agent"), None
 
 
+def _authorize_topic_owner(request: Request):
+    """`_authorize` PLUS «who may change this topic's walls» (review of #360,
+    second verification).
+
+    A connector action writes the topic's ingress/egress lists and binds a
+    channel, without the WALLS gate: so the caller must be the one entitled to
+    decide that, and `_authorize` alone admitted any internal principal —
+    `clodia`'s RUNTIME token (`CLODIA_TOOLS_TOKEN` in every agent's env) got 200
+    and wrote `tg:-100777` plus a binding. Admitted:
+
+    - an on-behalf HUMAN session whose principal is the topic's owner, or a
+      platform admin (`human_role: admin`);
+    - the agent-server itself: a session it mints for its own principal with
+      no execution and no chat (`topics_client._headers()` in clodia-logic),
+      which is the path the webui takes — clodia-logic checks owner/admin
+      (`_require_topic_owner`, `_require_platform_admin`) before forwarding.
+      An AGENT token always carries its `execution_id`, so it never qualifies.
+
+    Everything else: 403. Returns `(who, None)` — the human when on-behalf.
+    """
+    who, err = _authorize(request)
+    if err:
+        return None, err
+    p = getattr(request.state, "auth_payload", None) or {}
+    if p.get("on_behalf"):
+        principal = str(p.get("principal") or "")
+        if (p.get("human_role") or "user") == "admin":
+            return principal or who, None
+        tier = request.path_params.get("tier"); name = request.path_params.get("name")
+        try:
+            owner = (_service().open(tier, name).get("meta") or {}).get("owner")
+        except TopicError:
+            owner = None
+        if principal and owner and principal == owner:
+            return principal, None
+        LOG.warning("topics: %s non è owner di %s/%s né admin: azione sui muri "
+                    "rifiutata", principal or "?", tier, name)
+        return None, JSONResponse(
+            {"error": "solo l'owner del topic (o un admin) può collegare o "
+                      "scollegare un connettore"}, status_code=403)
+    if not str(p.get("execution_id") or "").strip() and not p.get("chat"):
+        return who, None
+    LOG.warning("topics: token di agente (%s, execution %s) rifiutato su "
+                "un'azione sui muri del topic", p.get("agent"),
+                p.get("execution_id"))
+    return None, JSONResponse(
+        {"error": "un agente non collega connettori a un topic: è una decisione "
+                  "dell'owner"}, status_code=403)
+
+
 def _reader(request: Request) -> dict | None:
     """The person behind a read, or None for the runner's own (system) reads."""
     p = getattr(request.state, "auth_payload", None) or {}
@@ -406,7 +456,7 @@ async def drive_folder(request: Request):
     perimetro che `gdrive_root.roots_for_call` legge. action: add|remove|
     set_credential (git — il credential rotation dello scope, indipendente
     da qualunque cartella Drive)."""
-    _, err = _authorize(request)
+    _, err = _authorize_topic_owner(request)
     if err:
         return err
     tier = request.path_params["tier"]; name = request.path_params["name"]
@@ -622,88 +672,106 @@ async def topic_tier(request: Request):
     return JSONResponse(esito)
 
 
-async def telegram_link(request: Request):
-    """GET/POST /internal/topics/{tier}/{name}/telegram-link.
+async def connector_action(request: Request):
+    """GET/POST /internal/topics/{tier}/{name}/connectors/{id}/{action}.
 
-    A differenza delle icone rapide Telegram/Drive (solo whitelist), qui
-    l'azione fa ENTRAMBI i passi che prima erano scollegati e confusi
-    (Davide, 23 set 2026): whitelist egress/ingress `tg:<chat_id>` PIÙ il
-    binding vero (`telegram_bindings`, l'equivalente HTTP-owner di
-    `telegram.listen`/`unlisten`) — senza il secondo, il messaggero non
-    riporta nulla anche con la whitelist già scritta, ed è esattamente il
-    sintomo che ha riportato.
+    L'azione che il MANIFEST del connettore dichiara, eseguita da ciò che
+    dichiara (clodia-platform#519). Prima ogni connettore aveva la sua rotta con
+    il suo corpo e la sua risposta, e un connettore in più voleva una rotta in
+    più e un deploy; `topic_actions:` dice già quali campi l'owner riempie,
+    quali voci di ingress/egress ne risultano e se segue un binding.
 
-    GET → stato corrente: {connected, chat_id, seal}.
-    POST {action: connect|disconnect, chat_id (richiesto su connect),
-          accept_seal_downgrade (solo se `seal.requires_ack`)}.
+    GET → stato dell'azione su questo topic (campi, valori offerti, voci già
+    scritte, e per un'azione con binding anche lo stato SEAL).
+    POST {action: connect|disconnect, <campi>} → applica, e risponde con lo
+    stesso stato.
+
+    **Autorizzazione owner-only, senza una card di gate aggiuntiva.** La issue
+    la descriveva «through the existing WALLS gate», ma quel gate è dei VERBI
+    DEGLI AGENTI (`topic.ingress_add`/`egress_add`): qui il principal è l'umano
+    owner del topic, cioè la decisione è già sua nel momento in cui chiama, e
+    una card che gli chiede conferma di ciò che sta facendo non aggiunge una
+    garanzia, aggiunge un clic. Quello che la risposta porta sempre è il TIER
+    del topic e lo stato del cap, che è l'informazione con cui decide.
     """
-    principal, err = _authorize(request)
+    principal, err = _authorize_topic_owner(request)
     if err:
         return err
     tier = request.path_params["tier"]; name = request.path_params["name"]
+    from .connectors import actions as ca
+    try:
+        connector, action = ca.find(request.path_params["id"],
+                                    request.path_params["action"])
+        if request.method == "GET":
+            return JSONResponse(ca.state(connector, action, tier, name))
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "bad_json"}, status_code=400)
+        return JSONResponse(ca.apply(connector, action, tier, name,
+                                     body=body or {}, principal=principal or ""))
+    except ca.TopicMissing as e:
+        return JSONResponse({"error": str(e)[:400]}, status_code=404)
+    except ca.ActionError as e:
+        return JSONResponse({"error": str(e)[:400]}, status_code=400)
+
+
+async def telegram_link(request: Request):
+    """GET/POST /internal/topics/{tier}/{name}/telegram-link.
+
+    Alias sottile dell'azione generica `telegram/telegram-link` (#519), tenuto
+    finché la webui parla questa lingua: stesso corpo, stessa risposta
+    `{connected, chat_id, seal}`. La rimozione è a fine epic, non qui — ed è
+    **un solo** comportamento sotto due URL, non due implementazioni che un
+    giorno divergono.
+
+    Fa ENTRAMBI i passi che prima erano scollegati (Davide, 23 set 2026):
+    whitelist egress/ingress `tg:<chat_id>` PIÙ il binding vero — senza il
+    secondo il messaggero non riporta nulla anche con la whitelist scritta.
+    """
+    principal, err = _authorize_topic_owner(request)
+    if err:
+        return err
+    tier = request.path_params["tier"]; name = request.path_params["name"]
+    from .connectors import actions as ca
+    try:
+        connector, action = ca.find("telegram", "telegram-link")
+    except ca.ActionError as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=400)
     if request.method == "GET":
-        cid, _b = _telegram_binding_for(tier, name)
-        return JSONResponse({"connected": cid is not None, "chat_id": cid,
-                             "seal": _telegram_seal_state(tier, name)})
+        return JSONResponse(_telegram_shape(
+            ca.state(connector, action, tier, name)))
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad_json"}, status_code=400)
-    body = body or {}
-    action = body.get("action")
-    from . import egress as eg
-    from .tools import telegram_bindings as tb
-    from .topics.service import _check_channel_cap
-    if action == "connect":
-        cid = str(body.get("chat_id") or "").strip()
-        if not cid:
-            return JSONResponse({"error": "richiesto 'chat_id'"}, status_code=400)
-        ex = tb.get(cid)
-        if ex and (ex.get("tier"), ex.get("topic")) != (tier, name):
-            return JSONResponse(
-                {"error": f"chat {cid} già collegata a {ex.get('tier')}/{ex.get('topic')}: "
-                          "disconnettila lì prima (una chat → un solo topic)"},
-                status_code=400)
-        svc = _service()
+    body = dict(body or {})
+    if "chat_id" in body:
+        body.setdefault("chat", body.get("chat_id"))
+    # Parità con la rotta di prima (review di #360): il campo mancante si
+    # chiama `chat_id` in questa lingua, e si controlla prima del topic.
+    if body.get("action") == "connect" and not str(body.get("chat") or "").strip():
+        return JSONResponse({"error": "richiesto 'chat_id'"}, status_code=400)
+    try:
+        out = ca.apply(connector, action, tier, name, body=body,
+                       principal=principal or "")
+    except ca.ActionError as e:
+        testo = str(e)
+        stato = {}
         try:
-            # Presa d'atto dell'owner sul cap SEAL del channel
-            # (clodia-platform#405): PRIMA della verifica, perché è ciò che la
-            # rende superabile. Qui il principal è l'umano owner del topic — la
-            # rotta è owner-only lato agent-server e ckt1-only qui — quindi è
-            # l'unico punto della piattaforma in cui quel consenso può nascere.
-            if body.get("accept_seal_downgrade"):
-                svc.accept_channel_cap(tier, name, "telegram", by=principal or "")
-            meta = svc.open(tier, name).get("meta", {})
-            _check_channel_cap({"type": "telegram"}, meta.get("tier", tier), meta)
-            scope = f"{tier}/{name}"
-            eg.scope_allow("egress", scope, f"tg:{cid}")
-            eg.scope_allow("ingress", scope, f"tg:{cid}")
-            tb.set_binding(cid, "messaggero", tier, name)
-        except TopicError as e:
-            return JSONResponse({"error": str(e)[:400],
-                                 "seal": _telegram_seal_state(tier, name)},
-                                status_code=400)
-        return JSONResponse({"connected": True, "chat_id": cid,
-                             "seal": _telegram_seal_state(tier, name)})
-    if action == "disconnect":
-        cid, _b = _telegram_binding_for(tier, name)
-        # La presa d'atto muore col collegamento anche quando il binding non
-        # c'era più: è il gesto «questo canale non parla con Telegram», e
-        # lasciarla in piedi farebbe passare il prossimo aggancio in silenzio.
-        try:
-            _service().revoke_channel_cap_ack(tier, name)
-        except TopicError:
-            pass
-        if cid is None:
-            return JSONResponse({"connected": False, "chat_id": None,
-                                 "seal": _telegram_seal_state(tier, name)})
-        tb.remove(cid)
-        scope = f"{tier}/{name}"
-        eg.scope_revoke("egress", scope, f"tg:{cid}")
-        eg.scope_revoke("ingress", scope, f"tg:{cid}")
-        return JSONResponse({"connected": False, "chat_id": None,
-                             "seal": _telegram_seal_state(tier, name)})
-    return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
+            stato = {"seal": ca.state(connector, action, tier, name)["seal"]}
+        except Exception:  # noqa: BLE001 — l'errore vero è quello sopra
+            stato = {}
+        # 400 anche per un topic inesistente, come prima: questa rotta non ha
+        # mai risposto 404.
+        return JSONResponse({"error": testo[:400], **stato}, status_code=400)
+    return JSONResponse(_telegram_shape(out))
+
+
+def _telegram_shape(stato: dict) -> dict:
+    """Lo stato generico nella forma che la webui conosce."""
+    return {"connected": bool(stato.get("connected")),
+            "chat_id": stato.get("bound"), "seal": stato.get("seal")}
 
 
 def _mailbox_state(scope: str) -> dict:
@@ -738,69 +806,59 @@ def _mailbox_state(scope: str) -> dict:
 async def mailbox_link(request: Request):
     """GET/POST /internal/topics/{tier}/{name}/mailbox-link.
 
+    Alias sottile dell'azione generica `mail/mailbox-link` (#519): stesso corpo
+    (`{action, account}`), stessa risposta (`{mailboxes: [...]}`).
+
     Connettore «Mailbox» del canale (clodia-platform#406): si sceglie una delle
     caselle GIÀ configurate nel sistema e quella diventa in un colpo solo
     ingress ED egress di questo topic — `inbox:<addr>` fra le fonti,
-    `outbox:<addr>` fra le destinazioni. Le due voci sono quelle che
-    `egress.mailbox_allowed` legge quando un verbo email materializza le
-    credenziali (`tools/email._secrets_env`): senza, la casella esiste ma il
-    canale non la può usare, ed è il gate ad-hoc che questa rotta sostituisce.
+    `outbox:<addr>` fra le destinazioni, le due voci che `egress.mailbox_allowed`
+    legge quando un verbo email materializza le credenziali.
 
-    A differenza di `telegram_link` non c'è nessun binding da creare: qui si
-    autorizza soltanto. Leggere la posta e portarla nel topic resta compito dei
-    verbi email del messaggero — il connettore decide DOVE, non chi né quando.
-
-    GET → {mailboxes: [{account, email, send_only, inbox, outbox, local}]}.
-    POST {action: connect|disconnect, account} → stesso corpo, aggiornato.
+    L'indirizzo lo decide il SISTEMA, non il corpo della richiesta: l'azione
+    dichiara un campo con un insieme di valori, e il gateway risolve l'indirizzo
+    della casella scelta. Accettare un `email` dal client farebbe autorizzare
+    una casella che non esiste.
     """
-    _, err = _authorize(request)
+    _, err = _authorize_topic_owner(request)
     if err:
         return err
     tier = request.path_params["tier"]; name = request.path_params["name"]
+    scope = f"{tier}/{name}"
+    from .connectors import actions as ca
+    try:
+        connector, action = ca.find("mail", "mailbox-link")
+    except ca.ActionError as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=400)
     # Il topic deve ESISTERE (review di #310): le liste per scope sono chiavi di
     # config, e una voce scritta per un topic non ancora creato sarebbe
-    # ereditata da chi un giorno lo creerà con quel nome. Stesso controllo di
-    # `telegram_link`.
+    # ereditata da chi un giorno lo creerà con quel nome.
     try:
         _service().open(tier, name)
     except TopicError as e:
         return JSONResponse({"error": f"topic {tier}/{name} inesistente: {str(e)[:160]}"},
                             status_code=404)
-    scope = f"{tier}/{name}"
     if request.method == "GET":
         return JSONResponse(_mailbox_state(scope))
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad_json"}, status_code=400)
-    body = body or {}
-    action = body.get("action")
-    if action not in ("connect", "disconnect"):
-        return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
-    conto = str(body.get("account") or "").strip().lower()
-    if not conto:
+    body = dict(body or {})
+    if body.get("action") not in ("connect", "disconnect"):
+        return JSONResponse({"error": f"azione sconosciuta: {body.get('action')}"},
+                            status_code=400)
+    if not str(body.get("account") or "").strip():
         return JSONResponse({"error": "richiesto 'account'"}, status_code=400)
-    from . import egress as eg
-    from .tools import email as email_tool
-    # L'indirizzo lo decide il SISTEMA, non il corpo della richiesta: accettare
-    # un `email` dal client farebbe autorizzare una casella che non esiste —
-    # una whitelist scritta da chi ne è soggetto non è una whitelist.
-    riga = next((r for r in email_tool.system_mailboxes() if r["account"] == conto), None)
-    if riga is None:
-        return JSONResponse(
-            {"error": f"casella '{conto}' non configurata nel sistema: "
-                      "si sceglie fra quelle esistenti, non se ne creano da qui"},
-            status_code=400)
-    addr = riga["email"]
+    body["account"] = str(body["account"]).strip().lower()
     try:
-        if action == "connect":
-            eg.scope_allow("ingress", scope, f"inbox:{addr}")
-            eg.scope_allow("egress", scope, f"outbox:{addr}")
-        else:
-            eg.scope_revoke("ingress", scope, f"inbox:{addr}")
-            eg.scope_revoke("egress", scope, f"outbox:{addr}")
-    except ValueError as e:
-        return JSONResponse({"error": str(e)[:200]}, status_code=400)
+        ca.apply(connector, action, tier, name, body=body)
+    except ca.ActionError as e:
+        testo = str(e)
+        if "non è fra i valori" in testo:
+            testo = (f"casella '{body['account']}' non configurata nel sistema: "
+                     "si sceglie fra quelle esistenti, non se ne creano da qui")
+        return JSONResponse({"error": testo[:200]}, status_code=400)
     return JSONResponse(_mailbox_state(scope))
 
 
@@ -1143,6 +1201,8 @@ routes = [
     Route("/internal/topics/{tier}/{name}/telegram-link", telegram_link, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/tier", topic_tier, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/mailbox-link", mailbox_link, methods=["GET", "POST"]),
+    Route("/internal/topics/{tier}/{name}/connectors/{id}/{action}",
+          connector_action, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/mcp-clients", mcp_clients,
           methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/logo", topic_logo,
