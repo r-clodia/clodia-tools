@@ -20,12 +20,14 @@ Qui si verificano le quattro cose che #520 chiede a questo lato:
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
-from . import connectors_api, internal_auth, pki_verify, tools_api, vault
+from . import connectors_api, internal_auth, pki_verify, tools_api, topics_api, vault
+from . import egress as eg
+from .tools import telegram_bindings as tb
 from .connectors import actions as ca
 from .connectors import manifest as cm
 from .connectors import resolved
@@ -183,6 +185,22 @@ class AdminOnlyTravelsTests(_NoPacks):
         # L'opposto, se no il campo potrebbe essere `true` per tutti e il test
         # verde a vuoto: collegare una chat Telegram resta dell'owner.
         self.assertFalse(azioni[("telegram", "telegram-link")]["admin_only"])
+
+    def test_the_state_of_an_action_carries_it(self):
+        """È il campo che l'agent-server legge prima di inoltrare una POST: se
+        sparisse di qui, la rotta generica diventerebbe la porta di servizio di
+        `mailbox-link`, che in clodia-logic è da admin dal 27 set."""
+        svc = MagicMock()
+        svc.open.return_value = {"meta": {"tier": "SEAL-1"}}
+        with patch.object(topics_api, "_service", lambda: svc), \
+                patch.object(eg, "scope_uris", lambda d, s, cfg=None: []), \
+                patch.object(tb, "load", dict):
+            for cid, aid, atteso in (("mail", "mailbox-link", True),
+                                     ("telegram", "telegram-link", False)):
+                with self.subTest(connettore=cid):
+                    connector, action = ca.find(cid, aid)
+                    stato = ca.state(connector, action, "SEAL-1", "stanza")
+                    self.assertEqual(stato["admin_only"], atteso)
 
     def test_an_action_is_not_admin_only_by_default(self):
         azione = cm._parse_topic_action(

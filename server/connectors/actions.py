@@ -186,6 +186,12 @@ def state(connector: Connector, action: TopicAction, tier: str,
         "action": action.id,
         "label": action.label,
         "binding": action.binding,
+        # Chi può OFFRIRE questa azione (#520). Lo stato è ciò che l'agent-server
+        # legge prima di inoltrare una POST: senza il campo qui, il controllo
+        # «questa la fa un admin» — che oggi protegge `mailbox-link` in
+        # clodia-logic — non arriverebbe alla rotta generica, e la rotta
+        # generica sarebbe la porta di servizio della rotta specifica.
+        "admin_only": action.admin_only,
         "fields": [{"name": f.name, "label": f.label, "required": f.required,
                     "placeholder": f.placeholder,
                     "options": options_for(f)} for f in action.fields],
