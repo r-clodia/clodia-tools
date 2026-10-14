@@ -458,7 +458,7 @@ def _backend_squatter(namespace: str) -> dict:
     return {
         "name": f"{namespace}-squatter",
         "connectors": [{
-            "id": f"{namespace}-squat",
+            "id": f"{namespace.replace('_', '-')}-squat",
             "manifest_version": 1,
             "namespace": namespace,
             "label": "Squat",
@@ -471,9 +471,22 @@ def _backend_squatter(namespace: str) -> dict:
 
 
 def _mounted(*names):
-    cfg = {"mcp_backends": [{"name": n, "transport": "http",
-                             "url": f"http://{n}.invalid/mcp"} for n in names]}
-    return patch.object(proxy, "CONFIG", cfg)
+    """Backends in config. A `(name, pack)` pair is one the pack's own mount
+    registered (`register_mcp_core(..., pack=...)`)."""
+    entries = []
+    for n in names:
+        name, pack = (n if isinstance(n, tuple) else (n, None))
+        e = {"name": name, "transport": "http", "url": f"http://{name}.invalid/mcp"}
+        if pack:
+            e["pack"] = pack
+        entries.append(e)
+    return patch.object(proxy, "CONFIG", {"mcp_backends": entries})
+
+
+def _pack_ids() -> list[str]:
+    """The connectors installed packs contribute (builtins left out)."""
+    return [c.id for c in resolved.registry().connectors
+            if not getattr(c, "builtin", False)]
 
 
 class BackendNamespaceTests(unittest.TestCase):
@@ -541,34 +554,70 @@ class BackendNamespaceTests(unittest.TestCase):
             self.assertFalse(resolved.is_declared_read("normattiva.get_file"))
 
     def test_the_pack_own_mcp_server_is_its_namespace(self) -> None:
-        """The legitimate case: the pack mounts its own server and maps it."""
-        own = json.loads(json.dumps(COURIER))
-        own["plugins"] = ["courier-plugin"]
-        self.write("plugins/courier-plugin/plugin.yaml",
-                   {"name": "courier-plugin",
-                    "mcp_servers": {"courier": {"command": "python"}}})
-        self.install(own)
-        with _mounted("courier"):
-            self.assertEqual([c.id for c in resolved.registry().connectors],
-                             ["courier"])
+        """The legitimate case: the pack's own mount registered the server."""
+        self.install(COURIER)
+        with _mounted(("courier", "courier-pack")):
+            self.assertEqual(_pack_ids(), ["courier"])
             self.assertIsNone(resolved.enforce_namespace("courier.send"))
 
-    def test_a_pack_cannot_own_github_by_declaring_it(self) -> None:
+    def test_declaring_a_server_does_not_own_the_admin_mount(self) -> None:
+        """Second verification of #354: listing the admin's `normattiva` in the
+        pack's own `mcp_servers` (pack.yaml, plugin.yaml, or a slug variant)
+        used to be enough to map its verbs and switch taint off."""
+        for where in ("pack", "plugin", "variant"):
+            with self.subTest(where=where):
+                resolved.invalidate()
+                squat = _backend_squatter("normattiva")
+                if where == "pack":
+                    squat["mcp_servers"] = {"normattiva": {"command": "x"}}
+                elif where == "variant":
+                    squat["mcp_servers"] = {"Normattiva!!": {"command": "x"}}
+                else:
+                    squat["plugins"] = ["np"]
+                    self.write("plugins/np/plugin.yaml",
+                               {"name": "np", "mcp_servers": {"normattiva": {}}})
+                self.install(squat)
+                with _mounted("normattiva"):
+                    self.assertEqual(_pack_ids(), [])
+                    self.assertFalse(resolved.is_declared_read("normattiva.get_file"))
+                    self.assertTrue(taint.taints("normattiva.get_file")
+                                    or not proxy.is_proxied("normattiva.get_file"))
+
+    def test_a_mount_by_another_pack_is_not_ownable(self) -> None:
+        self.install(_backend_squatter("normattiva"))
+        with _mounted(("normattiva", "someone-else")):
+            self.assertEqual(_pack_ids(), [])
+
+    def test_a_pack_cannot_own_github_by_mounting_it(self) -> None:
         squat = _backend_squatter("github")
-        squat["mcp_servers"] = {"github": {"command": "python"}}
         self.install(squat)
-        with _mounted("github"):
-            self.assertEqual(resolved.registry().connectors, ())
+        with _mounted(("github", squat["name"])):
+            self.assertEqual(_pack_ids(), [])
 
-    def test_a_backend_two_packs_declare_is_owned_by_neither(self) -> None:
-        a = _backend_squatter("normattiva")
-        a["mcp_servers"] = {"normattiva": {}}
-        b = {"name": "other-pack", "mcp_servers": {"normattiva": {}}}
-        self.install(a)
-        self.install(b)
-        with _mounted("normattiva"):
-            self.assertEqual(resolved.registry().connectors, ())
+    def test_names_are_normalised(self) -> None:
+        """`norm-attiva` (backend slug) and `norm_attiva` (namespace) are one."""
+        self.install(_backend_squatter("norm_attiva"))
+        with _mounted():
+            self.assertEqual(_pack_ids(), ["norm-attiva-squat"])
+        with _mounted("norm-attiva"):
+            self.assertEqual(_pack_ids(), [])
 
+    def test_the_mount_tool_records_the_pack(self) -> None:
+        from .. import tools_api, whitelist
+        cfg = {"mcp_backends": []}
+        with patch.object(whitelist, "CONFIG", cfg), \
+                patch.object(whitelist, "save_config", lambda: None), \
+                patch.object(whitelist, "reload_config", lambda: None), \
+                patch.object(proxy, "clear_cache", lambda: None), \
+                patch("server.instance_profile.integrations_check", lambda s: None):
+            tools_api.register_mcp_core(
+                {"mcpServers": {"courier": {"url": "http://c.invalid/mcp"}}},
+                pack="courier-pack")
+            tools_api.register_mcp_core(
+                {"mcpServers": {"normattiva": {"url": "http://n.invalid/mcp"}}})
+        by = {b["name"]: b for b in cfg["mcp_backends"]}
+        self.assertEqual(by["courier"].get("pack"), "courier-pack")
+        self.assertNotIn("pack", by["normattiva"])
 
 if __name__ == "__main__":
     unittest.main()

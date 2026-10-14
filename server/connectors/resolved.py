@@ -89,63 +89,52 @@ def _signature(paths: list[Path]) -> tuple:
 _CORE_BACKENDS = frozenset({"github"})
 
 
-def _slug(name: str) -> str:
-    """Lo slug con cui `tools_api.register_mcp_core` monta un server MCP."""
+def _norm(name: str) -> str:
+    """Un nome di backend o di namespace nella forma in cui si confrontano.
+
+    Gli slug dei backend usano `-` (`tools_api._slugify`), i namespace `_`:
+    `norm-attiva` e `norm_attiva` sono lo stesso nome, e un confronto a stringa
+    lo mancherebbe.
+    """
     import re as _re
-    return _re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")[:40]
+    return _re.sub(r"[^a-z0-9]", "_", (name or "").strip().lower())
+
+
+def _backend_entries() -> list[dict]:
+    from .. import proxy
+    return list(proxy._backends().values())
 
 
 def mounted_backends() -> frozenset[str]:
-    """I namespace dei backend MCP montati adesso (`mcp_backends` di config)."""
-    from .. import proxy
-    return frozenset(proxy._backends())
+    """I nomi (normalizzati) dei backend MCP montati adesso (`mcp_backends`)."""
+    return frozenset(_norm(str(b.get("name") or "")) for b in _backend_entries())
 
 
-def _plugin_files() -> list[Path]:
-    try:
-        return sorted((_DATA / "plugins").glob("*/plugin.yaml"))
-    except OSError:
-        return []
+def _mount_signature() -> tuple:
+    return tuple(sorted((_norm(str(b.get("name") or "")), str(b.get("pack") or ""))
+                        for b in _backend_entries()))
 
 
 def backend_owners(packs: Mapping[str, Mapping] | None = None) -> dict[str, frozenset[str]]:
-    """`{pack: backend che quel pack monta come propri}`.
+    """`{pack: backend che quel pack ha DAVVERO montato}`.
 
-    Un pack possiede il backend di un server MCP che dichiara lui stesso: nel
-    `mcp_servers` del proprio `pack.yaml` o in quello dei suoi plugin
-    (`$CLODIA_DATA/plugins/<plugin>/plugin.yaml`, elencati in `plugins:`).
-    Un backend dichiarato da due pack non è di nessuno, e i backend del core
-    (`_CORE_BACKENDS`) non sono mai di un pack.
+    Review di #354 (seconda verifica): la proprietà non si dichiara, si prova.
+    Prima bastava elencare un server in `mcp_servers` (del `pack.yaml` o di un
+    `plugin.yaml`) per «possedere» il backend omonimo montato dall'admin — e
+    quei file stanno su un volume che il gateway non possiede. Ora conta solo
+    chi l'ha montato: `register_mcp_core(..., pack=<nome>)`, il percorso del
+    mount di un pack, scrive `pack:` nella voce del backend; un backend montato
+    da `mcp.add`/Tools senza pack non è di nessuno, quindi è riservato per
+    tutti. I backend del core (`_CORE_BACKENDS`) non sono mai di un pack.
+    `packs` è ignorato (resta nella firma per i chiamanti).
     """
-    import yaml
-
-    packs = manifests() if packs is None else packs
-    plugin_servers: dict[str, set[str]] = {}
-    for path in _plugin_files():
-        try:
-            meta = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except Exception:  # noqa: BLE001
-            continue
-        servers = meta.get("mcp_servers") if isinstance(meta, Mapping) else None
-        if isinstance(servers, Mapping):
-            plugin_servers[path.parent.name] = {_slug(str(k)) for k in servers}
-    claimed: dict[str, set[str]] = {}
-    for pack, meta in packs.items():
-        own: set[str] = set()
-        servers = meta.get("mcp_servers")
-        if isinstance(servers, Mapping):
-            own |= {_slug(str(k)) for k in servers}
-        plugins = meta.get("plugins")
-        for plugin in plugins if isinstance(plugins, list) else []:
-            name = plugin.get("name") if isinstance(plugin, Mapping) else plugin
-            own |= plugin_servers.get(str(name or ""), set())
-        claimed[pack] = own - _CORE_BACKENDS
-    count: dict[str, int] = {}
-    for own in claimed.values():
-        for b in own:
-            count[b] = count.get(b, 0) + 1
-    return {pack: frozenset(b for b in own if count[b] == 1)
-            for pack, own in claimed.items()}
+    out: dict[str, set[str]] = {}
+    for b in _backend_entries():
+        pack = b.get("pack")
+        name = _norm(str(b.get("name") or ""))
+        if isinstance(pack, str) and pack and name and name not in _CORE_BACKENDS:
+            out.setdefault(pack, set()).add(name)
+    return {k: frozenset(v) for k, v in out.items()}
 
 
 def foreign_backends(pack: str) -> frozenset[str]:
@@ -213,8 +202,7 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
     # Nella firma anche i plugin (chi possiede quale server MCP) e i backend
     # montati: un `mcp.add` fatto dopo la costruzione deve riservare quel
     # namespace alla chiamata successiva, non al prossimo cambio di pack.yaml.
-    sig = (_signature(_manifest_files()), _signature(_plugin_files()),
-           tuple(sorted(mounted_backends())))
+    sig = (_signature(_manifest_files()), _mount_signature())
     if _CACHE is not None and _CACHE[0] == sig:
         return _CACHE[1], _CACHE[2]
     reg, probs, owners = Registry(), (), {}
@@ -228,7 +216,7 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
         mounted = mounted_backends() | _CORE_BACKENDS
         keep, refused = [], []
         for c in reg.connectors:
-            if c.namespace in mounted - owners.get(c.pack, frozenset()):
+            if _norm(c.namespace) in mounted - owners.get(c.pack, frozenset()):
                 refused.append(
                     f"pack '{c.pack}', connector '{c.id}': namespace "
                     f"'{c.namespace}' is a mounted MCP backend that is not this "

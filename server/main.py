@@ -1571,7 +1571,8 @@ _MCP_TOOLS: list[Tool] = [
                       "supply-chain dei pack."),
          inputSchema={"type": "object", "properties": {
              "config": {"type": "object", "description": "config con mcpServers"},
-             "secrets": {"type": "object", "description": "segreti {NAME: valore} da mettere nel vault"}},
+             "secrets": {"type": "object", "description": "segreti {NAME: valore} da mettere nel vault"},
+             "pack": {"type": "string", "description": "il pack che monta questi server (mount di un pack): ne prova la proprietà per i connettori del pack"}},
              "required": ["config"]}),
     Tool(name="mcp.remove",
          description="Smonta un server MCP montato per nome (slug).",
@@ -2729,7 +2730,8 @@ def _dispatch_mcp(name: str, a: dict):
         return runtime.mcp_servers()
     if sub == "add":
         try:
-            return tools_api.register_mcp_core(a["config"], a.get("secrets") or {})
+            return tools_api.register_mcp_core(a["config"], a.get("secrets") or {},
+                                               pack=a.get("pack") or None)
         except tools_api.McpRegisterError as e:
             raise PermissionError(str(e)) if getattr(e, "status", 400) == 403 else ValueError(str(e))
     if sub == "remove":
