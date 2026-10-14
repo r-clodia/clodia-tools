@@ -8,10 +8,11 @@ to a topic and which credential it needs is declared in its manifest, so one
 route can serve all of them and a connector arriving with a pack appears without
 a deploy.
 
-Two routes here, and neither writes anything:
+Three routes here:
 
-    GET  /internal/connectors           what is installed, for the webui (#520)
-    POST /internal/connectors/validate  what a candidate block would do
+    GET  /internal/connectors                    what is installed (#520)
+    POST /internal/connectors/validate           what a candidate block would do
+    POST /internal/tools/connectors/{id}/connect the credential a provider declares
 
 The second is the install-time half: `pack_import` in clodia-logic asks before
 registering a pack, the way it already asks `/flow-allow` for the flow
@@ -30,7 +31,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import instance_profile, internal_auth
+from . import instance_profile, internal_auth, vault
 from .connectors import resolved as _resolved
 from .connectors import validate as _validate
 
@@ -105,7 +106,92 @@ async def validate_connectors(request: Request):
     return JSONResponse(out)
 
 
+async def connect(request: Request):
+    """POST /internal/tools/connectors/{id}/connect {provider?, fields…}.
+
+    La credenziale che il manifest DICHIARA: `kind: form` → i campi dichiarati
+    finiscono nella voce di vault dichiarata, e niente altro. Un campo che il
+    provider non dichiara viene ignorato, così il corpo della richiesta non può
+    scrivere nel vault chiavi che nessuno ha previsto.
+
+    Credenziale di infrastruttura, senza grant per-agente: la legge il gateway
+    quando materializza i segreti di una chiamata, e un agente non deve poterla
+    ottenere in mano. Per disconnettere si mandano i campi vuoti.
+
+    **La risposta non contiene mai ciò che è stato scritto.** Dice che c'è, non
+    cosa c'è.
+
+    `kind: oauth` **non passa di qui**: un consenso OAuth ha credenziali
+    d'applicazione, uno stato da custodire fra le due gambe del giro e un
+    callback, e oggi quelle cose vivono nelle rotte del provider (Google su
+    tutte). Renderle generiche senza il manifest che le descrive sarebbe
+    riscriverle, non generalizzarle — resta a #520, che porta la UI.
+    """
+    _payload, err = _authorize(request)
+    if err:
+        return err
+    cid = request.path_params["id"]
+    if not _allowed(cid):
+        return JSONResponse({"error": f"connettore '{cid}' non ammesso su "
+                                      f"questa istanza"}, status_code=403)
+    connector = _resolved.registry().by_id(cid)
+    if connector is None:
+        return JSONResponse({"error": f"connettore '{cid}' non installato"},
+                            status_code=404)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    body = body or {}
+    scelto = str(body.get("provider") or "").strip()
+    providers = [p for p in connector.providers
+                 if not scelto or p.id == scelto]
+    if len(providers) != 1:
+        nomi = ", ".join(p.id for p in connector.providers) or "nessuno"
+        return JSONResponse(
+            {"error": f"indica quale provider di '{cid}' connettere: {nomi}"},
+            status_code=400)
+    provider = providers[0]
+    cred = provider.credential
+    if cred is None or cred.kind != "form":
+        return JSONResponse(
+            {"error": f"il provider '{provider.id}' non si connette con un "
+                      f"form: la sua credenziale è "
+                      f"'{cred.kind if cred else 'assente'}'"},
+            status_code=400)
+
+    bundle = {}
+    mancanti = []
+    for field in cred.fields:
+        value = str(body.get(field.name) or "").strip()
+        if value:
+            bundle[field.name] = value
+        elif field.required:
+            mancanti.append(field.name)
+    if not bundle:
+        # Tutti i campi vuoti = disconnessione esplicita, come fa oggi
+        # `openai_connect` con `api_key: ""`.
+        vault.remove(cred.vault_entry)
+        LOG.info("connettore '%s': credenziale '%s' rimossa", cid,
+                 cred.vault_entry)
+        return JSONResponse({"connected": False, "connector": cid,
+                             "provider": provider.id,
+                             "vault_entry": cred.vault_entry})
+    if mancanti:
+        return JSONResponse({"error": "campi richiesti mancanti: "
+                                      + ", ".join(mancanti)}, status_code=400)
+    vault.deposit(cred.vault_entry, bundle, cred_type="api_key",
+                  grant_agents=[])
+    # Mai il contenuto nei log: solo che è successo, e su quale voce.
+    LOG.info("connettore '%s': credenziale '%s' depositata (%d campi)", cid,
+             cred.vault_entry, len(bundle))
+    return JSONResponse({"connected": True, "connector": cid,
+                         "provider": provider.id,
+                         "vault_entry": cred.vault_entry})
+
+
 routes = [
     Route("/internal/connectors", list_connectors, methods=["GET"]),
     Route("/internal/connectors/validate", validate_connectors, methods=["POST"]),
+    Route("/internal/tools/connectors/{id}/connect", connect, methods=["POST"]),
 ]

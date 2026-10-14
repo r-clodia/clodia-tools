@@ -111,6 +111,13 @@ by the ordinary http rules.
 
 ### `providers[]`
 
+Used by `POST /internal/tools/connectors/{id}/connect` (#519) for `kind: form`:
+the declared fields go into the declared vault entry, as an infrastructure
+credential with no per-agent grant, and the answer says that something is there
+— never what. `kind: oauth` keeps its provider routes: a consent has application
+credentials, state to keep between the two legs and a callback, and making that
+generic without a manifest that describes it would be rewriting it.
+
 `id`, `label`, optional `status_verb` / `test_verb`, and a `credential`:
 
 - `kind: form` — `vault_entry` plus the `fields` the owner fills in (`secret:
@@ -159,6 +166,28 @@ call actually happens — two implementations of it would be one too many.
 `egress:` templates over the action's own fields. A template naming a field the
 action does not declare is an error. What the action adds is a *proposal*: the
 grant is still the owner's, at the gate.
+
+Since #519 the action is **executed** from this declaration, by the generic
+route `POST /internal/topics/{tier}/{name}/connectors/{id}/{action}`: the owner
+fills the fields in, the gateway renders the templates and writes those entries
+into that topic's lists — and `binding: channel` also creates the binding, which
+is the second half nothing works without.
+
+A field is free text, or a **choice among values the gateway supplies**:
+
+| field | meaning |
+|---|---|
+| `name`, `label`, `required`, `placeholder` | the form |
+| `options` | one of `manifest.OPTION_SETS` (today: `mailboxes`) |
+
+The difference is not convenience, it is trust. A chosen option is **resolved by
+the gateway**: picking a mailbox yields the address the gateway knows for it, and
+the template interpolates that (`inbox:{address}`) — the names an option set
+resolves are declared in `OPTION_SET_VALUES`, so the grammar can validate them.
+Free text is the client's, and is then checked against the scheme's forms.
+Without the distinction, the mailbox action would take the address to authorise
+from the request body, and a whitelist written by whoever is subject to it is not
+a whitelist. A pack may *point at* an option set, never define one.
 
 ### `services[]`
 

@@ -39,6 +39,26 @@ connectors:
         scheme: tg
         arg: chat_id
         dtype: telegram
+    # Il bottone del topic: autorizza la chat in ENTRAMBE le direzioni e crea
+    # il binding vero (`binding: channel`). Sono due passi e vanno insieme —
+    # senza il secondo il messaggero non riporta niente anche con la whitelist
+    # già scritta, ed è il sintomo che ha fatto nascere la rotta `telegram-link`.
+    topic_actions:
+      - id: telegram-link
+        label: Collega una chat Telegram
+        binding: channel
+        fields:
+          - name: chat
+            label: Chat id o @handle
+            placeholder: '-1001234567890'
+        adds:
+          ingress:
+            - 'tg:{chat}'
+          egress:
+            - 'tg:{chat}'
+    tools_card:
+      setup_label: Collega un bot
+      status_verb: telegram.status
     # Chat in arrivo: chi scrive nel gruppo non è controllato, e una risposta
     # mescola più autori.
     taint:

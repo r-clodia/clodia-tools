@@ -86,6 +86,19 @@ _NESTED_QUANTIFIER = re.compile(
 #: rewriting what a URL means on this instance. See `normalise.py`.
 NORMALISERS = ("url_origin", "repo_url", "repo_pair", "email_from")
 
+#: Insiemi di valori che il GATEWAY offre a un campo di un'azione di topic, al
+#: posto del testo libero (clodia-platform#519). Lista chiusa come
+#: `NORMALISERS`, e per la stessa ragione: un insieme di valori è «cose di cui
+#: questa istanza risponde», e un pack che potesse definirne uno risponderebbe
+#: al posto suo. Le implementazioni stanno in `actions.OPTION_SETS`.
+OPTION_SETS = ("mailboxes",)
+
+#: I nomi che ciascun insieme RISOLVE, interpolabili nei template dell'azione
+#: oltre ai nomi dei campi. Dichiarati qui perché la grammatica deve poterli
+#: convalidare al caricamento; `actions.OPTION_SETS` li produce, e un test
+#: verifica che le due facce dicano la stessa cosa.
+OPTION_SET_VALUES = {"mailboxes": ("account", "address")}
+
 _ID = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
 _NAMESPACE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _SCHEME = re.compile(r"^[a-z][a-z0-9+.-]{0,31}$")
@@ -387,10 +400,22 @@ class VerbMapping:
 
 @dataclass(frozen=True)
 class ActionField:
+    """Un campo dell'azione: testo libero, oppure una scelta fra valori che il
+    gateway fornisce (`options:`).
+
+    La differenza non è di comodità, è di fiducia: il valore scelto da un
+    insieme viene RISOLTO dal gateway — della casella si prende l'indirizzo che
+    conosce lui — mentre un testo libero è del client e come tale va confrontato
+    con le forme dello schema. Senza la distinzione, l'azione sulle caselle
+    accetterebbe dal corpo della richiesta l'indirizzo da autorizzare, e una
+    whitelist scritta da chi ne è soggetto non è una whitelist.
+    """
+
     name: str
     label: str = ""
     required: bool = True
     placeholder: str = ""
+    options: str = ""
 
 
 @dataclass(frozen=True)
@@ -713,8 +738,18 @@ def _parse_topic_action(raw: Any, where: str) -> TopicAction:
                            default=True),
             placeholder=_text(fdata.get("placeholder"),
                               f"{where}.fields[{i}].placeholder", required=False),
+            options=_one_of(
+                _text(fdata.get("options"), f"{where}.fields[{i}].options",
+                      required=False, default=""),
+                ("",) + OPTION_SETS, f"{where}.fields[{i}].options"),
         ))
+    # I nomi interpolabili: quelli dei campi, più i valori che un insieme
+    # RISOLVE. `{address}` esiste perché la casella scelta porta con sé il
+    # proprio indirizzo — ed è l'indirizzo, non il nome dell'account, la cosa
+    # che finisce in whitelist.
     known = {f.name for f in fields}
+    for f in fields:
+        known.update(OPTION_SET_VALUES.get(f.options, ()))
     adds = _mapping(data.get("adds") or {}, f"{where}.adds")
     out: dict[str, tuple[str, ...]] = {}
     for key in ("ingress", "egress"):
