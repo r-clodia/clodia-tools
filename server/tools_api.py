@@ -32,6 +32,7 @@ from starlette.routing import Route
 
 from . import google_oauth as go
 from . import instance_profile
+from . import mcp_oauth
 from . import proxy
 from . import vault
 from . import whitelist
@@ -385,6 +386,16 @@ def connectors_snapshot() -> list[dict]:
             "connected": True,
             "accounts": [],
         }
+        # Un backend OAuth non ancora autorizzato è montato ma non usabile:
+        # stessa distinzione delle dipendenze pip mancanti (#451), stesso posto.
+        if mcp_oauth.auth_spec(b):
+            st = mcp_oauth.authorization_status(b)
+            row["auth"] = "oauth"
+            row["authorized"] = st["authorized"]
+            if not st["authorized"]:
+                row["connected"] = False
+                row["operational"] = False
+                row["issues"] = [{"error": st["detail"]}]
         gap = gaps_by_server.get(_slugify(str(b.get("name") or "")))
         if gap:
             row["operational"] = False
@@ -456,11 +467,21 @@ def register_mcp_core(config, secrets: dict | None = None) -> dict:
             backend = {"name": slug, "label": name, "transport": "http", "url": spec["url"]}
             if spec.get("headers"):
                 backend["headers"] = spec["headers"]
+            if spec.get("auth") is not None:
+                try:
+                    backend["auth"] = mcp_oauth.normalize_auth(spec["auth"], transport="http")
+                except ValueError as e:
+                    raise McpRegisterError(f"server '{name}': {e}")
         elif spec.get("command"):
             backend = {"name": slug, "label": name, "transport": "stdio",
                        "command": spec["command"], "args": spec.get("args", [])}
             if spec.get("env"):
                 backend["env"] = spec["env"]
+            if spec.get("auth") is not None:
+                try:
+                    mcp_oauth.normalize_auth(spec["auth"], transport="stdio")
+                except ValueError as e:
+                    raise McpRegisterError(f"server '{name}': {e}")
         else:
             raise McpRegisterError(f"server '{name}': serve 'url' (http) o 'command' (stdio)")
         # Secret: deposita nel vault (infra, no grant) e sostituisci nel config.
@@ -485,8 +506,13 @@ def unregister_mcp_core(name: str) -> dict:
     """Core della rimozione MCP. Riutilizzato da mcp.remove.
 
     Non tocca più gli `allowed_tools` di nessuno: il mount non ne concede
-    (clodia-platform#393), quindi non c'è grant da ritirare."""
+    (clodia-platform#393), quindi non c'è grant da ritirare. I token OAuth
+    invece sì: restassero nella vault, un remount dello stesso slug — magari
+    verso un'altra URL — ripartirebbe con le credenziali del precedente."""
     cfg = whitelist.CONFIG
+    if any(mcp_oauth.auth_spec(b) for b in (cfg.get("mcp_backends") or [])
+           if b.get("name") == name):
+        mcp_oauth.forget(name)
     cfg["mcp_backends"] = [b for b in (cfg.get("mcp_backends") or []) if b.get("name") != name]
     whitelist.save_config()
     whitelist.reload_config()
@@ -513,6 +539,60 @@ async def unregister_mcp(request: Request):
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return JSONResponse(unregister_mcp_core(request.path_params["name"]))
+
+
+def _mcp_backend(name: str) -> dict | None:
+    for b in (whitelist.CONFIG.get("mcp_backends") or []):
+        if b.get("name") == name:
+            return b
+    return None
+
+
+async def mcp_oauth_start(request: Request):
+    """POST /tools/mcp/{name}/oauth/start → `{state, auth_url, redirect_uri}`.
+
+    Chi può montare un server MCP può autorizzarlo: stesso `_authorized` di
+    `/tools/mcp`, cioè territorio admin. Il risultato non contiene segreti —
+    la URL di consenso è pubblica per costruzione, il PKCE verifier resta nel
+    provider.
+    """
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    b = _mcp_backend(request.path_params["name"])
+    if b is None:
+        return JSONResponse({"error": "backend non montato"}, status_code=404)
+    try:
+        return JSONResponse(await mcp_oauth.begin(b))
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:  # noqa: BLE001 — un backend di terzi rotto è un 502, non un 500 nostro
+        LOG.warning("mcp oauth start fallito per %s: %s", b.get("name"), type(e).__name__)
+        return JSONResponse({"error": f"{type(e).__name__}: {str(e)[:200]}"}, status_code=502)
+
+
+async def mcp_oauth_complete(request: Request):
+    """POST /tools/mcp/{name}/oauth/complete {state, code} → consenso concluso.
+
+    `code` accetta sia il parametro nudo sia la URL intera su cui il browser è
+    atterrato: incollare la URL è ciò che si fa davvero (stessa scelta di
+    `google_connect`). Il token finisce nella vault e NON torna nella risposta.
+    """
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    try:
+        res = await mcp_oauth.finish(str(body.get("state") or ""),
+                                     str(body.get("code") or ""))
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("mcp oauth complete fallito: %s", type(e).__name__)
+        return JSONResponse({"error": f"{type(e).__name__}: {str(e)[:200]}"}, status_code=502)
+    proxy.clear_cache()  # ora il backend espone tool: la lista cache-ata è vecchia
+    return JSONResponse(res)
 
 
 def _account_from_email(email: str) -> str:
@@ -1469,4 +1549,6 @@ routes = [
     Route("/tools/backup/restore-test", backup_restore_test, methods=["POST"]),
     Route("/tools/mcp", register_mcp, methods=["POST"]),
     Route("/tools/mcp/{name}", unregister_mcp, methods=["DELETE"]),
+    Route("/tools/mcp/{name}/oauth/start", mcp_oauth_start, methods=["POST"]),
+    Route("/tools/mcp/{name}/oauth/complete", mcp_oauth_complete, methods=["POST"]),
 ]

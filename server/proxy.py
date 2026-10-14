@@ -31,6 +31,7 @@ except ImportError:  # mcp >=2 ha rinominato il simbolo
 from mcp.types import Tool
 
 from . import docmd as _docmd
+from . import mcp_oauth
 from . import vault
 from .tools import pack_runtime
 from .whitelist import CONFIG
@@ -90,9 +91,16 @@ def _backends() -> dict[str, dict]:
 
 
 @asynccontextmanager
-async def _session(b: dict):
+async def session(b: dict, *, oauth_handlers: tuple | None = None):
     """Apre una ClientSession verso il backend (stdio o http). I secret
-    ${VAULT:cred} in env/headers/url/args sono risolti dal vault qui, al volo."""
+    ${VAULT:cred} in env/headers/url/args sono risolti dal vault qui, al volo.
+
+    Un backend http con `auth: {type: oauth}` non porta nessun segreto nel
+    config: l'header lo compone `mcp_oauth`, dai token nella vault, con refresh
+    automatico (clodia-platform#532). `oauth_handlers` lo passa SOLO il consenso
+    guidato dalla card — in una chiamata di tool resta None, e un backend non
+    ancora autorizzato fallisce invece di aprire un consenso che nessuno può dare.
+    """
     b = _resolve_secrets(b)
     transport = b.get("transport", "stdio")
     if transport == "stdio":
@@ -113,12 +121,37 @@ async def _session(b: dict):
                 await s.initialize()
                 yield s
     elif transport == "http":
-        async with streamablehttp_client(b["url"], headers=b.get("headers")) as (read, write, _):
+        auth = mcp_oauth.provider_for(b, handlers=oauth_handlers)
+        async with streamablehttp_client(b["url"], headers=b.get("headers"),
+                                         auth=auth) as (read, write, _):
             async with ClientSession(read, write) as s:
                 await s.initialize()
                 yield s
     else:
         raise ValueError(f"transport MCP non supportato: {transport!r}")
+
+
+#: Nome storico, usato dal resto del modulo.
+_session = session
+
+
+def riautorizzazione(e: BaseException) -> mcp_oauth.ReauthorizationRequired | None:
+    """Cerca un «serve un consenso OAuth» dentro un guasto, anche annidato.
+
+    Il transport http gira dentro un task group di anyio: l'errore che risale
+    è un `ExceptionGroup`, il cui `str()` è «unhandled errors in a TaskGroup».
+    Senza questo srotolamento l'unica cosa che il proprietario leggerebbe —
+    nella card e nel risultato della chiamata — è quella frase, che non dice
+    niente di ciò che deve fare.
+    """
+    if isinstance(e, mcp_oauth.ReauthorizationRequired):
+        return e
+    for sub in getattr(e, "exceptions", ()) or ():
+        found = riautorizzazione(sub)
+        if found is not None:
+            return found
+    cause = e.__cause__ or e.__context__
+    return riautorizzazione(cause) if cause is not None else None
 
 
 def is_proxied(name: str) -> bool:
@@ -150,7 +183,7 @@ async def test_backend(name: str) -> dict:
     except TimeoutError:
         return {"ok": False, "detail": f"nessuna risposta entro {TEST_TIMEOUT_S}s"}
     except Exception as e:  # noqa: BLE001 — qualunque guasto del backend è un esito, non un crash della API
-        return {"ok": False, "detail": str(e)[:200]}
+        return {"ok": False, "detail": str(riautorizzazione(e) or e)[:200]}
 
 
 async def list_proxied_tools() -> list[Tool]:
@@ -236,6 +269,15 @@ async def call_proxied(name: str, arguments: dict) -> str:
     b = _backends().get(backend_name)
     if not b:
         raise ValueError(f"backend MCP sconosciuto: {backend_name!r}")
-    async with _session(b) as s:
-        res = await s.call_tool(tool_name, arguments)
-        return _cappa(_response_text(res.content), name)
+    try:
+        async with _session(b) as s:
+            res = await s.call_tool(tool_name, arguments)
+            return _cappa(_response_text(res.content), name)
+    except Exception as e:
+        # Un backend OAuth non ancora autorizzato non è un guasto misterioso:
+        # è una cosa che una persona deve fare nella card. Dillo con quelle
+        # parole, invece di lasciare risalire il gruppo di eccezioni di anyio.
+        reauth = riautorizzazione(e)
+        if reauth is None:
+            raise
+        raise reauth from None
