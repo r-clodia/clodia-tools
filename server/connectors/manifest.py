@@ -64,6 +64,8 @@ CORE_SCHEME_DIRECTION = {
 }
 CORE_SCHEMES = tuple(CORE_SCHEME_DIRECTION)
 CREDENTIAL_KINDS = ("form", "oauth")
+#: What a topic action may bind besides its whitelist entries.
+BINDINGS = ("channel",)
 HEALTH_KINDS = ("http", "tcp", "command")
 RESTART_POLICIES = ("always", "on-failure", "never")
 
@@ -90,13 +92,64 @@ _VAULT_ENTRY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _PLACEHOLDER = re.compile(r"\{([A-Za-z0-9_]+)\}")
 
 
+#: Vault entries the GATEWAY itself writes (`tools_api`, `backup`, `profile`,
+#: `providers_api`, `mcp_oauth`, the topic git credentials). A pack credential
+#: may never be stored under one of these: a form posted to the generic connect
+#: route would overwrite — or, empty, remove — a credential that is not the
+#: pack's, keeping its grants (review of #359/#360).
+CORE_VAULT_PREFIXES = (
+    "app_", "backup_", "github_", "gmail_", "google_", "gworkspace_",
+    "mailbox_", "mcp_", "openai_", "profile_", "provider_", "scope_",
+    "telegram_")
+#: The core prefixes that belong to a connector the gateway still implements
+#: itself, and that the pack it migrates into (epic #527) inherits WITH the
+#: namespace. A pack cannot hold one of these namespaces while the builtin
+#: connector exists (it is refused/ignored), so the exception opens nothing
+#: before the migration happens.
+CORE_VAULT_MIGRATING = {"telegram_": "telegram", "github_": "github",
+                        "google_": "google"}
+
+
+def vault_entry_problem(entry: str, namespace: str) -> str:
+    """Why a PACK connector may not store its credential under `entry`, or "".
+
+    The entry lives under the connector's own namespace — `<namespace>` or
+    `<namespace>_…` — and never under a core credential prefix (except the one
+    of the builtin connector whose namespace the pack has taken over).
+    """
+    if entry != namespace and not entry.startswith(f"{namespace}_"):
+        return (f"vault entry '{entry}' is outside namespace '{namespace}': a "
+                f"connector stores its credential as '{namespace}' or "
+                f"'{namespace}_<name>'")
+    for prefix in CORE_VAULT_PREFIXES:
+        if not (entry.startswith(prefix) or entry == prefix.rstrip("_")):
+            continue
+        if CORE_VAULT_MIGRATING.get(prefix) == namespace:
+            continue
+        return (f"vault entry '{entry}' is a core credential name "
+                f"('{prefix}…'), which a pack cannot write")
+    return ""
+
+
 class ManifestError(ValueError):
     """A manifest is refused as a whole, with a message an owner can act on.
 
     Never a per-entry warning: a connector accepted minus the mapping that did
     not pass would be a connector whose verbs go unchecked, which is the exact
     failure the namespace rule exists to prevent.
+
+    `packs` names the installed packs the refusal is about, when the registry
+    knows: `connectors.resolved` drops exactly those and keeps the others
+    (review of #359 — one bad pack used to take every pack's connectors down).
     """
+
+    packs: tuple[str, ...] = ()
+
+
+def _blame(error: ManifestError, *packs: str) -> ManifestError:
+    """Attach the packs responsible for `error` (see `ManifestError.packs`)."""
+    error.packs = tuple(sorted(set(error.packs) | {p for p in packs if p}))
+    return error
 
 
 # --------------------------------------------------------------------------
@@ -962,8 +1015,15 @@ def _parse_topic_action(raw: Any, where: str) -> TopicAction:
         fields=tuple(fields),
         adds_ingress=out["ingress"],
         adds_egress=out["egress"],
-        binding=_text(data.get("binding"), f"{where}.binding", required=False),
+        binding=_binding(data.get("binding"), f"{where}.binding"),
     )
+
+
+def _binding(raw: Any, where: str) -> str:
+    """`binding` is a closed set: a typo (`chanel`) is a refusal, not an action
+    that silently adds the whitelist entries and skips the binding."""
+    value = _text(raw, where, required=False)
+    return _one_of(value, BINDINGS, where) if value else ""
 
 
 def _parse_tools_card(raw: Any, where: str) -> ToolsCard:
@@ -1118,6 +1178,13 @@ def parse_connector(raw: Any, *, pack: str,
         if p.id in seen_providers:
             raise ManifestError(f"{where}: provider '{p.id}' declared twice")
         seen_providers.add(p.id)
+
+    if not builtin:
+        for p in providers:
+            entry = p.credential.vault_entry if p.credential else ""
+            problem = vault_entry_problem(entry, namespace) if entry else ""
+            if problem:
+                raise ManifestError(f"{where}.providers '{p.id}': {problem}")
 
     verbs = tuple(
         _parse_verb(v, f"{where}.verbs[{i}]")
@@ -1383,8 +1450,12 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
     for pack in sorted(set(manifests) - set(builtin_names)):
         # Each pack is checked against the gateway's namespaces *and* against the
         # namespaces already claimed by the packs parsed before it.
-        for entry in _seq((manifests[pack] or {}).get("connectors"),
-                          f"{_at(pack)}: connectors"):
+        try:
+            entries = _seq((manifests[pack] or {}).get("connectors"),
+                           f"{_at(pack)}: connectors")
+        except ManifestError as e:
+            raise _blame(e, pack)
+        for entry in entries:
             # The namespace of a connector the GATEWAY still implements is read
             # before parsing, because `check_namespace` would refuse the whole
             # manifest for it — and that would make the pack of the pending
@@ -1402,7 +1473,15 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
                     f"connector is ignored. It becomes effective when that "
                     f"implementation moves into a pack (epic clodia-platform#527)")
                 continue
-            connector = parse_connector(entry, pack=pack, reserved=reserved_set)
+            try:
+                connector = parse_connector(entry, pack=pack,
+                                            reserved=reserved_set)
+            except ManifestError as e:
+                # A namespace already claimed by an earlier pack: both are
+                # refused, so the winner is not whoever sorts first.
+                claimant = next((c.pack for c in parsed if not c.builtin
+                                 and c.namespace == ns), "")
+                raise _blame(e, pack, claimant)
             clash = ""
             if connector.id in builtin_ids:
                 clash = f"connector id '{connector.id}'"
@@ -1425,9 +1504,9 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
     by_id: dict[str, Connector] = {}
     for c in parsed:
         if c.id in by_id:
-            raise ManifestError(
+            raise _blame(ManifestError(
                 f"connector '{c.id}' is declared by both '{by_id[c.id].pack}' and "
-                f"'{c.pack}'")
+                f"'{c.pack}'"), by_id[c.id].pack, c.pack)
         by_id[c.id] = c
 
     scheme_owner: dict[str, Connector] = {}
@@ -1435,10 +1514,11 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
         for s in c.schemes:
             other = scheme_owner.get(s.name)
             if other is not None:
-                raise ManifestError(
+                raise _blame(ManifestError(
                     f"scheme '{s.name}' is declared by both '{other.pack}' "
                     f"(connector '{other.id}') and '{c.pack}' (connector "
-                    f"'{c.id}'); a scheme vocabulary has exactly one owner")
+                    f"'{c.id}'); a scheme vocabulary has exactly one owner"),
+                    other.pack, c.pack)
             scheme_owner[s.name] = c
 
     provider_owner: dict[tuple[str, str], Connector] = {}
@@ -1446,26 +1526,59 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
         if c.extends:
             target = by_id.get(c.extends)
             if target is None:
-                raise ManifestError(
+                raise _blame(ManifestError(
                     f"{_at(c.pack, c.id)}: extends '{c.extends}', which no "
                     f"installed pack declares. Install the pack that owns that "
-                    f"vocabulary, or fix the name")
+                    f"vocabulary, or fix the name"), c.pack)
             if not target.owns_vocabulary:
-                raise ManifestError(
+                raise _blame(ManifestError(
                     f"{_at(c.pack, c.id)}: extends '{c.extends}', which is "
                     f"itself an extension; a provider attaches to the vocabulary "
-                    f"owner, not to another provider")
+                    f"owner, not to another provider"), c.pack)
         for p in c.providers:
             key = (c.vocabulary, p.id)
             other = provider_owner.get(key)
             if other is not None:
-                raise ManifestError(
+                raise _blame(ManifestError(
                     f"provider '{p.id}' of vocabulary '{c.vocabulary}' is "
-                    f"declared by both '{other.pack}' and '{c.pack}'")
+                    f"declared by both '{other.pack}' and '{c.pack}'"),
+                    other.pack, c.pack)
             provider_owner[key] = c
 
+    _check_vault_entries(parsed)
     _check_verb_schemes(parsed)
     return Registry(connectors=tuple(parsed), refused=tuple(refused))
+
+
+def _check_vault_entries(connectors: list[Connector]) -> None:
+    """A vault entry belongs to exactly one connector: the one whose namespace
+    is its longest prefix. `sms` may not declare `sms_x_token` when `sms_x` is
+    installed, and two connectors may not share an entry."""
+    namespaces = {c.namespace: c for c in connectors}
+    seen: dict[str, Connector] = {}
+    for c in connectors:
+        for p in c.providers:
+            entry = p.credential.vault_entry if p.credential else ""
+            if not entry:
+                continue
+            other = seen.get(entry)
+            if other is not None and other is not c:
+                raise _blame(ManifestError(
+                    f"vault entry '{entry}' is declared by both '{other.pack}' "
+                    f"(connector '{other.id}') and '{c.pack}' (connector "
+                    f"'{c.id}')"), *(x.pack for x in (other, c) if not x.builtin))
+            seen[entry] = c
+            if c.builtin:
+                continue
+            owner = max((n for n in namespaces
+                         if entry == n or entry.startswith(f"{n}_")),
+                        key=len, default="")
+            if owner and owner != c.namespace:
+                raise _blame(ManifestError(
+                    f"{_at(c.pack, c.id)}: vault entry '{entry}' falls under "
+                    f"namespace '{owner}' of connector "
+                    f"'{namespaces[owner].id}', not under its own "
+                    f"'{c.namespace}'"), c.pack)
 
 
 def _check_verb_schemes(connectors: list[Connector]) -> None:
@@ -1490,24 +1603,26 @@ def _check_verb_schemes(connectors: list[Connector]) -> None:
             dtypes.setdefault((v.verb, v.direction), set()).add(v.dtype)
     for (verb, _d), seen in dtypes.items():
         if len({t for t in seen if t}) > 1:
-            raise ManifestError(
+            raise _blame(ManifestError(
                 f"verb '{verb}' is mapped with two destination types "
                 f"({', '.join(sorted(t for t in seen if t))}); the gate would "
-                f"name the call differently depending on which argument it read")
+                f"name the call differently depending on which argument it read"),
+                *{c.pack for c in connectors if not c.builtin
+                  and any(v.verb == verb for v in c.verbs)})
     for c in connectors:
         for v in c.verbs:
             direction = declared.get(v.scheme)
             if direction is None:
-                raise ManifestError(
+                raise _blame(ManifestError(
                     f"{_at(c.pack, c.id)}: verb '{v.verb}' maps to scheme "
                     f"'{v.scheme}', which no installed connector declares and "
                     f"which is not one of the platform schemes "
-                    f"({', '.join(CORE_SCHEMES)})")
+                    f"({', '.join(CORE_SCHEMES)})"), c.pack)
             if v.direction == "egress" and direction not in ("egress", "both"):
-                raise ManifestError(
+                raise _blame(ManifestError(
                     f"{_at(c.pack, c.id)}: verb '{v.verb}' writes to scheme "
-                    f"'{v.scheme}', declared as '{direction}'")
+                    f"'{v.scheme}', declared as '{direction}'"), c.pack)
             if v.direction == "source" and direction not in ("source", "both"):
-                raise ManifestError(
+                raise _blame(ManifestError(
                     f"{_at(c.pack, c.id)}: verb '{v.verb}' reads from scheme "
-                    f"'{v.scheme}', declared as '{direction}'")
+                    f"'{v.scheme}', declared as '{direction}'"), c.pack)

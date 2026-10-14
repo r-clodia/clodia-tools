@@ -126,7 +126,11 @@ by the ordinary http rules.
 
 `id`, `label`, optional `status_verb` / `test_verb`, and a `credential`:
 
-- `kind: form` — `vault_entry` plus the `fields` the owner fills in (`secret:
+- `kind: form` — `vault_entry` (under the connector's own namespace:
+  `<namespace>` or `<namespace>_<name>`, never a core credential such as
+  `mailbox_…`, `provider_…`, `mcp_…`; the core prefixes of a connector the
+  gateway still implements — `telegram_`, `github_`, `google_` — go with that
+  namespace when it moves into a pack) plus the `fields` the owner fills in (`secret:
   true` for the ones that must never be echoed back);
 - `kind: oauth` — `authorize_url`, `token_url`, `scopes`.
 
@@ -168,7 +172,7 @@ call actually happens — two implementations of it would be one too many.
 
 ### `topic_actions[]`
 
-`id`, `label`, `fields[]`, `binding` (optional), and `adds:` with `ingress:` /
+`id`, `label`, `fields[]`, `binding` (optional; only `channel`), and `adds:` with `ingress:` /
 `egress:` templates over the action's own fields. A template naming a field the
 action does not declare is an error. What the action adds is a *proposal*: the
 grant is still the owner's, at the gate.
@@ -327,7 +331,7 @@ connectors:
         label: IMAP/SMTP mailbox
         credential:
           kind: form
-          vault_entry: mailbox
+          vault_entry: mail_imap
           fields:
             - name: address
               label: Email address
@@ -542,7 +546,7 @@ connectors:
         label: OpenAI API key
         credential:
           kind: form
-          vault_entry: openai_api_key
+          vault_entry: imagegen_openai
           fields:
             - name: api_key
               label: API key
