@@ -14,6 +14,17 @@ Three routes here:
     POST /internal/connectors/validate           what a candidate block would do
     POST /internal/tools/connectors/{id}/connect the credential a provider declares
 
+Two of them answer at a SECOND address as well (#520):
+
+    GET  /tools/connectors                       = /internal/connectors
+    POST /tools/connectors/{id}/connect          = /internal/tools/connectors/…
+
+Same functions, same authorisation, no second logic — only the prefix differs,
+because `/internal/` is server-to-server by construction and the webui's proxy
+does not forward it (`vite.config.ts` routes `/tools` to the gateway and nothing
+else). They are the URLs #519 names in its Goal, so the registry reaches the
+page it was built for instead of being readable only from the inside.
+
 The second is the install-time half: `pack_import` in clodia-logic asks before
 registering a pack, the way it already asks `/flow-allow` for the flow
 declarations. The verdict is computed in `connectors/validate.py` — see there
@@ -82,7 +93,8 @@ async def list_connectors(request: Request):
     if err:
         return err
     reg = _resolved.registry()
-    rows = [_validate.summary(c) for c in reg.connectors if _allowed(c.id)]
+    rows = [_with_connected(_validate.summary(c))
+            for c in reg.connectors if _allowed(c.id)]
     return JSONResponse({
         "connectors": rows,
         "schemes": {"egress": list(reg.scheme_names("egress")),
@@ -90,6 +102,27 @@ async def list_connectors(request: Request):
         "problems": list(_resolved.problems()),
         "ignored": list(reg.refused),
     })
+
+
+def _with_connected(row: dict) -> dict:
+    """Adds `connected` to each provider of a listing row: a BOOLEAN, nothing else.
+
+    `summary()` says which vault entry a provider would use; it cannot say
+    whether anything is stored under it, because the install preview shares it
+    and there the question has no meaning. The Tools page asks exactly that,
+    though, and without an answer a connector that arrives with a pack can only
+    ever be drawn as «not connected» (clodia-platform#520).
+
+    Deliberately not a connector-level field: a connector with no declared
+    provider — `mail`, whose mailboxes are configured elsewhere — would come
+    back `connected: false` while the page shows its boxes working, and a state
+    that contradicts the page next to it is worse than a state that is missing.
+    The answer is `vault.has_credential`, which never reads the contents.
+    """
+    for provider in row.get("providers") or ():
+        entry = str(provider.get("vault_entry") or "")
+        provider["connected"] = bool(entry) and vault.has_credential(entry)
+    return row
 
 
 async def validate_connectors(request: Request):
@@ -259,4 +292,11 @@ routes = [
     Route("/internal/connectors", list_connectors, methods=["GET"]),
     Route("/internal/connectors/validate", validate_connectors, methods=["POST"]),
     Route("/internal/tools/connectors/{id}/connect", connect, methods=["POST"]),
+    # Lo stesso, dove il browser arriva (#520). Le funzioni sono quelle sopra:
+    # un alias che rifacesse l'autorizzazione sarebbe una seconda regola, e la
+    # seconda regola è quella che un giorno dice il contrario della prima —
+    # qui in particolare #539 §5 sta restringendo `_authorize`, e questo
+    # ingresso eredita la stretta perché non ne ha uno suo.
+    Route("/tools/connectors", list_connectors, methods=["GET"]),
+    Route("/tools/connectors/{id}/connect", connect, methods=["POST"]),
 ]

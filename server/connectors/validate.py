@@ -123,6 +123,7 @@ def summary(connector) -> dict:
                    "scheme": v.scheme, "prefix": v.prefix}
                   for v in connector.verbs],
         "topic_actions": [{"id": a.id, "label": a.label, "binding": a.binding,
+                           "admin_only": a.admin_only,
                            "fields": [{"name": f.name, "label": f.label,
                                        "required": f.required,
                                        "placeholder": f.placeholder}

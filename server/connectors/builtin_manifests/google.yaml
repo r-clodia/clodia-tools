@@ -73,6 +73,24 @@ connectors:
             - https://www.googleapis.com/auth/drive
             - https://www.googleapis.com/auth/spreadsheets
             - https://www.googleapis.com/auth/calendar
+    # Il bottone del topic: una cartella di Drive diventa fonte E destinazione
+    # di questa stanza. Nessun `binding` — Drive non ha un canale da agganciare,
+    # si autorizza e basta, ed è esattamente ciò che l'icona Drive della webui
+    # fa dal 18 set 2026 scrivendo le due liste a mano. Dichiararlo qui è ciò
+    # che permette alla pagina di disegnare il bottone senza sapere cos'è Drive
+    # (clodia-platform#520).
+    topic_actions:
+      - id: drive-folder
+        label: Aggiungi una cartella Drive
+        fields:
+          - name: folder
+            label: Cartella Drive (id o URL)
+            placeholder: '1AbCdEfGhIjKlMnOpQrStUv'
+        adds:
+          ingress:
+            - 'gdrive:folder/{folder}'
+          egress:
+            - 'gdrive:folder/{folder}'
     verbs:
       # Dove finisce il contenuto, o con CHI viene condiviso: `gdrive.share` è
       # uscita verso una PERSONA, non verso una cartella. Per questo i due non

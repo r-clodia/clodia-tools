@@ -182,7 +182,8 @@ call actually happens — two implementations of it would be one too many.
 
 ### `topic_actions[]`
 
-`id`, `label`, `fields[]`, `binding` (optional; only `channel`), and `adds:` with `ingress:` /
+`id`, `label`, `fields[]`, `binding` (optional; only `channel`), `admin_only`
+(optional, default `false`), and `adds:` with `ingress:` /
 `egress:` templates over the action's own fields. A template naming a field the
 action does not declare is an error, and so is a template that does not start
 with one of the connector's OWN schemes written out (`tg:{chat}`, never `{url}`
@@ -193,6 +194,20 @@ only into a scheme that declares `forms` (a scheme without forms would accept
 `courier:*`). Only the topic's owner or an admin (on-behalf), or the
 agent-server's own session, may run an action — never an agent token. What the action adds is a *proposal*: the
 grant is still the owner's, at the gate.
+
+`admin_only: true` means the action is **offered** only to an admin of the
+instance, not to every topic owner: what it authorises may not belong to whoever
+owns the room (a system mailbox is the instance's mail). It is a rule about the
+SURFACE — the route's check stays `_authorize_topic_owner` — and it lives here
+rather than in an `if` on the connector's name, which is what rendering the row
+generically would otherwise delete (#520).
+
+A free-text value is passed through `egress.canonical()` before the template is
+rendered, and a value that is already an address of the scheme the template
+writes stands for itself: a Drive folder URL copied from the browser bar becomes
+`gdrive:folder/<id>`. Anything else goes through the template and then through
+the same form check as before, so this widens what a person may TYPE, not what
+the action may WRITE.
 
 Since #519 the action is **executed** from this declaration, by the generic
 route `POST /internal/topics/{tier}/{name}/connectors/{id}/{action}`: the owner

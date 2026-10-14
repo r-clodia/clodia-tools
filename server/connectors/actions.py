@@ -125,7 +125,25 @@ def resolve_values(action: TopicAction, body: dict) -> dict[str, str]:
 
 
 def render(action: TopicAction, values: dict[str, str]) -> dict[str, list[str]]:
-    """Gli URI che questa azione scriverebbe. Solo i suoi template."""
+    """Gli URI che questa azione scriverebbe. Solo i suoi template.
+
+    Il valore di un campo passa prima per `egress.canonical()`: ciò che una
+    persona incolla è l'URL che ha nella barra del browser, e lo schema lo
+    riconduce alla forma canonica con le proprie regole `canonicalise:`. Senza,
+    il bottone Drive generico sarebbe un passo indietro rispetto a quello
+    cablato che sostituisce, dove incollare l'URL della cartella funziona
+    (clodia-platform#520).
+
+    Il valore canonicalizzato vale PER SÉ solo se è già un indirizzo dello
+    schema che il template scrive: `https://drive.google.com/drive/folders/X`
+    diventa `gdrive:folder/X` e sostituisce il template, mentre
+    `https://evil.example` resta ciò che è, finisce dentro il template come
+    testo e lì non ha la forma di un `gdrive:` — cioè viene rifiutato. Nessuna
+    guardia si sposta: `check_uris` (schema posseduto, forma, `check_grantable`)
+    gira dopo, su quello che esce di qui.
+    """
+    from .. import egress as eg
+
     def _one(template: str) -> str:
         def _sub(m):
             key = m.group(1)
@@ -134,7 +152,14 @@ def render(action: TopicAction, values: dict[str, str]) -> dict[str, list[str]]:
                     f"il template '{template}' nomina '{key}', che l'azione non "
                     f"dichiara fra i propri campi")
             return values[key]
-        return _PLACEHOLDER.sub(_sub, template)
+
+        scheme = template.partition(":")[0]
+        nomi = _PLACEHOLDER.findall(template)
+        if len(nomi) == 1 and nomi[0] in values:
+            canonico = eg.canonical(values[nomi[0]])
+            if canonico.partition(":")[0] == scheme and ":" in canonico:
+                return canonico
+        return eg.canonical(_PLACEHOLDER.sub(_sub, template))
 
     return {"ingress": [_one(t) for t in action.adds_ingress],
             "egress": [_one(t) for t in action.adds_egress]}

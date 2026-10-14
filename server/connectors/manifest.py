@@ -795,6 +795,17 @@ class TopicAction:
     adds_ingress: tuple[str, ...] = ()
     adds_egress: tuple[str, ...] = ()
     binding: str = ""
+    #: L'azione la offre solo a un ADMIN dell'istanza, non a ogni owner di
+    #: topic. Esiste perché ciò che l'azione autorizza può non appartenere a
+    #: chi possiede la stanza: una casella di sistema è posta dell'istanza, e
+    #: il bottone Mailbox è sotto `isAdmin` da settembre. Finché quella regola
+    #: viveva in un `if` sul NOME del connettore, renderla generica la
+    #: cancellava (clodia-platform#520); qui sta dove sta il resto della
+    #: descrizione, e un connettore di pack può dichiararla per sé.
+    #: È una regola di SUPERFICIE: l'enforcement vero resta
+    #: `_authorize_topic_owner`, che non distingue admin da owner — un admin
+    #: è comunque owner di ciò che gli si mostra.
+    admin_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -1152,6 +1163,8 @@ def _parse_topic_action(raw: Any, where: str) -> TopicAction:
         adds_ingress=out["ingress"],
         adds_egress=out["egress"],
         binding=_binding(data.get("binding"), f"{where}.binding"),
+        admin_only=_flag(data.get("admin_only"), f"{where}.admin_only",
+                         default=False),
     )
 
 

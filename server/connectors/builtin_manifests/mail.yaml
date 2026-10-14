@@ -98,6 +98,10 @@ connectors:
     topic_actions:
       - id: mailbox-link
         label: Autorizza una casella
+        # Solo un admin dell'istanza: una casella di sistema è posta che non è
+        # dell'owner del topic (decisione del 27 set 2026, finora scritta come
+        # `{#if $isAdmin}` attorno al bottone Mailbox nella webui).
+        admin_only: true
         fields:
           - name: account
             label: Casella di sistema
