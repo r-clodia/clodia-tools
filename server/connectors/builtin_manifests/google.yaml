@@ -33,11 +33,11 @@ connectors:
         canonicalise:
           - from: '^gdrive://(?:folder/)?([\w-]+)/?$'
             to: 'gdrive:folder/{1}'
-          - from: '^https?://drive\.google\.com/drive/(?:u/\d+/)?folders/([\w-]+)'
+          - from: '^https?://drive\.google\.com/drive/(?:u/\d+/)?folders/([\w-]+)(?:[/?#].*)?'
             to: 'gdrive:folder/{1}'
-          - from: '^https?://docs\.google\.com/document/d/([\w-]+)'
+          - from: '^https?://docs\.google\.com/document/d/([\w-]+)(?:[/?#].*)?'
             to: 'gdrive:doc/{1}'
-          - from: '^https?://drive\.google\.com/file/d/([\w-]+)'
+          - from: '^https?://drive\.google\.com/file/d/([\w-]+)(?:[/?#].*)?'
             to: 'gdrive:file/{1}'
       - scheme: gsheets
         direction: both
@@ -46,7 +46,7 @@ connectors:
         canonicalise:
           - from: '^gsheets://([\w-]+)/?$'
             to: 'gsheets:{1}'
-          - from: '^https?://docs\.google\.com/spreadsheets/d/([\w-]+)'
+          - from: '^https?://docs\.google\.com/spreadsheets/d/([\w-]+)(?:[/?#].*)?'
             to: 'gsheets:{1}'
       # `gcal:` sta in USCITA e non in ingresso perché governa l'AUTORITÀ sulla
       # risorsa (leggere l'agenda e scriverci eventi), non la fiducia nel
