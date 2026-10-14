@@ -82,7 +82,32 @@ _TAINTING_PREFIX = ("web.fetch", "web.download", "web.search", "web.render", "we
 def taints(verb: str) -> bool:
     """True se `verb` fa entrare contenuto non controllato nel contesto."""
     v = (verb or "").strip()
-    return v in _TAINTING_EXACT or v.startswith(_TAINTING_PREFIX)
+    if v in _TAINTING_EXACT or v.startswith(_TAINTING_PREFIX):
+        return True
+    return _declared_read(v)
+
+
+def _declared_read(verb: str) -> bool:
+    """Un pack ha dichiarato questo verbo come lettura di una fonte esterna
+    (`direction: source` nel manifest del connettore, clodia-platform#517).
+
+    Le due tabelle qui sopra dicono «questo verbo porta dentro roba di terzi»
+    verbo per verbo; un pack che dichiara una fonte ha detto la stessa cosa del
+    proprio. Senza questa riga il vaglio della fonte fatto in `_source_vetted`
+    non arriverebbe mai a `note_verb`: un `mail.read` di pack non sarebbe
+    contaminante a prescindere dalla sua provenienza, cioè l'opposto di «come un
+    verbo nativo».
+
+    Import differito come gli altri di questo modulo, e silenzioso in caso di
+    guasto: una misura che rompe il turno che sta misurando è peggio della
+    misura mancante (vedi `note_verb`).
+    """
+    try:
+        from .connectors import resolved as _connectors
+        return _connectors.is_declared_read(verb)
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("taint: connettori dei pack non consultabili (%s)", e)
+        return False
 
 
 def _room(tier: str, name: str) -> Optional[str]:

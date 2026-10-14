@@ -237,7 +237,20 @@ def spec_for(verb: str) -> Optional[tuple[str, Callable[[dict], list[str]]]]:
             return ("github", _repo_url)
         if any(tail.startswith(p) or tail == p for p in _GITHUB_WRITE):
             return ("github", _repo)
-    return None
+    # Verbi serviti da un PACK (clodia-platform#517): la mappatura
+    # verbo→destinazione la dichiara il manifest del connettore, e da qui in giù
+    # il verbo è indistinguibile da uno nativo — stessa whitelist, stesso gate,
+    # stesso `flow.egress`. DOPO le tabelle native, mai prima: un pack non può
+    # ridefinire dove va a finire un verbo del gateway, e la regola di namespace
+    # (#516, riapplicata a call time) glielo vieta già a monte. Questo ordine è
+    # la seconda difesa, quella che regge anche se la prima fosse aggirata.
+    try:
+        from .connectors import resolved as _connectors
+        return _connectors.spec_for(verb)
+    except Exception as e:  # noqa: BLE001 — un registry rotto non è un verdetto
+        LOG.warning("egress: connettori dei pack non consultabili per %s (%s)",
+                    verb, e)
+        return None
 
 
 # ── rule matching ────────────────────────────────────────────────────────────
