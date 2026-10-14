@@ -54,9 +54,9 @@ class ToolCallAuditTests(unittest.TestCase):
             # would rename the live gateway's state. Both temporary: nothing to
             # migrate, nothing of anybody else's touched.
             "CLODIA_DATA": str(Path(tmp.name) / "data"),
-            # ...and with no human to answer, the block-and-wait of a gated verb
-            # waits its full 60s. Zero loops = the same ending (nobody approved)
-            # reached at once: the test measures the audit frame, not patience.
+            # Cintura: nessun caso qui sotto deve più aprire un gate (#539 §7
+            # lo impedisce alla radice), ma se un giorno uno lo facesse si vuole
+            # un rosso in millisecondi invece di un turno appeso 60 secondi.
             "GATE_WAIT_LOOPS": "0",
         })
         env.start()
@@ -121,14 +121,14 @@ class ToolCallAuditTests(unittest.TestCase):
         # A refusal of the reference monitor adds its decision in between
         # (#436); whatever happens, the call and its result frame it.
         self.assertEqual((types[0], types[-1]), ("tool.call", "tool.result"))
-        # An unknown verb is GATED, fail-closed: the gateway asks a human and,
-        # with nobody answering, the request expires. Those two events are the
-        # behaviour, not noise — the assertion used to admit `policy.decision`
-        # alone and failed on the real dispatch (#539 §7). What it still
-        # forbids is a dispatch event escaping the frame.
-        self.assertEqual(types[1:-1], ["gate.request", "gate.expire",
-                                       "policy.decision"], types)
-        self.assertTrue(out[0].text.startswith("DENIED: gate:"), out[0].text)
+        # Dal #539 §7 un verbo che il dispatch non sa servire riceve subito
+        # `unknown tool`: NON apre più una card di gate per farsi approvare da
+        # un umano un verbo che non esiste. Quindi in mezzo resta la sola
+        # decisione del reference monitor, e la sequenza è di nuovo quella che
+        # questo test dichiarava — adesso perché è vera, non per fortuna.
+        self.assertEqual(set(types[1:-1]) - {"policy.decision"}, set(), types)
+        self.assertNotIn("gate.request", types)
+        self.assertTrue(out[0].text.startswith("ERROR"), out[0].text)
 
     def test_a_borrowed_call_is_nested_under_the_call_that_made_it(self) -> None:
         async def outer(name, arguments):

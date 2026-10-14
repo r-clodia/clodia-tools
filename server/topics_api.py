@@ -152,7 +152,15 @@ def _authorize_topic_owner(request: Request):
             {"error": "solo l'owner del topic (o un admin) può collegare o "
                       "scollegare un connettore"}, status_code=403)
     if p.get("role") == pki_mint.ROLE_AGENT_SERVER:
-        return who, None
+        # Principal VUOTO, non `clodia`: l'agent-server è un CARRIER, e chi ha
+        # deciso è la persona che clodia-logic ha già verificato come owner o
+        # admin. Restituire il nome del carrier lo faceva finire nei record che
+        # dicono CHI ha accettato: la presa d'atto sul cap SEAL (#405) risultava
+        # presa da `clodia`. Vuoto, `accept_channel_cap` ricade su
+        # `meta["owner"]`, che è la persona giusta e l'unica che questo lato
+        # conosce davvero. (Difetto trovato da un'altra lettura della stessa
+        # issue e portato qui: era fuori dall'elenco di #539.)
+        return "", None
     LOG.warning("topics: token di agente (%s, execution %s) rifiutato su "
                 "un'azione sui muri del topic", p.get("agent"),
                 p.get("execution_id"))

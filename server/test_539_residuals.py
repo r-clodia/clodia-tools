@@ -108,7 +108,15 @@ class WallAuthorizationTests(unittest.TestCase):
     def test_il_runner_passa_per_il_claim(self):
         who, err = self._esito(RUNNER)
         self.assertIsNone(err)
-        self.assertEqual(who, "clodia")
+
+    def test_il_runner_non_si_firma_la_presa_d_atto(self):
+        """Il principal che torna è VUOTO, non `clodia`: l'agent-server è un
+        carrier, e chi ha deciso è la persona che clodia-logic ha verificato.
+        Col nome del carrier, la presa d'atto sul cap SEAL (#405) risultava
+        presa da `clodia`; vuoto, `accept_channel_cap` ricade sull'owner."""
+        who, err = self._esito(RUNNER)
+        self.assertIsNone(err)
+        self.assertEqual(who, "")
 
     def test_senza_claim_il_token_del_runner_non_basta_piu(self):
         """Il cuore di §1: il riconoscimento per ASSENZA è chiuso. Un token
@@ -200,6 +208,46 @@ class PackImportEndToEndTests(unittest.TestCase):
     def test_l_admin_al_pannello_tools_convalida(self):
         r = self._call(UMANO_ADMIN)
         self.assertEqual(r.status_code, 200, r.text)
+
+
+class SealAckFallsBackToTheOwnerTests(unittest.TestCase):
+    """L'altra metà del principal vuoto: dove quel valore finisce davvero."""
+
+    def test_la_presa_d_atto_vuota_si_attribuisce_all_owner(self):
+        import tempfile
+        from .topics.local_fs import LocalFsStorage
+        from .topics.service import TopicService
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = TopicService(LocalFsStorage(tmp))
+            svc.new("SEAL-2", "acme", {"title": "Acme", "owner": "giovanni"})
+            meta = svc.accept_channel_cap("SEAL-2", "acme", "telegram", by="")
+        self.assertEqual(meta["channel_seal_ack"]["by"], "giovanni")
+
+
+class UnknownVerbTests(unittest.TestCase):
+    """§7: un verbo che non esiste non si fa approvare da un umano."""
+
+    def test_un_verbo_inesistente_non_e_implementato(self):
+        from . import main
+        self.assertFalse(main._verb_implemented("no.such_verb"))
+
+    def test_un_verbo_nativo_lo_e(self):
+        from . import main
+        self.assertTrue(main._verb_implemented("topic.post_message"))
+
+    def test_lo_sono_anche_i_nativi_spenti_dal_profilo(self):
+        """«Esiste» e «ti è concesso» sono due domande diverse, e ciascuna ha
+        già la sua guardia: rispondere `unknown tool` a un verbo che il profilo
+        spegne direbbe la cosa sbagliata."""
+        from . import main
+        self.assertTrue(main._verb_implemented(main._RAG_TOOLS[0].name))
+
+    def test_nel_dubbio_parla_il_dispatch(self):
+        """Fail-safe all'indietro sul solo ramo dei backend montati: se il
+        proxy non risponde, non si rifiuta un verbo che potrebbe essere buono."""
+        from . import main
+        with patch.object(main.proxy, "is_proxied", side_effect=RuntimeError("giù")):
+            self.assertTrue(main._verb_implemented("qualcosa.di_montato"))
 
 
 # ── §3 un pack rotto non spegne i verbi del vicino ───────────────────────────
