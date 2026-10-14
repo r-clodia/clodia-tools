@@ -118,7 +118,7 @@ class DocumentedExamplesTests(unittest.TestCase):
         images = registry.by_id("openai-images")
         self.assertEqual(images.schemes, ())
         self.assertEqual(images.providers[0].credential.vault_entry,
-                         "openai_api_key")
+                         "imagegen_openai")
 
 
 class NamespaceRuleTests(unittest.TestCase):

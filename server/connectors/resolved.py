@@ -240,6 +240,35 @@ def _builtin_registry() -> Registry:
     return build_registry(own, builtin=tuple(own), reserved=frozenset())
 
 
+def _build_isolated(own: dict, installed: dict
+                    ) -> tuple[Registry, list[str], list[str]]:
+    """The registry with every pack that can be held, and why the others not.
+
+    `build_registry` is all-or-nothing on purpose — a manifest that collides is
+    not half-valid — but the INSTANCE must not be: one malformed or clashing
+    pack used to drop every pack's connectors (and with #517 their egress
+    checks). The packs a refusal is about (`ManifestError.packs`) are removed
+    and the build is retried; a clash removes BOTH sides, so the winner of a
+    contested scheme is never «whoever sorts first». Raises when a refusal
+    names no installed pack (then the floor is the builtins alone).
+    """
+    remaining = dict(installed)
+    dropped: list[str] = []
+    while True:
+        try:
+            return (build_registry({**own, **remaining}, builtin=tuple(own)),
+                    dropped, sorted(set(installed) - set(remaining)))
+        except ManifestError as e:
+            culprits = [p for p in e.packs if p in remaining]
+            if not culprits:
+                raise
+            for p in culprits:
+                remaining.pop(p)
+                dropped.append(f"pack '{p}' refused, its connectors are "
+                               f"inactive: {e}")
+            LOG.error("connectors: pack rifiutati %s (%s)", culprits, e)
+
+
 def _failsafe_from(packs: Mapping[str, Mapping]) -> tuple[str, ...]:
     """The OUTBOUND verbs the raw manifests of `packs` declare, for packs whose
     connectors could not be built (second verification of #358).
@@ -320,8 +349,8 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
         own = _builtin.manifests()
         installed = {k: v for k, v in manifests().items() if k not in own}
         owners = backend_owners(installed)
-        reg = build_registry({**own, **installed}, builtin=tuple(own))
-        refused = list(reg.refused)
+        reg, dropped, dropped_packs = _build_isolated(own, installed)
+        refused = list(dropped) + list(reg.refused)
         # Namespace di backend MCP montati: riservati come quelli nativi, salvo
         # il server MCP che il pack monta come proprio. Il connettore che ne
         # prende uno altrui è rifiutato da solo — gli altri restano.
@@ -336,8 +365,12 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
                     f"pack's own; a pack cannot claim another backend's verbs")
             else:
                 keep.append(c)
-        if len(keep) != len(reg.connectors):
-            reg = Registry(connectors=tuple(keep), refused=tuple(refused))
+        if len(keep) != len(reg.connectors) or dropped:
+            # The outbound verbs of a DROPPED pack fail closed (second
+            # verification): unmapped would mean unchecked.
+            reg = Registry(connectors=tuple(keep), refused=tuple(refused),
+                           failsafe_verbs=_failsafe_from(
+                               {p: installed[p] for p in dropped_packs}))
         if reg.refused:
             # Not a failure of the registry: a pack that collides with a
             # connector this gateway still implements, or with a backend that
