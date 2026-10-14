@@ -122,9 +122,18 @@ def _failsafe_denied(verb: str) -> str:
     mandi `email.send`, e «non lo so» non può valere «ammesso».
     """
     reg = _registry()
+    from .connectors import resolved as _connectors
+    try:
+        _denied = _connectors.failsafe_denied(verb)
+    except Exception as e:  # noqa: BLE001
+        LOG.error("egress: fail-safe dei pack non valutabile (%s)", e)
+        _denied = False
+    if _denied:
+        return (f"il manifest del pack che dichiara '{verb}' non è utilizzabile "
+                f"({'; '.join(_connectors.problems())[:300]}): il verbo è negato "
+                f"finché non torna valido, invece di uscire senza controllo")
     if not reg.degraded:
         return ""
-    from .connectors import resolved as _connectors
     ns = (verb or "").split(".", 1)[0]
     if ns in _connectors.FAILSAFE_EGRESS_NAMESPACES:
         return (f"registry dei connettori del gateway non disponibile "

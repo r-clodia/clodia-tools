@@ -113,7 +113,7 @@ class ValidateTests(unittest.TestCase):
             ({**SMS, "schemes": [{"scheme": "sms", "direction": "egress",
                                   "forms": [{"label": "x",
                                              "pattern": r"^(a+)+$"}]}]},
-             "exponential"),
+             "group"),
             ({**SMS, "verbs": [{"verb": "sms.send", "direction": "egress",
                                 "scheme": "inesistente", "arg": "to"}]},
              "inesistente"),

@@ -250,12 +250,13 @@ class RegexCostTests(unittest.TestCase):
                         r"[A-Za-z0-9-]+/[a-z0-9][a-z0-9_-]*",
                         r"https?://(?:[a-z0-9.-]+\.)?github\.com(?:[:/].*)?"):
             with self.subTest(pattern=pattern):
-                rx = manifest._compiled(pattern, "t")
-                for value in ("1" * manifest.MAX_VALUE_LENGTH,
-                              "a." * (manifest.MAX_VALUE_LENGTH // 2)):
+                # The gateway's own patterns (builtin analysis, 2048 chars).
+                rx = manifest._compiled(pattern, "t", builtin=True)
+                n = manifest.MAX_VALUE_LENGTH
+                for value in ("1" * n, "a." * (n // 2)):
                     t = time.monotonic()
-                    manifest.Form("x", rx).matches(value)
-                    manifest.DangerRule(rx, "t").matches(value)
+                    manifest.Form("x", rx, max_input=n).matches(value)
+                    manifest.DangerRule(rx, "t", max_input=n).matches(value)
                     self.assertLess(time.monotonic() - t, 0.5)
 
     def test_canonicalisation_input_is_capped(self):

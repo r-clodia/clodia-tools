@@ -318,7 +318,7 @@ class BoundedRegexCostTests(unittest.TestCase):
                 with self.assertRaises(ManifestError) as e:
                     parse_connector(self._scheme(pattern), pack="p",
                                     reserved=frozenset())
-                self.assertIn("exponential", str(e.exception))
+                self.assertIn("group", str(e.exception))
 
     def test_an_over_long_pattern_is_refused(self):
         with self.assertRaises(ManifestError):
@@ -330,11 +330,10 @@ class BoundedRegexCostTests(unittest.TestCase):
         one of them was caught by it while this issue was being written."""
         self.assertEqual(resolved.problems(), ())
 
-    def test_an_ordinary_optional_group_is_not_mistaken_for_one(self):
-        """`(?:folder/)?` and `(?:u/\\d+/)?` are bounded to one repetition, and
-        they are in the Drive rules: a guard that refused them would refuse the
-        gateway's own manifests."""
-        c = parse_connector(self._scheme(r"^(?:u/\d+/)?folders/([\w-]+)$"),
+    def test_an_ordinary_optional_atom_is_not_mistaken_for_one(self):
+        """A pack may still write `u?/?\\d+…`: `?` on single atoms is in the
+        safe subset (second verification of #358 refuses `?` on a GROUP)."""
+        c = parse_connector(self._scheme(r"^u?/?\d+/folders/([\w-]+)$"),
                             pack="p", reserved=frozenset())
         self.assertIsInstance(c, Connector)
 
