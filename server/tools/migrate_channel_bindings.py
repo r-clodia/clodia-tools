@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from . import channel_bindings as cb
 
@@ -28,7 +29,11 @@ def main(argv=None) -> int:
     ap.add_argument("--json", action="store_true", help="output JSON")
     args = ap.parse_args(argv)
 
-    esito = cb.migrate_legacy(dry_run=args.dry_run)
+    try:
+        esito = cb.migrate_legacy(dry_run=args.dry_run)
+    except cb.LegacyBindingsUnreadable as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
     esito["legacy_file"] = str(cb._legacy_path())
     esito["target_file"] = str(cb._path())
     esito["dry_run"] = bool(args.dry_run)
