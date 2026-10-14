@@ -429,7 +429,8 @@ class McpRegisterError(ValueError):
         self.status = status
 
 
-def register_mcp_core(config, secrets: dict | None = None) -> dict:
+def register_mcp_core(config, secrets: dict | None = None,
+                      pack: str | None = None) -> dict:
     """Core riutilizzabile della registrazione MCP (UI Add-MCP e tool mcp.add).
     I placeholder ${NAME} nel config vengono sostituiti con
     ${VAULT:mcp_<server>_<NAME>} e i segreti depositati nel vault (mai nel
@@ -484,6 +485,14 @@ def register_mcp_core(config, secrets: dict | None = None) -> dict:
                     raise McpRegisterError(f"server '{name}': {e}")
         else:
             raise McpRegisterError(f"server '{name}': serve 'url' (http) o 'command' (stdio)")
+        # Provenienza (review di #354): il backend montato DAL MOUNT DI UN PACK
+        # porta il nome del pack, ed è l'unica prova con cui quel pack può
+        # usarne il namespace per i propri connettori. Un mount da Tools o da
+        # `mcp.add` senza `pack` non è di nessun pack.
+        if pack:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", str(pack)):
+                raise McpRegisterError(f"nome di pack non valido: {pack!r}")
+            backend["pack"] = str(pack)
         # Secret: deposita nel vault (infra, no grant) e sostituisci nel config.
         for sname, sval in secrets_in.items():
             if not sval:
