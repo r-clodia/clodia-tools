@@ -28,7 +28,7 @@ Tre cose che il testo della issue non dice, e che decidono il disegno:
    Telegram non dà a un bot l'elenco completo dei membri. Da solo lascerebbe
    «non migrabile» ogni utente normale, cioè il caso comune. Seconda fonte,
    per-chat e già autenticata: il buffer del relay
-   (`channel-relay-state/chat_<id>.json`), che porta `from_id` +
+   (`channel-relay-state/chat_telegram_<id>.json`, formerly `chat_<id>.json`), che porta `from_id` +
    `from_username` dal campo `from` dell'API. Dipendenza **soft**: se non c'è,
    l'utente resta non migrabile, non è un errore.
 3. **La forma di `tg:` la decide `egress.check_grantable`**, che convalida
@@ -113,14 +113,31 @@ def _chat_admins(chat_id: str) -> list:
                        {"chat_id": chat_id}) or []
 
 
+def _relay_state_paths(chat_id: str) -> list:
+    """Where the relay keeps this chat's state, newest naming first.
+
+    Since clodia-logic#514 the relay keys its state by connector + chat
+    (`telegram:<id>` → `chat_telegram_<id>.json`, `/` and `:` → `_`); before,
+    by chat only (`chat_<id>.json`). Read the new name, fall back to the old
+    one, so the migration works on either side of that deploy."""
+    d = _data_dir() / "channel-relay-state"
+    new = f"telegram:{chat_id}".replace("/", "_").replace(":", "_")
+    old = str(chat_id).replace("/", "_")
+    return [d / f"chat_{new}.json", d / f"chat_{old}.json"]
+
+
 def _buffer_people(chat_id: str) -> tuple[dict, set]:
     """`(uid → handle, uid senza handle)` dal buffer di contesto del relay."""
-    p = _data_dir() / "channel-relay-state" / f"chat_{str(chat_id).replace('/', '_')}.json"
     handles: dict = {}
     nohandle: set = set()
-    try:
-        state = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    state = None
+    for p in _relay_state_paths(chat_id):
+        try:
+            state = json.loads(p.read_text(encoding="utf-8"))
+            break
+        except (OSError, json.JSONDecodeError):
+            continue
+    if not isinstance(state, dict):
         return handles, nohandle
     for m in (state.get("buffer") or []):
         uid = m.get("from_id")

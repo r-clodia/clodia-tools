@@ -89,10 +89,10 @@ class MigrateTelegramIngressTests(unittest.TestCase):
         mdir.mkdir(parents=True, exist_ok=True)
         (mdir / "MEMORY.md").write_text(text, encoding="utf-8")
 
-    def _buffer(self, chat_id: str, messages: list) -> None:
+    def _buffer(self, chat_id: str, messages: list, *, name: str | None = None) -> None:
         d = self.datadir / "channel-relay-state"
         d.mkdir(parents=True, exist_ok=True)
-        (d / f"chat_{chat_id}.json").write_text(
+        (d / (name or f"chat_{chat_id}.json")).write_text(
             json.dumps({"seen": [], "buffer": messages}), encoding="utf-8")
 
     def _uris(self, plan: dict, scope: str) -> list:
@@ -135,6 +135,22 @@ class MigrateTelegramIngressTests(unittest.TestCase):
         plan = MIG.plan()
         self.assertIn("tg:@gamma_utente", self._uris(plan, "SEAL-1/acme"))
         self.assertFalse(self._reasons(plan, "333"))
+
+    def test_il_buffer_col_nome_nuovo_del_relay_e_letto(self):
+        """Since clodia-logic#514 the relay writes `chat_telegram_<id>.json`
+        (state keyed by connector + chat): that file must be read."""
+        self._buffer("-1001", [{"from_id": 333, "from_username": "gamma_utente"}],
+                     name="chat_telegram_-1001.json")
+        plan = MIG.plan()
+        self.assertIn("tg:@gamma_utente", self._uris(plan, "SEAL-1/acme"))
+
+    def test_il_nome_nuovo_vince_sul_vecchio(self):
+        self._buffer("-1001", [{"from_id": 333, "from_username": "vecchio_handle"}])
+        self._buffer("-1001", [{"from_id": 333, "from_username": "nuovo_handle"}],
+                     name="chat_telegram_-1001.json")
+        uris = self._uris(MIG.plan(), "SEAL-1/acme")
+        self.assertIn("tg:@nuovo_handle", uris)
+        self.assertNotIn("tg:@vecchio_handle", uris)
 
     def test_un_uid_di_una_chat_non_autorizza_l_altro_topic(self):
         """La whitelist è del seed: l'attribuzione la fa la chat, non la lista."""
