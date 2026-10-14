@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,6 +45,7 @@ class _Session:
 
     def __init__(self, claims: dict):
         self.claims = claims
+        self._tmp = tempfile.TemporaryDirectory()
 
     def __enter__(self):
         self._ps = [
@@ -57,6 +59,13 @@ class _Session:
                          lambda *a, **k: None),
             patch.object(tools_api, "_revocata", lambda p: False),
             patch.object(tools_api, "_UI_TOKEN", None),
+            # `_is_human_admin` reads `$CLODIA_DATA/agents/<name>/agent.yaml`:
+            # pointed at a real datadir it is somebody else's state, and a
+            # directory the test process cannot read makes it raise instead of
+            # refusing (clodia-platform#539 §7, same class of defect). An empty
+            # directory answers «not an admin» for every name, which is what
+            # these cases assume.
+            patch.dict(os.environ, {"CLODIA_DATA": self._tmp.name}),
         ]
         for p in self._ps:
             p.start()
@@ -65,6 +74,7 @@ class _Session:
     def __exit__(self, *exc):
         for p in reversed(self._ps):
             p.stop()
+        self._tmp.cleanup()
 
 
 class AdminOnlyRoutesTests(unittest.TestCase):
@@ -91,11 +101,20 @@ class AdminOnlyRoutesTests(unittest.TestCase):
                        "on_behalf": True, "human_role": "admin"}):
             self.assertEqual(self._both(), (200, 200))
 
-    def test_the_plain_token_of_pack_import_passes(self):
+    def test_the_service_token_of_pack_import_passes(self):
         """`gateway_admin._headers()` in clodia-logic: a session token minted
-        for its principal (`clodia`), no on-behalf claim."""
-        with _Session({"agent": "clodia"}):
+        for its principal (`clodia`) with the signed `role: agent-server`
+        claim (clodia-platform#539 §1)."""
+        with _Session({"agent": "clodia", "role": "agent-server"}):
             self.assertEqual(self._both(), (200, 200))
+
+    def test_the_runtime_token_of_clodia_no_longer_passes(self):
+        """#539 §5: the same principal WITHOUT the service claim is an agent's
+        runtime token — the one in every spawn's env. It used to pass as a
+        super-agent, and with it a turn could deposit or remove the credential
+        of a connector."""
+        with _Session({"agent": "clodia"}):
+            self.assertEqual(self._both(), (401, 401))
 
     def test_an_ordinary_agent_is_refused(self):
         with _Session({"agent": "minerva"}):

@@ -72,7 +72,7 @@ def _client() -> TestClient:
 class _Auth:
     def __enter__(self):
         from . import tools_api
-        self._p = patch.object(tools_api, "_authorized", lambda request: True)
+        self._p = patch.object(tools_api, "_authorized_service", lambda request: True)
         self._p.start()
         return self
 

@@ -18,7 +18,12 @@ from .test_519_generic_actions import _H, _Topic, _client, _url
 
 AGENT_RUNTIME = {"agent": "clodia", "execution_id": "clodia-517",
                  "chat": "chan:SEAL-1:acme:clodia"}
-SYSTEM = {"agent": "clodia"}                       # topics_client._headers()
+# topics_client._headers(): dal #539 §1 il runner si dichiara con un claim
+# FIRMATO invece di farsi riconoscere da ciò che il suo token non porta.
+SYSTEM = {"agent": "clodia", "role": "agent-server"}
+#: Lo stesso principal SENZA il claim: prima passava per assenza di
+#: `execution_id` e `chat`, adesso è un token come un altro.
+SYSTEM_SENZA_CLAIM = {"agent": "clodia"}
 OWNER = {"agent": "clodia", "principal": "davide", "on_behalf": True,
          "human_role": "user"}
 STRANGER = {**OWNER, "principal": "mario"}
@@ -82,6 +87,13 @@ class TopicOwnerOnlyTests(unittest.TestCase):
                 codes, (liste, bindings) = self._run(who)
                 self.assertEqual(codes, [200, 200, 200, 200])
                 self.assertIn("-100777", bindings)
+
+    def test_without_the_service_claim_it_does_not_pass_by_absence(self):
+        """#539 §1: riconoscere il runner dall'ASSENZA di claim reggeva per
+        caso — `_execution_id` torna `""` finché lo spawn non ha il workspace."""
+        codes, (liste, bindings) = self._run(SYSTEM_SENZA_CLAIM)
+        self.assertEqual(codes, [403, 403, 403, 403])
+        self.assertEqual((liste, bindings), ({}, {}))
 
     def test_the_state_read_follows_the_same_rule(self):
         with _Topic() as t, _As(AGENT_RUNTIME):

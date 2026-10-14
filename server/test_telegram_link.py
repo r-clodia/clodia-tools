@@ -27,6 +27,16 @@ from .topics.service import TopicService
 _H = {"Authorization": "Bearer ckt1.finto"}
 
 
+
+def _come_runner(request):
+    """`_authorize` è già passato: questa è la chiamata del RUNNER, che la
+    webui inoltra. Dal #539 §1 si dichiara con il claim firmato
+    `role: agent-server` invece di essere riconosciuta dall'assenza di
+    `execution_id` e `chat` — che un token può non avere per sbaglio.
+    """
+    request.state.auth_payload = {"agent": "clodia", "role": "agent-server"}
+    return "davide", None
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="telegram-link-"))
@@ -40,7 +50,7 @@ class Base(unittest.TestCase):
         self._p = [
             patch.object(topics_api, "_svc", self.svc),
             patch.object(tb, "_path", lambda: self.bindings_dir / "telegram-bindings.json"),
-            patch.object(topics_api, "_authorize", lambda _r: ("davide", None)),
+            patch.object(topics_api, "_authorize", _come_runner),
         ]
         for p in self._p:
             p.start()

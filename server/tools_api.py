@@ -33,6 +33,7 @@ from starlette.routing import Route
 from . import google_oauth as go
 from . import instance_profile
 from . import mcp_oauth
+from . import pki_mint
 from . import proxy
 from . import vault
 from . import whitelist
@@ -121,6 +122,52 @@ def _authorized(request: Request) -> bool:
         return (p.get("human_role") or "user") == "admin"
     ag = str(p.get("agent") or "")
     return ag in ("clodia", "ophelia") or _is_human_admin(ag)
+
+
+def _authorized_service(request: Request) -> bool:
+    """Chi può toccare le CREDENZIALI di un connettore (clodia-platform#539 §5).
+
+    Passano, e nessun altro:
+
+    - il **trusted-core** via UI token (chiamanti interni/headless);
+    - un **umano admin** — on-behalf con `human_role: admin`, oppure ruolo
+      admin nel suo `agent.yaml`;
+    - l'**agent-server**, per il claim firmato `role: agent-server` (#539 §1):
+      è `pack_import` che convalida il blocco `connectors:` di un pack.
+
+    NON passano più i token RUNTIME di `clodia`/`ophelia`, che `_authorized`
+    accetta come super-agent. Quel token sta nell'env di ogni spawn: depositare
+    o rimuovere la credenziale di un connettore con esso significa che un turno
+    qualunque può scollegare un provider dell'istanza. Il claim di servizio
+    distingue il runner dall'agente che porta lo stesso nome `clodia`, cosa che
+    un confronto sul nome non può fare.
+
+    Vale su TUTTE le porte che scrivono una credenziale, non solo sulla rotta
+    generica dei connettori nominata dalla issue: `/tools/github/connect` e le
+    sorelle per vendor depositano la stessa credenziale: lasciarle con la
+    regola vecchia sarebbe chiudere una porta e lasciare aperta quella accanto.
+    `_authorized` resta com'è per il resto (audit, egress, backup, mount MCP):
+    è una superficie diversa, e restringerla è una decisione che la issue non
+    ha preso.
+    """
+    if _authorized_owner(request):
+        return True
+    p = _session_payload(request)
+    return bool(p) and p.get("role") == pki_mint.ROLE_AGENT_SERVER
+
+
+def _session_payload(request: Request) -> dict:
+    """Claim VERIFICATI del ckt1 della richiesta, `{}` se assente/invalido/revocato."""
+    hdr = request.headers.get("authorization", "")
+    token = hdr[7:] if hdr.lower().startswith("bearer ") else ""
+    if not token:
+        return {}
+    from .pki_verify import verify_session_token
+    try:
+        p = verify_session_token(token)
+    except Exception:  # noqa: BLE001
+        return {}
+    return {} if _revocata(p) else (p or {})
 
 
 def _authorized_owner(request: Request) -> bool:
@@ -429,6 +476,37 @@ class McpRegisterError(ValueError):
         self.status = status
 
 
+def _refuse_owner_change(backends: list, slug: str, pack: str | None) -> None:
+    """Un mount NON cambia il proprietario di un backend già montato
+    (clodia-platform#539 §4).
+
+    La deduplica per slug riscriveva la voce esistente con la provenienza del
+    nuovo mount: montare `sedia` da un pack prendeva il backend che l'admin
+    aveva montato da Tools e lo timbrava `pack: <nome>` — e da quel momento
+    quel pack ne possedeva il namespace per i propri connettori
+    (`backend_owners`, review di #354). Vale in tutte le direzioni: pack su
+    admin, admin su pack, pack su pack. Rimontare il PROPRIO backend resta
+    lecito: è l'aggiornamento di un mount, non un passaggio di proprietà.
+
+    Fallisce chiuso con un errore esplicito: chi vuole davvero cambiare
+    proprietario smonta e rimonta, cioè compie due atti visibili invece di uno
+    che non si vede.
+    """
+    prima = next((b for b in backends if b.get("name") == slug), None)
+    if prima is None:
+        return
+    attuale = str(prima.get("pack") or "") or None
+    nuovo = str(pack or "") or None
+    if attuale == nuovo:
+        return
+    chi = f"del pack '{attuale}'" if attuale else "montato dall'admin"
+    ora = f"del pack '{nuovo}'" if nuovo else "senza pack (admin)"
+    raise McpRegisterError(
+        f"il backend MCP '{slug}' è già {chi}: un mount {ora} non può "
+        f"sostituirlo. Smontalo prima, se il cambio di proprietario è "
+        f"voluto.", status=409)
+
+
 def register_mcp_core(config, secrets: dict | None = None,
                       pack: str | None = None) -> dict:
     """Core riutilizzabile della registrazione MCP (UI Add-MCP e tool mcp.add).
@@ -500,6 +578,7 @@ def register_mcp_core(config, secrets: dict | None = None,
             cred = f"mcp_{slug}_{sname}"
             vault.deposit(cred, {"value": sval}, cred_type="mcp_secret", grant_agents=[])
             backend = _replace_placeholder(backend, sname, f"${{VAULT:{cred}}}")
+        _refuse_owner_change(backends, slug, pack)
         backends = [b for b in backends if b.get("name") != slug]  # dedup
         backends.append(backend)
         registered.append(slug)
@@ -638,7 +717,7 @@ async def google_connect(request: Request):
     g = _connector_guard("google")
     if g is not None:
         return g
-    if not _authorized(request):
+    if not _authorized_service(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         body = await request.json()
@@ -717,7 +796,7 @@ async def gmail_connect(request: Request):
     g = _connector_guard("gmail")
     if g is not None:
         return g
-    if not _authorized(request):
+    if not _authorized_service(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         body = await request.json()
@@ -805,7 +884,7 @@ async def gworkspace_connect(request: Request):
     g = _connector_guard("google-workspace")
     if g is not None:
         return g
-    if not _authorized(request):
+    if not _authorized_service(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         body = await request.json()
@@ -865,7 +944,7 @@ async def openai_connect(request: Request):
     legge solo il gateway). Per disconnettere: body {"api_key": ""}."""
     src = request.client.host if request.client else "?"
     LOG.info("openai_connect: ricevuta richiesta da %s", src)
-    if not _authorized(request):
+    if not _authorized_service(request):
         LOG.warning("openai_connect: NON autorizzata da %s", src)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
@@ -1038,7 +1117,7 @@ async def telegram_connect(request: Request):
     deposita il token nel vault (grant clodia) e memorizza l'@username. token
     vuoto → disconnette (rimuove la credenziale). Il token non transita mai dal
     modello: lo usano solo i tool telegram.* via vault."""
-    if not _authorized(request):
+    if not _authorized_service(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         body = await request.json()
@@ -1073,7 +1152,7 @@ async def github_connect(request: Request):
     """Deposita il PAT GitHub nel vault e registra/rimuove il backend MCP ufficiale
     GitHub. Body: {pat}. pat vuoto → disconnette (rimuove cred + backend).
     Il PAT non transita mai dal modello: il proxy lo risolve via ${VAULT:github_pat}."""
-    if not _authorized(request):
+    if not _authorized_service(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         body = await request.json()

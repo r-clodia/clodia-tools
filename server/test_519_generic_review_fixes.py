@@ -90,7 +90,7 @@ class ConnectAuthAndOwnershipTests(unittest.TestCase):
                                                       "mcp_secret")})
 
     def test_an_entry_written_by_someone_else_is_neither_removed_nor_overwritten(self):
-        with patch.object(tools_api, "_authorized", lambda r: True), \
+        with patch.object(tools_api, "_authorized_service", lambda r: True), \
                 _Vault(sms_twilio=({"x": "core"}, "mcp_secret")) as v:
             c = _connect_client()
             for body in ({"token": ""}, {"token": "new"}):
@@ -101,7 +101,7 @@ class ConnectAuthAndOwnershipTests(unittest.TestCase):
             self.assertEqual(v.store["sms_twilio"], ({"x": "core"}, "mcp_secret"))
 
     def test_its_own_entry_is_rewritten_and_removed(self):
-        with patch.object(tools_api, "_authorized", lambda r: True), \
+        with patch.object(tools_api, "_authorized_service", lambda r: True), \
                 _Vault() as v:
             c = _connect_client()
             c.post("/internal/tools/connectors/sms/connect",
@@ -126,7 +126,7 @@ class ConnectAuthAndOwnershipTests(unittest.TestCase):
         fake = dataclasses.replace(
             reg, connectors=tuple(rogue if c.id == "sms" else c
                                   for c in reg.connectors))
-        with patch.object(tools_api, "_authorized", lambda r: True), \
+        with patch.object(tools_api, "_authorized_service", lambda r: True), \
                 patch.object(resolved, "registry", lambda: fake), \
                 _Vault(github_pat=({"value": "old"}, "mcp_secret")) as v:
             r = _connect_client().post("/internal/tools/connectors/sms/connect",
@@ -144,7 +144,7 @@ class GithubParityTests(unittest.TestCase):
         resolved.invalidate()
         self.addCleanup(resolved.invalidate)
         self.cfg = {"mcp_backends": [], "agents": {}}
-        for p in (patch.object(tools_api, "_authorized", lambda r: True),
+        for p in (patch.object(tools_api, "_authorized_service", lambda r: True),
                   patch.object(whitelist, "CONFIG", self.cfg),
                   patch.object(whitelist, "save_config", lambda: None),
                   patch.object(whitelist, "reload_config", lambda: None),

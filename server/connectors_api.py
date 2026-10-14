@@ -40,16 +40,21 @@ LOG = logging.getLogger("clodia-tools.connectors-api")
 
 
 def _authorize(request: Request):
-    """The ADMIN check of the Tools routes (`tools_api._authorized`).
+    """Who may read the connectors and write their credentials.
 
     Review of #359: `internal_auth.authorize(allow_on_behalf=True)` let ANY
     human session through. The real callers are an admin at the Tools page
-    (on-behalf with `human_role: admin`) and `pack_import` in clodia-logic,
-    which mints a plain session token for its principal (`clodia`) — both pass
-    here, a non-admin session does not.
+    (on-behalf with `human_role: admin`) and `pack_import` in clodia-logic.
+
+    Since #539 §5 this is `tools_api._authorized_service`, not `_authorized`:
+    the latter also accepts the RUNTIME token of `clodia`/`ophelia`, which sits
+    in every spawn's env — so any turn could deposit or remove the credential of
+    a connector. `pack_import` is not recognised by its principal's name any
+    more but by the signed `role: agent-server` claim (#539 §1), which an agent
+    cannot obtain: minting is behind the bootstrap secret.
     """
     from . import tools_api
-    if not tools_api._authorized(request):
+    if not tools_api._authorized_service(request):
         LOG.warning("connectors: richiesta non autorizzata (serve un admin)")
         return {}, JSONResponse({"error": "unauthorized"}, status_code=401)
     return {}, None

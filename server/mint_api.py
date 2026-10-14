@@ -68,6 +68,10 @@ async def mint(request: Request):
                 unattended=bool(b.get("unattended")),
                 origin=b.get("origin") or None,
                 scope_tier=b.get("scope_tier") or None,
+                # Service role (#539 §1). Reachable only with the bootstrap
+                # secret checked above: a spawn cannot ask for it. An unknown
+                # value is a PermissionError → 403, not a silent drop.
+                role=b.get("role") or None,
             )
             return JSONResponse({"token": token})
         if kind == "capability":

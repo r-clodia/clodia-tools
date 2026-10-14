@@ -32,6 +32,14 @@ from cryptography.x509.oid import NameOID
 TOKEN_PREFIX = "ckt1"
 TOKEN_AUDIENCE = "keystore"
 SESSION_TTL_SECONDS = 45 * 60
+
+#: Service role of the AGENT-SERVER on the calls it makes for itself
+#: (clodia-platform#539 §1). Mirrors `colony.pki.ROLE_AGENT_SERVER` in
+#: clodia-logic: the runner asks for it, this side signs and enforces it.
+ROLE_AGENT_SERVER = "agent-server"
+#: CLOSED list of signable service roles. One entry until there is a second
+#: service that needs one.
+SERVICE_ROLES = frozenset({ROLE_AGENT_SERVER})
 CAP_PREFIX = "ccap1"
 COLONY_ORG = "clodia-colony"
 CERT_DAYS = 365 * 3
@@ -83,17 +91,29 @@ def mint_session_token(agent: str, execution_id: str = "",
                        unattended: bool = False,
                        principal_kind: str | None = None,
                        origin: list[str] | None = None,
-                       scope_tier: str | None = None) -> str:
+                       scope_tier: str | None = None,
+                       role: str | None = None) -> str:
     """Conia un token di sessione ckt1 firmato con l'identity key dell'agente.
     Identico a colony.pki.mint_session_token, ma le chiavi stanno QUI (gateway).
 
     `origin` and `scope_tier` are signed here too (clodia-platform#450): the
     local signer in clodia-logic always included them, this one did not, so
     in gateway-minting mode — production — the origin-chain intersection and
-    the scope tier of jobs ran on their fallbacks instead of the signed claim."""
+    the scope tier of jobs ran on their fallbacks instead of the signed claim.
+
+    `role` (clodia-platform#539 §1): SERVICE ROLE of the caller, today only
+    `agent-server`. The topic-wall routes used to recognise the agent-server by
+    what its token does NOT carry (no `execution_id`, no `chat`); they now want
+    this positive claim. Minting is reachable only with the bootstrap secret,
+    which lives in the env of gateway and orchestrator and never in a spawn's,
+    so an agent cannot ask for a token carrying it."""
     scoped_tools = list(dict.fromkeys(scoped_tools or []))
     if any(t in ("*", "agents") or t.startswith("agents.") for t in scoped_tools):
         raise PermissionError("scoped_tools non può concedere wildcard o tool agents.*")
+    if role is not None and role not in SERVICE_ROLES:
+        # Closed list, no generic roles: a new role would be new surface opened
+        # to close an old one.
+        raise PermissionError(f"ruolo di servizio sconosciuto: {role!r}")
     key_path = _agent_key_path(agent)
     if not key_path.is_file():
         raise PermissionError(f"agent '{agent}' senza identità (nessuna identity.key nel gateway)")
@@ -131,6 +151,9 @@ def mint_session_token(agent: str, execution_id: str = "",
         payload["origin"] = [str(x) for x in origin]
     if scope_tier:
         payload["scope_tier"] = scope_tier
+    if role:
+        # Positive claim: "this call is the runner's" (see the docstring).
+        payload["role"] = role
     body = _b64e(json.dumps(payload, separators=(",", ":")).encode())
     sig = _b64e(key.sign(body.encode()))
     return f"{TOKEN_PREFIX}.{body}.{sig}"

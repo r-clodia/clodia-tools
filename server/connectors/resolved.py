@@ -40,7 +40,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -269,7 +269,8 @@ def _build_isolated(own: dict, installed: dict
             LOG.error("connectors: pack rifiutati %s (%s)", culprits, e)
 
 
-def _failsafe_from(packs: Mapping[str, Mapping]) -> tuple[str, ...]:
+def _failsafe_from(packs: Mapping[str, Mapping],
+                   reserved: Iterable[str] = ()) -> tuple[str, ...]:
     """The OUTBOUND verbs the raw manifests of `packs` declare, for packs whose
     connectors could not be built (second verification of #358).
 
@@ -279,16 +280,30 @@ def _failsafe_from(packs: Mapping[str, Mapping]) -> tuple[str, ...]:
     connector's own namespace that is neither native nor builtin — a broken
     manifest must not be able to switch off somebody else's verb. A `prefix:
     true` mapping is kept with a trailing `*`.
+
+    `reserved` (clodia-platform#539 §3): namespaces that belong to SOMEBODY
+    ELSE — the connectors the registry is actually holding, i.e. the healthy
+    packs. Native and builtin namespaces were already excluded, mounted MCP
+    backends are excluded here too, but a broken manifest declaring a HEALTHY
+    pack's namespace still denied that pack's verbs: it fails closed, so it is
+    a denial of service and not a bypass, and the victim is a pack that did
+    nothing wrong. Whoever is HELD by the registry owns its namespace; a
+    manifest that could not be built does not get to speak for it.
     """
     try:
         from .manifest import core_namespaces
-        taken = set(core_namespaces())
+        taken = {_norm(x) for x in core_namespaces()}
     except Exception:  # noqa: BLE001
         taken = set()
     try:
-        taken |= {c.namespace for c in _builtin_registry().connectors}
+        taken |= {_norm(c.namespace) for c in _builtin_registry().connectors}
     except Exception:  # noqa: BLE001
         pass
+    try:
+        taken |= mounted_backends() | _CORE_BACKENDS
+    except Exception:  # noqa: BLE001
+        pass
+    taken |= {_norm(x) for x in (reserved or ())}
     out: set[str] = set()
     for meta in (packs or {}).values():
         entries = meta.get("connectors") if isinstance(meta, Mapping) else None
@@ -296,7 +311,7 @@ def _failsafe_from(packs: Mapping[str, Mapping]) -> tuple[str, ...]:
             if not isinstance(entry, Mapping):
                 continue
             ns = str(entry.get("namespace") or "")
-            if not ns or ns in taken:
+            if not ns or _norm(ns) in taken:
                 continue
             verbs = entry.get("verbs")
             for v in verbs if isinstance(verbs, list) else []:
@@ -370,7 +385,11 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
             # verification): unmapped would mean unchecked.
             reg = Registry(connectors=tuple(keep), refused=tuple(refused),
                            failsafe_verbs=_failsafe_from(
-                               {p: installed[p] for p in dropped_packs}))
+                               {p: installed[p] for p in dropped_packs},
+                               # I namespace che il registry sta REGGENDO sono
+                               # di chi li regge: un manifest rotto non spegne
+                               # i verbi del vicino sano (#539 §3).
+                               reserved={c.namespace for c in keep}))
         if reg.refused:
             # Not a failure of the registry: a pack that collides with a
             # connector this gateway still implements, or with a backend that

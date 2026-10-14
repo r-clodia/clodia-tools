@@ -36,8 +36,29 @@ class ToolCallAuditTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name) / "audit"
-        env = patch.dict(os.environ, {"CLODIA_AUDIT_DIR": str(self.root),
-                                      "CLODIA_AUDIT_KEY_DIR": str(Path(tmp.name) / "k")})
+        env = patch.dict(os.environ, {
+            "CLODIA_AUDIT_DIR": str(self.root),
+            "CLODIA_AUDIT_KEY_DIR": str(Path(tmp.name) / "k"),
+            # The gate's decision state (pending requests, consents) lives in a
+            # FILE, and without this it is the one of whoever runs the test:
+            # `CLODIA_DATA` in a dev box, the repo root in CI
+            # (clodia-platform#539 §7). A leftover consent or a pending request
+            # for the same (agent, instance, verb) changes what the dispatch
+            # below does, which is why this test failed locally and passed in
+            # CI. Isolated, it decides nothing from outside.
+            "CLODIA_TOOLS_STATE_DIR": str(Path(tmp.name) / "state"),
+            # `CLODIA_DATA` with it, and not only for symmetry: with the state
+            # dir isolated and the shared one still pointing at a real
+            # `/datadir`, `state_paths` considers the state MIGRATED and moves
+            # the legacy files aside (`.migrated-to-state-dir`) — a test run
+            # would rename the live gateway's state. Both temporary: nothing to
+            # migrate, nothing of anybody else's touched.
+            "CLODIA_DATA": str(Path(tmp.name) / "data"),
+            # ...and with no human to answer, the block-and-wait of a gated verb
+            # waits its full 60s. Zero loops = the same ending (nobody approved)
+            # reached at once: the test measures the audit frame, not patience.
+            "GATE_WAIT_LOOPS": "0",
+        })
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("CLODIA_AUDIT_FAIL_CLOSED", None)
@@ -100,7 +121,14 @@ class ToolCallAuditTests(unittest.TestCase):
         # A refusal of the reference monitor adds its decision in between
         # (#436); whatever happens, the call and its result frame it.
         self.assertEqual((types[0], types[-1]), ("tool.call", "tool.result"))
-        self.assertTrue(set(types[1:-1]) <= {"policy.decision"}, types)
+        # An unknown verb is GATED, fail-closed: the gateway asks a human and,
+        # with nobody answering, the request expires. Those two events are the
+        # behaviour, not noise — the assertion used to admit `policy.decision`
+        # alone and failed on the real dispatch (#539 §7). What it still
+        # forbids is a dispatch event escaping the frame.
+        self.assertEqual(types[1:-1], ["gate.request", "gate.expire",
+                                       "policy.decision"], types)
+        self.assertTrue(out[0].text.startswith("DENIED: gate:"), out[0].text)
 
     def test_a_borrowed_call_is_nested_under_the_call_that_made_it(self) -> None:
         async def outer(name, arguments):

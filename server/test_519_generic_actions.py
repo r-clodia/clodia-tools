@@ -248,7 +248,7 @@ class ConnectTests(unittest.TestCase):
         self.addCleanup(resolved.invalidate)
         self.depositi: list[tuple] = []
         self.rimossi: list[str] = []
-        for p in (patch.object(tools_api, "_authorized", lambda request: True),
+        for p in (patch.object(tools_api, "_authorized_service", lambda request: True),
                   patch.object(resolved, "manifests",
                                lambda: {"sms-pack": SMS_PACK}),
                   patch.object(vault, "credential_type", lambda e: None),
@@ -313,7 +313,7 @@ class ConnectTests(unittest.TestCase):
 
     def test_the_route_requires_the_admin_check(self) -> None:
         from . import tools_api
-        with patch.object(tools_api, "_authorized", lambda request: False):
+        with patch.object(tools_api, "_authorized_service", lambda request: False):
             self.assertEqual(
                 self.c.post("/internal/tools/connectors/sms/connect",
                             json={"token": "x"}).status_code, 401)
