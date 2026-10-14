@@ -31,7 +31,7 @@ def main(argv=None) -> int:
 
     try:
         esito = cb.migrate_legacy(dry_run=args.dry_run)
-    except cb.LegacyBindingsUnreadable as e:
+    except cb.BindingsUnreadable as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
     esito["legacy_file"] = str(cb._legacy_path())

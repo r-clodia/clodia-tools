@@ -293,5 +293,54 @@ class ConcorrenzaTests(_Base):
         self.assertEqual(len(cb.load("telegram", base=self.dir)), 18)
 
 
+class RegistroIllegibileTests(_Base):
+    """Coordinator follow-up on tools#356: a malformed `channel-bindings.json`
+    reads as empty (ERROR log) but is never overwritten — every write refuses,
+    so repairing the file restores the bindings."""
+
+    BUONO = {"version": 1, "connectors": {"telegram": {
+        "-100": {"instance": "m", "tier": "SEAL-1", "topic": "acme"}}}}
+
+    def _assert_scritture_rifiutate(self, contenuto: str):
+        self.nuovo.write_text(contenuto, encoding="utf-8")
+        with self.assertLogs(cb.LOG, level="ERROR"):
+            self.assertEqual(cb.load(base=self.dir), {})
+        for scrivi in (
+                lambda: cb.set_binding("telegram", "-9", "m", "SEAL-1", "x", base=self.dir),
+                lambda: cb.remove("telegram", "-100", base=self.dir),
+                lambda: cb.replace("telegram", {}, base=self.dir),
+                lambda: cb.migrate_legacy(base=self.dir)):
+            with self.assertRaises(cb.BindingsUnreadable):
+                scrivi()
+        self.assertEqual(self.nuovo.read_text(encoding="utf-8"), contenuto,
+                         "a malformed registry must never be replaced")
+        # Repair: the bindings are back, and writes work again.
+        self.nuovo.write_text(json.dumps(self.BUONO), encoding="utf-8")
+        self.assertEqual(list(cb.load("telegram", base=self.dir)), ["-100"])
+        cb.set_binding("telegram", "-9", "m", "SEAL-1", "x", base=self.dir)
+        self.assertEqual(sorted(cb.load("telegram", base=self.dir)), ["-100", "-9"])
+
+    def test_json_rotto_scrittura_rifiutata(self):
+        self._assert_scritture_rifiutate('{"version": 1, "connectors": {"telegram": {"-100": ')
+
+    def test_json_lista_scrittura_rifiutata(self):
+        self._assert_scritture_rifiutate("[1, 2]")
+
+    def test_connectors_non_oggetto_scrittura_rifiutata(self):
+        self._assert_scritture_rifiutate('{"version": 1, "connectors": ["telegram"]}')
+
+    def test_connettore_non_oggetto_scrittura_rifiutata(self):
+        self._assert_scritture_rifiutate('{"version": 1, "connectors": {"telegram": 7}}')
+
+    def test_il_cli_esce_non_zero(self):
+        from . import migrate_channel_bindings as mcb
+        self.nuovo.write_text("[]", encoding="utf-8")
+        with patch.dict("os.environ", {"CLODIA_DATA": str(self.dir)}), \
+                patch("sys.stderr", new_callable=__import__("io").StringIO) as err:
+            self.assertEqual(mcb.main([]), 2)
+        self.assertIn("ERROR", err.getvalue())
+        self.assertEqual(self.nuovo.read_text(encoding="utf-8"), "[]")
+
+
 if __name__ == "__main__":
     unittest.main()

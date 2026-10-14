@@ -70,7 +70,14 @@ def _legacy_path(base=None) -> Path:
     return _data_dir(base) / LEGACY_FILENAME
 
 
-class LegacyBindingsUnreadable(RuntimeError):
+class BindingsUnreadable(RuntimeError):
+    """`channel-bindings.json` exists but cannot be read, is not JSON, or is
+    not the expected shape. Reads serve an empty registry (and log at ERROR);
+    every write refuses, so a corrupted file is never replaced and repairing it
+    restores the bindings."""
+
+
+class LegacyBindingsUnreadable(BindingsUnreadable):
     """`telegram-bindings.json` exists but cannot be read or is not a JSON
     object. Migrating from it would write an empty registry and, since the new
     file's existence is what marks the migration as done, lose every binding
@@ -79,13 +86,30 @@ class LegacyBindingsUnreadable(RuntimeError):
 
 
 def _read_json(p: Path) -> dict:
+    """The registry document; `{}` if the file does not exist. Raises
+    `BindingsUnreadable` if it exists but cannot be read/parsed or is not
+    `{"connectors": {<id>: {<chat>: {...}}}}` — never a silent `{}` that the
+    next write would turn into a wiped registry."""
     if not p.is_file():
         return {}
     try:
-        d = json.loads(p.read_text(encoding="utf-8")) or {}
-    except (OSError, json.JSONDecodeError):
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise BindingsUnreadable(
+            f"{p} exists but cannot be read/parsed ({type(e).__name__}: {e}); "
+            f"writes refused until it is repaired") from e
+    if d is None:
         return {}
-    return d if isinstance(d, dict) else {}
+    problema = None
+    if not isinstance(d, dict):
+        problema = f"is a JSON {type(d).__name__}, not an object"
+    elif "connectors" in d and not isinstance(d["connectors"], dict):
+        problema = "has a 'connectors' that is not an object"
+    elif any(not isinstance(v, dict) for v in (d.get("connectors") or {}).values()):
+        problema = "has a connector whose bindings are not an object"
+    if problema:
+        raise BindingsUnreadable(f"{p} {problema}; writes refused until it is repaired")
+    return d
 
 
 def _read_legacy(base=None) -> dict | None:
@@ -163,7 +187,9 @@ def _doc(base=None, *, for_write: bool = False) -> dict:
     unreadable the migration is NOT done (it is retried on the next call, so
     repairing the old file is enough): a read serves an empty registry, a write
     raises `LegacyBindingsUnreadable` — writing would create the new file and
-    mark the migration as done with every legacy binding missing."""
+    mark the migration as done with every legacy binding missing. Same rule for
+    an unreadable/malformed new file: reads empty, writes raise
+    `BindingsUnreadable`, the file is never replaced."""
     p = _path(base)
     if not p.is_file() and _legacy_path(base).is_file():
         try:
@@ -173,10 +199,14 @@ def _doc(base=None, *, for_write: bool = False) -> dict:
             if for_write:
                 raise
             return {"version": VERSION, "connectors": {}}
-    doc = _read_json(p)
-    conn = doc.get("connectors")
-    if not isinstance(conn, dict):
-        conn = {}
+    try:
+        doc = _read_json(p)
+    except BindingsUnreadable as e:
+        LOG.error("channel-bindings: %s", e)
+        if for_write:
+            raise
+        return {"version": VERSION, "connectors": {}}
+    conn = doc.get("connectors") or {}
     return {"version": doc.get("version", VERSION), "connectors": conn}
 
 
@@ -277,7 +307,11 @@ def _migrate_unlocked(*, base=None, dry_run: bool = False) -> dict:
             # only compared against. Say so, but do not fail.
             LOG.warning("channel-bindings already migrated; orphan check skipped: %s", e)
             legacy = {}
-        doc = _read_json(_path(base))
+        try:
+            doc = _read_json(_path(base))
+        except BindingsUnreadable as e:
+            LOG.error("channel-bindings: %s", e)
+            raise
         presenti = set((doc.get("connectors") or {}).get(LEGACY_CONNECTOR) or {})
         orphans = sorted(set(legacy) - presenti)
         if orphans:
