@@ -37,6 +37,7 @@ registry straight from manifests.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 from collections.abc import Mapping
@@ -239,6 +240,56 @@ def _builtin_registry() -> Registry:
     return build_registry(own, builtin=tuple(own), reserved=frozenset())
 
 
+def _failsafe_from(packs: Mapping[str, Mapping]) -> tuple[str, ...]:
+    """The OUTBOUND verbs the raw manifests of `packs` declare, for packs whose
+    connectors could not be built (second verification of #358).
+
+    Without the registry those verbs are simply unmapped, and an unmapped verb
+    is «not checked, allowed»: a pack whose manifest is broken would send
+    anywhere. Read from the raw YAML, best effort, and only verbs inside the
+    connector's own namespace that is neither native nor builtin — a broken
+    manifest must not be able to switch off somebody else's verb. A `prefix:
+    true` mapping is kept with a trailing `*`.
+    """
+    try:
+        from .manifest import core_namespaces
+        taken = set(core_namespaces())
+    except Exception:  # noqa: BLE001
+        taken = set()
+    try:
+        taken |= {c.namespace for c in _builtin_registry().connectors}
+    except Exception:  # noqa: BLE001
+        pass
+    out: set[str] = set()
+    for meta in (packs or {}).values():
+        entries = meta.get("connectors") if isinstance(meta, Mapping) else None
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, Mapping):
+                continue
+            ns = str(entry.get("namespace") or "")
+            if not ns or ns in taken:
+                continue
+            verbs = entry.get("verbs")
+            for v in verbs if isinstance(verbs, list) else []:
+                if not isinstance(v, Mapping) or v.get("direction") != "egress":
+                    continue
+                verb = str(v.get("verb") or "")
+                if verb.startswith(f"{ns}."):
+                    out.add(verb + ("*" if v.get("prefix") else ""))
+    return tuple(sorted(out))
+
+
+def failsafe_denied(verb: str) -> bool:
+    """True when `verb` is an outbound verb of a pack the registry could not
+    hold (see `_failsafe_from`): it fails closed instead of passing unchecked."""
+    for v in registry().failsafe_verbs:
+        if v.endswith("*") and verb.startswith(v[:-1]):
+            return True
+        if verb == v:
+            return True
+    return False
+
+
 def _build() -> tuple[Registry, tuple[str, ...]]:
     global _CACHE
     # Nella firma anche i plugin (chi possiede quale server MCP) e i backend
@@ -258,7 +309,11 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
         LOG.error("connectors: i manifest del gateway non sono costruibili "
                   "(%s): verbi nativi in uscita NEGATI, letture contaminanti",
                   reason)
-        return Registry(degraded=reason), (reason,)
+        try:
+            fs = _failsafe_from(manifests())
+        except Exception:  # noqa: BLE001
+            fs = ()
+        return Registry(degraded=reason, failsafe_verbs=fs), (reason,)
     reg, probs, owners = base, (), {}
     cache = True
     try:
@@ -295,14 +350,18 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
         # unmapped, loudly; the gateway's own connectors do not fall with it —
         # a pack with a typo must not be able to unmap `email.send`.
         probs = (str(e),)
-        reg = base
+        reg = dataclasses.replace(base, failsafe_verbs=_failsafe_from(installed))
         LOG.error("connectors: registry non costruibile, i verbi dei pack "
                   "restano senza mappatura (%s)", e)
     except Exception as e:  # noqa: BLE001 — never break a call over this
         # Not a statement about the manifests (they did not change): not
         # cached, so a transient failure does not outlive its call.
         probs = (f"{type(e).__name__}: {e}",)
-        reg = base
+        try:
+            fs = _failsafe_from(manifests())
+        except Exception:  # noqa: BLE001
+            fs = ()
+        reg = dataclasses.replace(base, failsafe_verbs=fs)
         cache = False
         LOG.error("connectors: registry non costruibile (%s)", e)
     if cache:

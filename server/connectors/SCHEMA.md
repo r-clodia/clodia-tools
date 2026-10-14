@@ -92,17 +92,19 @@ the gate shows the topic's tier. Today's `_CHANNEL_SEAL_CAP` and
 | `canonicalise[]` | no | `from` (regex) → `to` (template over `{1}`, `{2}`…) — today's `_CANON` |
 
 Every pattern — `forms`, `canonicalise.from`, `danger_uris.match` — matches
-with **`fullmatch`**: `^-?\d+` accepts `-100123`, not `-100123garbage`; a rule
-that should cover a whole tree says so (`(?:[/?#].*)?`). Values longer than
-2048 characters are never matched. A pattern is also bounded at load, on its
-parse tree: capped in length; refused if a repeated group contains another
-repeat or an alternation (`(a+)+`, `((a+))+`, `(a|aa)+`) or can match the empty
-string; refused if more than two unbounded repeats can compete for the same
-characters (`\d*\d*\d*x`; a mandatory character the previous repeat cannot
-consume, like the `@` in `[^@]+@[^@]+`, ends the run); refused above ten
-repeats, four alternations, or with back-references and lookarounds. These
-patterns run in the gateway's event loop on every check and `re` has no
-timeout, so the bound is on the pattern and on the input, not on the clock.
+with **`fullmatch`**: `^-?\d+` accepts `-100123`, not `-100123garbage`.
+
+A PACK pattern must stay inside a **safe subset**, checked on its parse tree at
+load: at most two quantified atoms with a maximum above one (`*`, `+`, `{m,n}`,
+bounded or not), at most two `?`; a quantifier applies to a single character
+or character class, never to a group (`(?:x)?`, `(a+)+` are refused); at most
+one alternation, of at most four alternatives, with no quantifier inside it;
+no back-references, lookarounds or conditionals; at most 200 characters. And a
+pack pattern is never applied to a value longer than **256** characters — such a
+value is refused for that scheme. `re` has no timeout, so the bound is in the
+grammar and in the input, not on the clock. (The gateway's own manifests are
+checked by a structural analysis instead, and matched on up to 2048
+characters.)
 
 A **canonicalisation** rewrites a URI of its own scheme into its own scheme:
 `to` must start with `<scheme>:` and use at least one capture group. A pack's
@@ -299,28 +301,28 @@ connectors:
           stays on the recipient's server.
         forms:
           - label: address
-            pattern: '^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$'
+            pattern: '^[^@\s]+@[A-Za-z0-9.-]+$'
             example: 'someone@example.org'
       - scheme: mailfrom
         direction: source
         label: Vetted sender
         forms:
           - label: address
-            pattern: '^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$'
+            pattern: '^[^@\s]+@[A-Za-z0-9.-]+$'
             example: 'someone@example.org'
       - scheme: outbox
         direction: egress
         label: Mailbox that sends
         forms:
           - label: address
-            pattern: '^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$'
+            pattern: '^[^@\s]+@[A-Za-z0-9.-]+$'
             example: 'studio@example.org'
       - scheme: inbox
         direction: source
         label: Mailbox that is downloaded
         forms:
           - label: address
-            pattern: '^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$'
+            pattern: '^[^@\s]+@[A-Za-z0-9.-]+$'
             example: 'studio@example.org'
     providers:
       - id: imap
@@ -395,10 +397,8 @@ connectors:
             pattern: '^file/[\w-]+$'
             example: 'file/1AbCdEfGhIjKlMnOpQrStUv'
         canonicalise:
-          - from: '^https?://drive\.google\.com/drive/(?:u/\d+/)?folders/([\w-]+)(?:[/?#].*)?'
+          - from: '^gdrive://([\w-]+)/?$'
             to: 'gdrive:folder/{1}'
-          - from: '^https?://drive\.google\.com/file/d/([\w-]+)(?:[/?#].*)?'
-            to: 'gdrive:file/{1}'
       - scheme: gsheets
         direction: both
         label: Google spreadsheet
@@ -408,7 +408,7 @@ connectors:
             pattern: '^[\w-]+$'
             example: '1AbCdEfGhIjKlMnOpQrStUv'
         canonicalise:
-          - from: '^https?://docs\.google\.com/spreadsheets/d/([\w-]+)(?:[/?#].*)?'
+          - from: '^gsheets://([\w-]+)/?$'
             to: 'gsheets:{1}'
       - scheme: gcal
         direction: egress

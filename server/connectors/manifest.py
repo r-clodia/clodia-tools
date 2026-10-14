@@ -381,7 +381,87 @@ def _regex_cost_problem(pattern: str) -> str:
     return ""
 
 
-def _compiled(raw: Any, where: str) -> re.Pattern[str]:
+#: Longest value a PACK regex is ever applied to (second verification of
+#: #358). Longer values are refused for pack schemes, never matched.
+PACK_MAX_INPUT = 256
+#: The safe subset a PACK regex must stay in. Heuristics on the parse tree
+#: (above) kept being bypassed — bounded repeats, literals that earlier repeats
+#: can also consume, character classes outside the sampled alphabet — so a pack
+#: gets a grammar small enough to be bounded by construction instead:
+PACK_MAX_REPEATS = 2      # quantified atoms with max > 1, bounded or not
+PACK_MAX_OPTIONALS = 2    # `x?` atoms
+PACK_MAX_BRANCHES = 1     # alternations
+PACK_MAX_ALTERNATIVES = 4
+_SINGLE_ATOMS = {_sre_c.LITERAL, _sre_c.NOT_LITERAL, _sre_c.IN, _sre_c.ANY,
+                 getattr(_sre_c, "CATEGORY", None)}
+
+
+def _pack_regex_problem(pattern: str) -> str:
+    """Why `pattern` is outside the pack subset, or `""`.
+
+    - at most `PACK_MAX_REPEATS` quantified atoms with max > 1 (`*`, `+`,
+      `{m,n}` — bounded and unbounded count alike), `PACK_MAX_OPTIONALS` `?`;
+    - a quantifier applies to ONE character atom (`a`, `[a-z]`, `\\d`, `.`),
+      never to a group;
+    - at most one alternation, of at most four alternatives, with no
+      quantifier anywhere inside it;
+    - no back-references, no lookarounds, no conditionals.
+
+    With fullmatch on at most `PACK_MAX_INPUT` characters that is at most
+    O(n²) × 2² × 4 steps, whatever the pattern says.
+    """
+    try:
+        tree = _sre_p.parse(pattern)
+    except re.error as exc:
+        return f"invalid regular expression ({exc})"
+    counts = {"repeat": 0, "optional": 0, "branch": 0}
+
+    def walk(sub, in_branch: bool) -> str:
+        for op, av in sub:
+            if op in _REFUSED_OPS:
+                return "back-references, lookarounds and conditionals are not allowed"
+            if op in _REPEATS:
+                lo, hi, body = av
+                if len(body) != 1 or body[0][0] not in _SINGLE_ATOMS:
+                    return ("a quantifier may apply only to a single character "
+                            "or character class, never to a group")
+                if in_branch:
+                    return "no quantifier inside an alternation"
+                counts["repeat" if hi > 1 else "optional"] += 1
+                continue
+            if op is _sre_c.SUBPATTERN:
+                err = walk(av[-1], in_branch)
+                if err:
+                    return err
+                continue
+            if op is _sre_c.BRANCH:
+                counts["branch"] += 1
+                if len(av[1]) > PACK_MAX_ALTERNATIVES:
+                    return f"more than {PACK_MAX_ALTERNATIVES} alternatives"
+                for alt in av[1]:
+                    err = walk(alt, True)
+                    if err:
+                        return err
+                continue
+            if op in _SINGLE_ATOMS or op is _sre_c.AT:
+                continue
+            return f"construct '{op}' is not allowed"
+        return ""
+
+    err = walk(tree, False)
+    if err:
+        return err
+    if counts["repeat"] > PACK_MAX_REPEATS:
+        return (f"more than {PACK_MAX_REPEATS} quantified atoms with a maximum "
+                f"above one")
+    if counts["optional"] > PACK_MAX_OPTIONALS:
+        return f"more than {PACK_MAX_OPTIONALS} optional atoms"
+    if counts["branch"] > PACK_MAX_BRANCHES:
+        return f"more than {PACK_MAX_BRANCHES} alternation"
+    return ""
+
+
+def _compiled(raw: Any, where: str, *, builtin: bool = False) -> re.Pattern[str]:
     """A regex from the manifest, compiled here so a typo fails at load.
 
     Compiled eagerly and on purpose: a pattern that only blows up the first time
@@ -411,7 +491,8 @@ def _compiled(raw: Any, where: str) -> re.Pattern[str]:
             f"{where}: regular expression is {len(pattern)} characters, over the "
             f"{MAX_PATTERN_LENGTH} this gateway will evaluate. A URI form that "
             f"needs more than that is describing something other than a URI")
-    problem = _regex_cost_problem(pattern)
+    problem = (_regex_cost_problem(pattern) if builtin
+               else _pack_regex_problem(pattern))
     if problem:
         raise ManifestError(
             f"{where}: '{pattern}' is refused: {problem}. This pattern would run "
@@ -444,9 +525,11 @@ class Form:
     label: str
     pattern: re.Pattern[str]
     example: str = ""
+    #: `PACK_MAX_INPUT` for a pack's pattern, `MAX_VALUE_LENGTH` for ours.
+    max_input: int = PACK_MAX_INPUT
 
     def matches(self, rest: str) -> bool:
-        if len(rest or "") > MAX_VALUE_LENGTH:
+        if len(rest or "") > self.max_input:
             # A pattern cannot cost more than the bound checked at load time
             # unless the *input* is unbounded. Nothing legitimate reaches this.
             return False
@@ -459,11 +542,12 @@ class Canonicalisation:
 
     pattern: re.Pattern[str]
     template: str
+    max_input: int = PACK_MAX_INPUT
 
     def apply(self, uri: str) -> str | None:
         # Bounded input and `fullmatch` (review of #358): the pattern is
         # pack-supplied and the URI attacker-supplied.
-        if not uri or len(uri) > MAX_VALUE_LENGTH:
+        if not uri or len(uri) > self.max_input:
             return None
         m = self.pattern.fullmatch(uri)
         if not m:
@@ -485,9 +569,10 @@ class DangerRule:
 
     pattern: re.Pattern[str]
     text: str
+    max_input: int = PACK_MAX_INPUT
 
     def matches(self, uri: str) -> bool:
-        return bool(uri) and len(uri) <= MAX_VALUE_LENGTH and bool(
+        return bool(uri) and len(uri) <= self.max_input and bool(
             self.pattern.fullmatch(uri))
 
 
@@ -765,22 +850,28 @@ def check_namespace(namespace: str, verbs: Iterable[str], *,
 # parsing
 # --------------------------------------------------------------------------
 
-def _parse_form(raw: Any, where: str) -> Form:
+def _max_input(builtin: bool) -> int:
+    return MAX_VALUE_LENGTH if builtin else PACK_MAX_INPUT
+
+
+def _parse_form(raw: Any, where: str, builtin: bool = False) -> Form:
     data = _mapping(raw, where)
     label = _text(data.get("label"), f"{where}.label", required=False)
-    pattern = _compiled(data.get("pattern"), f"{where}.pattern")
+    pattern = _compiled(data.get("pattern"), f"{where}.pattern", builtin=builtin)
     example = _text(data.get("example"), f"{where}.example", required=False)
     if example and not pattern.fullmatch(example):
         # The cheapest possible proof that the regex says what the author meant.
         raise ManifestError(
             f"{where}: example '{example}' does not match the declared pattern "
             f"'{pattern.pattern}'")
-    return Form(label=label, pattern=pattern, example=example)
+    return Form(label=label, pattern=pattern, example=example,
+                max_input=_max_input(builtin))
 
 
-def _parse_canonicalisation(raw: Any, where: str, scheme: str) -> Canonicalisation:
+def _parse_canonicalisation(raw: Any, where: str, scheme: str,
+                            builtin: bool = False) -> Canonicalisation:
     data = _mapping(raw, where)
-    pattern = _compiled(data.get("from"), f"{where}.from")
+    pattern = _compiled(data.get("from"), f"{where}.from", builtin=builtin)
     template = _text(data.get("to"), f"{where}.to")
     # Review of #358: a rule rewrites a URI into THIS scheme, and it rewrites
     # it into something taken from the URI. `{from: '^.*', to: '*'}` turned
@@ -803,20 +894,21 @@ def _parse_canonicalisation(raw: Any, where: str, scheme: str) -> Canonicalisati
             raise ManifestError(
                 f"{where}.to: group {{{ref}}} does not exist in '{pattern.pattern}' "
                 f"(it captures {pattern.groups})")
-    return Canonicalisation(pattern=pattern, template=template)
+    return Canonicalisation(pattern=pattern, template=template,
+                            max_input=_max_input(builtin))
 
 
-def _parse_scheme(raw: Any, where: str) -> Scheme:
+def _parse_scheme(raw: Any, where: str, builtin: bool = False) -> Scheme:
     data = _mapping(raw, where)
     name = _matching(_text(data.get("scheme"), f"{where}.scheme"), _SCHEME,
                      f"{where}.scheme")
     direction = _one_of(_text(data.get("direction"), f"{where}.direction"),
                         DIRECTIONS, f"{where}.direction")
     forms = tuple(
-        _parse_form(f, f"{where}.forms[{i}]")
+        _parse_form(f, f"{where}.forms[{i}]", builtin)
         for i, f in enumerate(_seq(data.get("forms"), f"{where}.forms")))
     canon = tuple(
-        _parse_canonicalisation(c, f"{where}.canonicalise[{i}]", name)
+        _parse_canonicalisation(c, f"{where}.canonicalise[{i}]", name, builtin)
         for i, c in enumerate(
             _seq(data.get("canonicalise"), f"{where}.canonicalise")))
     return Scheme(
@@ -1093,7 +1185,7 @@ def parse_connector(raw: Any, *, pack: str,
                 f"contributes nothing")
 
     schemes = tuple(
-        _parse_scheme(s, f"{where}.schemes[{i}]")
+        _parse_scheme(s, f"{where}.schemes[{i}]", builtin)
         for i, s in enumerate(_seq(data.get("schemes"), f"{where}.schemes")))
     seen_schemes: set[str] = set()
     for s in schemes:
@@ -1128,9 +1220,10 @@ def parse_connector(raw: Any, *, pack: str,
     danger_rules = tuple(
         DangerRule(
             pattern=_compiled(_mapping(d, f"{where}.danger_uris[{i}]").get("match"),
-                              f"{where}.danger_uris[{i}].match"),
+                              f"{where}.danger_uris[{i}].match", builtin=builtin),
             text=_text(_mapping(d, f"{where}.danger_uris[{i}]").get("text"),
-                       f"{where}.danger_uris[{i}].text"))
+                       f"{where}.danger_uris[{i}].text"),
+            max_input=_max_input(builtin))
         for i, d in enumerate(_seq(data.get("danger_uris"),
                                    f"{where}.danger_uris")))
 
@@ -1243,6 +1336,9 @@ class Registry:
     #: reason. The PDP then fails closed instead of reading «no mapping» as
     #: «nothing to check» (review of #358).
     degraded: str = ""
+    #: Outbound verbs of installed packs whose connectors could not be built:
+    #: denied instead of «unmapped, allowed» (`resolved._failsafe_from`).
+    failsafe_verbs: tuple[str, ...] = ()
 
     def by_id(self, cid: str) -> Connector | None:
         return next((c for c in self.connectors if c.id == cid), None)

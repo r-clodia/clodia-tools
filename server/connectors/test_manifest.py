@@ -97,9 +97,10 @@ class DocumentedExamplesTests(unittest.TestCase):
         registry = M.build_registry(self.examples, reserved=NO_RESERVED)
         gdrive = next(s for s in registry.schemes() if s.name == "gdrive")
         rules = gdrive.canonicalise
-        url = "https://drive.google.com/drive/u/0/folders/1AbCdEfGhIjKlMnOpQrStUv"
+        # A pack canonicalises only its own scheme (review of #358); browser
+        # URLs stay with the gateway's own manifest until the migration.
+        url = "gdrive://1AbCdEfGhIjKlMnOpQrStUv"
         got = next(r.apply(url) for r in rules if r.apply(url))
-        # Same answer `egress.canonical()` gives today for the same URL.
         self.assertEqual(got, "gdrive:folder/1AbCdEfGhIjKlMnOpQrStUv")
 
     def test_topic_action_declares_what_it_would_add(self):
