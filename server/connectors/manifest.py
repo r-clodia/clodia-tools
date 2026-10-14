@@ -72,13 +72,6 @@ RESTART_POLICIES = ("always", "on-failure", "never")
 MAX_PATTERN_LENGTH = 200
 MAX_VALUE_LENGTH = 2048
 
-#: A quantified group inside another quantifier — `(a+)+`, `(a*)*`, `(a{2,}){3}`.
-#: Every textbook catastrophic-backtracking pattern has this shape, and no URI
-#: form needs it. `?` on the outer group is deliberately not a trigger: it
-#: bounds the repetition to one, which is what `(?:folder/)?` does.
-_NESTED_QUANTIFIER = re.compile(
-    r"\([^()]*(?:[+*]|\{\d+,?\d*\})[^()]*\)\s*(?:[+*]|\{\d+,?\d*\})")
-
 #: Value transforms the GATEWAY implements, that a verb mapping may name. A
 #: closed list on purpose: these are the three things today's extractors do that
 #: a template cannot (lowercase a host, drop a port, resolve a repository
@@ -169,6 +162,225 @@ def _matching(value: str, pattern: re.Pattern[str], where: str) -> str:
     return value
 
 
+# ---- regex cost analysis (review of #358) ----------------------------------
+
+try:  # Python ≥ 3.11
+    from re import _constants as _sre_c, _parser as _sre_p
+except ImportError:  # pragma: no cover — older interpreters
+    import sre_constants as _sre_c  # type: ignore[no-redef]
+    import sre_parse as _sre_p  # type: ignore[no-redef]
+
+#: A bounded repeat with a larger maximum costs like an unbounded one on a
+#: value of `MAX_VALUE_LENGTH` characters, so it is counted as one.
+_BIG_REPEAT = 32
+#: Unbounded repeats that can fight over the same characters, in sequence. Two
+#: is quadratic on at most `MAX_VALUE_LENGTH` characters (~10 ms); three is
+#: cubic (`\d*\d*\d*x` on 2000 characters: 6.4 s).
+MAX_AMBIGUOUS_CHAIN = 2
+#: Repeats of any kind in one pattern. `a?a?a?…aaa…` is exponential without a
+#: single unbounded repeat: the bound is on how many choices a pattern can make.
+MAX_REPEATS = 10
+#: Alternations in one pattern, for the same reason.
+MAX_BRANCHES = 4
+
+_REPEATS = {_sre_c.MAX_REPEAT, _sre_c.MIN_REPEAT}
+if hasattr(_sre_c, "POSSESSIVE_REPEAT"):
+    _REPEATS.add(_sre_c.POSSESSIVE_REPEAT)
+_REFUSED_OPS = {_sre_c.GROUPREF, _sre_c.GROUPREF_EXISTS, _sre_c.ASSERT,
+                _sre_c.ASSERT_NOT}
+#: The alphabet a character class is evaluated on: enough to tell which classes
+#: can overlap, which is all the analysis needs.
+_SAMPLE = tuple(range(0, 256)) + (0x100, 0x3B1, 0x4E00, 0x2028, 0x1F600)
+_ALL = frozenset(_SAMPLE)
+_CATEGORY_RE = {
+    "CATEGORY_DIGIT": r"\d", "CATEGORY_NOT_DIGIT": r"\D",
+    "CATEGORY_SPACE": r"\s", "CATEGORY_NOT_SPACE": r"\S",
+    "CATEGORY_WORD": r"\w", "CATEGORY_NOT_WORD": r"\W",
+}
+
+
+def _category_chars(cat) -> frozenset[int]:
+    rx = _CATEGORY_RE.get(str(cat))
+    if rx is None:
+        return _ALL
+    probe = re.compile(rx)
+    return frozenset(c for c in _SAMPLE if probe.fullmatch(chr(c)))
+
+
+def _class_chars(items) -> frozenset[int]:
+    negate, out = False, set()
+    for op, av in items:
+        if op is _sre_c.NEGATE:
+            negate = True
+        elif op is _sre_c.LITERAL:
+            out.add(av)
+        elif op is _sre_c.RANGE:
+            out.update(c for c in _SAMPLE if av[0] <= c <= av[1])
+        elif op is _sre_c.CATEGORY:
+            out.update(_category_chars(av))
+        else:
+            return _ALL
+    return frozenset(_ALL - out) if negate else frozenset(out)
+
+
+def _chars(sub) -> frozenset[int]:
+    """Every character `sub` can consume, approximated on `_SAMPLE`."""
+    out: set[int] = set()
+    for op, av in sub:
+        if op is _sre_c.LITERAL:
+            out.add(av)
+        elif op is _sre_c.NOT_LITERAL:
+            out |= _ALL - {av}
+        elif op is _sre_c.ANY:
+            return _ALL
+        elif op is _sre_c.IN:
+            out |= _class_chars(av)
+        elif op in _REPEATS:
+            out |= _chars(av[2])
+        elif op is _sre_c.SUBPATTERN:
+            out |= _chars(av[-1])
+        elif op is _sre_c.BRANCH:
+            for alt in av[1]:
+                out |= _chars(alt)
+        elif op is _sre_c.AT:
+            continue
+        else:
+            out |= _ALL
+    return frozenset(out)
+
+
+def _single(op, av) -> frozenset[int] | None:
+    """The character set of a one-character element, or None."""
+    if op is _sre_c.LITERAL:
+        return frozenset({av})
+    if op is _sre_c.IN:
+        return _class_chars(av)
+    if op is _sre_c.NOT_LITERAL:
+        return frozenset(_ALL - {av})
+    if op is _sre_c.ANY:
+        return _ALL
+    return None
+
+
+def _contains_repeat_or_branch(sub) -> bool:
+    for op, av in sub:
+        if op in _REPEATS and av[1] > 1:
+            return True
+        if op is _sre_c.BRANCH:
+            return True
+        if op is _sre_c.SUBPATTERN and _contains_repeat_or_branch(av[-1]):
+            return True
+        if op in _REPEATS and _contains_repeat_or_branch(av[2]):
+            return True
+        if op is getattr(_sre_c, "ATOMIC_GROUP", None) and \
+                _contains_repeat_or_branch(av):
+            return True
+    return False
+
+
+def _nullable(sub) -> bool:
+    for op, av in sub:
+        if op is _sre_c.AT:
+            continue
+        if op in _REPEATS:
+            if av[0] > 0 and not _nullable(av[2]):
+                return False
+            continue
+        if op is _sre_c.SUBPATTERN:
+            if not _nullable(av[-1]):
+                return False
+            continue
+        if op is _sre_c.BRANCH:
+            if not any(_nullable(alt) for alt in av[1]):
+                return False
+            continue
+        return False
+    return True
+
+
+def _regex_cost_problem(pattern: str) -> str:
+    """Why this pattern's matching cost is not bounded, or `""`.
+
+    Structural, on the parse tree (`re._parser`), not on the text: a textual
+    heuristic is bypassed by an extra pair of parentheses (`((a+))+b`). The
+    rules, each of which closes one family of super-linear matches:
+
+    - a repeat (max > 1) whose body holds another repeat or an alternation —
+      `(a+)+`, `((a+))+`, `(a|aa)+`, `(?:a|a)*` (exponential);
+    - a repeat (max > 1) whose body can match the empty string — `(a?)*`;
+    - more than `MAX_AMBIGUOUS_CHAIN` unbounded repeats in a run where they can
+      consume the same characters — `\\d*\\d*\\d*x` (polynomial). A run is
+      broken by a mandatory character the previous repeat cannot consume (the
+      `@` in `[^@]+@[^@]+`): that repeat's extent is then fixed;
+    - more than `MAX_REPEATS` repeats or `MAX_BRANCHES` alternations at all;
+    - back-references and lookarounds, which no URI form needs.
+    """
+    try:
+        tree = _sre_p.parse(pattern)
+    except re.error as exc:
+        return f"invalid regular expression ({exc})"
+    counts = {"repeats": 0, "branches": 0}
+    chains: list[int] = [0]
+    last: list[frozenset[int] | None] = [None]
+
+    def walk(sub, breaking: bool) -> str:
+        for op, av in sub:
+            if op in _REFUSED_OPS:
+                return "back-references and lookarounds are not allowed"
+            if op in _REPEATS:
+                lo, hi, body = av
+                counts["repeats"] += 1
+                if hi > 1 and _contains_repeat_or_branch(body):
+                    return ("a repeated group contains another repeat or an "
+                            "alternation (exponential backtracking)")
+                if hi > 1 and _nullable(body):
+                    return "a repeated group can match the empty string"
+                if hi == _sre_c.MAXREPEAT or hi > _BIG_REPEAT:
+                    chains[-1] += 1
+                    last[0] = _chars(body)
+                    if chains[-1] > MAX_AMBIGUOUS_CHAIN:
+                        return (f"more than {MAX_AMBIGUOUS_CHAIN} unbounded "
+                                f"repeats compete for the same characters "
+                                f"(polynomial backtracking)")
+                elif hi <= 1:
+                    err = walk(body, False)
+                    if err:
+                        return err
+                continue
+            if op is _sre_c.SUBPATTERN:
+                err = walk(av[-1], breaking)
+                if err:
+                    return err
+                continue
+            if op is getattr(_sre_c, "ATOMIC_GROUP", None):
+                err = walk(av, breaking)
+                if err:
+                    return err
+                continue
+            if op is _sre_c.BRANCH:
+                counts["branches"] += 1
+                for alt in av[1]:
+                    err = walk(alt, False)
+                    if err:
+                        return err
+                continue
+            one = _single(op, av)
+            if one is not None and breaking and last[0] is not None \
+                    and not (one & last[0]):
+                chains.append(0)
+                last[0] = None
+        return ""
+
+    err = walk(tree, True)
+    if err:
+        return err
+    if counts["repeats"] > MAX_REPEATS:
+        return f"more than {MAX_REPEATS} repeats"
+    if counts["branches"] > MAX_BRANCHES:
+        return f"more than {MAX_BRANCHES} alternations"
+    return ""
+
+
 def _compiled(raw: Any, where: str) -> re.Pattern[str]:
     """A regex from the manifest, compiled here so a typo fails at load.
 
@@ -184,9 +396,11 @@ def _compiled(raw: Any, where: str) -> re.Pattern[str]:
     on the pattern and on the input instead of on the clock:
 
     - the pattern is capped in length;
-    - a quantified group that is itself quantified is refused by name, which is
-      the shape every catastrophic-backtracking example shares;
-    - `Form.matches` refuses an over-long value before matching.
+    - the parse tree is checked by `_regex_cost_problem` (nested or ambiguous
+      repeats, competing unbounded repeats, too many choices) — structurally,
+      so an extra pair of parentheses does not hide `(a+)+`;
+    - every match (`Form`, `Canonicalisation`, `DangerRule`) is a `fullmatch`
+      on a value of at most `MAX_VALUE_LENGTH` characters.
 
     Refused at load, not at match time: a pack whose pattern is dangerous must
     fail where an owner can read the message, not in the middle of a turn.
@@ -197,13 +411,11 @@ def _compiled(raw: Any, where: str) -> re.Pattern[str]:
             f"{where}: regular expression is {len(pattern)} characters, over the "
             f"{MAX_PATTERN_LENGTH} this gateway will evaluate. A URI form that "
             f"needs more than that is describing something other than a URI")
-    nested = _NESTED_QUANTIFIER.search(pattern)
-    if nested:
+    problem = _regex_cost_problem(pattern)
+    if problem:
         raise ManifestError(
-            f"{where}: '{nested.group(0)}' is a quantified group inside another "
-            f"quantifier, the shape that makes a regular expression take "
-            f"exponential time on a value that does not match. Refused: this "
-            f"pattern runs in the gateway's loop on every check")
+            f"{where}: '{pattern}' is refused: {problem}. This pattern would run "
+            f"in the gateway's loop on every check, so its cost must be bounded")
     try:
         return re.compile(pattern)
     except re.error as exc:
@@ -249,7 +461,11 @@ class Canonicalisation:
     template: str
 
     def apply(self, uri: str) -> str | None:
-        m = self.pattern.match(uri)
+        # Bounded input and `fullmatch` (review of #358): the pattern is
+        # pack-supplied and the URI attacker-supplied.
+        if not uri or len(uri) > MAX_VALUE_LENGTH:
+            return None
+        m = self.pattern.fullmatch(uri)
         if not m:
             return None
         return _PLACEHOLDER.sub(lambda g: m.group(int(g.group(1))), self.template)
@@ -272,7 +488,7 @@ class DangerRule:
 
     def matches(self, uri: str) -> bool:
         return bool(uri) and len(uri) <= MAX_VALUE_LENGTH and bool(
-            self.pattern.search(uri))
+            self.pattern.fullmatch(uri))
 
 
 @dataclass(frozen=True)
@@ -554,7 +770,7 @@ def _parse_form(raw: Any, where: str) -> Form:
     label = _text(data.get("label"), f"{where}.label", required=False)
     pattern = _compiled(data.get("pattern"), f"{where}.pattern")
     example = _text(data.get("example"), f"{where}.example", required=False)
-    if example and not pattern.match(example):
+    if example and not pattern.fullmatch(example):
         # The cheapest possible proof that the regex says what the author meant.
         raise ManifestError(
             f"{where}: example '{example}' does not match the declared pattern "
@@ -562,10 +778,22 @@ def _parse_form(raw: Any, where: str) -> Form:
     return Form(label=label, pattern=pattern, example=example)
 
 
-def _parse_canonicalisation(raw: Any, where: str) -> Canonicalisation:
+def _parse_canonicalisation(raw: Any, where: str, scheme: str) -> Canonicalisation:
     data = _mapping(raw, where)
     pattern = _compiled(data.get("from"), f"{where}.from")
     template = _text(data.get("to"), f"{where}.to")
+    # Review of #358: a rule rewrites a URI into THIS scheme, and it rewrites
+    # it into something taken from the URI. `{from: '^.*', to: '*'}` turned
+    # every whitelist rule into `*`.
+    if not template.startswith(f"{scheme}:"):
+        raise ManifestError(
+            f"{where}.to: '{template}' must produce a '{scheme}:' URI; a "
+            f"scheme canonicalises into itself, never into another scheme or "
+            f"into a wildcard")
+    if not _placeholders(template):
+        raise ManifestError(
+            f"{where}.to: '{template}' uses no capture group, so every URI it "
+            f"matches would become the same destination")
     for ref in _placeholders(template):
         if not ref.isdigit():
             raise ManifestError(
@@ -588,7 +816,7 @@ def _parse_scheme(raw: Any, where: str) -> Scheme:
         _parse_form(f, f"{where}.forms[{i}]")
         for i, f in enumerate(_seq(data.get("forms"), f"{where}.forms")))
     canon = tuple(
-        _parse_canonicalisation(c, f"{where}.canonicalise[{i}]")
+        _parse_canonicalisation(c, f"{where}.canonicalise[{i}]", name)
         for i, c in enumerate(
             _seq(data.get("canonicalise"), f"{where}.canonicalise")))
     return Scheme(
@@ -1011,6 +1239,10 @@ class Registry:
     #: registry unbuildable: the alternative would be one malformed pack taking
     #: the PDP's tables down with it.
     refused: tuple[str, ...] = ()
+    #: Non-empty when the gateway's OWN connectors could not be built: the
+    #: reason. The PDP then fails closed instead of reading «no mapping» as
+    #: «nothing to check» (review of #358).
+    degraded: str = ""
 
     def by_id(self, cid: str) -> Connector | None:
         return next((c for c in self.connectors if c.id == cid), None)
@@ -1043,12 +1275,41 @@ class Registry:
 
     def danger_for(self, uri: str) -> str:
         """The warning for this URI from a connector that claims its hosts, or
-        `""`. Builtins first, so a pack cannot soften the gateway's own text."""
+        `""`. Builtins first, so a pack cannot soften the gateway's own text.
+
+        A PACK's rules apply only to URIs of a scheme that pack owns (review of
+        #358): otherwise a pack matching every `https:` URI would replace the
+        core warning of the shared scheme with its own text.
+        """
+        scheme = (uri or "").partition(":")[0].lower()
         for c in sorted(self.connectors, key=lambda c: not c.builtin):
+            if not c.builtin and scheme not in {s.name for s in c.schemes}:
+                continue
             for rule in c.danger_rules:
                 if rule.matches(uri):
                     return rule.text
         return ""
+
+    def canonical(self, uri: str) -> str | None:
+        """The first canonicalisation rule that rewrites `uri`, or None.
+
+        A PACK's rules apply only to URIs of the scheme that declares them
+        (review of #358): `canonicalise: [{from: '^.*', to: '*'}]` on a pack
+        scheme used to rewrite every whitelist rule into `*`. The gateway's own
+        rules may read a shared scheme — that is how a Drive URL copied from
+        the browser becomes `gdrive:folder/<id>` — because they are code in
+        the image, not input.
+        """
+        scheme = (uri or "").partition(":")[0].lower()
+        for c in sorted(self.connectors, key=lambda c: not c.builtin):
+            for sch in c.schemes:
+                if not c.builtin and sch.name != scheme:
+                    continue
+                for rule in sch.canonicalise:
+                    out = rule.apply(uri)
+                    if out is not None:
+                        return out
+        return None
 
     def vocabularies(self) -> tuple[Connector, ...]:
         return tuple(c for c in self.connectors if c.owns_vocabulary)

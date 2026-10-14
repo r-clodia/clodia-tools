@@ -28,7 +28,7 @@ connectors:
       # concedendo, non decidere al suo posto.
       # Un solo gruppo quantificato, e il dot-boundary è dentro: `evilgithub.com`
       # non combacia, al contrario di un `endswith("github.com")`.
-      - match: '^https?://(?:[a-z0-9.-]+\.)?github\.com(?:[:/]|$)'
+      - match: '^https?://(?:[a-z0-9.-]+\.)?github\.com(?:[:/].*)?'
         text: >-
           un repository su github.com. Se è pubblico, tutto ciò che viene spinto
           lì è visibile a chiunque e resta nella storia del repo anche se

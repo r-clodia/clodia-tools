@@ -208,7 +208,46 @@ def problems() -> tuple[str, ...]:
 
 def _build_owners() -> dict[str, frozenset[str]]:
     _build()
-    return _CACHE[3] if _CACHE is not None else {}
+    if _CACHE is not None:
+        return _CACHE[3]
+    try:
+        return backend_owners()
+    except Exception:  # noqa: BLE001 — no owner: every backend stays reserved
+        return {}
+
+
+#: Fail-safe when the gateway's OWN connectors cannot be built (review of
+#: #358, blocker 2). Without them the registry knows no destination and no
+#: source, and an empty registry is permissive: `egress.decide` answers
+#: «not checked, allowed» and `taint.taints` answers False. These two sets are
+#: the namespaces of the builtin manifests' outbound verbs and of their reads
+#: (`test_518_fail_closed` keeps them in step with the manifests): in degraded
+#: mode the first are DENIED and the second TAINT.
+FAILSAFE_EGRESS_NAMESPACES = frozenset({
+    "email", "gdrive", "github", "gsheets", "telegram", "web"})
+FAILSAFE_SOURCE_NAMESPACES = frozenset({
+    "datastore", "email", "gcalendar", "gdocs", "gdrive", "github", "gsheets",
+    "telegram", "topic", "web"})
+
+
+def degraded() -> str:
+    """Why the gateway's own connectors are unavailable, or `""`."""
+    try:
+        return registry().degraded
+    except Exception as e:  # noqa: BLE001
+        return f"{type(e).__name__}: {e}"
+
+
+def _builtin_registry() -> Registry:
+    """The gateway's own connectors alone. Raises when they cannot be built.
+
+    `reserved=frozenset()`: the namespace rule is about PACKS, and deriving the
+    native namespaces imports `server.main` — a dependency the gateway's own
+    manifests do not need and whose transient failure used to leave the PDP
+    without any table at all.
+    """
+    own = _builtin.manifests()
+    return build_registry(own, builtin=tuple(own), reserved=frozenset())
 
 
 def _build() -> tuple[Registry, tuple[str, ...]]:
@@ -220,7 +259,20 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
            tuple(sorted(mounted_backends())))
     if _CACHE is not None and _CACHE[0] == sig:
         return _CACHE[1], _CACHE[2]
-    reg, probs, owners = Registry(), (), {}
+    # 1. The floor: the gateway's own connectors. If THEY fail the result is
+    #    a DEGRADED registry — native outbound verbs denied, reads tainted (see
+    #    `FAILSAFE_*`) — and it is never cached: the next call tries again,
+    #    instead of serving «no tables» until somebody touches a pack.yaml.
+    try:
+        base = _builtin_registry()
+    except Exception as e:  # noqa: BLE001 — a broken image, not a broken pack
+        reason = f"{type(e).__name__}: {e}"
+        LOG.error("connectors: i manifest del gateway non sono costruibili "
+                  "(%s): verbi nativi in uscita NEGATI, letture contaminanti",
+                  reason)
+        return Registry(degraded=reason), (reason,)
+    reg, probs, owners = base, (), {}
+    cache = True
     try:
         own = _builtin.manifests()
         installed = {k: v for k, v in manifests().items() if k not in own}
@@ -251,37 +303,23 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
                 LOG.warning("connectors: %s", line)
             probs = tuple(reg.refused)
     except ManifestError as e:
-        # All-or-nothing is `build_registry`'s own rule (#516): a manifest that
-        # collides with another is not half-valid. The consequence is that the
-        # instance falls back to the behaviour it had before #517 — PACK verbs
-        # unmapped — so the refusal has to be loud, and the real place to stop a
-        # malformed manifest is the installation (#519).
-        #
-        # What does NOT fall back is the gateway's own connectors: they are code
-        # in the image, and a pack with a typo must not be able to unmap
-        # `email.send`. Before #518 that was true because the tables were in
-        # Python; it has to stay true now that they are manifests.
+        # A pack manifest the registry cannot hold. The PACK verbs stay
+        # unmapped, loudly; the gateway's own connectors do not fall with it —
+        # a pack with a typo must not be able to unmap `email.send`.
         probs = (str(e),)
-        reg = _builtin_only()
+        reg = base
         LOG.error("connectors: registry non costruibile, i verbi dei pack "
                   "restano senza mappatura (%s)", e)
     except Exception as e:  # noqa: BLE001 — never break a call over this
+        # Not a statement about the manifests (they did not change): not
+        # cached, so a transient failure does not outlive its call.
         probs = (f"{type(e).__name__}: {e}",)
-        reg = _builtin_only()
+        reg = base
+        cache = False
         LOG.error("connectors: registry non costruibile (%s)", e)
-    _CACHE = (sig, reg, probs, owners)
+    if cache:
+        _CACHE = (sig, reg, probs, owners)
     return reg, probs
-
-
-def _builtin_only() -> Registry:
-    """The gateway's own connectors alone. The floor under every failure above."""
-    try:
-        own = _builtin.manifests()
-        return build_registry(own, builtin=tuple(own))
-    except Exception as e:  # noqa: BLE001 — a broken image, not a broken pack
-        LOG.error("connectors: nemmeno i manifest del gateway sono leggibili "
-                  "(%s): nessun connettore, tutto negato", e)
-        return Registry()
 
 
 def invalidate() -> None:

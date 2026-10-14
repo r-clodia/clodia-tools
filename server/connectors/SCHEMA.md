@@ -91,12 +91,25 @@ the gate shows the topic's tier. Today's `_CHANNEL_SEAL_CAP` and
 | `danger` | no | the warning shown at the gate — today's `_DANGER` |
 | `canonicalise[]` | no | `from` (regex) → `to` (template over `{1}`, `{2}`…) — today's `_CANON` |
 
-A form matches with **`fullmatch`**: `^-?\d+` accepts `-100123`, not
-`-100123garbage`. A pattern is also bounded at load — capped in length, and
-refused if it contains a quantified group inside another quantifier (`(a+)+`),
-the shape of every catastrophic-backtracking example. These patterns run in the
-gateway's event loop on every check and `re` has no timeout, so the bound is on
-the pattern, not on the clock.
+Every pattern — `forms`, `canonicalise.from`, `danger_uris.match` — matches
+with **`fullmatch`**: `^-?\d+` accepts `-100123`, not `-100123garbage`; a rule
+that should cover a whole tree says so (`(?:[/?#].*)?`). Values longer than
+2048 characters are never matched. A pattern is also bounded at load, on its
+parse tree: capped in length; refused if a repeated group contains another
+repeat or an alternation (`(a+)+`, `((a+))+`, `(a|aa)+`) or can match the empty
+string; refused if more than two unbounded repeats can compete for the same
+characters (`\d*\d*\d*x`; a mandatory character the previous repeat cannot
+consume, like the `@` in `[^@]+@[^@]+`, ends the run); refused above ten
+repeats, four alternations, or with back-references and lookarounds. These
+patterns run in the gateway's event loop on every check and `re` has no
+timeout, so the bound is on the pattern and on the input, not on the clock.
+
+A **canonicalisation** rewrites a URI of its own scheme into its own scheme:
+`to` must start with `<scheme>:` and use at least one capture group. A pack's
+rules — and its `danger_uris` — are applied only to URIs of the schemes that
+pack owns, never to a shared scheme like `https:`; only the gateway's own
+manifests may read a shared scheme (that is how a Drive URL becomes
+`gdrive:folder/<id>`).
 
 An `example` that does not match its own `pattern` is an error: it is the
 cheapest available proof that the regex says what the author meant. A
@@ -382,9 +395,9 @@ connectors:
             pattern: '^file/[\w-]+$'
             example: 'file/1AbCdEfGhIjKlMnOpQrStUv'
         canonicalise:
-          - from: '^https?://drive\.google\.com/drive/(?:u/\d+/)?folders/([\w-]+)'
+          - from: '^https?://drive\.google\.com/drive/(?:u/\d+/)?folders/([\w-]+)(?:[/?#].*)?'
             to: 'gdrive:folder/{1}'
-          - from: '^https?://drive\.google\.com/file/d/([\w-]+)'
+          - from: '^https?://drive\.google\.com/file/d/([\w-]+)(?:[/?#].*)?'
             to: 'gdrive:file/{1}'
       - scheme: gsheets
         direction: both
@@ -395,7 +408,7 @@ connectors:
             pattern: '^[\w-]+$'
             example: '1AbCdEfGhIjKlMnOpQrStUv'
         canonicalise:
-          - from: '^https?://docs\.google\.com/spreadsheets/d/([\w-]+)'
+          - from: '^https?://docs\.google\.com/spreadsheets/d/([\w-]+)(?:[/?#].*)?'
             to: 'gsheets:{1}'
       - scheme: gcal
         direction: egress
