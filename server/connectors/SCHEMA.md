@@ -236,8 +236,10 @@ connectors:
       - scheme: tg
         direction: both
         label: Telegram chat
-        danger: >-
-          a chat on Telegram, that is on infrastructure that is not yours.
+        # Verbatim from `egress._DANGER["tg"]`, in the language the owner reads
+        # it at the gate: the example is the declaration, and a translated
+        # sentence here would be a different thing to consent to.
+        danger: "una chat su Telegram, cioè su un'infrastruttura non tua."
         forms:
           - label: group
             pattern: '^-?\d+$'
@@ -268,22 +270,26 @@ connectors:
         scheme: tg
         arg: chat_id
         dtype: telegram
-      - verb: telegram.read
-        direction: source
-        scheme: tg
-        arg: chat_id
+    # No `telegram.read`: today no Telegram read goes through
+    # `_RESOURCE_READ_VERBS`, so declaring one would add a check that does not
+    # exist — inside a migration (#522) whose whole point is parity. What the
+    # incoming side does have is the taint below.
+    taint:
+      - telegram.inbox
+      - telegram.receive
+      - telegram.pull
     topic_actions:
       - id: telegram-link
         label: Link a Telegram chat
         binding: channel
         fields:
-          - name: chat
+          - name: chat_id
             label: Chat id or @handle
         adds:
           ingress:
-            - 'tg:{chat}'
+            - 'tg:{chat_id}'
           egress:
-            - 'tg:{chat}'
+            - 'tg:{chat_id}'
     tools_card:
       setup_label: Connect a bot
       status_verb: telegram.status
