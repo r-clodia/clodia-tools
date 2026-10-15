@@ -4637,7 +4637,18 @@ async def _call_tool_recorded(name: str, arguments: dict) -> list[TextContent]:
     tok_e = _AUDIT_EGRESS.set(egress_seen)
     tok_r = _AUDIT_READS.set({})
     try:
-        out = await _call_tool_unaudited(name, arguments)
+        # Per-agent cap on slow calls (#553): one agent's burst waits for its
+        # own slots instead of taking the whole offload pool.
+        from . import slow_calls as _slow
+        try:
+            _who = agent_name()
+        except PermissionError:
+            _who = None
+        try:
+            async with _slow.slot(name, _who):
+                out = await _call_tool_unaudited(name, arguments)
+        except _slow.TooManySlowCalls as e:
+            out = [TextContent(type="text", text=f"ERROR: TooManySlowCalls: {e}")]
     finally:
         _AUDIT_READS.reset(tok_r)
         _AUDIT_EGRESS.reset(tok_e)
@@ -5120,7 +5131,9 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 await asyncio.to_thread(_note_crossing, _p, kind="attachment",
                                         trusted=True)
             try:
-                result = email.send(
+                # Off the event loop (#553): SMTP/IMAP are seconds of network.
+                result = await asyncio.to_thread(
+                    email.send,
                     arguments["to"],
                     arguments["subject"],
                     arguments["body"],
@@ -5133,21 +5146,25 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                     import shutil as _sh
                     _sh.rmtree(_tmpdir, ignore_errors=True)
         elif name == "email.folders":
-            result = email.folders(account=_email_account(arguments))
+            result = await asyncio.to_thread(email.folders,
+                                             account=_email_account(arguments))
         elif name == "email.list":
-            result = email.list_messages(
+            result = await asyncio.to_thread(
+                email.list_messages,
                 account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
                 limit=arguments.get("limit", 10),
             )
         elif name == "email.read":
-            result = email.read_message(
+            result = await asyncio.to_thread(
+                email.read_message,
                 arguments["email_id"],
                 account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
             )
         elif name == "email.get_attachment":
-            result = email.get_attachment(
+            result = await asyncio.to_thread(
+                email.get_attachment,
                 arguments["email_id"],
                 arguments["filename"],
                 account=_email_account(arguments),
@@ -5172,7 +5189,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 raise ValueError(
                     "non sono riuscito a ricavare il topic dal canale: passa "
                     "`tier`+`name`, oppure `dest` per scrivere nel tuo scratch")
-            raw, meta = email.get_attachment_bytes(
+            raw, meta = await asyncio.to_thread(
+                email.get_attachment_bytes,
                 arguments["email_id"],
                 arguments["filename"],
                 account=_email_account(arguments),
@@ -5190,7 +5208,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # Provenienza `untrusted` d'ufficio: un file introdotto da un verbo
                 # non ha nessuno da interrogare (#104 §3), e la posta in arrivo è
                 # la definizione di sorgente non controllata.
-                r = svc.put_file(_tier, _tname, fn, raw, "untrusted", by=_ag or "")
+                r = await asyncio.to_thread(svc.put_file, _tier, _tname, fn, raw,
+                                            "untrusted", by=_ag or "")
                 # E CONTAMINA il canale: è contenuto di terzi che entra adesso.
                 # Senza questo l'archiviazione sarebbe un modo di far entrare un
                 # PDF ostile senza lasciare traccia nel flag.
@@ -5206,7 +5225,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                     f.write(raw)
                 result = {"local_path": dest, "size": len(raw), **meta}
         elif name == "email.search":
-            result = email.search(
+            result = await asyncio.to_thread(
+                email.search,
                 arguments["query"],
                 account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
@@ -5216,7 +5236,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             _own = _agent_attachments(arguments.get("attachments"))
             for _p in _own:
                 await asyncio.to_thread(_note_crossing, _p, kind="attachment")
-            result = email.reply(
+            result = await asyncio.to_thread(
+                email.reply,
                 arguments["email_id"],
                 arguments["body"],
                 account=_email_account(arguments),
@@ -5245,7 +5266,9 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             # deve scendere fino al ramo `proxy.is_proxied`. Il ramo nativo
             # resta qui finché la PR 3 lo porta via: due implementazioni dello
             # stesso verbo non girano mai insieme — è il profilo a dire quale.
-            result = _dispatch_telegram(name, arguments)
+            # `to_thread` è di #553: `_dispatch_telegram` fa rete (getUpdates,
+            # sendMessage) e fuori dal loop ci deve restare.
+            result = await asyncio.to_thread(_dispatch_telegram, name, arguments)
         elif name.startswith("memory."):
             result = _dispatch_memory(name, arguments)
         elif name in _GITHUB_NATIVE_NAMES:
@@ -5255,13 +5278,13 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             # scendono fino al ramo `proxy.is_proxied`, che è il loro.
             result = await asyncio.to_thread(_dispatch_github, name, arguments)
         elif name.startswith("gdrive."):
-            result = _dispatch_gdrive(name, arguments)
+            result = await asyncio.to_thread(_dispatch_gdrive, name, arguments)
         elif name.startswith("gcalendar."):
-            result = _dispatch_gcalendar(name, arguments)
+            result = await asyncio.to_thread(_dispatch_gcalendar, name, arguments)
         elif name.startswith("gdocs."):
-            result = _dispatch_gdocs(name, arguments)
+            result = await asyncio.to_thread(_dispatch_gdocs, name, arguments)
         elif name.startswith("gsheets."):
-            result = _dispatch_gsheets(name, arguments)
+            result = await asyncio.to_thread(_dispatch_gsheets, name, arguments)
         elif name.startswith(("egress.", "ingress.")):
             result = _dispatch_egress_admin(name, arguments)
         elif name.startswith("runtime."):
