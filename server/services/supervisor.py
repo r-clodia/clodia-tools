@@ -139,6 +139,11 @@ class Supervisor:
                 if entry is None:
                     entry = self._entries[key] = _Running(service=service)
                 self._tick(entry)
+            # I nipoti orfani di un servizio vengono riparentati al gateway,
+            # che nel suo container è PID 1 (clodia-platform#545 §5). Dopo il
+            # `_tick`, così i servizi che sono appena usciti li ha già
+            # raccolti `Popen.poll()` e non c'è niente da togliergli.
+            launch.reap_orphans(self._live_pids())
 
     def _tick(self, entry: _Running) -> None:
         if entry.proc is not None:
@@ -158,6 +163,11 @@ class Supervisor:
         self._start(entry)
 
     # -- avvio e arresto --------------------------------------------------
+    def _live_pids(self) -> set[int]:
+        """I pid dei servizi supervisionati: ciò che `reap_orphans` non deve
+        toccare, perché il loro codice d'uscita lo aspetta un `Popen`."""
+        return {e.proc.pid for e in self._entries.values() if e.proc is not None}
+
     def _taken_uids(self, entry: _Running) -> set[int]:
         return {e.uid for e in self._entries.values()
                 if e.uid is not None and e.key != entry.key}
@@ -212,7 +222,7 @@ class Supervisor:
             handle = launch.open_log(logfile)
             try:
                 proc = subprocess.Popen(  # noqa: S603 - argv dal manifest, mai una shell
-                    list(service.command), cwd=workdir, env=env,
+                    launch.with_rlimits(service.command), cwd=workdir, env=env,
                     stdin=subprocess.DEVNULL, stdout=handle, stderr=handle,
                     close_fds=True, start_new_session=True, **kw)
             finally:
@@ -302,15 +312,20 @@ class Supervisor:
 
     # -- salute -----------------------------------------------------------
     def _exposed(self, entry: _Running) -> bool:
-        """Stop a service listening on TCP outside loopback.
+        """Stop a service listening outside loopback, on TCP or on UDP.
 
         A service is reachable by the gateway only (#515): one bound to 0.0.0.0
         is reachable from the whole stack and bypasses the egress proxy. Only
         for an isolated service, whose sockets carry its own uid.
+
+        UDP è entrato qui con clodia-platform#545 §5: un bind UDP fuori da
+        loopback è raggiungibile e scavalca il proxy esattamente come uno TCP,
+        e restava fuori solo perché distinguere un server da un client richiede
+        una regola diversa (vedi `launch.exposed_udp`).
         """
         if entry.uid is None:
             return False
-        exposed = launch.exposed_listeners(entry.uid)
+        exposed = launch.exposed_listeners(entry.uid) + launch.exposed_udp(entry.uid)
         if not exposed:
             return False
         service = entry.service
