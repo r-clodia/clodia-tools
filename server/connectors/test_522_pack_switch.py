@@ -32,6 +32,7 @@ in una data dir finta, così il registry lo legge dalla strada vera
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import tempfile
@@ -443,6 +444,70 @@ class ContextIsTheGatewaysToFillTests(_Istanza):
         from .. import main
         args = {"tier": "SEAL-1", "name": "software-house"}
         self.assertIs(main._fill_declared_context("topic.open", args), args)
+
+
+class ThePackReachesItsCredentialTests(unittest.TestCase):
+    """`${VAULT:cred.campo}` — come il server MCP del pack prende il token.
+
+    In posizione `pack` l'implementazione gira in un processo che il gateway
+    monta come backend MCP, e il segreto gli arriva per env attraverso un
+    placeholder `${VAULT:…}`. Ma un bundle non è sempre `{"value": …}`:
+    `telegram_bot_token` è `{"token", "bot_username", "bot_id"}`, lo scrive
+    `tools_api.telegram_connect` dopo `getMe`. Con la sola forma senza campo il
+    pack partiva con il token **stringa vuota**, Telegram rispondeva 401 e il
+    sintomo era «il token del bot è sbagliato»: il posto giusto dove non
+    guardare.
+    """
+
+    def _con_bundle(self, bundle):
+        from .. import proxy
+        return patch.object(proxy.vault, "read_internal",
+                            lambda _n, _b=bundle: _b)
+
+    def test_a_field_of_the_bundle_is_reachable(self):
+        from .. import proxy
+        with self._con_bundle({"token": "123:ABC", "bot_username": "clodia_bot"}):
+            self.assertEqual(
+                proxy._resolve_secrets(
+                    {"env": {"TOKEN": "${VAULT:telegram_bot_token.token}"}}),
+                {"env": {"TOKEN": "123:ABC"}})
+
+    def test_the_old_form_still_means_value(self):
+        from .. import proxy
+        with self._con_bundle({"value": "segreto"}):
+            self.assertEqual(proxy._resolve_secrets("${VAULT:qualcosa}"),
+                             "segreto")
+
+    def test_a_missing_field_leaves_the_placeholder_alone(self):
+        """E NON una stringa vuota. Un segreto vuoto è indistinguibile da un
+        segreto sbagliato; un `${VAULT:…}` letterale arrivato fino alla API di
+        un vendor è un errore che nomina sé stesso."""
+        from .. import proxy
+        with self._con_bundle({"token": "123:ABC"}):
+            self.assertEqual(proxy._resolve_secrets("${VAULT:telegram_bot_token}"),
+                             "${VAULT:telegram_bot_token}")
+            self.assertEqual(
+                proxy._resolve_secrets("${VAULT:telegram_bot_token.assente}"),
+                "${VAULT:telegram_bot_token.assente}")
+
+    def test_an_absent_credential_is_still_left_alone(self):
+        from .. import proxy
+
+        def _esplode(_n):
+            raise RuntimeError("assente")
+        with patch.object(proxy.vault, "read_internal", _esplode):
+            self.assertEqual(proxy._resolve_secrets("${VAULT:niente.token}"),
+                             "${VAULT:niente.token}")
+
+    def test_the_bundle_telegram_connect_writes_has_no_value_field(self):
+        """La prova che il difetto era reale e non ipotetico: il bundle che la
+        rotta di connessione deposita non ha `value`, quindi la forma senza
+        campo su quella credenziale non poteva che dare vuoto."""
+        from .. import tools_api
+        sorgente = inspect.getsource(tools_api.telegram_connect)
+        self.assertIn('vault.deposit("telegram_bot_token"', sorgente)
+        self.assertIn('"token": token', sorgente)
+        self.assertNotIn('"value"', sorgente)
 
 
 class TheRegisteredHandlerIsStillCallToolTests(unittest.TestCase):
