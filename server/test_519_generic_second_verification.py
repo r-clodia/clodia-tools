@@ -2,9 +2,11 @@
 
 * a topic's connectors (`…/connectors/{id}/{action}` and the aliases
   `telegram-link`, `mailbox-link`, `drive-folder`) are changed only by the
-  topic's owner or an admin, on-behalf — or by the agent-server's own session
-  (no execution, no chat), which checks owner/admin before forwarding. An
-  agent's runtime token (`CLODIA_TOOLS_TOKEN`) and a non-owner get 403;
+  topic's owner or an admin, on-behalf — or by the agent-server's own session,
+  which SAYS SO (signed claim `role: agent-server`, clodia-platform#539 §1) and
+  checks owner/admin before forwarding. An agent's runtime token
+  (`CLODIA_TOOLS_TOKEN`), a bare token without the claim, and a non-owner
+  get 403;
 * a pack's topic action may write only into a scheme that declares `forms`.
 """
 from __future__ import annotations
@@ -18,7 +20,12 @@ from .test_519_generic_actions import _H, _Topic, _client, _url
 
 AGENT_RUNTIME = {"agent": "clodia", "execution_id": "clodia-517",
                  "chat": "chan:SEAL-1:acme:clodia"}
-SYSTEM = {"agent": "clodia"}                       # topics_client._headers()
+SYSTEM = {"agent": "clodia", "role": "agent-server"}   # topics_client._headers()
+#: Un token nudo: nessun `execution_id`, nessun `chat`, e nessuna affermazione.
+#: Era indistinguibile dall'agent-server, perché il riconoscimento avveniva per
+#: ASSENZA (clodia-platform#539 §1). `_execution_id(spawn)` torna "" quando il
+#: workspace dello spawn non è stato creato: non è un caso di laboratorio.
+BARE = {"agent": "clodia"}
 OWNER = {"agent": "clodia", "principal": "davide", "on_behalf": True,
          "human_role": "user"}
 STRANGER = {**OWNER, "principal": "mario"}
@@ -68,6 +75,14 @@ class TopicOwnerOnlyTests(unittest.TestCase):
 
     def test_an_agent_runtime_token_is_refused_everywhere(self):
         codes, (liste, bindings) = self._run(AGENT_RUNTIME)
+        self.assertEqual(codes, [403, 403, 403, 403])
+        self.assertEqual((liste, bindings), ({}, {}))
+
+    def test_a_token_without_the_claim_is_not_the_agent_server(self):
+        """Il cuore della #539 §1: l'identità si afferma, non si deduce da ciò
+        che manca. Prima bastava un token senza `execution_id` e senza `chat`
+        per scrivere i muri di una stanza qualunque."""
+        codes, (liste, bindings) = self._run(BARE)
         self.assertEqual(codes, [403, 403, 403, 403])
         self.assertEqual((liste, bindings), ({}, {}))
 

@@ -11,7 +11,8 @@ raggiungerlo e quindi non può farsi coniare identità arbitrarie.
 Body JSON:
   {"kind":"session"|"capability", "agent":..., "principal":..., "clearance":...,
    "on_behalf":bool, "human_role":..., "chat":..., "ttl_seconds":int,
-   "execution_id":..., "instance":..., "minutes":int, "by":..., "cap":...}
+   "execution_id":..., "instance":..., "minutes":int, "by":..., "cap":...,
+   "role":"agent-server"}
 """
 from __future__ import annotations
 
@@ -68,6 +69,12 @@ async def mint(request: Request):
                 unattended=bool(b.get("unattended")),
                 origin=b.get("origin") or None,
                 scope_tier=b.get("scope_tier") or None,
+                # Il ruolo di servizio (clodia-platform#539 §1). Arriva da qui e
+                # solo da qui: questa rotta è dietro il secret di bootstrap, che
+                # vive nell'ENV dei due servizi trusted e non nel child-env di
+                # uno spawn — la stessa ragione per cui un agente non può farsi
+                # coniare `on_behalf` o `unattended`.
+                role=b.get("role") or None,
             )
             return JSONResponse({"token": token})
         if kind == "capability":

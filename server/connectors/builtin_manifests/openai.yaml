@@ -1,0 +1,35 @@
+# Image generation (OpenAI), come il gateway la implementa oggi
+# (clodia-platform#518, dichiarata in #520).
+#
+# Nessuno schema e nessun verbo con una destinazione da vagliare: le chiamate
+# escono verso `api.openai.com`, cioè un normale host HTTPS, governato dalle
+# regole `https:` della piattaforma — il percorso generico più stretto che
+# esista. Come GitHub, questo connettore dichiara solo la propria CREDENZIALE e
+# ciò che la pagina Tools deve mostrarne.
+#
+# Esiste perché finché non era dichiarato, l'unico posto dove «Image generation»
+# era descritto era una tabella dentro clodia-web: la card c'era solo perché il
+# frontend sapeva il suo nome.
+name: gateway-openai
+connectors:
+  - id: openai-images
+    manifest_version: 1
+    namespace: openai
+    label: Image generation
+    providers:
+      - id: api-key
+        label: Chiave API OpenAI
+        credential:
+          kind: form
+          vault_entry: openai_api_key
+          fields:
+            - name: api_key
+              label: API key
+              secret: true
+    tools_card:
+      icon: openai
+      setup_label: Incolla la API key
+      blurb: >-
+        Generazione avatar/immagini via gpt-image-2 (PFP degli agenti). La
+        chiave è custodita nel vault e la legge solo il gateway.
+      scope: api.openai.com/v1/images

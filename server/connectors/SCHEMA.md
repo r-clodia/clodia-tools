@@ -68,9 +68,20 @@ That is a connector which only needs a credential — image generation is one.
 | `danger_uris` | no | warnings for URIs of a shared scheme (`match` + `text`) |
 | `taint` | no | MCP prefixes of this pack whose answers do not taint a channel |
 | `topic_actions` | no | buttons the connector adds to a topic |
-| `tools_card` | no | what the Tools page shows |
+| `tools_card` | no | what the Tools page shows: `setup_label`, `status_verb`, `test_verb`, `docs_url`, `blurb`, `scope`, `icon` |
 | `services` | no | long-running processes, see #515 |
 | `storage_remote` | no | topic storage backend the pack provides, see #524 |
+
+`blurb`, `scope` and `icon` (#520) are the card's COPY and its glyph. The
+drawing is a frontend asset — a logo is an SVG file, not gateway data — but the
+CHOICE is the connector's: while the page decided it, it decided by NAME, which
+is the per-connector knowledge the issue removes. A connector without a
+`tools_card` is a vocabulary, not a card, and the Tools page does not draw it;
+an `icon` the page does not know falls back to the generic glyph.
+
+`docs_url` must be an absolute `https://` URL: the Tools page puts it in an
+`href`, and anything else (`javascript:`, `data:`, `http:`, relative) is refused
+when the manifest is parsed.
 
 There is **no `seal_cap`**, and writing one is an error. The epic decided there
 is no SEAL ceiling on a binding: the owner decides per binding at the gate, and
@@ -182,7 +193,8 @@ call actually happens — two implementations of it would be one too many.
 
 ### `topic_actions[]`
 
-`id`, `label`, `fields[]`, `binding` (optional; only `channel`), and `adds:` with `ingress:` /
+`id`, `label`, `fields[]`, `binding` (optional; only `channel`), `admin_only`
+(optional, default `false`), and `adds:` with `ingress:` /
 `egress:` templates over the action's own fields. A template naming a field the
 action does not declare is an error, and so is a template that does not start
 with one of the connector's OWN schemes written out (`tg:{chat}`, never `{url}`
@@ -193,6 +205,20 @@ only into a scheme that declares `forms` (a scheme without forms would accept
 `courier:*`). Only the topic's owner or an admin (on-behalf), or the
 agent-server's own session, may run an action — never an agent token. What the action adds is a *proposal*: the
 grant is still the owner's, at the gate.
+
+`admin_only: true` means the action is **offered** only to an admin of the
+instance, not to every topic owner: what it authorises may not belong to whoever
+owns the room (a system mailbox is the instance's mail). It is a rule about the
+SURFACE — the route's check stays `_authorize_topic_owner` — and it lives here
+rather than in an `if` on the connector's name, which is what rendering the row
+generically would otherwise delete (#520).
+
+A free-text value is passed through `egress.canonical()` before the template is
+rendered, and a value that is already an address of the scheme the template
+writes stands for itself: a Drive folder URL copied from the browser bar becomes
+`gdrive:folder/<id>`. Anything else goes through the template and then through
+the same form check as before, so this widens what a person may TYPE, not what
+the action may WRITE.
 
 Since #519 the action is **executed** from this declaration, by the generic
 route `POST /internal/topics/{tier}/{name}/connectors/{id}/{action}`: the owner

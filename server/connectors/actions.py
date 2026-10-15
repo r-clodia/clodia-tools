@@ -38,6 +38,16 @@ LOG = logging.getLogger("clodia-tools.connectors")
 _PLACEHOLDER = re.compile(r"\{([A-Za-z0-9_]+)\}")
 
 
+def _shape(template: str) -> "re.Pattern[str]":
+    """The template as a pattern: its literal text verbatim, each placeholder
+    a non-empty run. `gdrive:folder/{folder}` matches `gdrive:folder/X` and
+    not `gdrive:file/X`."""
+    parts = _PLACEHOLDER.split(template)
+    # split() alternates literal, name, literal, …: the odd items are names.
+    return re.compile("".join(
+        "(.+)" if i % 2 else re.escape(part) for i, part in enumerate(parts)))
+
+
 class ActionError(ValueError):
     """Something the owner can fix, with the message they should read."""
 
@@ -125,7 +135,25 @@ def resolve_values(action: TopicAction, body: dict) -> dict[str, str]:
 
 
 def render(action: TopicAction, values: dict[str, str]) -> dict[str, list[str]]:
-    """Gli URI che questa azione scriverebbe. Solo i suoi template."""
+    """Gli URI che questa azione scriverebbe. Solo i suoi template.
+
+    Il valore di un campo passa prima per `egress.canonical()`: ciò che una
+    persona incolla è l'URL che ha nella barra del browser, e lo schema lo
+    riconduce alla forma canonica con le proprie regole `canonicalise:`. Senza,
+    il bottone Drive generico sarebbe un passo indietro rispetto a quello
+    cablato che sostituisce, dove incollare l'URL della cartella funziona
+    (clodia-platform#520).
+
+    Il valore canonicalizzato vale PER SÉ solo se è già un indirizzo dello
+    schema che il template scrive: `https://drive.google.com/drive/folders/X`
+    diventa `gdrive:folder/X` e sostituisce il template, mentre
+    `https://evil.example` resta ciò che è, finisce dentro il template come
+    testo e lì non ha la forma di un `gdrive:` — cioè viene rifiutato. Nessuna
+    guardia si sposta: `check_uris` (schema posseduto, forma, `check_grantable`)
+    gira dopo, su quello che esce di qui.
+    """
+    from .. import egress as eg
+
     def _one(template: str) -> str:
         def _sub(m):
             key = m.group(1)
@@ -134,7 +162,24 @@ def render(action: TopicAction, values: dict[str, str]) -> dict[str, list[str]]:
                     f"il template '{template}' nomina '{key}', che l'azione non "
                     f"dichiara fra i propri campi")
             return values[key]
-        return _PLACEHOLDER.sub(_sub, template)
+
+        scheme = template.partition(":")[0]
+        nomi = _PLACEHOLDER.findall(template)
+        if len(nomi) == 1 and nomi[0] in values:
+            canonico = eg.canonical(values[nomi[0]])
+            if canonico.partition(":")[0] == scheme and ":" in canonico:
+                # Review of #365: a URI of the scheme stands for itself only
+                # if it has the TEMPLATE's shape. Otherwise a Drive action
+                # declared for `gdrive:folder/{folder}` could write
+                # `gdrive:file/…` or `gdrive:doc/…` — any grantable form of
+                # the scheme, not the one the manifest declared.
+                if not _shape(template).fullmatch(canonico):
+                    raise ActionError(
+                        f"'{values[nomi[0]]}' è un indirizzo '{scheme}:' ma "
+                        f"non della forma che questa azione scrive "
+                        f"('{template}')")
+                return canonico
+        return eg.canonical(_PLACEHOLDER.sub(_sub, template))
 
     return {"ingress": [_one(t) for t in action.adds_ingress],
             "egress": [_one(t) for t in action.adds_egress]}
@@ -161,6 +206,12 @@ def state(connector: Connector, action: TopicAction, tier: str,
         "action": action.id,
         "label": action.label,
         "binding": action.binding,
+        # Chi può OFFRIRE questa azione (#520). Lo stato è ciò che l'agent-server
+        # legge prima di inoltrare una POST: senza il campo qui, il controllo
+        # «questa la fa un admin» — che oggi protegge `mailbox-link` in
+        # clodia-logic — non arriverebbe alla rotta generica, e la rotta
+        # generica sarebbe la porta di servizio della rotta specifica.
+        "admin_only": action.admin_only,
         "fields": [{"name": f.name, "label": f.label, "required": f.required,
                     "placeholder": f.placeholder,
                     "options": options_for(f)} for f in action.fields],

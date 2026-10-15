@@ -32,6 +32,22 @@ _H = {"Authorization": "Bearer ckt1.finto"}
 _HUMAN = {"agent": "clodia", "principal": "davide", "on_behalf": True,
           "human_role": "admin"}
 
+
+def come_agent_server(request):
+    """`topics_api._authorize` quando a chiamare è l'AGENT-SERVER.
+
+    Fixture condivisa dai test che montano le rotte dei muri: dalla #539 §1
+    l'identità del servizio è AFFERMATA nel token (`role: agent-server`) e non
+    più dedotta dall'assenza di `execution_id`/`chat`. Una fixture che non la
+    dichiara misura un chiamante che nella realtà non esiste più.
+    """
+    try:
+        request.state.auth_payload = {"agent": "clodia", "role": "agent-server"}
+    except AttributeError:      # richiesta finta senza `state`: basta il ritorno
+        pass
+    # Principal vuoto come nella rotta vera: il carrier non è la persona.
+    return ("", None)
+
 CASELLE = [{"account": "studio", "email": "studio@tomato.blue",
             "send_only": False},
            {"account": "info", "email": "info@tomato.blue", "send_only": True}]

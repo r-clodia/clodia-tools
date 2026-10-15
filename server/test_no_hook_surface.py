@@ -24,6 +24,7 @@ from . import topics_api, whitelist
 from .tools import runtime
 from .topics.local_fs import LocalFsStorage
 from .topics.service import TopicService
+from .test_519_generic_actions import come_agent_server
 
 
 def _svc() -> TopicService:
@@ -86,7 +87,7 @@ class _Request:
 class TheTopicsApiTests(unittest.TestCase):
     def _post(self, body: dict):
         svc = _svc()
-        with patch.object(topics_api, "_authorize", lambda _r: ("davide", None)), \
+        with patch.object(topics_api, "_authorize", come_agent_server), \
              patch.object(topics_api, "_service", lambda: svc), \
              patch.object(topics_api.instance_profile,
                           "topic_creation_check", lambda _n: None):

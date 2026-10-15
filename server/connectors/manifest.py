@@ -40,6 +40,7 @@ import dataclasses
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
+from urllib.parse import urlsplit
 
 #: Version of *this grammar*. A manifest declares the version it was written
 #: for; a manifest from the future is refused by name instead of being parsed
@@ -807,16 +808,43 @@ class TopicAction:
     adds_ingress: tuple[str, ...] = ()
     adds_egress: tuple[str, ...] = ()
     binding: str = ""
+    #: L'azione la offre solo a un ADMIN dell'istanza, non a ogni owner di
+    #: topic. Esiste perché ciò che l'azione autorizza può non appartenere a
+    #: chi possiede la stanza: una casella di sistema è posta dell'istanza, e
+    #: il bottone Mailbox è sotto `isAdmin` da settembre. Finché quella regola
+    #: viveva in un `if` sul NOME del connettore, renderla generica la
+    #: cancellava (clodia-platform#520); qui sta dove sta il resto della
+    #: descrizione, e un connettore di pack può dichiararla per sé.
+    #: È una regola di SUPERFICIE: l'enforcement vero resta
+    #: `_authorize_topic_owner`, che non distingue admin da owner — un admin
+    #: è comunque owner di ciò che gli si mostra.
+    admin_only: bool = False
 
 
 @dataclass(frozen=True)
 class ToolsCard:
-    """What the Tools page shows for this connector: setup, status, test."""
+    """What the Tools page shows for this connector: setup, status, test.
+
+    `blurb` and `scope` are the card's COPY — what this connector does, and
+    the perimeter it touches. Until #520 they lived in a per-connector table
+    inside clodia-web, which is the table the issue removes: a connector
+    arriving with a pack had no way to say anything about itself, and the page
+    could only draw it as an unnamed box. The text is the connector's, so it
+    arrives with the connector.
+    """
 
     setup_label: str = ""
     status_verb: str = ""
     test_verb: str = ""
     docs_url: str = ""
+    blurb: str = ""
+    scope: str = ""
+    #: Quale GLIFO la pagina disegna per questo connettore. Il disegno è un
+    #: asset del frontend — un logo è un file SVG, non un dato del gateway — ma
+    #: la SCELTA è del connettore: finché la decideva il frontend, lo faceva
+    #: deducendola dal nome, cioè sapendo chi sono i connettori. Un nome che la
+    #: pagina non conosce ricade sul glifo generico.
+    icon: str = ""
 
 
 @dataclass(frozen=True)
@@ -1168,6 +1196,8 @@ def _parse_topic_action(raw: Any, where: str) -> TopicAction:
         adds_ingress=out["ingress"],
         adds_egress=out["egress"],
         binding=_binding(data.get("binding"), f"{where}.binding"),
+        admin_only=_flag(data.get("admin_only"), f"{where}.admin_only",
+                         default=False),
     )
 
 
@@ -1207,6 +1237,23 @@ def _check_action_schemes(actions, owned, where: str, *,
                         f"forms")
 
 
+def _docs_url(raw: Any, where: str) -> str:
+    """`docs_url` goes into an `href` on the Tools page, where the session
+    token sits in localStorage: a `javascript:` or `data:` URL would run in
+    that origin. A pack may point at its documentation, nothing else, so only
+    an absolute `https://` URL with a host is accepted (review of #365)."""
+    value = _text(raw, where, required=False)
+    if not value:
+        return ""
+    parts = urlsplit(value)
+    if not value.startswith("https://") or parts.scheme != "https" \
+            or not parts.netloc or any(c.isspace() for c in value):
+        raise ManifestError(
+            f"{where}: '{value}' is not an https:// URL; only https:// "
+            f"documentation links are accepted")
+    return value
+
+
 def _parse_tools_card(raw: Any, where: str) -> ToolsCard:
     data = _mapping(raw, where)
     return ToolsCard(
@@ -1215,7 +1262,10 @@ def _parse_tools_card(raw: Any, where: str) -> ToolsCard:
         status_verb=_text(data.get("status_verb"), f"{where}.status_verb",
                           required=False),
         test_verb=_text(data.get("test_verb"), f"{where}.test_verb", required=False),
-        docs_url=_text(data.get("docs_url"), f"{where}.docs_url", required=False),
+        docs_url=_docs_url(data.get("docs_url"), f"{where}.docs_url"),
+        blurb=_text(data.get("blurb"), f"{where}.blurb", required=False),
+        scope=_text(data.get("scope"), f"{where}.scope", required=False),
+        icon=_text(data.get("icon"), f"{where}.icon", required=False),
     )
 
 

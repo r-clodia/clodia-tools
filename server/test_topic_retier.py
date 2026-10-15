@@ -25,6 +25,7 @@ from .tools import telegram_bindings as tb
 from .topics import retier
 from .topics.local_fs import LocalFsStorage
 from .topics.service import TopicError, TopicService
+from .test_519_generic_actions import come_agent_server
 
 
 class Base(unittest.TestCase):
@@ -45,7 +46,7 @@ class Base(unittest.TestCase):
             patch.object(tb, "_path", lambda: stato / "telegram-bindings.json"),
             patch.object(taint, "_path", lambda: stato / "taint.json"),
             patch.object(topics_api, "_svc", self.svc),
-            patch.object(topics_api, "_authorize", lambda _r: ("clodia", None)),
+            patch.object(topics_api, "_authorize", come_agent_server),
         ]
         for p in self._p:
             p.start()

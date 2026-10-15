@@ -36,6 +36,21 @@ CAP_PREFIX = "ccap1"
 COLONY_ORG = "clodia-colony"
 CERT_DAYS = 365 * 3
 
+#: Ruolo che l'agent-server dichiara nei token che conia PER SÉ — le chiamate
+#: che fa al gateway come servizio, non per conto di un agente in un turno
+#: (clodia-platform#539 §1). Gemello di `colony.pki.ROLE_AGENT_SERVER` in
+#: clodia-logic: i due nomi devono restare la stessa stringa, perché uno firma e
+#: l'altro verifica. Un valore solo, e il mint rifiuta gli altri: non è un
+#: sistema di ruoli, è l'identità di UN chiamante.
+ROLE_AGENT_SERVER = "agent-server"
+ROLES = (ROLE_AGENT_SERVER,)
+#: The identity the agent-server mints its OWN service tokens on. The service
+#: role is signed only on a token of this agent, and only on a token that is
+#: not also a turn's (no `on_behalf`, `execution_id` or `chat`): those claims
+#: describe an agent acting in a turn or a human session, and a token carrying
+#: them next to `role: agent-server` would be the very confusion §1 removes.
+ROLE_AGENT_SERVER_AGENT = "clodia"
+
 
 def _secrets_dir() -> Path:
     return Path(os.environ.get("CLODIA_SECRETS_DIR", "/datadir/secrets"))
@@ -83,7 +98,8 @@ def mint_session_token(agent: str, execution_id: str = "",
                        unattended: bool = False,
                        principal_kind: str | None = None,
                        origin: list[str] | None = None,
-                       scope_tier: str | None = None) -> str:
+                       scope_tier: str | None = None,
+                       role: str | None = None) -> str:
     """Conia un token di sessione ckt1 firmato con l'identity key dell'agente.
     Identico a colony.pki.mint_session_token, ma le chiavi stanno QUI (gateway).
 
@@ -94,6 +110,20 @@ def mint_session_token(agent: str, execution_id: str = "",
     scoped_tools = list(dict.fromkeys(scoped_tools or []))
     if any(t in ("*", "agents") or t.startswith("agents.") for t in scoped_tools):
         raise PermissionError("scoped_tools non può concedere wildcard o tool agents.*")
+    if role is not None and role not in ROLES:
+        raise PermissionError(f"ruolo di sessione sconosciuto: {role!r}")
+    if role == ROLE_AGENT_SERVER:
+        # Hardening (review of #363): the bootstrap secret is the only gate on
+        # this route, so the claim's SHAPE is checked here too. Refused rather
+        # than silently dropped: a caller asking for a mixed token has a bug.
+        mixed = [k for k, v in (("on_behalf", on_behalf),
+                                ("execution_id", execution_id),
+                                ("chat", chat)) if v]
+        if agent != ROLE_AGENT_SERVER_AGENT or mixed:
+            raise PermissionError(
+                f"role {ROLE_AGENT_SERVER!r} is signed only for agent "
+                f"{ROLE_AGENT_SERVER_AGENT!r} with no on_behalf/execution_id/chat "
+                f"(got agent={agent!r}, with {mixed or 'none'})")
     key_path = _agent_key_path(agent)
     if not key_path.is_file():
         raise PermissionError(f"agent '{agent}' senza identità (nessuna identity.key nel gateway)")
@@ -127,6 +157,11 @@ def mint_session_token(agent: str, execution_id: str = "",
         # Sessione di un job schedulato: nessun umano davanti al turno. FIRMATO,
         # quindi l'agente non può rimuoverselo (clodia-platform#104).
         payload["unattended"] = True
+    if role:
+        # CHI è questo chiamante, affermato da chi tiene la chiave. Conia solo
+        # chi ha il secret di bootstrap (`mint_api`), che non entra mai
+        # nell'ambiente di uno spawn: un agente non può scriverselo.
+        payload["role"] = role
     if origin:
         payload["origin"] = [str(x) for x in origin]
     if scope_tier:

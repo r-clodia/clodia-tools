@@ -56,9 +56,28 @@ connectors:
             - 'tg:{chat}'
           egress:
             - 'tg:{chat}'
+    providers:
+      # Il bot dedicato. La credenziale la DEPOSITA ancora `telegram_connect`
+      # (`_LEGACY_CONNECT`), che prima di scrivere valida il token con getMe e
+      # memorizza l'@username: dichiararla qui serve alla pagina per disegnare
+      # il form, non a sostituire quella validazione.
+      - id: bot
+        label: Bot Telegram
+        credential:
+          kind: form
+          vault_entry: telegram_bot_token
+          fields:
+            - name: token
+              label: Token del bot (@BotFather)
+              secret: true
     tools_card:
+      icon: telegram
       setup_label: Collega un bot
       status_verb: telegram.status
+      blurb: >-
+        Gli agenti inviano/ricevono messaggi (tool telegram.*) con lease
+        per-chat. Crea un bot dedicato con @BotFather e incolla il token.
+      scope: api.telegram.org/bot
     # Chat in arrivo: chi scrive nel gruppo non è controllato, e una risposta
     # mescola più autori.
     taint:
