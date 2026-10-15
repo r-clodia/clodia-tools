@@ -71,6 +71,8 @@ That is a connector which only needs a credential — image generation is one.
 | `tools_card` | no | what the Tools page shows: `setup_label`, `status_verb`, `test_verb`, `docs_url`, `blurb`, `scope`, `icon` |
 | `services` | no | long-running processes, see #515 |
 | `storage_remote` | no | topic storage backend the pack provides, see #524 |
+| `defaults` | no | arguments the gateway fills **only when omitted**, see below |
+| `files` | no | arguments that name a TOPIC FILE, which the gateway reads and delivers as bytes |
 | `context` | no | call facts the gateway fills in, see below |
 
 `blurb`, `scope` and `icon` (#520) are the card's COPY and its glyph. The
@@ -88,6 +90,71 @@ There is **no `seal_cap`**, and writing one is an error. The epic decided there
 is no SEAL ceiling on a binding: the owner decides per binding at the gate, and
 the gate shows the topic's tier. Today's `_CHANNEL_SEAL_CAP` and
 `_DRIVE_SEAL_CAP` disappear with #518 and must not come back as a field.
+
+### `defaults`
+
+```
+defaults:
+  - verb: telegram.send
+    arg: chat_id
+    value: binding      # the chat bound to the calling topic
+```
+
+The gateway fills these arguments **only when the caller left them out**, and
+that rule is the whole difference from `context:`. A context is an *identity*
+and is always overwritten, because «the caller already set it» is the attack. A
+default is a convenience — «send it to this topic's chat» — and an explicit
+value from the caller has to win, or you could no longer write to any chat other
+than the bound one.
+
+Per **verb**, not per namespace: `telegram.inbox` has no chat to fill, and
+filling it anyway would hand the backend an argument its schema does not
+declare.
+
+`binding` is the whole list of values. It resolves through the gateway's
+bindings registry — the one the topic's button writes, which holds every
+connector's bindings — and that is the point: a pack process reading it itself
+would also be reading everybody else's, with the gateway's uid.
+
+A declared default that cannot be resolved is an **explained error**, not an
+argument left empty: empty, the PDP would compute a destination that does not
+exist and refuse the send talking about «unknown destination», which is the
+wrong symptom for «this topic has no chat connected».
+
+### `files`
+
+```
+files:
+  - verb: telegram.send_file
+    path_arg: path            # what the caller names
+    bytes_arg: content_b64    # where the gateway puts the bytes
+    name_arg: filename        # where it puts the basename
+    tier_arg: tier            # optional: explicit topic
+    topic_arg: name
+    chat_arg: chat_id         # optional: the topic bound to this chat
+```
+
+Some verbs act on a file that lives in a topic. **Reading it is platform work,
+not connector work**: the compartment (the caller must be a participant of that
+topic) and the audit of what crosses the boundary hang off that read. A pack
+backend reading the topics' filesystem itself would walk past both, and the path
+is chosen by the caller.
+
+So the pack says *which arguments* are the path, the bytes and the name; the
+gateway resolves the topic, checks the membership, reads, records the crossing
+and fills in the two arguments. The backend receives bytes and never sees a
+path — the arguments that said *where to read* are removed once they have done
+their job.
+
+The topic is resolved in the order the native code used: `tier_arg`+`topic_arg`
+when the caller passes both, else the topic bound to the chat in `chat_arg`
+(the bindings registry belongs to the gateway, not to the pack), else the
+channel the call comes from.
+
+`verb` must be inside the connector's namespace — the same rule as `verbs:`, for
+the same reason: a pack does not get somebody else's topic files delivered. A
+**builtin** manifest declaring `files` is refused: the gateway reads a topic
+file from the inside.
 
 ### `schemes[]`
 
@@ -450,6 +517,24 @@ connectors:
     # `_RESOURCE_READ_VERBS`, so declaring one would add a check that does not
     # exist — inside a migration (#522) whose whole point is parity. What the
     # incoming side does have is the taint below.
+    # `chat_id` omesso = la chat legata al topic da cui si chiama. Lo risolve
+    # il gateway, che è l'unico a tenere il registro dei binding; un esplicito
+    # del chiamante vince, se no non si potrebbe più scrivere altrove.
+    defaults:
+      - verb: telegram.send
+        arg: chat_id
+        value: binding
+      - verb: telegram.send_file
+        arg: chat_id
+        value: binding
+    files:
+      - verb: telegram.send_file
+        path_arg: path
+        bytes_arg: content_b64
+        name_arg: filename
+        tier_arg: tier
+        topic_arg: name
+        chat_arg: chat_id
     taint:
       - telegram.inbox
       - telegram.receive

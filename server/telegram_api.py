@@ -16,10 +16,73 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from . import instance_profile
 from . import internal_auth
+from . import proxy
 from .tools import telegram as tg
 
 LOG = logging.getLogger("clodia-tools.telegram_api")
+
+#: Il connettore di queste rotte. In posizione `pack` l'implementazione sta nel
+#: backend MCP omonimo e queste rotte diventano un RINVIO: non un secondo
+#: percorso, un unico percorso con due implementazioni dietro.
+CONNECTOR = "telegram"
+
+
+def _nativo() -> bool:
+    """Chi implementa Telegram qui. `connector_mode` è già fail-safe verso
+    `native`: un profilo illeggibile lascia il gateway com'era ieri."""
+    return instance_profile.connector_mode(CONNECTOR) == "native"
+
+
+async def _pack(verbo: str, args: dict) -> dict:
+    """Chiama il verbo del backend del pack e ne ritorna il JSON.
+
+    Non passa da `call_tool`: questa è già una porta privilegiata
+    (`internal_auth`), e farla rientrare dal PDP per-agente chiederebbe un
+    grant a un processo che non è un agente. Soprattutto: `telegram.updates`
+    NON è un verbo d'agente — Telegram ammette un solo consumer `getUpdates`
+    per bot, e questa rotta è quel consumer.
+    """
+    import json as _json
+
+    testo = await proxy.call_proxied(f"{CONNECTOR}.{verbo}", args)
+    if str(testo).startswith("ERROR: "):
+        raise RuntimeError(str(testo)[len("ERROR: "):][:200])
+    try:
+        return _json.loads(testo)
+    except ValueError:
+        raise RuntimeError(f"{CONNECTOR}.{verbo}: risposta non JSON "
+                           f"({str(testo)[:120]})") from None
+
+
+def _intercetta_join(messaggi: list, bot_username) -> list:
+    """Consuma i `/start <token>` di un join per link (clodia-platform#549).
+
+    Nel gateway l'intercettazione viveva dentro il ciclo degli update; con
+    l'implementazione nel pack quel ciclo è di là, e il join NON si è spostato
+    con lui: è control-plane — mette una PROPOSTA in attesa dell'owner, non un
+    messaggio da riportare. Quindi si intercetta qui, sull'unica porta da cui
+    gli update entrano. Senza, un `/start <token>` arriverebbe nel topic come
+    un messaggio qualunque e il bottone del topic non proporrebbe mai il gruppo.
+    """
+    from .tools import telegram_join as _join
+
+    tenuti = []
+    for m in messaggi or []:
+        finto = {
+            "text": m.get("text") or "",
+            "chat": {"id": m.get("chat_id"), "title": m.get("chat_title"),
+                     "type": m.get("chat_type")},
+            "from": {"username": m.get("from_username"), "id": m.get("from_id")},
+        }
+        try:
+            if _join.intercept(finto, bot_username):
+                continue
+        except Exception as e:  # noqa: BLE001 — un join rotto non ferma il relay
+            LOG.warning("join Telegram non consumato (%s)", e)
+        tenuti.append(m)
+    return tenuti
 
 
 def _authorize(request: Request):
@@ -40,6 +103,14 @@ async def updates(request: Request):
     chat_id = str(body.get("chat_id") or "").strip()
     if not chat_id:
         return JSONResponse({"error": "chat_id richiesto"}, status_code=400)
+    if not _nativo():
+        # Nessun equivalente nel pack, e nessun chiamante: il relay usa `poll`.
+        # Si risponde con il motivo invece di inventare un drenaggio che
+        # consumerebbe la coda condivisa di tutte le chat.
+        return JSONResponse(
+            {"error": "telegram è implementato da un pack su questa istanza: "
+                      "il drenaggio per-chat non esiste lì, usa /poll"},
+            status_code=501)
     try:
         return JSONResponse(tg.drain_internal(chat_id))
     except Exception as e:  # noqa: BLE001
@@ -59,6 +130,11 @@ async def send(request: Request):
     if not chat_id:
         return JSONResponse({"error": "chat_id richiesto"}, status_code=400)
     try:
+        if not _nativo():
+            args = {"chat_id": chat_id, "text": text}
+            if body.get("thread_id") is not None:
+                args["thread_id"] = body["thread_id"]
+            return JSONResponse(await _pack("send", args))
         return JSONResponse(tg.send_internal(chat_id, text, thread_id=body.get("thread_id")))
     except Exception as e:  # noqa: BLE001
         LOG.warning("telegram send errore: %s", e)
@@ -78,6 +154,11 @@ async def poll(request: Request):
         body = {}
     timeout = max(1, min(50, int(body.get("timeout", 25))))
     try:
+        if not _nativo():
+            risposta = await _pack("updates", {"timeout": timeout})
+            msgs = _intercetta_join(risposta.get("messages") or [],
+                                    risposta.get("bot_username"))
+            return JSONResponse({"messages": msgs, "count": len(msgs)})
         # getUpdates blocca `timeout`s → in un thread per non congelare l'event loop.
         msgs = await asyncio.to_thread(tg.poll_updates, timeout)
         return JSONResponse({"messages": msgs, "count": len(msgs)})
@@ -97,6 +178,8 @@ async def download(request: Request):
     if not file_id:
         return JSONResponse({"error": "file_id richiesto"}, status_code=400)
     try:
+        if not _nativo():
+            return JSONResponse(await _pack("download", {"file_id": file_id}))
         return JSONResponse(await asyncio.to_thread(tg.download_file, file_id))
     except Exception as e:  # noqa: BLE001
         LOG.warning("telegram download errore: %s", e)

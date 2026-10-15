@@ -3183,6 +3183,136 @@ def _verb_implemented(name: str) -> bool:
         return True
 
 
+def _bound_chat(namespace: str) -> str:
+    """La chat legata al canale da cui si chiama, per questo connettore.
+
+    Il registro dei binding (`channel_bindings`) è del gateway: lo scrive il
+    bottone del topic e tiene i binding di TUTTI i connettori. Un backend di
+    pack che lo leggesse da sé leggerebbe anche quelli degli altri — e lo
+    farebbe con l'uid del gateway, cioè esattamente ciò che clodia-platform#544
+    sta chiudendo.
+    """
+    scope = current_channel()
+    if not scope or "/" not in scope:
+        return ""
+    tier, _, topic = scope.partition("/")
+    from .tools import channel_bindings as _cb
+    for cid, b in (_cb.load(namespace) or {}).items():
+        if (b.get("tier"), b.get("topic")) == (tier, topic):
+            return str(cid)
+    return ""
+
+
+def _fill_declared_defaults(name: str, arguments: dict) -> list[str]:
+    """Riempie gli argomenti OMESSI che il manifest dichiara in `defaults:`.
+
+    Differenza con `_fill_declared_context`, ed è tutta la ragione per cui sono
+    due blocchi e non uno: il contesto è un'identità e si sovrascrive sempre;
+    un default è una comodità e il valore esplicito del chiamante VINCE — se no
+    non si potrebbe più scrivere a una chat diversa da quella legata al topic.
+
+    Un default dichiarato che non si può risolvere è un errore spiegato, non un
+    argomento lasciato vuoto: vuoto, il PDP calcolerebbe una destinazione
+    inesistente e negherebbe l'invio parlando di «destinazione ignota», che è il
+    sintomo sbagliato per «questo topic non ha una chat collegata».
+    """
+    from .connectors import resolved as _connectors
+
+    hit = _connectors.default_arguments(name)
+    if hit is None:
+        return []
+    namespace, decls = hit
+    riempiti = []
+    for d in decls:
+        if str(arguments.get(d.arg) or "").strip():
+            continue          # il chiamante ha scelto: non si tocca
+        if d.value != "binding":
+            raise ValueError(f"default '{d.value}' non previsto da questo gateway")
+        chat = _bound_chat(namespace)
+        if not chat:
+            raise ValueError(
+                f"nessuna chat '{namespace}' collegata a questo topic: collegala "
+                f"dal pulsante del topic, oppure passa '{d.arg}' esplicito")
+        arguments[d.arg] = chat
+        riempiti.append(d.arg)
+    if riempiti:
+        LOG.info("default di pack su %s: %s dal binding del canale", name,
+                 ", ".join(riempiti))
+    return riempiti
+
+
+def _declared_file_topic(namespace: str, decl, arguments: dict) -> tuple[str, str]:
+    """Il topic da cui leggere il file, nell'ordine che usava il codice nativo.
+
+    `tier`+`name` espliciti → quelli. Altrimenti il topic legato alla chat che
+    il chiamante indica (il registro dei binding è del gateway, non del pack).
+    Altrimenti il canale da cui arriva la chiamata, che è la sola fonte che non
+    può sbagliare quando nessuno ha nominato nulla.
+    """
+    tier = str(arguments.get(decl.tier_arg) or "") if decl.tier_arg else ""
+    tname = str(arguments.get(decl.topic_arg) or "") if decl.topic_arg else ""
+    if tier and tname:
+        return tier, tname
+    chat = str(arguments.get(decl.chat_arg) or "").strip() if decl.chat_arg else ""
+    if chat:
+        # Oggi la chiave del registro dei binding coincide col namespace del
+        # connettore (`channel_bindings`, l'azione generica di #519 scrive lì).
+        from .tools import channel_bindings as _cb
+        legame = _cb.get(namespace, chat)
+        if not legame:
+            raise ValueError(
+                f"chat {chat} non legata a un topic: passa {decl.tier_arg}+"
+                f"{decl.topic_arg} del topic da cui leggere il file")
+        return str(legame.get("tier")), str(legame.get("topic"))
+    scope = current_channel()
+    if not scope or "/" not in scope:
+        raise ValueError(
+            f"nessun topic da cui leggere '{decl.path_arg}': passa "
+            f"{decl.tier_arg}+{decl.topic_arg}, oppure chiama da un topic")
+    tier, _, tname = scope.partition("/")
+    return tier, tname
+
+
+def _fill_declared_file(name: str, arguments: dict) -> bool:
+    """Consegna al verbo di un pack i BYTE del file di topic che ha chiesto.
+
+    Il pack dichiara quale argomento è il percorso e dove vanno i byte
+    (`files:` del manifest); il gateway risolve il topic, verifica che il
+    chiamante ne sia partecipante, legge e annota il passaggio. È l'unico modo
+    in cui un file di topic può finire in un processo che non è il gateway:
+    leggerlo dal pack salterebbe il compartimento e l'audit, e il percorso lo
+    sceglie il chiamante.
+
+    Gli argomenti che descrivevano DOVE leggere vengono tolti: hanno già fatto
+    il loro lavoro, e lasciarli vorrebbe dire mandare al backend un percorso di
+    topic che lui non deve conoscere.
+    """
+    from .connectors import resolved as _connectors
+
+    hit = _connectors.file_argument(name)
+    if hit is None:
+        return False
+    namespace, decl = hit
+    path = str(arguments.get(decl.path_arg) or "").strip()
+    if not path:
+        raise ValueError(f"'{decl.path_arg}' è obbligatorio per {name}")
+    tier, tname = _declared_file_topic(namespace, decl, arguments)
+    svc = _topics()
+    _require_topic_member(svc, tier, tname)
+    data = svc.read_file(tier, tname, path)
+    _note_crossing(data=data, kind="file")
+    import base64 as _b64
+    arguments[decl.bytes_arg] = _b64.b64encode(data).decode("ascii")
+    if decl.name_arg:
+        arguments[decl.name_arg] = _os.path.basename(path)
+    for chiave in (decl.path_arg, decl.tier_arg, decl.topic_arg):
+        if chiave:
+            arguments.pop(chiave, None)
+    LOG.info("file di topic consegnato a %s: %s/%s (%d byte)", name, tier,
+             tname, len(data))
+    return True
+
+
 def all_native_verb_names() -> list[str]:
     """Nomi di TUTTI i verbi nativi del gateway, indipendentemente dal chiamante.
 
@@ -4777,6 +4907,17 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
         # saltarne il gate, che è l'errore che non si vede.
         if not _verb_implemented(name):
             raise ValueError(f"unknown tool: {name}")
+
+        # I DEFAULT e i FILE che il manifest del connettore dichiara (#522).
+        # Il contesto (identità e stanza) lo riempie già `_fill_declared_context`
+        # all'ingresso di `call_tool`; questi due no, e non possono: leggono il
+        # registro dei binding e il filesystem dei topic, cioè fanno I/O e
+        # possono rifiutare. Qui siamo dentro l'audit — un rifiuto resta
+        # registrato — e ancora PRIMA del gate e del verdetto: la card che
+        # l'owner legge, la destinazione che il PDP calcola e gli argomenti che
+        # il backend riceve devono descrivere la stessa chiamata.
+        await asyncio.to_thread(_fill_declared_defaults, name, arguments)
+        await asyncio.to_thread(_fill_declared_file, name, arguments)
 
         # M-gate: conferma umana su azioni sotto supervisione — UN SOLO meccanismo.
         # (a) VERBI gated (packs/mcp/agents/…): consenso one-shot per-verbo.
