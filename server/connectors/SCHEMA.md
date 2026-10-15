@@ -73,6 +73,7 @@ That is a connector which only needs a credential — image generation is one.
 | `storage_remote` | no | topic storage backend the pack provides, see #524 |
 | `context` | no | call facts the gateway fills in, see below |
 | `files` | no | arguments that name a TOPIC FILE, which the gateway reads and delivers as bytes |
+| `defaults` | no | arguments the gateway fills **only when omitted**, see below |
 
 `blurb`, `scope` and `icon` (#520) are the card's COPY and its glyph. The
 drawing is a frontend asset — a logo is an SVG file, not gateway data — but the
@@ -284,7 +285,37 @@ mean the manifest decides where the call goes. It is also how the PDP would be
 disarmed in silence: a fact the gateway has no answer for empties the argument,
 and an extractor with no value is a verb with no declared destination.
 
-### `files`
+### `defaults[]`
+
+```
+defaults:
+  - verb: telegram.send
+    arg: chat_id
+    value: binding      # the chat bound to the calling topic
+```
+
+The gateway fills these arguments **only when the caller left them out**, and
+that rule is the whole difference from `context:`. A context is an *identity*
+and is always overwritten, because «the caller already set it» is the attack. A
+default is a convenience — «send it to this topic's chat» — and an explicit
+value from the caller has to win, or you could no longer write to any chat other
+than the bound one.
+
+Per **verb**, not per namespace: `telegram.inbox` has no chat to fill, and
+filling it anyway would hand the backend an argument its schema does not
+declare.
+
+`binding` is the whole list of values. It resolves through the gateway's
+bindings registry — the one the topic's button writes, which holds every
+connector's bindings — and that is the point: a pack process reading it itself
+would also be reading everybody else's, with the gateway's uid.
+
+A declared default that cannot be resolved is an **explained error**, not an
+argument left empty: empty, the PDP would compute a destination that does not
+exist and refuse the send talking about «unknown destination», which is the
+wrong symptom for «this topic has no chat connected».
+
+### `files[]`
 
 ```
 files:
@@ -482,6 +513,16 @@ connectors:
         scheme: tg
         arg: chat_id
         dtype: telegram
+    # `chat_id` omesso = la chat legata al topic da cui si chiama. Lo risolve
+    # il gateway, che è l'unico a tenere il registro dei binding; un esplicito
+    # del chiamante vince, se no non si potrebbe più scrivere altrove.
+    defaults:
+      - verb: telegram.send
+        arg: chat_id
+        value: binding
+      - verb: telegram.send_file
+        arg: chat_id
+        value: binding
     # `telegram.send_file` manda un file che sta in un topic. Il path lo nomina
     # l'agente, i byte li mette il gateway: leggere un file di topic è lavoro
     # suo — ci stanno attaccati il compartimento e l'audit di ciò che esce.

@@ -3183,6 +3183,64 @@ def _verb_implemented(name: str) -> bool:
         return True
 
 
+def _bound_chat(namespace: str) -> str:
+    """La chat legata al canale da cui si chiama, per questo connettore.
+
+    Il registro dei binding (`channel_bindings`) è del gateway: lo scrive il
+    bottone del topic e tiene i binding di TUTTI i connettori. Un backend di
+    pack che lo leggesse da sé leggerebbe anche quelli degli altri — e lo
+    farebbe con l'uid del gateway, cioè esattamente ciò che clodia-platform#544
+    sta chiudendo.
+    """
+    scope = current_channel()
+    if not scope or "/" not in scope:
+        return ""
+    tier, _, topic = scope.partition("/")
+    from .tools import channel_bindings as _cb
+    for cid, b in (_cb.load(namespace) or {}).items():
+        if (b.get("tier"), b.get("topic")) == (tier, topic):
+            return str(cid)
+    return ""
+
+
+def _fill_declared_defaults(name: str, arguments: dict) -> list[str]:
+    """Riempie gli argomenti OMESSI che il manifest dichiara in `defaults:`.
+
+    Differenza con `_fill_declared_context`, ed è tutta la ragione per cui sono
+    due blocchi e non uno: il contesto è un'identità e si sovrascrive sempre;
+    un default è una comodità e il valore esplicito del chiamante VINCE — se no
+    non si potrebbe più scrivere a una chat diversa da quella legata al topic.
+
+    Un default dichiarato che non si può risolvere è un errore spiegato, non un
+    argomento lasciato vuoto: vuoto, il PDP calcolerebbe una destinazione
+    inesistente e negherebbe l'invio parlando di «destinazione ignota», che è il
+    sintomo sbagliato per «questo topic non ha una chat collegata».
+    """
+    from .connectors import resolved as _connectors
+
+    hit = _connectors.default_arguments(name)
+    if hit is None:
+        return []
+    namespace, decls = hit
+    riempiti = []
+    for d in decls:
+        if str(arguments.get(d.arg) or "").strip():
+            continue          # il chiamante ha scelto: non si tocca
+        if d.value != "binding":
+            raise ValueError(f"default '{d.value}' non previsto da questo gateway")
+        chat = _bound_chat(namespace)
+        if not chat:
+            raise ValueError(
+                f"nessuna chat '{namespace}' collegata a questo topic: collegala "
+                f"dal pulsante del topic, oppure passa '{d.arg}' esplicito")
+        arguments[d.arg] = chat
+        riempiti.append(d.arg)
+    if riempiti:
+        LOG.info("default di pack su %s: %s dal binding del canale", name,
+                 ", ".join(riempiti))
+    return riempiti
+
+
 def _declared_file_topic(namespace: str, decl, arguments: dict) -> tuple[str, str]:
     """Il topic da cui leggere il file, nell'ordine che usava il codice nativo.
 
@@ -4850,6 +4908,11 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
         if not _verb_implemented(name):
             raise ValueError(f"unknown tool: {name}")
 
+        # I DEFAULT dichiarati dal pack (la chat legata a questo topic),
+        # PRIMA del verdetto egress: con l'argomento vuoto il PDP calcolerebbe
+        # una destinazione inesistente e negherebbe un invio legittimo parlando
+        # di «destinazione ignota», che è il sintomo sbagliato.
+        await asyncio.to_thread(_fill_declared_defaults, name, arguments)
         # Se il verbo di un pack si fa consegnare un FILE DI TOPIC, i byte li
         # mette il gateway: la lettura (compartimento + audit) resta di qua
         # anche quando l'implementazione è di là. Prima del gate e prima del
