@@ -33,4 +33,4 @@ class MessengerAttachmentTests(unittest.TestCase):
         self.assertEqual(out, {"ok": True})
         self.assertEqual(topics.reads,
                          [("SEAL-1", "pratica", "files/contratto.pdf")])
-        send.assert_called_once_with("123", "contratto.pdf", "ZG9jdW1lbnQ=", "")
+        send.assert_called_once_with("123", "contratto.pdf", "ZG9jdW1lbnQ=", "", thread_id=None)

@@ -48,7 +48,8 @@ async def updates(request: Request):
 
 
 async def send(request: Request):
-    """POST /internal/telegram/send {chat_id, text} → invia al gruppo."""
+    """POST /internal/telegram/send {chat_id, text, thread_id?} → invia al gruppo
+    (nel thread del forum, se dato: clodia-platform#548)."""
     _agent, err = _authorize(request)
     if err:
         return err
@@ -58,7 +59,7 @@ async def send(request: Request):
     if not chat_id:
         return JSONResponse({"error": "chat_id richiesto"}, status_code=400)
     try:
-        return JSONResponse(tg.send_internal(chat_id, text))
+        return JSONResponse(tg.send_internal(chat_id, text, thread_id=body.get("thread_id")))
     except Exception as e:  # noqa: BLE001
         LOG.warning("telegram send errore: %s", e)
         return JSONResponse({"error": str(e)[:200]}, status_code=502)
