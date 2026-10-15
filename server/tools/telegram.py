@@ -146,14 +146,42 @@ def drain_internal(chat_id: str) -> dict:
     return {"chat_id": cid, "messages": msgs, "count": len(msgs)}
 
 
-def send_internal(chat_id: str, text: str) -> dict:
+def thread_id_of(value) -> int | None:
+    """Il thread di un forum (`message_thread_id`), o None (clodia-platform#548).
+
+    Un supergruppo con i *topic* attivi divide la chat in thread: senza questo
+    parametro un messaggio va nel thread «Generale». Il thread decide solo DOVE
+    compare il messaggio dentro una chat già autorizzata — il controllo
+    dell'egress resta sulla chat (`tg:<chat_id>`).
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError("'thread_id' deve essere un intero positivo")
+    try:
+        tid = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError("'thread_id' deve essere un intero positivo") from None
+    if tid <= 0:
+        raise ValueError("'thread_id' deve essere un intero positivo")
+    return tid
+
+
+def _with_thread(params: dict, thread_id) -> dict:
+    tid = thread_id_of(thread_id)
+    if tid is not None:
+        params["message_thread_id"] = tid
+    return params
+
+
+def send_internal(chat_id: str, text: str, thread_id=None) -> dict:
     """Invia a una chat SENZA lease/inbox-check — per il channel-runner (trusted,
     unico consumer del binding chat↔topic)."""
     if not str(text).strip():
         raise ValueError("'text' non può essere vuoto")
     cid = _resolve_chat(chat_id)           # accetta chat_id numerico o nome gruppo
     res = api_call(_token_internal(), "sendMessage",
-                   {"chat_id": int(cid), "text": str(text)})
+                   _with_thread({"chat_id": int(cid), "text": str(text)}, thread_id))
     return {"ok": True, "chat_id": cid, "message_id": res.get("message_id")}
 
 
@@ -231,6 +259,10 @@ def poll_updates(timeout: int = 25) -> list:
                 "text": msg.get("text") or msg.get("caption") or "",
                 "file": _extract_file(msg),
                 "reply_to_bot": reply_to_bot,
+                # Thread del forum da cui arriva (clodia-platform#548): la
+                # risposta va lì, non nel thread «Generale».
+                "thread_id": (msg.get("message_thread_id")
+                              if msg.get("is_topic_message") else None),
             })
         st["last_error"] = None
         _save_state(st)
@@ -333,6 +365,8 @@ def _refresh(st: dict, token: str) -> int:
             # `from` sopra resta la stringa di display per l'etichetta proxy.
             "text": text,
             "date": msg.get("date"),
+            "thread_id": (msg.get("message_thread_id")
+                          if msg.get("is_topic_message") else None),
         }
         slot["queue"].append(entry)
         slot["last_preview"] = (text[:80] + "…") if len(text) > 80 else text
@@ -425,7 +459,7 @@ def poll(chat_id: str) -> dict:
             "lease_expiry": lease["expiry"]}
 
 
-def send(chat_id: str | None = None, text: str = "") -> dict:
+def send(chat_id: str | None = None, text: str = "", thread_id=None) -> dict:
     """Invia un messaggio a una chat. LEASE-FREE (modello telegram-proxy, 18 lug):
     il messaggero è l'UNICO mittente della colonia, quindi non serve il lease
     esclusivo — sarebbe solo attrito. Vale il vincolo di Telegram: si può scrivere
@@ -439,7 +473,8 @@ def send(chat_id: str | None = None, text: str = "") -> dict:
     cid = _resolve_chat_or_current(chat_id)  # esplicito: id/nome; omesso: binding del topic
     with _LOCK:
         token = _token()
-    res = api_call(token, "sendMessage", {"chat_id": int(cid), "text": text})
+    res = api_call(token, "sendMessage",
+                   _with_thread({"chat_id": int(cid), "text": text}, thread_id))
     return {"ok": True, "chat_id": cid, "message_id": res.get("message_id")}
 
 
@@ -471,7 +506,7 @@ def _post_multipart(token: str, method: str, fields: dict,
 
 
 def send_file(chat_id: str | None = None, filename: str = "", content_b64: str = "",
-             caption: str = "") -> dict:
+             caption: str = "", thread_id=None) -> dict:
     """Invia un file a una chat/gruppo come allegato (sendDocument) o, se è
     un'immagine, come foto (sendPhoto). LEASE-FREE. `chat_id` accetta id o
     nome; OMESSO → la chat legata al topic corrente (vedi `telegram.send`)."""
@@ -486,6 +521,7 @@ def send_file(chat_id: str | None = None, filename: str = "", content_b64: str =
     fields = {"chat_id": str(cid)}
     if caption:
         fields["caption"] = caption
+    _with_thread(fields, thread_id)
     with _LOCK:
         token = _token()
     res = _post_multipart(token, method, fields, field, filename, data, mime)

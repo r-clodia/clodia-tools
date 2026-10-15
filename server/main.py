@@ -1891,7 +1891,8 @@ _TELEGRAM_TOOLS: list[Tool] = [
                       "hanno già causato invii al gruppo sbagliato."),
          inputSchema={"type": "object", "properties": {
              "chat_id": {"type": "string", "description": "opzionale: default la chat del topic corrente"},
-             "text": {"type": "string"}},
+             "text": {"type": "string"},
+             "thread_id": {"type": "integer", "description": "opzionale: il topic (thread) di un gruppo-forum, es. il message_thread_id di «#funding»; omesso = thread Generale"}},
              "required": ["text"]}),
     Tool(name="telegram.send_file",
          description=("Invia un FILE del topic a una chat/gruppo Telegram come allegato "
@@ -1906,7 +1907,8 @@ _TELEGRAM_TOOLS: list[Tool] = [
              "path": {"type": "string", "description": "path del file nel topic, es. files/foo.png"},
              "tier": {"type": "string", "description": "opzionale (override topic)"},
              "name": {"type": "string", "description": "opzionale: nome del topic (override)"},
-             "caption": {"type": "string"}},
+             "caption": {"type": "string"},
+             "thread_id": {"type": "integer", "description": "opzionale: il topic (thread) di un gruppo-forum; omesso = thread Generale"}},
              "required": ["path"]}),
     Tool(name="telegram.lease_release",
          description="Rilascia anticipatamente il lease su una chat (no-op se non lo detieni).",
@@ -2305,7 +2307,7 @@ def _dispatch_telegram(name: str, a: dict):
     if verb == "poll":
         return tg.poll(a["chat_id"])
     if verb == "send":
-        return tg.send(a.get("chat_id"), a["text"])
+        return tg.send(a.get("chat_id"), a["text"], thread_id=a.get("thread_id"))
     if verb == "send_file":
         # Legge il file dal topic (compartimento: dev'essere participant) e lo invia.
         # `chat_id` ESPLICITO: il TOPIC si ricava dal gruppo (binding chat→topic),
@@ -2345,7 +2347,8 @@ def _dispatch_telegram(name: str, a: dict):
         data = _topics().read_file(tier, tname, a["path"])
         _note_crossing(data=data, kind="file")
         return tg.send_file(cid, _os.path.basename(a["path"]),
-                            base64.b64encode(data).decode("ascii"), a.get("caption", ""))
+                            base64.b64encode(data).decode("ascii"), a.get("caption", ""),
+                            thread_id=a.get("thread_id"))
     if verb == "lease_release":
         return tg.lease_release(a["chat_id"])
     if verb in ("listen", "unlisten"):
