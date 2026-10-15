@@ -74,13 +74,16 @@ class _Base(unittest.TestCase):
         self.declared: list[Service] = []
 
     def service(self, script: str = _SLEEPER, **kwargs) -> Service:
-        fields = {"name": "listener", "pack": "demo-pack",
+        fields = {"name": "listener", "pack": "demo-pack", "namespace": "demo",
                   "command": (sys.executable, "-c", script)}
         fields.update(kwargs)
         return Service(**fields)
 
     def supervisor(self) -> Supervisor:
-        sup = Supervisor(lambda: list(self.declared), clock=self.clock)
+        # The isolation self-check (#544) is covered by its own tests; here the
+        # filesystem is taken to enforce permission bits.
+        sup = Supervisor(lambda: list(self.declared), clock=self.clock,
+                         isolation_probe=lambda privs: "")
         self.addCleanup(sup.stop_all)
         return sup
 
@@ -381,11 +384,12 @@ class DeclaredFromTheRegistryTests(_Base):
         self.assertEqual([(s.pack, s.name) for s in services],
                          [("demo-pack", "listener")])
 
-    def test_an_unreadable_registry_declares_nothing_instead_of_raising(self):
+    def test_an_unreadable_registry_is_unknown_instead_of_raising(self):
+        """None, not []: an empty set would stop every running service."""
         from .supervisor import _declared_services
         with patch("server.connectors.resolved.registry",
                    side_effect=RuntimeError("volume illeggibile")):
-            self.assertEqual(_declared_services(), [])
+            self.assertIsNone(_declared_services())
 
 
 if __name__ == "__main__":

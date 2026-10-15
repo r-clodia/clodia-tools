@@ -228,6 +228,16 @@ manifest that declares one), `workdir`, `credentials` (vault entry names),
 State lives under `<datadir>/services/<pack>/<service>/` — `Service.state_dir`
 computes it, so the path is not written down twice.
 
+**At load** a service is refused, and with it the whole pack, when:
+
+- a `credentials` entry is outside the connector's own namespace (`<namespace>`
+  or `<namespace>_<name>`) or carries a core prefix (`github_`, `google_`,
+  `telegram_`, `provider_`, `app_`, …) — the same `vault_entry_problem` rule as a
+  provider credential;
+- `workdir` is absolute, starts with `~`, or contains `..`. A `workdir` is
+  relative to the pack directory (`<datadir>/packs/<pack>/`); empty means the
+  service state dir.
+
 **At run time** (`server/services/`, #515), and this is the contract a pack
 author writes against:
 
@@ -244,7 +254,20 @@ author writes against:
   a process that is up and fails every call is worse than one that says why;
 - the `health.target` must be on **loopback**: a service is reachable by the
   gateway only, and a health check pointing outside declares the opposite;
-- `stdout`/`stderr` go to `service.log` inside the state dir;
+- `stdout`/`stderr` go to `service.log` inside the state dir, rotated past
+  5 MB into `service.log.1` (one kept);
+- before the first isolated start the gateway checks that the service uid
+  **cannot** read a 0600 file of the gateway (`services/.isolation-probe/`). If
+  it can — storage that ignores permission bits, as OrbStack virtiofs on terra
+  (clodia-platform#544) — no service starts: each is `blocked` with
+  `isolation unavailable: …`, `isolation: unavailable` on the Tools page, and
+  one CRITICAL log line;
+- the credentials and the `workdir` are checked again at launch, the
+  `workdir` after resolving symlinks: it must stay inside the pack directory
+  or the state dir;
+- a service must listen on loopback only: a TCP socket of its uid in LISTEN
+  outside loopback stops it (`blocked`, with backoff). UDP is not checked;
+- a transient registry error keeps the running services as they are;
 - status, last error and restart count appear on the Tools page
   (`GET /tools`, `GET /internal/connectors`).
 

@@ -6,18 +6,22 @@ riceve il processo. Tutto ciò che è di sicurezza sta in questo file.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
+import secrets
 import shlex
 import socket
+import stat
 import subprocess
+import sys
 import zlib
 from pathlib import Path
 from urllib.parse import urlparse
 
 from .. import vault
-from ..connectors.manifest import Service
+from ..connectors.manifest import Service, vault_entry_problem, workdir_problem
 from ..tools import pack_runtime
 
 LOG = logging.getLogger("clodia-tools.services")
@@ -38,6 +42,26 @@ BASE_PATH = "/usr/local/bin:/usr/bin:/bin"
 #: un health check che punta fuori da qui dichiara un servizio che si aspetta
 #: di essere raggiunto da altrove: è il segnale più vicino, ed è controllabile.
 LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost", "ip6-localhost"})
+
+#: Size past which `service.log` is rotated into `service.log.1` (one kept).
+LOG_MAX_BYTES = 5 * 1024 * 1024
+
+#: Where the isolation self-check keeps its sentinel, under `<datadir>/services`
+#: — the same volume as the state dirs and the vault (clodia-platform#544).
+PROBE_DIR = ".isolation-probe"
+
+#: The child of the isolation probe. Exit 0 = it READ the sentinel (no
+#: isolation), 3 = permission denied (isolated), anything else = inconclusive.
+_PROBE_READER = (
+    "import sys\n"
+    "try:\n"
+    "    open(sys.argv[1], 'rb').read(1)\n"
+    "except PermissionError:\n"
+    "    sys.exit(3)\n"
+    "except BaseException:\n"
+    "    sys.exit(4)\n"
+    "sys.exit(0)\n"
+)
 
 
 class ServiceRefused(RuntimeError):
@@ -167,6 +191,24 @@ def kill_leftovers(uid: int | None) -> int:
     return killed
 
 
+def credentials_problem(service: Service) -> str:
+    """Why this service may not receive its declared credentials, or "".
+
+    The manifest already refuses a foreign or core entry; this is the same rule
+    applied again where the vault is actually read, so that a `Service` that did
+    not come from the parser — or a parser regression — still cannot reach
+    `github_pat`, `provider_*` or another pack's token (review of #362).
+    """
+    for name in service.credentials:
+        if not service.namespace:
+            return (f"credential '{name}': the service declares no namespace, "
+                    f"so it may not receive any vault entry")
+        problem = vault_entry_problem(name, service.namespace)
+        if problem:
+            return f"credential '{name}': {problem}"
+    return ""
+
+
 def credentials_env(service: Service) -> dict[str, str]:
     """Le SOLE credenziali che il manifest dichiara, come JSON in una variabile
     ciascuna. Una credenziale assente ferma il servizio: partire senza è il modo
@@ -176,6 +218,9 @@ def credentials_env(service: Service) -> dict[str, str]:
     entra nell'ambiente del figlio, che gira con un uid diverso da quello di
     chiunque altro.
     """
+    problem = credentials_problem(service)
+    if problem:
+        raise ServiceRefused(problem)
     env: dict[str, str] = {}
     for name in service.credentials:
         try:
@@ -235,9 +280,12 @@ def health_problem(service: Service) -> str:
     return ""
 
 
-def probe(service: Service, privs: tuple[int, int] | None = None
-          ) -> tuple[bool, str]:
-    """Esegue l'health check dichiarato. `(ok, motivo)`; mai un'eccezione."""
+def probe(service: Service, privs: tuple[int, int] | None = None,
+          env: dict[str, str] | None = None) -> tuple[bool, str]:
+    """Esegue l'health check dichiarato. `(ok, motivo)`; mai un'eccezione.
+
+    `env`: l'ambiente costruito all'avvio del processo. Passarlo evita una
+    lettura della vault (e una riga di audit) a ogni probe `command`."""
     kind, target = service.health_kind, service.health_target
     if not kind:
         return True, ""
@@ -262,9 +310,209 @@ def probe(service: Service, privs: tuple[int, int] | None = None
         if privs is not None:
             kw.update(user=privs[0], group=privs[1], extra_groups=[])
         done = subprocess.run(argv, timeout=10, capture_output=True,
-                              env=build_env(service), check=False, **kw)
+                              env=env if env is not None else build_env(service),
+                              check=False, **kw)
         if done.returncode != 0:
             return False, f"health command: uscita {done.returncode}"
         return True, ""
     except Exception as exc:  # noqa: BLE001 - un probe non deve mai propagare
         return False, f"health {kind}: {type(exc).__name__}: {str(exc)[:120]}"
+
+
+# -- workdir -----------------------------------------------------------------
+def pack_dir(service: Service) -> Path:
+    return data_dir() / "packs" / service.pack
+
+
+def resolve_workdir(service: Service) -> Path:
+    """The directory the service starts in, confined to its pack directory or
+    its own state dir after resolving symlinks and `..`.
+
+    The `chdir` happens as root, before the privilege drop: an unconfined path
+    would put the service inside a directory its uid could never enter.
+    """
+    state = state_dir(service).resolve()
+    if not service.workdir:
+        return state
+    problem = workdir_problem(service.workdir)
+    if problem:
+        raise ServiceRefused(problem)
+    root = pack_dir(service).resolve()
+    target = (root / service.workdir).resolve()
+    if not (target.is_relative_to(root) or target.is_relative_to(state)):
+        raise ServiceRefused(
+            f"workdir '{service.workdir}' resolves outside the pack directory "
+            f"and the service state dir")
+    if not target.is_dir():
+        raise ServiceRefused(f"workdir '{service.workdir}' is not a directory")
+    return target
+
+
+# -- log ---------------------------------------------------------------------
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+
+def _check_plain(fd: int, path: Path) -> os.stat_result:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        os.close(fd)
+        raise ServiceRefused(
+            f"{path.name} is not a plain file with a single link: refusing to "
+            f"write to it")
+    return st
+
+
+def open_log(path: Path) -> int:
+    """Open `service.log` for appending, WITHOUT following a symlink.
+
+    The state dir belongs to the service uid and the log is opened by the
+    gateway (root): following a symlink or a hard link planted there would let
+    the service make root append to any file.
+    """
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | _NOFOLLOW
+                     | _CLOEXEC, 0o600)
+    except OSError as exc:
+        raise ServiceRefused(f"{path.name}: cannot open safely ({exc.strerror})") from exc
+    _check_plain(fd, path)
+    return fd
+
+
+def rotate_log(path: Path | str, limit: int | None = None) -> bool:
+    """Past `LOG_MAX_BYTES`, keep the last `limit` bytes in `service.log.1` and
+    truncate `service.log` in place. True if it rotated.
+
+    In place (copy + `ftruncate`), not by rename: the running child holds the
+    file open with O_APPEND, so after the truncation it keeps writing at the new
+    end of the same file. Every open refuses symlinks, as in `open_log`.
+    """
+    path = Path(path)
+    limit = LOG_MAX_BYTES if limit is None else limit
+    try:
+        fd = os.open(path, os.O_RDWR | _NOFOLLOW | _CLOEXEC)
+    except OSError:
+        return False
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size <= limit:
+            return False
+        kept = path.with_name(path.name + ".1")
+        try:
+            os.unlink(kept)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+        try:
+            out = os.open(kept, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW
+                          | _CLOEXEC, 0o600)
+        except OSError:
+            out = -1
+        if out >= 0:
+            try:
+                os.lseek(fd, max(0, st.st_size - limit), os.SEEK_SET)
+                remaining = limit
+                while remaining > 0:
+                    chunk = os.read(fd, min(remaining, 1 << 16))
+                    if not chunk:
+                        break
+                    os.write(out, chunk)
+                    remaining -= len(chunk)
+            finally:
+                os.close(out)
+        os.ftruncate(fd, 0)
+        return True
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+# -- isolation self-check (clodia-platform#544) ------------------------------
+def isolation_probe(privs: tuple[int, int] | None) -> str:
+    """Prove that the service uid cannot read a 0600 file of the gateway.
+
+    Returns "" when it is denied, otherwise why isolation is unavailable. On
+    terra the datadir is an OrbStack virtiofs bind mount that ignores permission
+    bits: a dedicated uid there isolates nothing, and a service would read the
+    vault. Inconclusive means unavailable: this check fails closed.
+    """
+    root = data_dir() / "services" / PROBE_DIR
+    root.mkdir(parents=True, exist_ok=True)
+    os.chmod(root, 0o711)
+    sentinel = root / "sentinel"
+    try:
+        os.unlink(sentinel)
+    except FileNotFoundError:
+        pass
+    fd = os.open(sentinel, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW
+                 | _CLOEXEC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, secrets.token_hex(16).encode())
+    finally:
+        os.close(fd)
+    kw: dict = {}
+    if privs is not None:
+        kw.update(user=privs[0], group=privs[1], extra_groups=[])
+    done = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [sys.executable, "-I", "-c", _PROBE_READER, str(sentinel)],
+        env={"PATH": BASE_PATH}, cwd="/", stdin=subprocess.DEVNULL,
+        capture_output=True, timeout=15, check=False, **kw)
+    who = f"uid {privs[0]}" if privs is not None else "the gateway user"
+    if done.returncode == 3:
+        return ""
+    if done.returncode == 0:
+        return (f"{who} could read a 0600 file owned by the gateway "
+                f"({sentinel}): this storage does not enforce permission bits "
+                f"(clodia-platform#544), so a service uid isolates nothing")
+    return (f"isolation probe inconclusive (exit {done.returncode}) as {who}: "
+            f"failing closed")
+
+
+# -- network exposure --------------------------------------------------------
+_PROC_NET = ("/proc/net/tcp", "/proc/net/tcp6")
+
+
+def _decode_address(hex_addr: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    raw = bytes.fromhex(hex_addr)
+    # /proc/net stores each 32-bit word in host (little-endian) order.
+    swapped = b"".join(raw[i:i + 4][::-1] for i in range(0, len(raw), 4))
+    return ipaddress.ip_address(swapped)
+
+
+def exposed_listeners(uid: int, tables: list[str] | None = None) -> list[str]:
+    """TCP sockets in LISTEN owned by `uid` and bound outside loopback.
+
+    Read from `/proc/net/tcp{,6}` of the gateway's network namespace, which the
+    services share: cheap enough to run on every reconcile. UDP is not covered
+    (an unconnected client socket looks like a bound one).
+    """
+    if tables is None:
+        tables = []
+        for name in _PROC_NET:
+            try:
+                tables.append(Path(name).read_text())
+            except OSError:
+                continue
+    found: list[str] = []
+    for table in tables:
+        for line in table.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) < 8 or fields[3] != "0A":
+                continue
+            try:
+                if int(fields[7]) != uid:
+                    continue
+                addr_hex, port_hex = fields[1].split(":")
+                addr = _decode_address(addr_hex)
+                port = int(port_hex, 16)
+            except ValueError:
+                continue
+            mapped = getattr(addr, "ipv4_mapped", None)
+            if addr.is_loopback or (mapped is not None and mapped.is_loopback):
+                continue
+            found.append(f"[{addr}]:{port}" if addr.version == 6 else f"{addr}:{port}")
+    return found

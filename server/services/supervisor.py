@@ -66,36 +66,50 @@ class _Running:
     health_due: float = 0.0
     health_failures: int = 0
     log: str = field(default="", repr=False)
+    #: The environment the CURRENT process was started with. Kept so a
+    #: `command` health probe does not read the vault at every round.
+    env: dict | None = field(default=None, repr=False)
 
     @property
     def key(self) -> tuple[str, str]:
         return self.service.pack, self.service.name
 
 
-def _declared_services() -> list[Service]:
+def _declared_services() -> list[Service] | None:
     """I servizi dei pack installati, dal registry dei connettori.
 
     Dal registry e non da una scansione nostra di `pack.yaml`: un pack rifiutato
     (manifest malformato, namespace di un altro) non è nel registry, e i suoi
     servizi non devono girare. Una seconda lettura dei file sarebbe una seconda
     opinione su che cosa è installato.
+
+    None when the registry cannot be read: "unknown", not "nothing declared".
+    Treating a transient error as an empty set would stop every running service
+    (review of clodia-tools #362); `reconcile` keeps the last known set instead.
     """
     from ..connectors import resolved
     try:
         return list(resolved.registry().services())
     except Exception as exc:  # noqa: BLE001 - il registry non deve fermare il ciclo
-        LOG.error("services: registry illeggibile (%s): nessun servizio dichiarato",
-                  exc)
-        return []
+        LOG.error("services: registry unreadable (%s): keeping the last known "
+                  "set of services", exc)
+        return None
 
 
 class Supervisor:
     """I servizi di questa istanza. Una sola istanza viva (`supervisor()`)."""
 
-    def __init__(self, declared: Callable[[], Iterable[Service]] | None = None,
-                 *, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, declared: Callable[[], Iterable[Service] | None] | None = None,
+                 *, clock: Callable[[], float] = time.monotonic,
+                 isolation_probe: Callable[[tuple[int, int]], str] | None = None
+                 ) -> None:
         self._declared = declared or _declared_services
         self._clock = clock
+        self._probe_isolation = isolation_probe or launch.isolation_probe
+        #: None = not probed yet; "" = the uid isolates; text = why it does not.
+        #: Probed once per gateway process: the storage under the datadir does
+        #: not change while the gateway runs, and fixing it means a restart.
+        self._isolation: str | None = None
         self._entries: dict[tuple[str, str], _Running] = {}
         self._lock = threading.Lock()
 
@@ -103,7 +117,12 @@ class Supervisor:
     def reconcile(self) -> None:
         """Porta i processi vivi su ciò che i pack dichiarano ADESSO."""
         with self._lock:
-            declared = {(s.pack, s.name): s for s in self._declared()}
+            found = self._declared()
+            if found is None:
+                # Registry unreadable this round: keep what was declared.
+                declared = {k: e.service for k, e in self._entries.items()}
+            else:
+                declared = {(s.pack, s.name): s for s in found}
             for key, entry in list(self._entries.items()):
                 if key not in declared:
                     self._stop(entry, "il pack non lo dichiara più")
@@ -125,6 +144,10 @@ class Supervisor:
         if entry.proc is not None:
             code = entry.proc.poll()
             if code is None:
+                if entry.log:
+                    launch.rotate_log(entry.log)
+                if self._exposed(entry):
+                    return
                 self._health(entry)
                 return
             self._exited(entry, code)
@@ -139,16 +162,40 @@ class Supervisor:
         return {e.uid for e in self._entries.values()
                 if e.uid is not None and e.key != entry.key}
 
+    def _isolation_problem(self, privs: tuple[int, int]) -> str:
+        """The isolation self-check (clodia-platform#544), run once."""
+        if self._isolation is None:
+            try:
+                self._isolation = self._probe_isolation(privs) or ""
+            except Exception as exc:  # noqa: BLE001 - a probe that fails is a no
+                self._isolation = (f"isolation probe failed "
+                                   f"({type(exc).__name__}: {str(exc)[:200]})")
+            if self._isolation:
+                LOG.critical(
+                    "services: isolation unavailable, NO pack service will be "
+                    "started: %s", self._isolation)
+        return self._isolation
+
     def _start(self, entry: _Running) -> None:
         service = entry.service
         try:
-            problem = launch.health_problem(service)
+            problem = launch.health_problem(service) \
+                or launch.credentials_problem(service)
             if problem:
                 raise launch.ServiceRefused(problem)
             privs = launch.privileges(service, self._taken_uids(entry))
+            if privs is not None:
+                unavailable = self._isolation_problem(privs)
+                if unavailable:
+                    # Before anything is prepared or read from the vault, and
+                    # without a log line per round: the CRITICAL was logged once.
+                    entry.state = "blocked"
+                    entry.last_error = f"isolation unavailable: {unavailable}"
+                    entry.next_attempt = self._clock() + MAX_BACKOFF
+                    return
             path = launch.prepare_state_dir(service, privs)
+            workdir = str(launch.resolve_workdir(service))
             env = launch.build_env(service)
-            workdir = service.workdir or str(path)
             kw: dict = {}
             if privs is not None:
                 # Prima di avviare: niente resti di una vita precedente sotto
@@ -161,14 +208,15 @@ class Supervisor:
                 kw.update(user=privs[0], group=privs[1], extra_groups=[],
                           umask=0o077)
             logfile = path / "service.log"
-            handle = open(logfile, "ab", buffering=0)  # noqa: SIM115 - vive quanto il figlio
+            launch.rotate_log(logfile)
+            handle = launch.open_log(logfile)
             try:
                 proc = subprocess.Popen(  # noqa: S603 - argv dal manifest, mai una shell
                     list(service.command), cwd=workdir, env=env,
                     stdin=subprocess.DEVNULL, stdout=handle, stderr=handle,
                     close_fds=True, start_new_session=True, **kw)
             finally:
-                handle.close()
+                os.close(handle)
         except Exception as exc:  # noqa: BLE001 - un servizio rotto non ferma gli altri
             entry.state = "blocked"
             entry.last_error = f"{type(exc).__name__}: {str(exc)[:300]}"
@@ -178,6 +226,7 @@ class Supervisor:
                       service.pack, service.name, entry.last_error)
             return
         entry.proc = proc
+        entry.env = env
         entry.uid = privs[0] if privs else None
         entry.state = "running"
         entry.since = self._clock()
@@ -218,6 +267,7 @@ class Supervisor:
     def _stop(self, entry: _Running, reason: str) -> None:
         proc = entry.proc
         entry.proc = None
+        entry.env = None
         entry.state = "stopped"
         if proc is None or proc.poll() is not None:
             return
@@ -251,13 +301,35 @@ class Supervisor:
                 pass
 
     # -- salute -----------------------------------------------------------
+    def _exposed(self, entry: _Running) -> bool:
+        """Stop a service listening on TCP outside loopback.
+
+        A service is reachable by the gateway only (#515): one bound to 0.0.0.0
+        is reachable from the whole stack and bypasses the egress proxy. Only
+        for an isolated service, whose sockets carry its own uid.
+        """
+        if entry.uid is None:
+            return False
+        exposed = launch.exposed_listeners(entry.uid)
+        if not exposed:
+            return False
+        service = entry.service
+        self._stop(entry, "listening outside loopback")
+        entry.state = "blocked"
+        entry.failures += 1
+        entry.next_attempt = self._clock() + self._backoff(entry)
+        entry.last_error = (f"listening outside loopback ({', '.join(exposed[:4])}): "
+                            f"a service is reachable by the gateway only")
+        LOG.error("services: %s/%s %s", service.pack, service.name, entry.last_error)
+        return True
+
     def _health(self, entry: _Running) -> None:
         service = entry.service
         if not service.health_kind or self._clock() < entry.health_due:
             return
         entry.health_due = self._clock() + max(1, service.health_interval)
         privs = (entry.uid, launch.gid_for(service.pack)) if entry.uid is not None else None
-        ok, why = launch.probe(service, privs)
+        ok, why = launch.probe(service, privs, entry.env)
         if ok:
             entry.health = "ok"
             entry.health_failures = 0
@@ -273,6 +345,15 @@ class Supervisor:
             entry.failures += 1
             entry.state = "backoff"
             entry.next_attempt = self._clock() + self._backoff(entry)
+
+    def _isolation_state(self, entry: _Running) -> str:
+        if entry.uid is not None:
+            return "ok"
+        if self._isolation:
+            return "unavailable"
+        if launch.isolation_disabled():
+            return "off"
+        return "unknown" if self._isolation is None else "ok"
 
     # -- spegnimento e lettura --------------------------------------------
     def stop_all(self) -> None:
@@ -304,6 +385,7 @@ class Supervisor:
                 "last_exit": entry.last_exit,
                 "last_error": entry.last_error,
                 "health": entry.health,
+                "isolation": self._isolation_state(entry),
                 "state_dir": str(launch.state_dir(entry.service)),
             })
         return rows

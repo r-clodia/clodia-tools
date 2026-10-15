@@ -36,6 +36,7 @@ quietly lying.
 """
 from __future__ import annotations
 
+import dataclasses
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
@@ -823,6 +824,10 @@ class Service:
     command: tuple[str, ...]
     workdir: str = ""
     credentials: tuple[str, ...] = ()
+    #: The namespace of the connector that declares the service. Carried so the
+    #: supervisor can re-apply `vault_entry_problem` at launch (defence in
+    #: depth, review of clodia-tools #362): "" means no credential at all.
+    namespace: str = ""
     health_kind: str = ""
     health_target: str = ""
     health_interval: int = 30
@@ -1213,6 +1218,36 @@ def _parse_int(raw: Any, where: str, *, default: int, minimum: int = 1) -> int:
     return raw
 
 
+def workdir_problem(workdir: str) -> str:
+    """Why `workdir` may not be a service's working directory, or "".
+
+    The supervisor `chdir`s into it BEFORE dropping privileges (that is how
+    CPython's `Popen(user=…)` works), so an arbitrary path would put the service
+    inside a directory its uid could never enter — `/gateway-state`, the vault.
+    A workdir is therefore a path RELATIVE to the pack directory, with no `..`
+    and nothing absolute; empty means the service state dir. Symlinks are
+    resolved, and the result re-confined, at launch (`services.launch`).
+    """
+    if not workdir:
+        return ""
+    if "\x00" in workdir or "\\" in workdir:
+        return f"workdir '{workdir}' contains a forbidden character"
+    if workdir.startswith(("/", "~")):
+        return (f"workdir '{workdir}' is absolute; it must be relative to the "
+                f"pack directory (empty means the service state dir)")
+    if ".." in workdir.split("/"):
+        return f"workdir '{workdir}' leaves the pack directory ('..')"
+    return ""
+
+
+def _workdir(raw: Any, where: str) -> str:
+    workdir = _text(raw, where, required=False)
+    problem = workdir_problem(workdir)
+    if problem:
+        raise ManifestError(f"{where}: {problem}")
+    return workdir
+
+
 def _parse_service(raw: Any, where: str, *, pack: str) -> Service:
     data = _mapping(raw, where)
     name = _matching(_text(data.get("name"), f"{where}.name"), _ID, f"{where}.name")
@@ -1253,7 +1288,7 @@ def _parse_service(raw: Any, where: str, *, pack: str) -> Service:
         name=name,
         pack=pack,
         command=command,
-        workdir=_text(data.get("workdir"), f"{where}.workdir", required=False),
+        workdir=_workdir(data.get("workdir"), f"{where}.workdir"),
         credentials=credentials,
         health_kind=health_kind,
         health_target=health_target,
@@ -1395,6 +1430,14 @@ def parse_connector(raw: Any, *, pack: str,
         if s.name in seen_services:
             raise ManifestError(f"{where}: service '{s.name}' declared twice")
         seen_services.add(s.name)
+        # Same rule as a provider credential (review of clodia-tools #362): a
+        # service receives each declared entry as `CLODIA_CREDENTIAL_*`, so a
+        # bare regex would hand any pack `github_pat` or another pack's token.
+        for entry in s.credentials if not builtin else ():
+            problem = vault_entry_problem(entry, namespace, reserved)
+            if problem:
+                raise ManifestError(f"{where}.services '{s.name}': {problem}")
+    services = tuple(dataclasses.replace(s, namespace=namespace) for s in services)
 
     card = data.get("tools_card")
     remote = data.get("storage_remote")
