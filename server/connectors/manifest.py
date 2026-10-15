@@ -39,6 +39,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
+from urllib.parse import urlsplit
 
 #: Version of *this grammar*. A manifest declares the version it was written
 #: for; a manifest from the future is refused by name instead of being parsed
@@ -1220,6 +1221,23 @@ def _check_action_schemes(actions, owned, where: str, *,
                         f"forms")
 
 
+def _docs_url(raw: Any, where: str) -> str:
+    """`docs_url` goes into an `href` on the Tools page, where the session
+    token sits in localStorage: a `javascript:` or `data:` URL would run in
+    that origin. A pack may point at its documentation, nothing else, so only
+    an absolute `https://` URL with a host is accepted (review of #365)."""
+    value = _text(raw, where, required=False)
+    if not value:
+        return ""
+    parts = urlsplit(value)
+    if not value.startswith("https://") or parts.scheme != "https" \
+            or not parts.netloc or any(c.isspace() for c in value):
+        raise ManifestError(
+            f"{where}: '{value}' is not an https:// URL; only https:// "
+            f"documentation links are accepted")
+    return value
+
+
 def _parse_tools_card(raw: Any, where: str) -> ToolsCard:
     data = _mapping(raw, where)
     return ToolsCard(
@@ -1228,7 +1246,7 @@ def _parse_tools_card(raw: Any, where: str) -> ToolsCard:
         status_verb=_text(data.get("status_verb"), f"{where}.status_verb",
                           required=False),
         test_verb=_text(data.get("test_verb"), f"{where}.test_verb", required=False),
-        docs_url=_text(data.get("docs_url"), f"{where}.docs_url", required=False),
+        docs_url=_docs_url(data.get("docs_url"), f"{where}.docs_url"),
         blurb=_text(data.get("blurb"), f"{where}.blurb", required=False),
         scope=_text(data.get("scope"), f"{where}.scope", required=False),
         icon=_text(data.get("icon"), f"{where}.icon", required=False),

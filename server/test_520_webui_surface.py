@@ -346,6 +346,64 @@ class DriveActionTests(_NoPacks):
         with self.assertRaises(ca.ActionError):
             self._render("gdrive://")
 
+    def test_a_uri_of_the_scheme_must_keep_the_template_shape(self):
+        """Review of #365: a value that is ALREADY a `gdrive:` URI used to
+        replace the template outright, so the Drive button — declared for
+        `gdrive:folder/{folder}` — could write `gdrive:file/…` or
+        `gdrive:doc/…`, i.e. any grantable form of the scheme. A canonical
+        value stands for itself only if it has the template's shape."""
+        for valore in ("gdrive:file/1AbCdEfGhIjKlMnOpQrStUv",
+                       "gdrive:doc/1AbCdEfGhIjKlMnOpQrStUv",
+                       "https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUv/view",
+                       "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUv/edit"):
+            with self.subTest(valore=valore):
+                with self.assertRaises(ca.ActionError):
+                    self._render(valore)
+
+    def test_a_folder_uri_of_the_right_shape_is_still_accepted(self):
+        self.assertEqual(
+            self._render("gdrive:folder/1AbCdEfGhIjKlMnOpQrStUv"),
+            self._render("1AbCdEfGhIjKlMnOpQrStUv"))
+
+
+class DocsUrlTests(unittest.TestCase):
+    """Review of #365: `tools_card.docs_url` ends up in an `href` on the Tools
+    page, where the session token lives in localStorage. A pack may point at
+    its documentation, not run script: only `https://` is accepted."""
+
+    @staticmethod
+    def _card(docs_url):
+        return {"id": "p", "manifest_version": cm.MANIFEST_VERSION,
+                "namespace": "p",
+                "schemes": [{"scheme": "pp", "direction": "egress"}],
+                "tools_card": {"setup_label": "Set up", "docs_url": docs_url}}
+
+    def test_non_https_urls_are_refused_at_parse_time(self):
+        for url in ("javascript:alert(document.cookie)",
+                    "JavaScript:alert(1)",
+                    " javascript:alert(1)",
+                    "data:text/html,<script>alert(1)</script>",
+                    "http://example.com/docs",
+                    "//example.com/docs",
+                    "/relative/docs",
+                    "https:",
+                    "https://"):
+            with self.subTest(url=url):
+                with self.assertRaises(cm.ManifestError):
+                    cm.parse_connector(self._card(url), pack="p")
+
+    def test_an_https_url_is_kept(self):
+        c = cm.parse_connector(self._card("https://example.com/docs"), pack="p")
+        self.assertEqual(c.tools_card.docs_url, "https://example.com/docs")
+
+    def test_builtin_manifests_carry_no_instance_names(self):
+        """The builtin manifests ship in a public repository."""
+        import pathlib
+        cartella = pathlib.Path(cm.__file__).parent / "builtin_manifests"
+        for f in sorted(cartella.glob("*.yaml")):
+            with self.subTest(file=f.name):
+                self.assertNotIn("wainston", f.read_text().lower())
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

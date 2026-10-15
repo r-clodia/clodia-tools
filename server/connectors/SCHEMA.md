@@ -79,6 +79,10 @@ is the per-connector knowledge the issue removes. A connector without a
 `tools_card` is a vocabulary, not a card, and the Tools page does not draw it;
 an `icon` the page does not know falls back to the generic glyph.
 
+`docs_url` must be an absolute `https://` URL: the Tools page puts it in an
+`href`, and anything else (`javascript:`, `data:`, `http:`, relative) is refused
+when the manifest is parsed.
+
 There is **no `seal_cap`**, and writing one is an error. The epic decided there
 is no SEAL ceiling on a binding: the owner decides per binding at the gate, and
 the gate shows the topic's tier. Today's `_CHANNEL_SEAL_CAP` and

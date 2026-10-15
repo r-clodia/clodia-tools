@@ -38,6 +38,16 @@ LOG = logging.getLogger("clodia-tools.connectors")
 _PLACEHOLDER = re.compile(r"\{([A-Za-z0-9_]+)\}")
 
 
+def _shape(template: str) -> "re.Pattern[str]":
+    """The template as a pattern: its literal text verbatim, each placeholder
+    a non-empty run. `gdrive:folder/{folder}` matches `gdrive:folder/X` and
+    not `gdrive:file/X`."""
+    parts = _PLACEHOLDER.split(template)
+    # split() alternates literal, name, literal, …: the odd items are names.
+    return re.compile("".join(
+        "(.+)" if i % 2 else re.escape(part) for i, part in enumerate(parts)))
+
+
 class ActionError(ValueError):
     """Something the owner can fix, with the message they should read."""
 
@@ -158,6 +168,16 @@ def render(action: TopicAction, values: dict[str, str]) -> dict[str, list[str]]:
         if len(nomi) == 1 and nomi[0] in values:
             canonico = eg.canonical(values[nomi[0]])
             if canonico.partition(":")[0] == scheme and ":" in canonico:
+                # Review of #365: a URI of the scheme stands for itself only
+                # if it has the TEMPLATE's shape. Otherwise a Drive action
+                # declared for `gdrive:folder/{folder}` could write
+                # `gdrive:file/…` or `gdrive:doc/…` — any grantable form of
+                # the scheme, not the one the manifest declared.
+                if not _shape(template).fullmatch(canonico):
+                    raise ActionError(
+                        f"'{values[nomi[0]]}' è un indirizzo '{scheme}:' ma "
+                        f"non della forma che questa azione scrive "
+                        f"('{template}')")
                 return canonico
         return eg.canonical(_PLACEHOLDER.sub(_sub, template))
 

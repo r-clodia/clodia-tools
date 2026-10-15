@@ -77,7 +77,6 @@ connectors:
       blurb: >-
         Gli agenti inviano/ricevono messaggi (tool telegram.*) con lease
         per-chat. Crea un bot dedicato con @BotFather e incolla il token.
-        In dubbio? Chiedi a Wainston.
       scope: api.telegram.org/bot
     # Chat in arrivo: chi scrive nel gruppo non è controllato, e una risposta
     # mescola più autori.
