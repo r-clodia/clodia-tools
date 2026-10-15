@@ -71,6 +71,7 @@ That is a connector which only needs a credential — image generation is one.
 | `tools_card` | no | what the Tools page shows: `setup_label`, `status_verb`, `test_verb`, `docs_url`, `blurb`, `scope`, `icon` |
 | `services` | no | long-running processes, see #515 |
 | `storage_remote` | no | topic storage backend the pack provides, see #524 |
+| `context` | no | call facts the gateway fills in, see below |
 
 `blurb`, `scope` and `icon` (#520) are the card's COPY and its glyph. The
 drawing is a frontend asset — a logo is an SVG file, not gateway data — but the
@@ -242,6 +243,46 @@ Without the distinction, the mailbox action would take the address to authorise
 from the request body, and a whitelist written by whoever is subject to it is not
 a whitelist. A pack may *point at* an option set, never define one.
 
+### `context[]`
+
+Facts about the call in progress that the **gateway** fills in, one row per
+argument (`arg` + `value`). `value` is one of a closed list — today `channel`
+(the room the call comes from, `TIER/name`) and `agent` (who is calling).
+
+```
+context:
+  - arg: channel
+    value: channel
+  - arg: agent
+    value: agent
+```
+
+This is not a convenience. A native verb reads both from the process: the
+channel is a **signed claim** and the agent an authenticated identity, so no
+caller can lie about either. A pack's MCP server has neither, and if the agent
+passed them they would be ordinary arguments — forgeable — and «send this to
+this topic's chat» would become «send this to whichever chat I name», which is
+the defect that produced the messages to the wrong group on 23 Sep 2026.
+
+So the gateway fills them, and **overwrites** whatever the caller sent. It does
+not prefer the caller's value, and it does not fall back to it: a fallback is
+the same forgery with one more step, reachable by calling from wherever the
+gateway has no answer. When the gateway genuinely has no answer — there is no
+channel outside a room — the argument is **removed** rather than blanked, so
+the connector can tell «I don't know» from «it is empty».
+
+The rows apply to every verb of the connector's namespace, not only to the ones
+listed in `verbs:`: an inbound verb declares no destination and still needs to
+know who is asking. They belong to the pack that **owns the vocabulary**; a
+contributor (`extends`) may not declare them.
+
+An `arg` that a verb mapping reads its destination from is **refused**. A
+destination is a property of the call — it is what the owner reads on the gate
+card and what the whitelist compares — and letting the manifest write it would
+mean the manifest decides where the call goes. It is also how the PDP would be
+disarmed in silence: a fact the gateway has no answer for empties the argument,
+and an extractor with no value is a verb with no declared destination.
+
 ### `services[]`
 
 The shape #515 fixed, parsed here so the supervisor consumes one format instead
@@ -327,6 +368,27 @@ it. Letting the pack win would mean an installed manifest redefining what
 `mailto:` means while the native implementation is still the thing doing the
 sending. Each migration deletes its file in the change that adds the pack.
 
+**The switch, while a migration is in flight (#522).** Deleting the file is the
+end of a migration, not its beginning: in between, the owner of one instance
+turns the connector over to the pack and watches real traffic. That is
+`profile.yaml`:
+
+```
+connectors:
+  telegram: pack        # native (default) | pack
+```
+
+With `pack`, three things happen together, and they are three faces of one
+statement — *the gateway no longer implements this*: the builtin file above is
+left out of the registry, the native verbs of that namespace leave the tool
+catalogue and the dispatch, and the namespace and its vault prefix stop being
+reserved, so the pack's declaration is finally held instead of being refused
+for collision. Nothing is shared and nothing runs twice: a connector has one
+implementation per instance, and the profile says which.
+
+Absent, unreadable or misspelled, the file means `native`. A migration is
+switched on; it is never suffered.
+
 ---
 
 ## Examples
@@ -407,6 +469,15 @@ connectors:
     tools_card:
       setup_label: Connect a bot
       status_verb: telegram.status
+    # Who is calling, and from which room. The native verbs read both from the
+    # process — the signed channel claim and the authenticated agent — and a
+    # pack's MCP server has neither. Declared here, filled by the gateway, and
+    # overwritten even when the caller sent them: see `context[]`.
+    context:
+      - arg: channel
+        value: channel
+      - arg: agent
+        value: agent
 
   - id: mail
     manifest_version: 1

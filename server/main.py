@@ -1951,6 +1951,51 @@ _TELEGRAM_TOOLS: list[Tool] = [
 ]
 
 
+def _packaged_namespaces() -> frozenset[str]:
+    """I namespace di cui, su questa istanza, il gateway non è più il padrone.
+
+    Quando il profilo mette un connettore su `pack` (clodia-platform#522,
+    `instance_profile.connector_mode`), i verbi di quel namespace arrivano dal
+    backend MCP del pack e il gateway smette di esporli e di servirli.
+
+    Derivati dal MANIFEST builtin del connettore (`builtin.released()`), non da
+    una lista Python scritta qui: è il manifest a dire quale namespace quel
+    connettore occupa, e un elenco di gruppi `_*_TOOLS` lascerebbe indietro i
+    verbi che stanno altrove — `telegram.roster` è dichiarato dentro
+    `_TOPIC_TOOLS`, e una migrazione che lo dimenticasse lo lascerebbe servito
+    dal gateway mentre il pack lo dichiara suo. Non darebbe errore: funzionerebbe
+    dalla parte sbagliata.
+
+    Mai un'eccezione: in dubbio non si sposta niente, che è il gateway di ieri.
+    """
+    try:
+        from .connectors import builtin as _builtin
+        return _builtin.released()[0]
+    except Exception:  # noqa: BLE001
+        return frozenset()
+
+
+def _is_packaged_verb(name: str) -> bool:
+    """Questo verbo lo implementa un pack, non più il gateway.
+
+    Interrogato dal dispatch PRIMA del ramo nativo: senza, i Tool sparirebbero
+    dall'elenco ma il ramo `name.startswith("telegram.")` continuerebbe a
+    servirli, e l'interruttore spegnerebbe la vetrina lasciando acceso il
+    negozio.
+    """
+    ns = name.split(NS_SEP_DOT, 1)[0] if NS_SEP_DOT in name else ""
+    return bool(ns) and ns in _packaged_namespaces()
+
+
+def _migrated_away(tools: list[Tool]) -> list[Tool]:
+    """`tools` meno i verbi dei namespace passati a un pack."""
+    packaged = _packaged_namespaces()
+    if not packaged:
+        return list(tools)
+    return [t for t in tools
+            if t.name.split(NS_SEP_DOT, 1)[0] not in packaged]
+
+
 # memory.* — seed memory scrivibile dell'agente (universale, non richiede grant).
 _MEMORY_TOOLS: list[Tool] = [
     Tool(name="memory.read",
@@ -2519,7 +2564,7 @@ def _native_tool_namespaces() -> list[str]:
              + _copybrain.TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
-    ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in tools})
+    ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in _migrated_away(tools)})
     return ns
 
 
@@ -3105,7 +3150,13 @@ def _all_native_tools() -> list:
                   + _copybrain.TOOLS)
     if instance_profile.rag_enabled():
         native += list(_EU_CORPUS_TOOLS + _RAG_TOOLS)
-    return native
+    # I connettori passati a un pack (#522) escono dal CATALOGO dei verbi
+    # nativi, non solo dall'elenco che un agente vede: da qui discendono
+    # `all_native_verb_names()` e quindi i namespace che `core_namespaces()`
+    # riserva ai pack. Senza questa sottrazione il connettore del pack
+    # resterebbe rifiutato per collisione con il gateway che ha appena smesso
+    # di implementarlo.
+    return _migrated_away(native)
 
 
 def _verb_implemented(name: str) -> bool:
@@ -4519,9 +4570,37 @@ def _resource_tier_of(arguments) -> str | None:
     return str(t) if isinstance(t, str) and t.strip() else None
 
 
+def _fill_declared_context(name: str, arguments: dict) -> dict:
+    """Gli argomenti di contesto che il manifest del connettore dichiara (#522).
+
+    Riempiti QUI, prima di tutto il resto, perché tutto il resto legge
+    `arguments`: l'audit ne pubblica l'hash, `_resource_tier_of` ne ricava il
+    livello, il PDP ne estrae le destinazioni e la card del gate le mostra a un
+    umano. Riempirli più avanti vorrebbe dire far decidere, registrare e
+    approvare una chiamata diversa da quella che parte.
+
+    Mai un'eccezione: un registry illeggibile non deve trasformare una chiamata
+    in un errore. Gli argomenti restano quelli del chiamante — che per un verbo
+    nativo sono già tutto, e per un verbo di pack significano una chiamata
+    senza contesto, cioè rifiutata dal connettore, non eseguita a caso.
+    """
+    try:
+        from .connectors import resolved as _conn
+        if not _conn.context_arguments(name):
+            return arguments
+        return _conn.fill_context(name, arguments, {
+            "channel": current_chat() or "",
+            "agent": agent_name_safe() or "",
+        })
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("connectors: contesto non applicato a '%s' (%s)", name, e)
+        return arguments
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     from . import audit as _audit
+    arguments = _fill_declared_context(name, arguments)
     tok = _audit.set_resource_tier(_resource_tier_of(arguments))
     try:
         return await _call_tool_recorded(name, arguments)
@@ -5154,7 +5233,12 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_profile(name, arguments, _ag)
         elif name.startswith("settings."):
             result = _dispatch_settings(name, arguments, _ag)
-        elif name.startswith("telegram."):
+        elif name.startswith("telegram.") and not _is_packaged_verb(name):
+            # `and not _is_packaged_verb`: con l'interruttore su `pack` (#522)
+            # questi verbi li serve il backend MCP del pack, quindi la chiamata
+            # deve scendere fino al ramo `proxy.is_proxied`. Il ramo nativo
+            # resta qui finché la PR 3 lo porta via: due implementazioni dello
+            # stesso verbo non girano mai insieme — è il profilo a dire quale.
             result = _dispatch_telegram(name, arguments)
         elif name.startswith("memory."):
             result = _dispatch_memory(name, arguments)

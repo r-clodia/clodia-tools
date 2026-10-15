@@ -28,12 +28,23 @@ NO_RESERVED: tuple[str, ...] = ()
 
 
 def _examples() -> dict[str, dict]:
-    """Every ```yaml block of SCHEMA.md, keyed by the pack it declares."""
+    """Every ```yaml block of SCHEMA.md, keyed by the pack it declares.
+
+    Convention of the document, and the reason these tests mean anything: a
+    ```yaml fence is a WHOLE pack manifest, loaded and validated here. A
+    fragment that illustrates one field gets a plain fence — see `context[]`.
+    Said out loud because the alternative is a `KeyError: 'name'` ten tests
+    deep, which names neither the rule nor the block that broke it.
+    """
     text = SCHEMA_MD.read_text(encoding="utf-8")
     blocks = re.findall(r"^```yaml\n(.*?)^```", text, re.DOTALL | re.MULTILINE)
     out: dict[str, dict] = {}
     for block in blocks:
         data = yaml.safe_load(block)
+        if not isinstance(data, dict) or "name" not in data:
+            raise AssertionError(
+                "SCHEMA.md: a ```yaml block is not a whole pack manifest "
+                f"(no 'name'): use a plain fence for a fragment.\n{block[:200]}")
         out[data["name"]] = data
     return out
 
