@@ -40,6 +40,8 @@ PACK = {
                      "forms": [{"pattern": r"-?\d+", "example": "-100"}]}],
         "verbs": [{"verb": "telegram.send_file", "direction": "egress",
                    "scheme": "tg", "arg": "chat_id"}],
+        "defaults": [{"verb": "telegram.send", "arg": "chat_id",
+                      "value": "binding"}],
         "files": [{"verb": "telegram.send_file", "path_arg": "path",
                    "bytes_arg": "content_b64", "name_arg": "filename",
                    "tier_arg": "tier", "topic_arg": "name",
@@ -179,6 +181,87 @@ class IlGatewayConsegnaIlFileTests(unittest.TestCase):
         doc["connectors"][0]["files"][0]["bytes_arg"] = "path"
         with self.assertRaises(M.ManifestError):
             M.build_registry({"comms-pack": doc}, reserved=frozenset())
+
+
+class LaChatLegataLaRisolveIlGatewayTests(unittest.TestCase):
+    """`defaults:` — il secondo fatto che un backend di pack non ha.
+
+    Il registro dei binding è del gateway: lo scrive il bottone del topic e
+    tiene i binding di TUTTI i connettori. Finché a leggerlo era il pack, lo
+    faceva con l'uid del gateway e vedeva anche quelli degli altri — la
+    scorciatoia che clodia-platform#544 chiude. Qui il valore lo mette il
+    gateway, e la regola è l'opposto di quella del contesto: si riempie solo
+    ciò che il chiamante ha omesso.
+    """
+
+    def setUp(self) -> None:
+        p = patch.object(main, "current_channel", lambda: "SEAL-1/software-house")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _registro(self, voci: dict):
+        return patch("server.tools.channel_bindings.load",
+                     lambda conn=None, **k: voci.get(conn, {}))
+
+    def test_un_argomento_omesso_prende_la_chat_del_canale(self) -> None:
+        args = {"text": "ciao"}
+        with _registry(), self._registro({"telegram": {
+                "-100999": {"tier": "SEAL-1", "topic": "software-house"}}}):
+            main._fill_declared_defaults("telegram.send", args)
+        self.assertEqual(args["chat_id"], "-100999")
+
+    def test_un_argomento_esplicito_vince(self) -> None:
+        """È la differenza con il contesto, e non è un dettaglio: se il default
+        sovrascrivesse, non si potrebbe più scrivere a una chat diversa da
+        quella legata al topic."""
+        args = {"text": "ciao", "chat_id": "-100111"}
+        with _registry(), self._registro({"telegram": {
+                "-100999": {"tier": "SEAL-1", "topic": "software-house"}}}):
+            main._fill_declared_defaults("telegram.send", args)
+        self.assertEqual(args["chat_id"], "-100111")
+
+    def test_il_binding_di_un_altro_connettore_non_vale(self) -> None:
+        with _registry(), self._registro({"whatsapp": {
+                "-100999": {"tier": "SEAL-1", "topic": "software-house"}}}):
+            with self.assertRaises(ValueError):
+                main._fill_declared_defaults("telegram.send", {"text": "ciao"})
+
+    def test_senza_chat_collegata_l_errore_nomina_la_causa(self) -> None:
+        """Lasciare l'argomento vuoto farebbe calcolare al PDP una destinazione
+        inesistente: l'agente leggerebbe «destinazione ignota» per un topic che
+        semplicemente non ha una chat collegata."""
+        with _registry(), self._registro({}):
+            with self.assertRaises(ValueError) as e:
+                main._fill_declared_defaults("telegram.send", {"text": "ciao"})
+        self.assertIn("collegala dal pulsante", str(e.exception))
+
+    def test_un_verbo_senza_default_non_viene_toccato(self) -> None:
+        """Per VERBO, non per namespace: `telegram.inbox` non ha una chat da
+        riempire e il suo schema non dichiara quell'argomento."""
+        args = {}
+        with _registry(), self._registro({"telegram": {
+                "-100999": {"tier": "SEAL-1", "topic": "software-house"}}}):
+            self.assertEqual(main._fill_declared_defaults("telegram.inbox", args), [])
+        self.assertEqual(args, {})
+
+    def test_un_manifest_del_gateway_non_puo_dichiararli(self) -> None:
+        with self.assertRaises(M.ManifestError):
+            M.parse_connector(
+                {"id": "tg2", "manifest_version": 1, "namespace": "tg2",
+                 "schemes": [{"scheme": "tg2", "direction": "egress",
+                              "forms": [{"pattern": r"\d+", "example": "1"}]}],
+                 "verbs": [{"verb": "tg2.send", "direction": "egress",
+                            "scheme": "tg2", "arg": "chat_id"}],
+                 "defaults": [{"verb": "tg2.send", "arg": "chat_id",
+                               "value": "binding"}]},
+                pack="gateway-telegram", builtin=True)
+
+    def test_un_valore_inventato_e_rifiutato(self) -> None:
+        doc = json.loads(json.dumps(PACK))
+        doc["connectors"][0]["defaults"][0]["value"] = "owner"
+        with self.assertRaises(M.ManifestError):
+            M.build_registry({"comms-pack": doc}, reserved=frozenset())
+
 
 
 class _Req:

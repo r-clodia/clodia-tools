@@ -104,6 +104,13 @@ OPTION_SET_VALUES = {"mailboxes": ("account", "address")}
 #: certificargli qualcosa che il gateway non sa.
 CONTEXT_VALUES = ("channel", "agent")
 
+#: Valori che il gateway sa mettere in un argomento OMESSO (`defaults:`).
+#: `binding` = la chat legata al canale da cui si chiama, per QUESTO connettore
+#: (`channel_bindings`). È l'altro fatto che un backend di pack non ha: il
+#: registro dei binding è del gateway, lo scrive il bottone del topic, e un
+#: processo che lo leggesse da sé leggerebbe anche i binding di tutti gli altri.
+DEFAULT_VALUES = ("binding",)
+
 _ID = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
 _NAMESPACE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _SCHEME = re.compile(r"^[a-z][a-z0-9+.-]{0,31}$")
@@ -810,6 +817,26 @@ class VerbMapping:
 
 
 @dataclass(frozen=True)
+class DefaultArg:
+    """Un argomento che il gateway riempie SOLO se il chiamante lo ha omesso.
+
+    Non è un `ContextArg`, e la differenza è tutta nella regola: il contesto è
+    un'identità e si sovrascrive sempre, perché il caso «ce l'ha già messo il
+    chiamante» è esattamente l'attacco. Un default è una comodità — «manda alla
+    chat di questo topic» — e un valore esplicito del chiamante deve vincere,
+    altrimenti non si potrebbe più scrivere a una chat diversa da quella legata.
+
+    Vale per un VERBO alla volta, non per il namespace: `telegram.inbox` non ha
+    una chat da riempire, e riempirgliela comunque significherebbe passare al
+    backend un argomento che il suo schema non dichiara.
+    """
+
+    verb: str
+    arg: str
+    value: str
+
+
+@dataclass(frozen=True)
 class FileArgument:
     """Un argomento che nomina un FILE DI TOPIC, che il gateway consegna.
 
@@ -1002,6 +1029,8 @@ class Connector:
     tools_card: ToolsCard | None = None
     services: tuple[Service, ...] = ()
     storage_remote: StorageRemote | None = None
+    #: Argomenti che il gateway riempie SOLO se omessi (`DefaultArg`).
+    defaults: tuple[DefaultArg, ...] = ()
     #: Argomenti che nominano un file di topic e che il gateway consegna come
     #: byte (`FileArgument`): la lettura resta dove stanno compartimento e audit.
     files: tuple[FileArgument, ...] = ()
@@ -1205,6 +1234,20 @@ def _parse_provider(raw: Any, where: str, *, pack: str) -> Provider:
                           required=False),
         test_verb=_text(data.get("test_verb"), f"{where}.test_verb", required=False),
     )
+
+
+def _parse_defaults(raw: Any, where: str) -> tuple[DefaultArg, ...]:
+    """Il blocco `defaults:` — `[{verb, arg, value}]`."""
+    out = []
+    for i, entry in enumerate(_seq(raw, where)):
+        at = f"{where}[{i}]"
+        data = _mapping(entry, at)
+        out.append(DefaultArg(
+            verb=_matching(_text(data.get("verb"), f"{at}.verb"), _VERB, f"{at}.verb"),
+            arg=_matching(_text(data.get("arg"), f"{at}.arg"), _ARG, f"{at}.arg"),
+            value=_one_of(_text(data.get("value"), f"{at}.value"), DEFAULT_VALUES,
+                          f"{at}.value")))
+    return tuple(out)
 
 
 def _parse_files(raw: Any, where: str) -> tuple[FileArgument, ...]:
@@ -1505,7 +1548,7 @@ def _parse_service(raw: Any, where: str, *, pack: str) -> Service:
 #: form or a verb mapping would hand the vocabulary of another pack to the one
 #: that installed second.
 _OWNER_ONLY = ("schemes", "verbs", "taint", "topic_actions", "context",
-               "files")
+               "files", "defaults")
 
 
 def parse_connector(raw: Any, *, pack: str,
@@ -1615,6 +1658,14 @@ def parse_connector(raw: Any, *, pack: str,
                 f"'{namespace}'. Declaring what does not taint a channel is a "
                 f"statement about one's own tools, never about someone else's")
 
+    defaults = _parse_defaults(data.get("defaults"), f"{where}.defaults")
+    if defaults and builtin:
+        raise ManifestError(
+            f"{where}: 'defaults' is for a connector a PACK implements; this "
+            f"gateway resolves a binding from the inside")
+    if not builtin:
+        check_namespace(namespace, [d.verb for d in defaults], reserved=reserved,
+                        where=where)
     files = _parse_files(data.get("files"), f"{where}.files")
     if files and builtin:
         raise ManifestError(
@@ -1700,6 +1751,7 @@ def parse_connector(raw: Any, *, pack: str,
         services=services,
         storage_remote=storage,
         context=context,
+        defaults=defaults,
         files=files,
         builtin=builtin,
     )
@@ -1861,6 +1913,16 @@ class Registry:
             if not c.builtin and c.namespace == ns and c.context:
                 return c.context
         return ()
+
+    def defaults_for(self, verb: str) -> tuple[Connector, tuple[DefaultArg, ...]] | None:
+        """Il connettore e i default dichiarati per QUESTO verbo, o None."""
+        for c in self.connectors:
+            if c.builtin:
+                continue
+            hits = tuple(d for d in c.defaults if d.verb == verb)
+            if hits:
+                return c, hits
+        return None
 
     def file_for(self, verb: str) -> tuple[Connector, FileArgument] | None:
         """Il connettore e la dichiarazione di file per questa chiamata, o None.
