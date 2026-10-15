@@ -24,7 +24,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from . import human_mcp, internal_auth
+from . import human_mcp, internal_auth, pki_mint
 from .topics.local_fs import LocalFsStorage
 from .topics.service import (MESSAGE_KINDS, SCHEMA_VERSION, TopicError, TopicService,
                              normalize_meta_v2, topic_links)
@@ -115,13 +115,21 @@ def _authorize_topic_owner(request: Request):
 
     - an on-behalf HUMAN session whose principal is the topic's owner, or a
       platform admin (`human_role: admin`);
-    - the agent-server itself: a session it mints for its own principal with
-      no execution and no chat (`topics_client._headers()` in clodia-logic),
-      which is the path the webui takes — clodia-logic checks owner/admin
+    - the agent-server itself, which says so: a token with the signed claim
+      `role: agent-server` (`topics_client._headers()` in clodia-logic), the
+      path the webui takes — clodia-logic checks owner/admin
       (`_require_topic_owner`, `_require_platform_admin`) before forwarding.
-      An AGENT token always carries its `execution_id`, so it never qualifies.
 
     Everything else: 403. Returns `(who, None)` — the human when on-behalf.
+
+    The claim REPLACES recognition by absence (clodia-platform#539 §1): until
+    now the agent-server was «the token with no `execution_id` and no `chat`».
+    That held only as long as every agent-held token carried at least one of the
+    two — and `_execution_id(spawn)` returns `""` when the spawn workspace has
+    not been created, so the safety of this door rested on a detail of another
+    function. An identity is affirmed, not inferred from what is missing; and
+    the claim can only be minted by whoever holds the bootstrap secret, which
+    never enters a spawn's environment.
     """
     who, err = _authorize(request)
     if err:
@@ -143,8 +151,14 @@ def _authorize_topic_owner(request: Request):
         return None, JSONResponse(
             {"error": "solo l'owner del topic (o un admin) può collegare o "
                       "scollegare un connettore"}, status_code=403)
-    if not str(p.get("execution_id") or "").strip() and not p.get("chat"):
-        return who, None
+    if p.get("role") == pki_mint.ROLE_AGENT_SERVER:
+        # Principal VUOTO, non `clodia`: l'agent-server è un carrier, e chi ha
+        # deciso è la persona che clodia-logic ha già verificato come owner o
+        # admin. Restituire il nome del carrier lo faceva finire nei record che
+        # dicono CHI ha accettato — la presa d'atto sul cap SEAL (#405) risultava
+        # presa da `clodia`. Vuoto, quel record ricade sull'owner del topic, che
+        # è la persona giusta e l'unica che questo lato conosce davvero.
+        return "", None
     LOG.warning("topics: token di agente (%s, execution %s) rifiutato su "
                 "un'azione sui muri del topic", p.get("agent"),
                 p.get("execution_id"))

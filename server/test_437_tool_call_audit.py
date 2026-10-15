@@ -36,8 +36,27 @@ class ToolCallAuditTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name) / "audit"
-        env = patch.dict(os.environ, {"CLODIA_AUDIT_DIR": str(self.root),
-                                      "CLODIA_AUDIT_KEY_DIR": str(Path(tmp.name) / "k")})
+        env = patch.dict(os.environ, {
+            "CLODIA_AUDIT_DIR": str(self.root),
+            "CLODIA_AUDIT_KEY_DIR": str(Path(tmp.name) / "k"),
+            # The gate's decision state (pending requests, consents) lives in a
+            # FILE, and without this it is the one of whoever runs the test:
+            # `CLODIA_DATA` on a dev box, the repo root in CI
+            # (clodia-platform#539 §7). A leftover consent or pending request
+            # for the same (agent, instance, verb) changes what the dispatch
+            # below does. Isolated, nothing outside decides it.
+            "CLODIA_TOOLS_STATE_DIR": str(Path(tmp.name) / "state"),
+            # `CLODIA_DATA` with it, and not for symmetry: with the state dir
+            # isolated and the shared one still pointing at a real `/datadir`,
+            # `state_paths` considers the state MIGRATED and moves the legacy
+            # files aside (`.migrated-to-state-dir`) — a test run would rename
+            # the live gateway's state files. Both temporary.
+            "CLODIA_DATA": str(Path(tmp.name) / "data"),
+            # Belt and braces: no case below may open a gate any more (§7
+            # prevents it at the root), but if one ever did, a red in
+            # milliseconds beats a turn hanging for 60 seconds.
+            "GATE_WAIT_LOOPS": "0",
+        })
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("CLODIA_AUDIT_FAIL_CLOSED", None)
@@ -101,6 +120,9 @@ class ToolCallAuditTests(unittest.TestCase):
         # (#436); whatever happens, the call and its result frame it.
         self.assertEqual((types[0], types[-1]), ("tool.call", "tool.result"))
         self.assertTrue(set(types[1:-1]) <= {"policy.decision"}, types)
+        # Since #539 §7 a verb the dispatch cannot serve gets `unknown tool`
+        # straight away: no gate card asking a human to approve it.
+        self.assertNotIn("gate.request", types)
 
     def test_a_borrowed_call_is_nested_under_the_call_that_made_it(self) -> None:
         async def outer(name, arguments):

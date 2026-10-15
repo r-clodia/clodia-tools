@@ -91,11 +91,25 @@ class AdminOnlyRoutesTests(unittest.TestCase):
                        "on_behalf": True, "human_role": "admin"}):
             self.assertEqual(self._both(), (200, 200))
 
-    def test_the_plain_token_of_pack_import_passes(self):
+    def test_the_service_token_of_pack_import_passes(self):
         """`gateway_admin._headers()` in clodia-logic: a session token minted
-        for its principal (`clodia`), no on-behalf claim."""
-        with _Session({"agent": "clodia"}):
+        for its principal (`clodia`) that DECLARES the service role."""
+        with _Session({"agent": "clodia", "role": "agent-server"}):
             self.assertEqual(self._both(), (200, 200))
+
+    def test_clodias_runtime_token_no_longer_passes(self):
+        """clodia-platform#539 §5: the credentials of the instance are not
+        agent territory. That token lives in every spawn's environment, and
+        `clodia` was admitted here as a leftover of when it was a super-agent —
+        «super» is a breadth of verbs, not a responsibility."""
+        with _Session({"agent": "clodia", "execution_id": "clodia-517",
+                       "chat": "chan:SEAL-1:acme:clodia"}):
+            self.assertEqual(self._both(), (401, 401))
+
+    def test_even_a_bare_clodia_token_without_the_claim_is_refused(self):
+        """Senza claim non è l'agent-server: l'identità si afferma (§1)."""
+        with _Session({"agent": "clodia"}):
+            self.assertEqual(self._both(), (401, 401))
 
     def test_an_ordinary_agent_is_refused(self):
         with _Session({"agent": "minerva"}):
