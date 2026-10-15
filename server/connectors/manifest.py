@@ -36,6 +36,7 @@ quietly lying.
 """
 from __future__ import annotations
 
+import dataclasses
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
@@ -123,6 +124,17 @@ CORE_VAULT_PREFIXES = (
 #: pack can hold these namespaces, so no pack can reach these vault entries.
 #: Added to `core_namespaces()`, which every namespace check reserves.
 MIGRATING_NAMESPACES = frozenset(p.rstrip("_") for p in CORE_VAULT_PREFIXES)
+
+
+def entry_owner(entry: str, namespaces: Iterable[str]) -> str:
+    """The namespace a vault entry belongs to: the LONGEST of `namespaces` that
+    is `entry` itself or a `<ns>_` prefix of it, or "" when none is.
+
+    Namespaces may contain `_`, so `foo_bar_token` is a valid entry for both
+    `foo` and `foo_bar`: it belongs to `foo_bar` when that is installed.
+    """
+    return max((n for n in namespaces
+                if entry == n or entry.startswith(f"{n}_")), key=len, default="")
 
 
 def vault_entry_problem(entry: str, namespace: str,
@@ -851,6 +863,10 @@ class Service:
     command: tuple[str, ...]
     workdir: str = ""
     credentials: tuple[str, ...] = ()
+    #: The namespace of the connector that declares the service. Carried so the
+    #: supervisor can re-apply `vault_entry_problem` at launch (defence in
+    #: depth, review of clodia-tools #362): "" means no credential at all.
+    namespace: str = ""
     health_kind: str = ""
     health_target: str = ""
     health_interval: int = 30
@@ -1263,6 +1279,36 @@ def _parse_int(raw: Any, where: str, *, default: int, minimum: int = 1) -> int:
     return raw
 
 
+def workdir_problem(workdir: str) -> str:
+    """Why `workdir` may not be a service's working directory, or "".
+
+    The supervisor `chdir`s into it BEFORE dropping privileges (that is how
+    CPython's `Popen(user=…)` works), so an arbitrary path would put the service
+    inside a directory its uid could never enter — `/gateway-state`, the vault.
+    A workdir is therefore a path RELATIVE to the pack directory, with no `..`
+    and nothing absolute; empty means the service state dir. Symlinks are
+    resolved, and the result re-confined, at launch (`services.launch`).
+    """
+    if not workdir:
+        return ""
+    if "\x00" in workdir or "\\" in workdir:
+        return f"workdir '{workdir}' contains a forbidden character"
+    if workdir.startswith(("/", "~")):
+        return (f"workdir '{workdir}' is absolute; it must be relative to the "
+                f"pack directory (empty means the service state dir)")
+    if ".." in workdir.split("/"):
+        return f"workdir '{workdir}' leaves the pack directory ('..')"
+    return ""
+
+
+def _workdir(raw: Any, where: str) -> str:
+    workdir = _text(raw, where, required=False)
+    problem = workdir_problem(workdir)
+    if problem:
+        raise ManifestError(f"{where}: {problem}")
+    return workdir
+
+
 def _parse_service(raw: Any, where: str, *, pack: str) -> Service:
     data = _mapping(raw, where)
     name = _matching(_text(data.get("name"), f"{where}.name"), _ID, f"{where}.name")
@@ -1303,7 +1349,7 @@ def _parse_service(raw: Any, where: str, *, pack: str) -> Service:
         name=name,
         pack=pack,
         command=command,
-        workdir=_text(data.get("workdir"), f"{where}.workdir", required=False),
+        workdir=_workdir(data.get("workdir"), f"{where}.workdir"),
         credentials=credentials,
         health_kind=health_kind,
         health_target=health_target,
@@ -1445,6 +1491,14 @@ def parse_connector(raw: Any, *, pack: str,
         if s.name in seen_services:
             raise ManifestError(f"{where}: service '{s.name}' declared twice")
         seen_services.add(s.name)
+        # Same rule as a provider credential (review of clodia-tools #362): a
+        # service receives each declared entry as `CLODIA_CREDENTIAL_*`, so a
+        # bare regex would hand any pack `github_pat` or another pack's token.
+        for entry in s.credentials if not builtin else ():
+            problem = vault_entry_problem(entry, namespace, reserved)
+            if problem:
+                raise ManifestError(f"{where}.services '{s.name}': {problem}")
+    services = tuple(dataclasses.replace(s, namespace=namespace) for s in services)
 
     card = data.get("tools_card")
     remote = data.get("storage_remote")
@@ -1672,6 +1726,10 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
         reserved_set.update(c.namespace for c in parsed)
 
     builtin_namespaces = {c.namespace for c in parsed}
+    #: Names a pack namespace may not be a `_`-prefix of: with `foo` installed,
+    #: `foo_bar…` entries would fall to the pack whenever the core `foo_bar`
+    #: namespace is not itself a connector in this registry.
+    core_names = set(reserved_set) | builtin_namespaces | set(MIGRATING_NAMESPACES)
     for pack in sorted(set(manifests) - set(builtin_names)):
         # Each pack is checked against the gateway's namespaces *and* against the
         # namespaces already claimed by the packs parsed before it.
@@ -1691,6 +1749,14 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
             # effective by itself the day the builtin file goes away.
             ns = str((entry or {}).get("namespace") or "") \
                 if isinstance(entry, Mapping) else ""
+            shadowed = sorted(n for n in core_names if n.startswith(f"{ns}_")) \
+                if ns else []
+            if shadowed:
+                raise _blame(ManifestError(
+                    f"{_at(pack, str((entry or {}).get('id') or '?'))}: namespace "
+                    f"'{ns}' is a prefix of the gateway's namespace "
+                    f"'{shadowed[0]}', so its vault entries would overlap; "
+                    f"choose a namespace that is not"), pack)
             if ns and ns in builtin_namespaces:
                 refused.append(
                     f"{_at(pack, str((entry or {}).get('id') or '?'))}: namespace "
@@ -1789,6 +1855,22 @@ def _check_vault_entries(connectors: list[Connector]) -> None:
     namespaces = {c.namespace: c for c in connectors}
     seen: dict[str, Connector] = {}
     for c in connectors:
+        if c.builtin:
+            continue
+        # Service credentials obey the same longest-prefix ownership (review of
+        # clodia-tools #362): `foo` may not hand its service `foo_bar_token`
+        # while `foo_bar` is installed. A service may read the entry its own
+        # connector's provider stores, so no "declared twice" check here.
+        for svc in c.services:
+            for entry in svc.credentials:
+                owner = entry_owner(entry, namespaces)
+                if owner and owner != c.namespace:
+                    raise _blame(ManifestError(
+                        f"{_at(c.pack, c.id)}.services '{svc.name}': vault entry "
+                        f"'{entry}' falls under namespace '{owner}' of connector "
+                        f"'{namespaces[owner].id}', not under its own "
+                        f"'{c.namespace}'"), c.pack)
+    for c in connectors:
         for p in c.providers:
             entry = p.credential.vault_entry if p.credential else ""
             if not entry:
@@ -1802,9 +1884,7 @@ def _check_vault_entries(connectors: list[Connector]) -> None:
             seen[entry] = c
             if c.builtin:
                 continue
-            owner = max((n for n in namespaces
-                         if entry == n or entry.startswith(f"{n}_")),
-                        key=len, default="")
+            owner = entry_owner(entry, namespaces)
             if owner and owner != c.namespace:
                 raise _blame(ManifestError(
                     f"{_at(c.pack, c.id)}: vault entry '{entry}' falls under "
