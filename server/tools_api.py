@@ -99,11 +99,24 @@ def _revocata(payload: dict) -> bool:
 
 
 def _authorized(request: Request) -> bool:
-    """Gestione integrations/credenziali/backup = **territorio ADMIN**. Autorizza
-    se: (a) trusted-core via UI token, oppure (b) ckt1 valido di un ADMIN — umano
-    admin (claim on_behalf/human_role o ruolo in agent.yaml) o super-agent
-    (clodia/ophelia). Chiude il buco: prima, con UI_TOKEN assente, era aperto a
-    chiunque loggato (un non-admin poteva rimuovere un MCP)."""
+    """Gestione integrations/credenziali/backup = **territorio ADMIN**.
+
+    Passa:
+    - il trusted-core via UI token (chiamanti interni/headless);
+    - una sessione on-behalf con `human_role: admin`;
+    - un token nudo il cui principal è un umano admin (`agent.yaml`);
+    - l'AGENT-SERVER, che lo dichiara nel claim firmato `role` — è il chiamante
+      di `/internal/connectors/validate` durante l'import di un pack.
+
+    NON passa più il token di RUNTIME di clodia/ophelia (clodia-platform#539 §5).
+    Era un residuo del tempo in cui erano super-agent: quel token vive
+    nell'ambiente di ogni spawn, quindi un agente poteva depositare o
+    sostituire le credenziali dell'istanza — Google, GitHub, Telegram, le
+    caselle — senza che nessuna persona lo vedesse. Le credenziali sono
+    territorio di chi risponde dell'istanza: un umano admin, o il servizio che
+    sta eseguendo un'installazione per lui. «Super» non è «amministratore»: il
+    primo è un'ampiezza di verbi, il secondo è una responsabilità.
+    """
     hdr = request.headers.get("authorization", "")
     if _UI_TOKEN and hdr == f"Bearer {_UI_TOKEN}":
         return True  # trusted-core (chiamanti interni/headless)
@@ -119,8 +132,10 @@ def _authorized(request: Request) -> bool:
         return False
     if p.get("on_behalf"):
         return (p.get("human_role") or "user") == "admin"
-    ag = str(p.get("agent") or "")
-    return ag in ("clodia", "ophelia") or _is_human_admin(ag)
+    from .pki_mint import ROLE_AGENT_SERVER
+    if p.get("role") == ROLE_AGENT_SERVER:
+        return True
+    return _is_human_admin(str(p.get("agent") or ""))
 
 
 def _authorized_owner(request: Request) -> bool:
@@ -454,6 +469,7 @@ def register_mcp_core(config, secrets: dict | None = None,
     # montato ora non è concesso a nessuno: lo ha chi lo dichiara nel proprio
     # seed, e clodia, se le serve, lo prende in prestito con `copybrain`.
     registered = []
+    deposits: list[tuple[str, str]] = []
     for name, spec in servers.items():
         slug = _slugify(name)
         if not slug or slug in _NATIVE_PREFIXES:
@@ -493,17 +509,46 @@ def register_mcp_core(config, secrets: dict | None = None,
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", str(pack)):
                 raise McpRegisterError(f"nome di pack non valido: {pack!r}")
             backend["pack"] = str(pack)
-        # Secret: deposita nel vault (infra, no grant) e sostituisci nel config.
+        # PROPRIETÀ, non solo nome (clodia-platform#539 §4). Il dedup per slug
+        # SOSTITUIVA la voce esistente e le scriveva sopra il `pack` del nuovo
+        # mount: un pack che montasse un server chiamato come quello di un admin
+        # — o di un altro pack — ne diventava il proprietario, e la proprietà è
+        # proprio ciò che poi gli dà diritto a quel namespace per i suoi
+        # connettori (`backend_owners`). Un rimount dallo STESSO proprietario
+        # resta un aggiornamento legittimo: cambia URL, header, segreti.
+        #
+        # The check runs BEFORE any vault write (review of #363): the secret
+        # name `mcp_<slug>_<name>` is shared with the backend already mounted,
+        # so depositing first and refusing afterwards overwrote the legitimate
+        # owner's secret with the refused caller's value.
+        precedente = next((b for b in backends if b.get("name") == slug), None)
+        if precedente is not None:
+            prima = str(precedente.get("pack") or "")
+            adesso = str(pack or "")
+            if prima != adesso:
+                chi_prima = f"il pack '{prima}'" if prima else "un amministratore"
+                chi_ora = f"il pack '{adesso}'" if adesso else "un amministratore"
+                raise McpRegisterError(
+                    f"il backend MCP '{slug}' è già montato da {chi_prima}: "
+                    f"{chi_ora} non può sostituirlo. Smontalo prima "
+                    f"(mcp.remove), oppure monta il tuo con un altro nome.",
+                    status=409)
+        # Secrets: placeholders are replaced in the config now, but the vault
+        # (infra, no grant) is written only once EVERY server of the request
+        # has been accepted — a refusal on a later server must not leave the
+        # earlier servers' secrets written.
         for sname, sval in secrets_in.items():
             if not sval:
                 continue
             cred = f"mcp_{slug}_{sname}"
-            vault.deposit(cred, {"value": sval}, cred_type="mcp_secret", grant_agents=[])
+            deposits.append((cred, sval))
             backend = _replace_placeholder(backend, sname, f"${{VAULT:{cred}}}")
         backends = [b for b in backends if b.get("name") != slug]  # dedup
         backends.append(backend)
         registered.append(slug)
 
+    for cred, sval in deposits:
+        vault.deposit(cred, {"value": sval}, cred_type="mcp_secret", grant_agents=[])
     whitelist.CONFIG["mcp_backends"] = backends
     whitelist.save_config()
     whitelist.reload_config()
