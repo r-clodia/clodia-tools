@@ -49,6 +49,7 @@ from . import normalise as _normalise
 from .manifest import (
     Connector,
     ContextArg,
+    FileArgument,
     ManifestError,
     Registry,
     Scheme,
@@ -551,6 +552,21 @@ def context_arguments(verb: str) -> tuple[ContextArg, ...]:
     namespace, quindi `context_for` risponde solo a chi possiede il verbo.
     """
     return registry().context_for(verb)
+
+
+def file_argument(verb: str) -> tuple[str, FileArgument] | None:
+    """`(namespace, dichiarazione)` del file che questo verbo si fa consegnare.
+
+    Senza `try`, per la stessa ragione di `context_arguments`: se il registry
+    non è interrogabile la chiamata non parte. L'alternativa sarebbe spedire al
+    backend gli argomenti così come sono arrivati — cioè, per un verbo che
+    aspetta dei byte, niente; oppure dei byte scelti dal chiamante.
+    """
+    hit = registry().file_for(verb)
+    if hit is None:
+        return None
+    connector, decl = hit
+    return connector.namespace, decl
 
 
 def destinations(mapping: VerbMapping, arguments: dict | None,

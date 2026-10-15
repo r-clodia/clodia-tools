@@ -72,6 +72,7 @@ That is a connector which only needs a credential — image generation is one.
 | `services` | no | long-running processes, see #515 |
 | `storage_remote` | no | topic storage backend the pack provides, see #524 |
 | `context` | no | arguments the GATEWAY fills on every verb of this namespace, see below |
+| `files` | no | arguments that name a TOPIC FILE, which the gateway reads and delivers as bytes |
 
 `blurb`, `scope` and `icon` (#520) are the card's COPY and its glyph. The
 drawing is a frontend asset — a logo is an SVG file, not gateway data — but the
@@ -123,6 +124,41 @@ Consequences worth knowing before declaring one:
 - a **builtin** manifest declaring `context` is refused: the gateway's own
   connectors have the claim, and the argument would overwrite a parameter of
   code we own.
+
+### `files`
+
+```
+files:
+  - verb: telegram.send_file
+    path_arg: path            # what the caller names
+    bytes_arg: content_b64    # where the gateway puts the bytes
+    name_arg: filename        # where it puts the basename
+    tier_arg: tier            # optional: explicit topic
+    topic_arg: name
+    chat_arg: chat_id         # optional: the topic bound to this chat
+```
+
+Some verbs act on a file that lives in a topic. **Reading it is platform work,
+not connector work**: the compartment (the caller must be a participant of that
+topic) and the audit of what crosses the boundary hang off that read. A pack
+backend reading the topics' filesystem itself would walk past both, and the path
+is chosen by the caller.
+
+So the pack says *which arguments* are the path, the bytes and the name; the
+gateway resolves the topic, checks the membership, reads, records the crossing
+and fills in the two arguments. The backend receives bytes and never sees a
+path — the arguments that said *where to read* are removed once they have done
+their job.
+
+The topic is resolved in the order the native code used: `tier_arg`+`topic_arg`
+when the caller passes both, else the topic bound to the chat in `chat_arg`
+(the bindings registry belongs to the gateway, not to the pack), else the
+channel the call comes from.
+
+`verb` must be inside the connector's namespace — the same rule as `verbs:`, for
+the same reason: a pack does not get somebody else's topic files delivered. A
+**builtin** manifest declaring `files` is refused: the gateway reads a topic
+file from the inside.
 
 ### `schemes[]`
 
@@ -428,6 +464,17 @@ connectors:
     context:
       channel: channel
       agent: agent
+    # `telegram.send_file` manda un file che sta in un topic. Il path lo nomina
+    # l'agente, i byte li mette il gateway: leggere un file di topic è lavoro
+    # suo — ci stanno attaccati il compartimento e l'audit di ciò che esce.
+    files:
+      - verb: telegram.send_file
+        path_arg: path
+        bytes_arg: content_b64
+        name_arg: filename
+        tier_arg: tier
+        topic_arg: name
+        chat_arg: chat_id
     # No `telegram.read`: today no Telegram read goes through
     # `_RESOURCE_READ_VERBS`, so declaring one would add a check that does not
     # exist — inside a migration (#522) whose whole point is parity. What the
