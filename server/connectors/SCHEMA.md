@@ -233,7 +233,11 @@ computes it, so the path is not written down twice.
 - a `credentials` entry is outside the connector's own namespace (`<namespace>`
   or `<namespace>_<name>`) or carries a core prefix (`github_`, `google_`,
   `telegram_`, `provider_`, `app_`, …) — the same `vault_entry_problem` rule as a
-  provider credential;
+  provider credential — or when the entry falls under a LONGER installed
+  namespace (`foo` may not declare `foo_bar_token` while `foo_bar` is
+  installed: an entry belongs to the longest namespace that prefixes it);
+- the pack's namespace is a `_`-prefix of a builtin or core-reserved namespace
+  (`foo` when the gateway owns `foo_bar`);
 - `workdir` is absolute, starts with `~`, or contains `..`. A `workdir` is
   relative to the pack directory (`<datadir>/packs/<pack>/`); empty means the
   service state dir.

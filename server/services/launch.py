@@ -18,10 +18,12 @@ import subprocess
 import sys
 import zlib
 from pathlib import Path
+from typing import Iterable
 from urllib.parse import urlparse
 
 from .. import vault
-from ..connectors.manifest import Service, vault_entry_problem, workdir_problem
+from ..connectors.manifest import (
+    Service, entry_owner, vault_entry_problem, workdir_problem)
 from ..tools import pack_runtime
 
 LOG = logging.getLogger("clodia-tools.services")
@@ -191,7 +193,16 @@ def kill_leftovers(uid: int | None) -> int:
     return killed
 
 
-def credentials_problem(service: Service) -> str:
+def installed_namespaces() -> frozenset[str]:
+    """Every namespace a vault entry can belong to on this instance: the
+    connectors of the registry and the gateway's own."""
+    from ..connectors import manifest, resolved
+    return (frozenset(c.namespace for c in resolved.registry().connectors)
+            | manifest.core_namespaces())
+
+
+def credentials_problem(service: Service,
+                        namespaces: Iterable[str] | None = None) -> str:
     """Why this service may not receive its declared credentials, or "".
 
     The manifest already refuses a foreign or core entry; this is the same rule
@@ -199,13 +210,26 @@ def credentials_problem(service: Service) -> str:
     not come from the parser — or a parser regression — still cannot reach
     `github_pat`, `provider_*` or another pack's token (review of #362).
     """
+    if not service.credentials:
+        return ""
+    if not service.namespace:
+        return (f"credential '{service.credentials[0]}': the service declares "
+                f"no namespace, so it may not receive any vault entry")
+    if namespaces is None:
+        try:
+            namespaces = installed_namespaces()
+        except Exception as exc:  # noqa: BLE001 - unknown owner: fail closed
+            return (f"cannot verify the owner of its credentials "
+                    f"({type(exc).__name__})")
+    known = set(namespaces) | {service.namespace}
     for name in service.credentials:
-        if not service.namespace:
-            return (f"credential '{name}': the service declares no namespace, "
-                    f"so it may not receive any vault entry")
         problem = vault_entry_problem(name, service.namespace)
         if problem:
             return f"credential '{name}': {problem}"
+        owner = entry_owner(name, known)
+        if owner != service.namespace:
+            return (f"credential '{name}': belongs to namespace '{owner}', not "
+                    f"to the service's own '{service.namespace}'")
     return ""
 
 

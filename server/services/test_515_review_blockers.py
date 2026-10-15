@@ -57,8 +57,9 @@ def _pack(credentials=(), workdir=None, namespace="evil") -> dict:
     if workdir is not None:
         service["workdir"] = workdir
     return {"connectors": [{
-        "id": "evil", "manifest_version": 1, "namespace": namespace,
-        "schemes": [{"scheme": namespace, "direction": "egress"}],
+        "id": namespace.replace("_", "-"), "manifest_version": 1,
+        "namespace": namespace,
+        "schemes": [{"scheme": namespace.replace("_", "-"), "direction": "egress"}],
         "services": [service],
     }]}
 
@@ -415,6 +416,62 @@ class ListenerTests(_Base):
                 os.kill(pid, 0)
                 import time
                 time.sleep(0.01)
+
+
+class LongestNamespaceOwnershipTests(_Base):
+    """Namespaces may contain `_`: `foo_bar_token` is a valid name for both
+    `foo` and `foo_bar`, and belongs to the LONGEST installed one."""
+
+    def test_foo_may_not_declare_an_entry_of_installed_foo_bar(self):
+        from ..connectors import resolved
+        registry, dropped, _ = resolved._build_isolated({}, {
+            "foo-pack": _pack(["foo_bar_token"], namespace="foo"),
+            "foobar-pack": _pack(["foo_bar_token"], namespace="foo_bar"),
+        })
+        self.assertEqual([(s.pack, s.credentials) for s in registry.services()],
+                         [("foobar-pack", ("foo_bar_token",))])
+        self.assertTrue(any("foo-pack" in d and "foo_bar" in d for d in dropped))
+
+    def test_without_foo_bar_installed_foo_keeps_it(self):
+        from ..connectors import resolved
+        registry, dropped, _ = resolved._build_isolated({}, {
+            "foo-pack": _pack(["foo_bar_token"], namespace="foo")})
+        self.assertEqual(dropped, [])
+        self.assertEqual(len(registry.services()), 1)
+
+    def test_launch_refuses_it_and_reads_nothing_from_the_vault(self):
+        self.declared = [self.service(pack="foo-pack", namespace="foo",
+                                      credentials=("foo_bar_token",))]
+        sup = self.supervisor()
+        reads: list[str] = []
+        popen: list = []
+        with patch.object(launch, "installed_namespaces",
+                          return_value=frozenset({"foo", "foo_bar"})), \
+             patch.object(launch.vault, "read_internal",
+                          lambda n: reads.append(n) or {"t": "x"}), \
+             patch("server.services.supervisor.subprocess.Popen",
+                   lambda argv, **kw: popen.append(kw) or _FakeProc()):
+            sup.reconcile()
+        row = sup.snapshot()[0]
+        self.assertEqual(row["state"], "blocked")
+        self.assertIn("foo_bar", row["last_error"])
+        self.assertEqual(reads, [])
+        self.assertEqual(popen, [])
+
+    def test_unknown_installed_namespaces_fail_closed(self):
+        svc = self.service(namespace="foo", credentials=("foo_token",))
+        with patch.object(launch, "installed_namespaces",
+                          side_effect=RuntimeError("registry")):
+            self.assertNotEqual(launch.credentials_problem(svc), "")
+
+    def test_a_namespace_prefixing_a_core_name_is_refused(self):
+        with self.assertRaises(M.ManifestError) as caught:
+            M.build_registry({"foo-pack": _pack(namespace="foo")},
+                             reserved={"foo_bar"})
+        self.assertIn("foo_bar", str(caught.exception))
+        # not a `_`-prefix: accepted
+        M.build_registry({"foo-pack": _pack(namespace="foo")},
+                         reserved={"foobar"})
 
 
 if __name__ == "__main__":

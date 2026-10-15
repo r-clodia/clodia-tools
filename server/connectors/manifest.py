@@ -125,6 +125,17 @@ CORE_VAULT_PREFIXES = (
 MIGRATING_NAMESPACES = frozenset(p.rstrip("_") for p in CORE_VAULT_PREFIXES)
 
 
+def entry_owner(entry: str, namespaces: Iterable[str]) -> str:
+    """The namespace a vault entry belongs to: the LONGEST of `namespaces` that
+    is `entry` itself or a `<ns>_` prefix of it, or "" when none is.
+
+    Namespaces may contain `_`, so `foo_bar_token` is a valid entry for both
+    `foo` and `foo_bar`: it belongs to `foo_bar` when that is installed.
+    """
+    return max((n for n in namespaces
+                if entry == n or entry.startswith(f"{n}_")), key=len, default="")
+
+
 def vault_entry_problem(entry: str, namespace: str,
                         reserved: Iterable[str] | None = None) -> str:
     """Why a PACK connector may not store its credential under `entry`, or "".
@@ -1665,6 +1676,10 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
         reserved_set.update(c.namespace for c in parsed)
 
     builtin_namespaces = {c.namespace for c in parsed}
+    #: Names a pack namespace may not be a `_`-prefix of: with `foo` installed,
+    #: `foo_bar…` entries would fall to the pack whenever the core `foo_bar`
+    #: namespace is not itself a connector in this registry.
+    core_names = set(reserved_set) | builtin_namespaces | set(MIGRATING_NAMESPACES)
     for pack in sorted(set(manifests) - set(builtin_names)):
         # Each pack is checked against the gateway's namespaces *and* against the
         # namespaces already claimed by the packs parsed before it.
@@ -1684,6 +1699,14 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
             # effective by itself the day the builtin file goes away.
             ns = str((entry or {}).get("namespace") or "") \
                 if isinstance(entry, Mapping) else ""
+            shadowed = sorted(n for n in core_names if n.startswith(f"{ns}_")) \
+                if ns else []
+            if shadowed:
+                raise _blame(ManifestError(
+                    f"{_at(pack, str((entry or {}).get('id') or '?'))}: namespace "
+                    f"'{ns}' is a prefix of the gateway's namespace "
+                    f"'{shadowed[0]}', so its vault entries would overlap; "
+                    f"choose a namespace that is not"), pack)
             if ns and ns in builtin_namespaces:
                 refused.append(
                     f"{_at(pack, str((entry or {}).get('id') or '?'))}: namespace "
@@ -1782,6 +1805,22 @@ def _check_vault_entries(connectors: list[Connector]) -> None:
     namespaces = {c.namespace: c for c in connectors}
     seen: dict[str, Connector] = {}
     for c in connectors:
+        if c.builtin:
+            continue
+        # Service credentials obey the same longest-prefix ownership (review of
+        # clodia-tools #362): `foo` may not hand its service `foo_bar_token`
+        # while `foo_bar` is installed. A service may read the entry its own
+        # connector's provider stores, so no "declared twice" check here.
+        for svc in c.services:
+            for entry in svc.credentials:
+                owner = entry_owner(entry, namespaces)
+                if owner and owner != c.namespace:
+                    raise _blame(ManifestError(
+                        f"{_at(c.pack, c.id)}.services '{svc.name}': vault entry "
+                        f"'{entry}' falls under namespace '{owner}' of connector "
+                        f"'{namespaces[owner].id}', not under its own "
+                        f"'{c.namespace}'"), c.pack)
+    for c in connectors:
         for p in c.providers:
             entry = p.credential.vault_entry if p.credential else ""
             if not entry:
@@ -1795,9 +1834,7 @@ def _check_vault_entries(connectors: list[Connector]) -> None:
             seen[entry] = c
             if c.builtin:
                 continue
-            owner = max((n for n in namespaces
-                         if entry == n or entry.startswith(f"{n}_")),
-                        key=len, default="")
+            owner = entry_owner(entry, namespaces)
             if owner and owner != c.namespace:
                 raise _blame(ManifestError(
                     f"{_at(c.pack, c.id)}: vault entry '{entry}' falls under "
