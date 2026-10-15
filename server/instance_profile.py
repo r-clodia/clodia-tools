@@ -11,6 +11,10 @@ vivono dal suo lato del confine:
   fixed = whitelist chiusa (`integrations.allowed`); full = self-service.
 - `topics: single` — creazione topic limitata al workspace unico (i DM
   restano permessi: sono la webchat, non topic di lavoro).
+- `connectors: {<id>: native|pack}` — chi implementa un connettore su questa
+  istanza (clodia-platform#522). Sezione di PRIMO livello, non dentro
+  `features`: non è una feature da accendere o spegnere, è l'interruttore di
+  una migrazione, e la posizione di default (`native`) è lo stato di ieri.
 
 Regole: file assente = FULL; file invalido = fallback FULL con warning
 prominente (availability-first, rischio documentato in spec). Loader
@@ -47,6 +51,14 @@ _TRISTATE = {"topics": ("off", "single", "full"),
              "rag": ("off", "single", "full"),
              "integrations": ("off", "fixed", "full")}
 
+#: Le due posizioni dell'interruttore di migrazione di un connettore
+#: (clodia-platform#522, decisione d'owner G3 dell'epic #527): `native` = lo
+#: implementa il gateway, `pack` = lo implementa il pack che lo dichiara.
+CONNECTOR_BACKENDS = ("native", "pack")
+#: Posizione di default: `native`, cioè lo stato di prima. Un profilo che non
+#: nomina il connettore non lo migra — l'interruttore si accende, non si subisce.
+CONNECTOR_DEFAULT = "native"
+
 _CACHE: Optional[dict] = None
 
 
@@ -63,6 +75,7 @@ def _full() -> dict:
         "integrations": {"allowed": []},
         "topics_single": {"name": "workspace", "tier": "SEAL-1"},
         "topics_defaults": {},
+        "connectors": {},
     }
 
 
@@ -100,6 +113,23 @@ def load(force: bool = False) -> dict:
                     val = bool(val)
                 prof["features"][key] = val
             prof["edition"] = str(raw.get("edition") or "full")
+            conns = raw.get("connectors") or {}
+            if not isinstance(conns, dict):
+                raise ValueError("'connectors' deve essere un mapping "
+                                 "<connettore>: native|pack")
+            for cid, pos in conns.items():
+                pos = str(pos or "").strip().lower()
+                if pos not in CONNECTOR_BACKENDS:
+                    # Un valore illeggibile lascia il connettore DOV'ERA
+                    # (`native`) invece di far ripiegare tutto il profilo su
+                    # FULL: questo interruttore non concede niente, e un refuso
+                    # qui non deve spegnere il gating di rag/integrations.
+                    LOG.error("profile.yaml: connectors.%s = '%s' non valido "
+                              "(%s) — il connettore resta '%s'",
+                              cid, pos, "|".join(CONNECTOR_BACKENDS),
+                              CONNECTOR_DEFAULT)
+                    continue
+                prof["connectors"][str(cid)] = pos
             for section in ("rag", "integrations", "topics_single", "topics_defaults"):
                 sec = raw.get(section)
                 if isinstance(sec, dict):
@@ -177,6 +207,37 @@ def connector_check(cid: str) -> None:
     if allowed is not None and cid not in allowed:
         raise PermissionError(
             f"connettore '{cid}' non previsto dall'edizione (connectors: {allowed})")
+
+
+def connector_backend(cid: str) -> str:
+    """Chi implementa il connettore `cid` su QUESTA istanza: `native` o `pack`.
+
+    L'interruttore della transizione di clodia-platform#522 (decisione d'owner
+    G3): le due implementazioni convivono nell'immagine e il profilo sceglie
+    quale è in servizio, così la migrazione si accende su un'istanza sola e si
+    spegne senza un rollback del codice.
+
+    Non va confuso con `integrations.connectors`, che è l'elenco dei connettori
+    previsti da un'EDIZIONE (`connector_check`): quello dice *se* il connettore
+    esiste su questa istanza, questo *chi* lo implementa.
+    """
+    return str(load()["connectors"].get(cid) or CONNECTOR_DEFAULT)
+
+
+def connector_is_native(cid: str) -> bool:
+    """Il gateway serve ancora questo connettore di persona?"""
+    return connector_backend(cid) == "native"
+
+
+def packed_connectors() -> frozenset[str]:
+    """Gli id dei connettori passati a un pack su questa istanza.
+
+    Un solo punto di lettura per tutti gli effetti dell'interruttore (verbi
+    nativi, manifest builtin, namespace e prefisso di vault riservati): sono
+    quattro facce della stessa decisione e una lista per faccia divergerebbe.
+    """
+    return frozenset(cid for cid, pos in load()["connectors"].items()
+                     if pos == "pack")
 
 
 def topic_default_participants() -> list[str]:

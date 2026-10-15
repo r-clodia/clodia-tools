@@ -48,6 +48,7 @@ from . import builtin as _builtin
 from . import normalise as _normalise
 from .manifest import (
     Connector,
+    ContextArg,
     ManifestError,
     Registry,
     Scheme,
@@ -353,7 +354,11 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
     # Nella firma anche i plugin (chi possiede quale server MCP) e i backend
     # montati: un `mcp.add` fatto dopo la costruzione deve riservare quel
     # namespace alla chiamata successiva, non al prossimo cambio di pack.yaml.
-    sig = (_signature(_manifest_files()), _mount_signature())
+    # Nella firma anche l'interruttore di migrazione (#522): spostato un
+    # connettore, i manifest del gateway non sono più gli stessi e un registry
+    # costruito prima descriverebbe l'implementazione che non è in servizio.
+    sig = (_signature(_manifest_files()), _mount_signature(),
+           tuple(sorted(_builtin.migrated_namespaces())))
     if _CACHE is not None and _CACHE[0] == sig:
         return _CACHE[1], _CACHE[2]
     # 1. The floor: the gateway's own connectors. If THEY fail the result is
@@ -530,6 +535,22 @@ def egress_mapping(verb: str) -> VerbMapping | None:
 def source_mapping(verb: str) -> VerbMapping | None:
     mappings = source_mappings(verb)
     return mappings[0] if mappings else None
+
+
+def context_arguments(verb: str) -> tuple[ContextArg, ...]:
+    """Gli argomenti di contesto dichiarati per `verb`, o `()`.
+
+    Senza `try`: se il registry non è leggibile questa funzione solleva e la
+    chiamata non parte. È voluto. Ogni altra risposta sarebbe «non so quali
+    argomenti riempire, procedo lo stesso», cioè consegnare al pack il canale e
+    l'agente *dichiarati dal chiamante* — esattamente il valore falsificabile
+    per cui esiste il meccanismo.
+
+    La regola di namespace vale qui come per le mappature (#516/#517): è
+    `build_registry` a garantire che un connettore parli solo del proprio
+    namespace, quindi `context_for` risponde solo a chi possiede il verbo.
+    """
+    return registry().context_for(verb)
 
 
 def destinations(mapping: VerbMapping, arguments: dict | None,

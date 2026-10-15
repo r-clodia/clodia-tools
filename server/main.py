@@ -788,13 +788,6 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name"]},
     ),
     Tool(
-        name="telegram.roster",
-        description=("Amministratori e membri noti di un gruppo, con uid e "
-                     "username: serve a mappare le persone senza digitare numeri."),
-        inputSchema={"type": "object", "properties": {
-            "chat_id": {"type": "string"}}, "required": ["chat_id"]},
-    ),
-    Tool(
         name="topic.list",
         description="Elenca i topic (riga sintetica). Gli archived sono nascosti salvo include_archived.",
         inputSchema={"type": "object", "properties": {
@@ -1948,7 +1941,44 @@ _TELEGRAM_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {
              "tier": {"type": "string"}, "name": {"type": "string"}},
              "required": ["tier", "name"]}),
+    # Stava in `_TOPIC_TOOLS` (serviva a mappare le persone di un topic) ed è
+    # un verbo `telegram.`: dispatchato da `_dispatch_telegram`, e il namespace
+    # lo si libera solo se se ne va TUTTO. Elencato altrove sarebbe l'unico
+    # verbo nativo rimasto a tenere riservato `telegram` — cioè un interruttore
+    # che sembra acceso e non lo è.
+    Tool(name="telegram.roster",
+         description=("Amministratori e membri noti di un gruppo, con uid e "
+                      "username: serve a mappare le persone senza digitare numeri."),
+         inputSchema={"type": "object", "properties": {
+             "chat_id": {"type": "string"}}, "required": ["chat_id"]}),
 ]
+
+#: I verbi nativi di un connettore che l'epic #527 sta spostando in un pack,
+#: per id di connettore. In posizione `pack` il gateway **non li espone e non li
+#: serve**: i verbi omonimi arrivano dal backend MCP del pack e passano dal ramo
+#: `proxy.is_proxied` del dispatch, con lo stesso nome e gli stessi grant.
+#:
+#: Tenerli fuori dal catalogo non è cosmesi: `core_namespaces()` deriva i
+#: namespace riservati PROPRIO da `all_native_verb_names()`, quindi è questo
+#: elenco a liberare `telegram` per il pack che lo dichiara (clodia-platform#522).
+_MIGRATING_CONNECTORS: dict[str, list] = {"telegram": _TELEGRAM_TOOLS}
+
+
+def _connector_is_native(cid: str) -> bool:
+    """Il connettore `cid` è ancora implementato dal gateway su questa istanza?"""
+    try:
+        return instance_profile.connector_is_native(cid)
+    except Exception:  # noqa: BLE001 — profilo illeggibile: resta com'era ieri
+        return True
+
+
+def _migrating_native_tools() -> list:
+    """I Tool dei connettori in migrazione ancora in servizio qui."""
+    out: list = []
+    for cid, tools in _MIGRATING_CONNECTORS.items():
+        if _connector_is_native(cid):
+            out += list(tools)
+    return out
 
 
 # memory.* — seed memory scrivibile dell'agente (universale, non richiede grant).
@@ -2512,7 +2542,7 @@ def _native_tool_namespaces() -> list[str]:
     soppiatto: clodia-platform#140.
     """
     tools = (_FS_TOOLS + _WEB_TOOLS + _DATASTORE_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TOPIC_TOOLS + _GITHUB_TOOLS + _IMAGE_TOOLS
-             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS
+             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _migrating_native_tools() + _MEMORY_TOOLS + _GDRIVE_TOOLS
              + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
              + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS
              + _PACKS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS
@@ -3098,11 +3128,11 @@ def _all_native_tools() -> list:
     """
     native = list(_FS_TOOLS + _WEB_TOOLS + _DATASTORE_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS
                   + _TOPIC_TOOLS + _GITHUB_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS
-                  + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS
+                  + _SETTINGS_TOOLS + _PROFILE_TOOLS + _MEMORY_TOOLS
                   + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
                   + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS + _PACKS_TOOLS
                   + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS
-                  + _copybrain.TOOLS)
+                  + _copybrain.TOOLS) + _migrating_native_tools()
     if instance_profile.rag_enabled():
         native += list(_EU_CORPUS_TOOLS + _RAG_TOOLS)
     return native
@@ -3124,6 +3154,51 @@ def _verb_implemented(name: str) -> bool:
         return bool(proxy.is_proxied(name))
     except Exception:  # noqa: BLE001 — in dubbio, lascia parlare il dispatch
         return True
+
+
+def _context_value(kind: str, agent: str | None) -> str:
+    """Il valore AUTENTICO di un contesto dichiarato (`manifest.CONTEXT_VALUES`).
+
+    Vuoto quando non c'è: una chiamata senza canale firmato consegna canale
+    vuoto, non il canale che il chiamante si è scritto negli argomenti.
+    """
+    if kind == "channel":
+        return current_channel() or ""
+    if kind == "agent":
+        return agent or ""
+    # Grammatica chiusa: un valore che il gateway non sa produrre non si lascia
+    # passare come «argomento normale» — sarebbe di nuovo il chiamante a dirlo.
+    raise ValueError(f"contesto '{kind}' non previsto da questo gateway")
+
+
+def _fill_declared_context(name: str, arguments: dict,
+                           agent: str | None) -> list[str]:
+    """Riempie gli argomenti di contesto che il manifest del pack dichiara.
+
+    Il connettore nativo sa in che stanza è e chi lo chiama perché legge il
+    claim firmato della sessione; il processo di un pack quel claim non ce l'ha,
+    e passarglielo come argomento del chiamante vorrebbe dire credergli. Qui il
+    valore lo mette il gateway, e **sovrascrive sempre** quello ricevuto: non
+    esiste il caso «il chiamante l'ha già messo, lo rispetto», perché quel caso
+    è esattamente l'attacco (un agente che dichiara un altro canale ottiene la
+    chat legata a un topic di cui non è partecipante).
+
+    Ritorna gli argomenti riempiti — per i test e per il log.
+    """
+    from .connectors import resolved as _connectors
+
+    # Senza `try`: se il registry non è interrogabile la chiamata fallisce,
+    # invece di proseguire con un contesto che non si è potuto verificare.
+    declared = _connectors.context_arguments(name)
+    if not declared:
+        return []
+    filled = []
+    for item in declared:
+        arguments[item.arg] = _context_value(item.value, agent)
+        filled.append(item.arg)
+    LOG.info("contesto di pack su %s: %s riempiti dal gateway", name,
+             ", ".join(filled))
+    return filled
 
 
 def all_native_verb_names() -> list[str]:
@@ -4682,6 +4757,14 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
         if not _verb_implemented(name):
             raise ValueError(f"unknown tool: {name}")
 
+        # CONTESTO DELLA CHIAMATA PER I VERBI DI UN PACK (clodia-platform#522).
+        # Qui, prima del gate e prima del verdetto egress: la card che l'owner
+        # legge, la destinazione che il PDP calcola e gli argomenti che il
+        # backend riceve devono descrivere la STESSA chiamata. Riempire dopo il
+        # verdetto significherebbe far approvare una destinazione e spedirne
+        # un'altra.
+        _fill_declared_context(name, arguments, _ag)
+
         # M-gate: conferma umana su azioni sotto supervisione — UN SOLO meccanismo.
         # (a) VERBI gated (packs/mcp/agents/…): consenso one-shot per-verbo.
         # (b) CROSS-TOPIC: un agente che tocca un topic di cui NON è participant
@@ -5154,7 +5237,11 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_profile(name, arguments, _ag)
         elif name.startswith("settings."):
             result = _dispatch_settings(name, arguments, _ag)
-        elif name.startswith("telegram."):
+        elif name.startswith("telegram.") and _connector_is_native("telegram"):
+            # In posizione `pack` il ramo si salta di proposito: i `telegram.*`
+            # scendono fino a `proxy.is_proxied`, che è il backend MCP del pack.
+            # Se quel backend non è montato il verbo non esiste affatto, e
+            # `_verb_implemented` l'ha già detto prima di ogni gate.
             result = _dispatch_telegram(name, arguments)
         elif name.startswith("memory."):
             result = _dispatch_memory(name, arguments)

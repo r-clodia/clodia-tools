@@ -19,7 +19,12 @@ the gateway ships with itself:
     github.yaml     → it-pack with migration #525
 
 A migration deletes its file in the same change that adds the pack, and the
-registry notices nothing: the entries simply arrive from the other side. Until
+registry notices nothing: the entries simply arrive from the other side. While
+a migration is in flight the two implementations coexist in the image and the
+per-instance switch (`instance_profile.connector_backend`, clodia-platform#522)
+says which one is in service: a connector in the `pack` position is dropped from
+the documents below, which is exactly the «file deleted» state, one instance at
+a time and reversible without a rollback of the code. Until
 then a pack declaring the same connector id or the same scheme is **refused**
 (`build_registry`, `builtin=`): while the gateway is the thing actually sending
 the mail, an installed manifest must not be able to redefine where it goes.
@@ -38,8 +43,9 @@ LOG = logging.getLogger("clodia-tools.connectors")
 DIR = Path(__file__).resolve().parent / "builtin_manifests"
 
 
-def manifests() -> dict[str, dict]:
-    """`{pack name: parsed document}` for every file shipped in `builtin_manifests/`.
+def documents() -> dict[str, dict]:
+    """`{pack name: parsed document}` for every file shipped in `builtin_manifests/`,
+    *before* the per-instance migration switch.
 
     A file that does not parse raises: unlike a pack manifest — which comes from
     a volume the gateway does not own, and whose breakage must not take the
@@ -56,6 +62,77 @@ def manifests() -> dict[str, dict]:
             raise ValueError(f"builtin manifest '{name}' declared twice")
         out[name] = dict(loaded)
     return out
+
+
+def _entries(doc: dict) -> list:
+    raw = doc.get("connectors")
+    return list(raw) if isinstance(raw, list) else []
+
+
+def migrated_namespaces() -> frozenset[str]:
+    """The namespaces of the builtin connectors a PACK implements here now.
+
+    Read from the files rather than from the switch, because the switch names
+    connector *ids* while the reservations (`CORE_VAULT_PREFIXES`, the native
+    namespaces) are about *namespaces*: deriving one from the other by hand
+    would be a second mapping, right where a mistake frees a prefix that is
+    still in use.
+    """
+    from .. import instance_profile
+
+    try:
+        packed = instance_profile.packed_connectors()
+    except Exception:  # noqa: BLE001 — a profile we cannot read migrates nothing
+        return frozenset()
+    if not packed:
+        return frozenset()
+    out = set()
+    for doc in documents().values():
+        for entry in _entries(doc):
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("id") or "") in packed:
+                out.add(str(entry.get("namespace") or ""))
+    return frozenset(n for n in out if n)
+
+
+def manifests() -> dict[str, dict]:
+    """The builtin documents **as this instance serves them**: the connectors
+    the migration switch moved to a pack are not in here (clodia-platform#522).
+
+    Dropping the entry is the whole mechanism. `build_registry` already refuses
+    a pack connector whose namespace is a builtin one — «it becomes effective
+    when that implementation moves into a pack» — so removing the gateway's own
+    declaration is what lets the pack's identical declaration take its place,
+    with no second code path and nothing to keep in step.
+
+    A document left without connectors is dropped whole: a `name:` with nothing
+    under it would reserve a pack name for an empty manifest.
+    """
+    packed = {c for c in _packed_ids()}
+    out: dict[str, dict] = {}
+    for name, doc in documents().items():
+        entries = _entries(doc)
+        kept = [e for e in entries
+                if not (isinstance(e, dict) and str(e.get("id") or "") in packed)]
+        if entries and not kept:
+            LOG.info("connectors: '%s' è implementato da un pack su questa "
+                     "istanza, il manifest del gateway non è in servizio", name)
+            continue
+        doc = dict(doc)
+        if entries:
+            doc["connectors"] = kept
+        out[name] = doc
+    return out
+
+
+def _packed_ids() -> frozenset[str]:
+    from .. import instance_profile
+
+    try:
+        return instance_profile.packed_connectors()
+    except Exception:  # noqa: BLE001 — unreadable profile: nothing is migrated
+        return frozenset()
 
 
 def names() -> tuple[str, ...]:

@@ -71,6 +71,7 @@ That is a connector which only needs a credential — image generation is one.
 | `tools_card` | no | what the Tools page shows: `setup_label`, `status_verb`, `test_verb`, `docs_url`, `blurb`, `scope`, `icon` |
 | `services` | no | long-running processes, see #515 |
 | `storage_remote` | no | topic storage backend the pack provides, see #524 |
+| `context` | no | arguments the GATEWAY fills on every verb of this namespace, see below |
 
 `blurb`, `scope` and `icon` (#520) are the card's COPY and its glyph. The
 drawing is a frontend asset — a logo is an SVG file, not gateway data — but the
@@ -87,6 +88,41 @@ There is **no `seal_cap`**, and writing one is an error. The epic decided there
 is no SEAL ceiling on a binding: the owner decides per binding at the gate, and
 the gate shows the topic's tier. Today's `_CHANNEL_SEAL_CAP` and
 `_DRIVE_SEAL_CAP` disappear with #518 and must not come back as a field.
+
+### `context`
+
+```
+context:
+  channel: channel      # argument name: what the gateway puts in it
+  agent: agent
+```
+
+A mapping `<argument>: channel|agent`. The gateway fills those arguments on
+**every** call to a verb of this namespace, with the values it reads from the
+session's signed claim — the room the call comes from and the agent making it —
+and it **overwrites** whatever arrived with the call.
+
+Why it exists: a native connector knows where it is and who is calling because
+it reads the claim; a pack's process does not have the claim, and a context
+passed as an ordinary argument would be a context the caller can choose.
+`telegram.send` without `chat_id` sends to the chat bound to the calling topic,
+so a caller-declared channel would mean «write into another topic's group».
+
+Consequences worth knowing before declaring one:
+
+- the value is overwritten **always**, with the empty string when there is no
+  channel: there is no «the caller already set it, so I keep it», because that
+  case is the attack;
+- it applies to every verb of the namespace, so every tool of your MCP server
+  must accept those arguments. One list per verb would be one more list to keep
+  in step with the server's tools, and the day a new verb arrives without an
+  entry it would receive the caller's value instead;
+- `channel` and `agent` are the whole list. A manifest may not invent a context
+  name: that is not adding a field, it is asking the gateway to certify
+  something it does not know;
+- a **builtin** manifest declaring `context` is refused: the gateway's own
+  connectors have the claim, and the argument would overwrite a parameter of
+  code we own.
 
 ### `schemes[]`
 
@@ -384,6 +420,14 @@ connectors:
         scheme: tg
         arg: chat_id
         dtype: telegram
+    # The two things the gateway knows and the pack's process cannot: which
+    # room the call comes from (`telegram.send` without `chat_id` goes to the
+    # chat bound to it) and who is calling (the per-chat lease is held by an
+    # agent, by name). Filled by the gateway on every `telegram.*` call, over
+    # whatever the caller sent.
+    context:
+      channel: channel
+      agent: agent
     # No `telegram.read`: today no Telegram read goes through
     # `_RESOURCE_READ_VERBS`, so declaring one would add a check that does not
     # exist — inside a migration (#522) whose whole point is parity. What the

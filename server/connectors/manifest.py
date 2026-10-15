@@ -96,6 +96,14 @@ OPTION_SETS = ("mailboxes",)
 #: verifica che le due facce dicano la stessa cosa.
 OPTION_SET_VALUES = {"mailboxes": ("account", "address")}
 
+#: Il CONTESTO della chiamata che il gateway sa, e il pack no: la stanza da cui
+#: si chiama (`channel`, dal claim firmato — `whitelist.current_channel()`) e
+#: l'agente che chiama (`agent`). Lista chiusa come `NORMALISERS` e per la
+#: stessa ragione, più una: questi valori sono *identità*. Un pack che potesse
+#: nominarne di nuovi non aggiungerebbe un campo, chiederebbe al gateway di
+#: certificargli qualcosa che il gateway non sa.
+CONTEXT_VALUES = ("channel", "agent")
+
 _ID = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
 _NAMESPACE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _SCHEME = re.compile(r"^[a-z][a-z0-9+.-]{0,31}$")
@@ -126,6 +134,34 @@ CORE_VAULT_PREFIXES = (
 MIGRATING_NAMESPACES = frozenset(p.rstrip("_") for p in CORE_VAULT_PREFIXES)
 
 
+def migrated_namespaces() -> frozenset[str]:
+    """I namespace che su QUESTA istanza sono già passati a un pack (#522).
+
+    Le due costanti qui sopra sono l'elenco completo, cioè lo stato prima di
+    ogni migrazione; la riserva EFFETTIVA le toglie man mano che l'interruttore
+    del profilo sposta un connettore. Finché resta riservato, il pack che lo
+    implementa non potrebbe né tenere il namespace né scrivere la propria
+    credenziale: la migrazione sarebbe dichiarabile e non installabile.
+    """
+    try:
+        from .builtin import migrated_namespaces as _m
+
+        return _m()
+    except Exception:  # noqa: BLE001 — in dubbio si riserva tutto (fail-closed)
+        return frozenset()
+
+
+def core_vault_prefixes() -> tuple[str, ...]:
+    """`CORE_VAULT_PREFIXES` meno quelli dei connettori già migrati."""
+    gone = {f"{n}_" for n in migrated_namespaces()}
+    return tuple(p for p in CORE_VAULT_PREFIXES if p not in gone)
+
+
+def migrating_namespaces() -> frozenset[str]:
+    """`MIGRATING_NAMESPACES` meno quelli dei connettori già migrati."""
+    return MIGRATING_NAMESPACES - migrated_namespaces()
+
+
 def entry_owner(entry: str, namespaces: Iterable[str]) -> str:
     """The namespace a vault entry belongs to: the LONGEST of `namespaces` that
     is `entry` itself or a `<ns>_` prefix of it, or "" when none is.
@@ -150,12 +186,12 @@ def vault_entry_problem(entry: str, namespace: str,
     reproduced with an explicit, smaller one — a test of the day after a
     migration — lets a stem namespace use its own prefix.
     """
-    taken = MIGRATING_NAMESPACES if reserved is None else frozenset(reserved)
+    taken = migrating_namespaces() if reserved is None else frozenset(reserved)
     if entry != namespace and not entry.startswith(f"{namespace}_"):
         return (f"vault entry '{entry}' is outside namespace '{namespace}': a "
                 f"connector stores its credential as '{namespace}' or "
                 f"'{namespace}_<name>'")
-    for prefix in CORE_VAULT_PREFIXES:
+    for prefix in core_vault_prefixes():
         if not (entry.startswith(prefix) or entry == prefix.rstrip("_")):
             continue
         if prefix.rstrip("_") == namespace and namespace not in taken:
@@ -774,6 +810,27 @@ class VerbMapping:
 
 
 @dataclass(frozen=True)
+class ContextArg:
+    """Un argomento che il GATEWAY riempie, al posto del chiamante.
+
+    Un connettore nativo sa da sé in che stanza è e chi sta chiamando: lo
+    leggono `whitelist.current_channel()` e `agent_name()` dal claim firmato
+    della sessione, che non passa dagli argomenti. Un connettore di PACK gira in
+    un processo che quel claim non ha, e passargli il contesto come un argomento
+    qualunque lo renderebbe falsificabile: `telegram.send` senza `chat_id` usa la
+    chat legata al canale chiamante, quindi un canale dichiarato dal chiamante
+    sarebbe «scrivi nel gruppo di un altro topic».
+
+    Perciò la dichiarazione nomina l'argomento, e il gateway ci mette il valore
+    vero **sempre**, sovrascrivendo quello che è arrivato (`main._fill_declared_context`).
+    Non è una default: è l'unico modo in cui quel valore può entrare.
+    """
+
+    arg: str
+    value: str
+
+
+@dataclass(frozen=True)
 class ActionField:
     """Un campo dell'azione: testo libero, oppure una scelta fra valori che il
     gateway fornisce (`options:`).
@@ -914,6 +971,11 @@ class Connector:
     tools_card: ToolsCard | None = None
     services: tuple[Service, ...] = ()
     storage_remote: StorageRemote | None = None
+    #: Argomenti di contesto che il gateway riempie su OGNI verbo di questo
+    #: namespace (`ContextArg`). Vale per i connettori di pack: i nativi il
+    #: contesto ce l'hanno già, e scriverlo in un argomento sovrascriverebbe un
+    #: parametro di codice nostro.
+    context: tuple[ContextArg, ...] = ()
     #: Shipped by the gateway itself (`builtin/*.yaml`) rather than installed
     #: with a pack. Those files are the connectors this gateway still implements
     #: natively, declared in the same grammar so the PDP has one source — see
@@ -946,7 +1008,7 @@ def core_namespaces() -> frozenset[str]:
 
     return frozenset(
         name.split(".", 1)[0] for name in all_native_verb_names()
-        if "." in name) | MIGRATING_NAMESPACES
+        if "." in name) | migrating_namespaces()
 
 
 def check_namespace(namespace: str, verbs: Iterable[str], *,
@@ -1109,6 +1171,26 @@ def _parse_provider(raw: Any, where: str, *, pack: str) -> Provider:
                           required=False),
         test_verb=_text(data.get("test_verb"), f"{where}.test_verb", required=False),
     )
+
+
+def _parse_context(raw: Any, where: str) -> tuple[ContextArg, ...]:
+    """Il blocco `context:` — `{<argomento>: channel|agent}`.
+
+    Mapping e non lista perché l'argomento è la chiave: due voci per lo stesso
+    argomento sarebbero due valori per lo stesso posto, e in YAML non esistono.
+    """
+    if raw is None:
+        return ()
+    data = _mapping(raw, where)
+    out = []
+    for arg, value in data.items():
+        name = _matching(_text(arg, f"{where} argument name"), _ARG,
+                         f"{where} argument name")
+        out.append(ContextArg(
+            arg=name,
+            value=_one_of(_text(value, f"{where}.{name}"), CONTEXT_VALUES,
+                          f"{where}.{name}")))
+    return tuple(out)
 
 
 def _parse_verb(raw: Any, where: str) -> VerbMapping:
@@ -1363,7 +1445,7 @@ def _parse_service(raw: Any, where: str, *, pack: str) -> Service:
 #: implementation, never a meaning: letting it re-declare a scheme, a canonical
 #: form or a verb mapping would hand the vocabulary of another pack to the one
 #: that installed second.
-_OWNER_ONLY = ("schemes", "verbs", "taint", "topic_actions")
+_OWNER_ONLY = ("schemes", "verbs", "taint", "topic_actions", "context")
 
 
 def parse_connector(raw: Any, *, pack: str,
@@ -1473,6 +1555,16 @@ def parse_connector(raw: Any, *, pack: str,
                 f"'{namespace}'. Declaring what does not taint a channel is a "
                 f"statement about one's own tools, never about someone else's")
 
+    context = _parse_context(data.get("context"), f"{where}.context")
+    if context and builtin:
+        # Un connettore del GATEWAY legge il claim firmato della sessione: un
+        # argomento di contesto non gli aggiungerebbe niente e sovrascriverebbe
+        # un parametro di codice nostro. Rifiutato invece che ignorato: una
+        # dichiarazione inerte è una promessa che nessuno mantiene.
+        raise ManifestError(
+            f"{where}: 'context' is for a connector a PACK implements; this "
+            f"gateway reads the channel and the agent from the signed claim")
+
     actions = tuple(
         _parse_topic_action(a, f"{where}.topic_actions[{i}]")
         for i, a in enumerate(
@@ -1537,6 +1629,7 @@ def parse_connector(raw: Any, *, pack: str,
         tools_card=_parse_tools_card(card, f"{where}.tools_card") if card else None,
         services=services,
         storage_remote=storage,
+        context=context,
         builtin=builtin,
     )
 
@@ -1679,6 +1772,25 @@ class Registry:
         return {v.verb: v for c in self.connectors for v in c.verbs
                 if v.direction == direction}
 
+    def context_for(self, verb: str) -> tuple[ContextArg, ...]:
+        """Gli argomenti di contesto da riempire su questa chiamata.
+
+        Per NAMESPACE, non per verbo: il contesto è «chi chiama e da dove», che
+        non cambia col verbo, e un elenco per verbo sarebbe un elenco da tenere
+        allineato ai tool del backend — cioè il posto dove, prima o poi, un
+        verbo nuovo arriva senza contesto e riceve quello del chiamante.
+
+        Mai per un connettore `builtin`: quelli il claim ce l'hanno (vedi
+        `ContextArg`), e il parser già rifiuta la dichiarazione.
+        """
+        ns = (verb or "").split(".", 1)[0]
+        if not ns:
+            return ()
+        for c in self.connectors:
+            if not c.builtin and c.namespace == ns and c.context:
+                return c.context
+        return ()
+
     def taint_prefixes(self) -> tuple[str, ...]:
         return tuple(sorted({p for c in self.connectors for p in c.taint_prefixes}))
 
@@ -1729,7 +1841,7 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
     #: Names a pack namespace may not be a `_`-prefix of: with `foo` installed,
     #: `foo_bar…` entries would fall to the pack whenever the core `foo_bar`
     #: namespace is not itself a connector in this registry.
-    core_names = set(reserved_set) | builtin_namespaces | set(MIGRATING_NAMESPACES)
+    core_names = set(reserved_set) | builtin_namespaces | migrating_namespaces()
     for pack in sorted(set(manifests) - set(builtin_names)):
         # Each pack is checked against the gateway's namespaces *and* against the
         # namespaces already claimed by the packs parsed before it.
