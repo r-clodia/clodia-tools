@@ -71,10 +71,33 @@ _CACHE: tuple[tuple, Registry, tuple[str, ...], dict] | None = None
 
 
 def _manifest_files() -> list[Path]:
+    """The installed manifests, OLDEST FIRST — i.e. in install order.
+
+    The order is the tie-breaker of a clash (clodia-platform#545 §1: the
+    incumbent keeps its namespace, the newcomer is the one dropped), so it has
+    to mean something. `sorted()` by path meant «whoever sorts first», which is
+    not a fact about the instance.
+
+    SHORTCUT: install time is the mtime of `pack.yaml`. It holds while that file
+    is only written by an install or an update — and an update of the incumbent
+    does not change who was there first, because the other pack's file is not
+    touched. It stops holding the day a restore/rsync rewrites every manifest
+    with the same timestamp, or a `touch` reorders them: then the agent-server
+    has to stamp an `installed_at` in the manifest at install time and this
+    reads that instead, with the mtime as the fallback for the files already on
+    disk.
+    """
     try:
-        return sorted((_DATA / PACKS_DIR).glob("*/pack.yaml"))
+        files = list((_DATA / PACKS_DIR).glob("*/pack.yaml"))
     except OSError:  # unreadable data dir: no connectors, never an exception
         return []
+
+    def _when(p: Path) -> tuple:
+        try:
+            return (p.stat().st_mtime_ns, str(p))
+        except OSError:
+            return (0, str(p))
+    return sorted(files, key=_when)
 
 
 def _signature(paths: list[Path]) -> tuple:
@@ -93,15 +116,25 @@ def _signature(paths: list[Path]) -> tuple:
 _CORE_BACKENDS = frozenset({"github"})
 
 
-def _norm(name: str) -> str:
+def norm_name(name: str) -> str:
     """Un nome di backend o di namespace nella forma in cui si confrontano.
 
     Gli slug dei backend usano `-` (`tools_api._slugify`), i namespace `_`:
     `norm-attiva` e `norm_attiva` sono lo stesso nome, e un confronto a stringa
     lo mancherebbe.
+
+    Pubblica perché la PROPRIETÀ di un backend e il controllo di conflitto che
+    decide se montarlo (`tools_api.register_mcp_core`) devono rispondere alla
+    stessa domanda: finché il secondo confrontava gli slug grezzi, un nome
+    scritto a mano in `config.yaml` passava il 409 e poi risultava lo stesso
+    backend qui (clodia-platform#545 §2).
     """
     import re as _re
     return _re.sub(r"[^a-z0-9]", "_", (name or "").strip().lower())
+
+
+#: Nome storico, usato in tutto questo modulo.
+_norm = norm_name
 
 
 def _backend_entries() -> list[dict]:
@@ -163,7 +196,12 @@ def reserved_for(pack: str) -> frozenset[str]:
 
 
 def manifests() -> dict[str, dict]:
-    """`{pack name: parsed pack.yaml}` for every installed pack.
+    """`{pack name: parsed pack.yaml}` for every installed pack, OLDEST FIRST.
+
+    The iteration order is install order (`_manifest_files`) and it is load
+    bearing: `_build_isolated` reads it to know which side of a clash was there
+    first. Tests that patch this function declare that order by building the
+    dict in it.
 
     A file that does not parse is skipped with a warning: it is already the
     agent-server's job to refuse it, and one broken pack must not make the other
@@ -248,11 +286,20 @@ def _build_isolated(own: dict, installed: dict
     not half-valid — but the INSTANCE must not be: one malformed or clashing
     pack used to drop every pack's connectors (and with #517 their egress
     checks). The packs a refusal is about (`ManifestError.packs`) are removed
-    and the build is retried; a clash removes BOTH sides, so the winner of a
-    contested scheme is never «whoever sorts first». Raises when a refusal
-    names no installed pack (then the floor is the builtins alone).
+    and the build is retried. Raises when a refusal names no installed pack
+    (then the floor is the builtins alone).
+
+    When a refusal blames MORE than one pack it is a clash, and only the pack
+    installed LAST is dropped (clodia-platform#545 §1). Dropping both sides was
+    meant to keep the winner from being «whoever sorts first», but it made
+    installing an unrelated pack a way to switch off a healthy one: its
+    connectors left the registry and its outbound verbs fell into the failsafe,
+    i.e. denied. The incumbent is not an arbitrary winner — it is the one whose
+    connectors the instance has been using, and the newcomer is the change an
+    owner can undo. `installed` is in install order (see `manifests`).
     """
     remaining = dict(installed)
+    order = {p: i for i, p in enumerate(installed)}
     dropped: list[str] = []
     while True:
         try:
@@ -262,6 +309,10 @@ def _build_isolated(own: dict, installed: dict
             culprits = [p for p in e.packs if p in remaining]
             if not culprits:
                 raise
+            if len(culprits) > 1:
+                # A clash: the latest arrival loses, the others stay. One per
+                # round — a second clash among those left raises again here.
+                culprits = [max(culprits, key=lambda p: order.get(p, 0))]
             for p in culprits:
                 remaining.pop(p)
                 dropped.append(f"pack '{p}' refused, its connectors are "

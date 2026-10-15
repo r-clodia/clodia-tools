@@ -401,10 +401,19 @@ class RegistryFromDiskTests(unittest.TestCase):
         return [c.id for c in resolved.registry().connectors if not c.builtin]
 
     def write(self, pack: str, body: str) -> Path:
+        """Scrive il manifest e ne DICHIARA l'ordine di installazione.
+
+        L'mtime è ciò che `resolved._manifest_files` legge per sapere chi era
+        qui prima (clodia-platform#545 §1), e due scritture nello stesso test
+        possono cadere nello stesso istante: qui lo si stampiglia invece di
+        sperarlo.
+        """
         d = self.data / resolved.PACKS_DIR / pack
         d.mkdir(parents=True, exist_ok=True)
         path = d / "pack.yaml"
         path.write_text(body, encoding="utf-8")
+        self._quando = getattr(self, "_quando", 1_000_000) + 60
+        os.utime(path, (self._quando, self._quando))
         return path
 
     def test_an_installed_manifest_is_read_from_the_data_dir(self) -> None:
@@ -442,11 +451,14 @@ class RegistryFromDiskTests(unittest.TestCase):
         self.write("courier-pack", yaml.safe_dump(COURIER))
         self.assertEqual(self.pack_connectors(), ["courier"])
 
-    def test_two_packs_claiming_one_scheme_leave_no_pack_connector(self) -> None:
-        """`build_registry` is all-or-nothing by design. The consequence is the
-        behaviour of before the issue — PACK verbs unmapped — and it has to be
-        visible, which is what `problems()` is for. The gateway's own connectors
-        survive it (#518): a pack must not be able to unmap `email.send`."""
+    def test_two_packs_claiming_one_scheme_cost_the_NEWCOMER_its_connector(self) -> None:
+        """`build_registry` is all-or-nothing by design, so one of the two
+        contenders has to go — but not both (clodia-platform#545 §1): dropping
+        the incumbent made installing an unrelated pack a way to unmap a verb
+        that was working. The pack installed LAST loses; the refusal stays
+        visible, which is what `problems()` is for. The gateway's own
+        connectors survive either way (#518): a pack must not unmap
+        `email.send`."""
         import yaml
         # A scheme nobody owns, declared twice: two packs disagreeing about a
         # vocabulary is the collision this rule exists for. (A pack colliding
@@ -462,13 +474,13 @@ class RegistryFromDiskTests(unittest.TestCase):
         twin["connectors"][0]["id"] = "twin"
         twin["connectors"][0]["namespace"] = "twin"
         twin["connectors"][0]["verbs"] = []
-        self.write("sms-pack", yaml.safe_dump(sms))
-        self.write("twin-pack", yaml.safe_dump(twin))
-        self.assertEqual(self.pack_connectors(), [])
+        self.write("sms-pack", yaml.safe_dump(sms))      # c'era prima
+        self.write("twin-pack", yaml.safe_dump(twin))    # arriva dopo
+        self.assertEqual(self.pack_connectors(), ["sms"])
         self.assertIsNotNone(resolved.egress_mapping("email.send"))
+        self.assertIsNotNone(resolved.egress_mapping("sms.send"))
         self.assertTrue(resolved.problems())
-        self.assertIn("sms", resolved.problems()[0])
-        self.assertIsNone(resolved.egress_mapping("sms.send"))
+        self.assertIn("twin-pack", " ".join(resolved.problems()))
 
 
 # --------------------------------------------------------------------------
