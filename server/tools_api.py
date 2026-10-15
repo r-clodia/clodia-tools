@@ -444,6 +444,110 @@ class McpRegisterError(ValueError):
         self.status = status
 
 
+#: A plugin or pack name as the agent-server writes it on disk.
+_SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def _pack_plugin_roots(pack: str) -> list:
+    """The resolved plugin directories that belong to `pack` and to no other
+    installed pack (clodia-platform#539 §4, legacy adoption).
+
+    The agent-server installs a pack's plugins under `$CLODIA_DATA/plugins/
+    <plugin>/` and lists them in `$CLODIA_DATA/packs/<pack>/pack.yaml`
+    (`plugins:`); `pack_mcp_mount` mounts each plugin's servers in the name of
+    the pack that carries it, so `<plugin>` is not necessarily `<pack>` (on
+    terra: `studio-commercialista` carries `assetti-contabili`). A plugin that
+    two installed packs both list belongs to neither: ambiguity is refused.
+    """
+    from pathlib import Path
+    import yaml
+    data = Path(os.environ.get("CLODIA_DATA", "/datadir"))
+    listed: dict[str, set[str]] = {}
+    try:
+        files = sorted((data / "packs").glob("*/pack.yaml"))
+    except OSError:
+        return []
+    for f in files:
+        try:
+            meta = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001 — unreadable manifest: proves nothing
+            continue
+        if not isinstance(meta, dict):
+            continue
+        owner = str(meta.get("name") or f.parent.name)
+        plugins = meta.get("plugins")
+        for pl in plugins if isinstance(plugins, list) else []:
+            listed.setdefault(str(pl), set()).add(owner)
+    try:
+        base = (data / "plugins").resolve()
+    except OSError:
+        return []
+    roots = []
+    for plugin, owners in sorted(listed.items()):
+        if owners != {pack} or not _SAFE_NAME.fullmatch(plugin) \
+                or plugin in (".", ".."):
+            continue
+        lexical = base / plugin
+        root = lexical.resolve()
+        # A plugin dir that is a symlink — even to a sibling plugin dir — is
+        # not the pack's: only a real directory under `plugins/` proves it.
+        if root != lexical:
+            continue
+        roots.append(root)
+    return roots
+
+
+def _legacy_adoptable(entry: dict, pack: str) -> bool:
+    """May `pack` adopt this backend that carries no `pack` stamp?
+
+    Backends that packs mounted before clodia-tools 2.90.0 were never stamped:
+    under the §4 guard they read as «mounted by an admin, reserved for
+    everyone», so once clodia-logic passes `pack` on import/update, a trusted
+    pack re-mounting its OWN legacy backend would get 409 and Updates would
+    break. Ownership must still be PROVEN, not claimed: the proof is that the
+    process the existing entry starts lives inside one of the pack's own
+    plugin directories (`_pack_plugin_roots`).
+
+    Fail closed on everything else: http backends (a URL proves nothing),
+    entries without a path-like token, relative paths, any `..`, tokens with
+    whitespace (a shell line, not a path), paths that — after resolving
+    symlinks — fall outside the plugin dir, or that span two plugin dirs.
+    """
+    from pathlib import Path
+    if not isinstance(entry, dict) or entry.get("pack"):
+        return False
+    if entry.get("transport") != "stdio":
+        return False
+    if not pack or not _SAFE_NAME.fullmatch(str(pack)):
+        return False
+    tokens = [entry.get("command")] + list(entry.get("args") or [])
+    paths = []
+    for tok in tokens:
+        if not isinstance(tok, str):
+            return False
+        if "=" in tok and tok.startswith("-"):
+            tok = tok.split("=", 1)[1]
+        if "/" not in tok and "\\" not in tok:
+            continue                      # `python3`, `-u`, `--stdio`
+        if any(c.isspace() for c in tok) or "\\" in tok:
+            return False
+        p = Path(tok)
+        if not p.is_absolute() or ".." in p.parts:
+            return False
+        paths.append(p)
+    if not paths:
+        return False
+    roots = _pack_plugin_roots(str(pack))
+    for root in roots:
+        try:
+            if all(p.resolve().is_relative_to(root) and p.resolve() != root
+                   for p in paths):
+                return True
+        except (OSError, RuntimeError):  # symlink loop
+            return False
+    return False
+
+
 def register_mcp_core(config, secrets: dict | None = None,
                       pack: str | None = None) -> dict:
     """Core riutilizzabile della registrazione MCP (UI Add-MCP e tool mcp.add).
@@ -525,7 +629,13 @@ def register_mcp_core(config, secrets: dict | None = None,
         if precedente is not None:
             prima = str(precedente.get("pack") or "")
             adesso = str(pack or "")
-            if prima != adesso:
+            if prima != adesso and not prima and adesso and \
+                    _legacy_adoptable(precedente, adesso):
+                # Legacy mount of this very pack (see `_legacy_adoptable`):
+                # adopted, and the new entry below carries `pack: <adesso>`.
+                LOG.info("mcp: backend '%s' senza proprietario adottato dal "
+                         "pack '%s' (path nel suo plugin dir)", slug, adesso)
+            elif prima != adesso:
                 chi_prima = f"il pack '{prima}'" if prima else "un amministratore"
                 chi_ora = f"il pack '{adesso}'" if adesso else "un amministratore"
                 raise McpRegisterError(
