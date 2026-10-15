@@ -95,10 +95,15 @@ async def list_connectors(request: Request):
     reg = _resolved.registry()
     rows = [_with_connected(_validate.summary(c))
             for c in reg.connectors if _allowed(c.id)]
+    # `services`: ciò che il supervisore (#515) sta davvero facendo girare, non
+    # ciò che il manifest dichiara — sono due cose diverse esattamente quando
+    # serve saperlo, cioè quando un servizio non parte.
+    from . import services as _services
     return JSONResponse({
         "connectors": rows,
         "schemes": {"egress": list(reg.scheme_names("egress")),
                     "source": list(reg.scheme_names("source"))},
+        "services": _services.snapshot(),
         "problems": list(_resolved.problems()),
         "ignored": list(reg.refused),
     })
