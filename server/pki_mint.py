@@ -44,6 +44,12 @@ CERT_DAYS = 365 * 3
 #: sistema di ruoli, è l'identità di UN chiamante.
 ROLE_AGENT_SERVER = "agent-server"
 ROLES = (ROLE_AGENT_SERVER,)
+#: The identity the agent-server mints its OWN service tokens on. The service
+#: role is signed only on a token of this agent, and only on a token that is
+#: not also a turn's (no `on_behalf`, `execution_id` or `chat`): those claims
+#: describe an agent acting in a turn or a human session, and a token carrying
+#: them next to `role: agent-server` would be the very confusion §1 removes.
+ROLE_AGENT_SERVER_AGENT = "clodia"
 
 
 def _secrets_dir() -> Path:
@@ -106,6 +112,18 @@ def mint_session_token(agent: str, execution_id: str = "",
         raise PermissionError("scoped_tools non può concedere wildcard o tool agents.*")
     if role is not None and role not in ROLES:
         raise PermissionError(f"ruolo di sessione sconosciuto: {role!r}")
+    if role == ROLE_AGENT_SERVER:
+        # Hardening (review of #363): the bootstrap secret is the only gate on
+        # this route, so the claim's SHAPE is checked here too. Refused rather
+        # than silently dropped: a caller asking for a mixed token has a bug.
+        mixed = [k for k, v in (("on_behalf", on_behalf),
+                                ("execution_id", execution_id),
+                                ("chat", chat)) if v]
+        if agent != ROLE_AGENT_SERVER_AGENT or mixed:
+            raise PermissionError(
+                f"role {ROLE_AGENT_SERVER!r} is signed only for agent "
+                f"{ROLE_AGENT_SERVER_AGENT!r} with no on_behalf/execution_id/chat "
+                f"(got agent={agent!r}, with {mixed or 'none'})")
     key_path = _agent_key_path(agent)
     if not key_path.is_file():
         raise PermissionError(f"agent '{agent}' senza identità (nessuna identity.key nel gateway)")

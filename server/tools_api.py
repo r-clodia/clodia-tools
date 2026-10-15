@@ -469,6 +469,7 @@ def register_mcp_core(config, secrets: dict | None = None,
     # montato ora non è concesso a nessuno: lo ha chi lo dichiara nel proprio
     # seed, e clodia, se le serve, lo prende in prestito con `copybrain`.
     registered = []
+    deposits: list[tuple[str, str]] = []
     for name, spec in servers.items():
         slug = _slugify(name)
         if not slug or slug in _NATIVE_PREFIXES:
@@ -508,13 +509,6 @@ def register_mcp_core(config, secrets: dict | None = None,
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", str(pack)):
                 raise McpRegisterError(f"nome di pack non valido: {pack!r}")
             backend["pack"] = str(pack)
-        # Secret: deposita nel vault (infra, no grant) e sostituisci nel config.
-        for sname, sval in secrets_in.items():
-            if not sval:
-                continue
-            cred = f"mcp_{slug}_{sname}"
-            vault.deposit(cred, {"value": sval}, cred_type="mcp_secret", grant_agents=[])
-            backend = _replace_placeholder(backend, sname, f"${{VAULT:{cred}}}")
         # PROPRIETÀ, non solo nome (clodia-platform#539 §4). Il dedup per slug
         # SOSTITUIVA la voce esistente e le scriveva sopra il `pack` del nuovo
         # mount: un pack che montasse un server chiamato come quello di un admin
@@ -522,6 +516,11 @@ def register_mcp_core(config, secrets: dict | None = None,
         # proprio ciò che poi gli dà diritto a quel namespace per i suoi
         # connettori (`backend_owners`). Un rimount dallo STESSO proprietario
         # resta un aggiornamento legittimo: cambia URL, header, segreti.
+        #
+        # The check runs BEFORE any vault write (review of #363): the secret
+        # name `mcp_<slug>_<name>` is shared with the backend already mounted,
+        # so depositing first and refusing afterwards overwrote the legitimate
+        # owner's secret with the refused caller's value.
         precedente = next((b for b in backends if b.get("name") == slug), None)
         if precedente is not None:
             prima = str(precedente.get("pack") or "")
@@ -534,10 +533,22 @@ def register_mcp_core(config, secrets: dict | None = None,
                     f"{chi_ora} non può sostituirlo. Smontalo prima "
                     f"(mcp.remove), oppure monta il tuo con un altro nome.",
                     status=409)
+        # Secrets: placeholders are replaced in the config now, but the vault
+        # (infra, no grant) is written only once EVERY server of the request
+        # has been accepted — a refusal on a later server must not leave the
+        # earlier servers' secrets written.
+        for sname, sval in secrets_in.items():
+            if not sval:
+                continue
+            cred = f"mcp_{slug}_{sname}"
+            deposits.append((cred, sval))
+            backend = _replace_placeholder(backend, sname, f"${{VAULT:{cred}}}")
         backends = [b for b in backends if b.get("name") != slug]  # dedup
         backends.append(backend)
         registered.append(slug)
 
+    for cred, sval in deposits:
+        vault.deposit(cred, {"value": sval}, cred_type="mcp_secret", grant_agents=[])
     whitelist.CONFIG["mcp_backends"] = backends
     whitelist.save_config()
     whitelist.reload_config()
