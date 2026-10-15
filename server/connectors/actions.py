@@ -221,6 +221,8 @@ def state(connector: Connector, action: TopicAction, tier: str,
         out["seal"] = _seal_state(connector, tier, name)
         out["bound"] = _bound_chat(tier, name)
         out["connected"] = out["bound"] is not None
+        out["suggestions"] = _suggestions(connector, action, tier, name,
+                                          out["bound"])
     else:
         # The owner decides with the topic's tier in front of them, for EVERY
         # action (#519): what is being authorised and at which SEAL level.
@@ -275,6 +277,27 @@ def _bound_chat(tier: str, name: str) -> str | None:
         if (b.get("tier"), b.get("topic")) == (tier, name):
             return cid
     return None
+
+
+def _suggestions(connector: Connector, action: TopicAction, tier: str,
+                 name: str, bound: str | None) -> list[dict]:
+    """Chats the bot joined for this topic by link, ready for the owner (#549).
+
+    Each suggestion is a ready set of field values: approving one is the same
+    `connect` the owner would do by typing — with the id Telegram gave, not one
+    typed by hand. Nothing here authorises anything.
+    """
+    # SHORTCUT: like `_bound_chat`, the only joinable channel is Telegram's.
+    if connector.id != "telegram" or not action.fields:
+        return []
+    from ..tools import telegram_join as tj
+    campo = action.fields[0].name
+    return [{"label": p.get("title") or p["chat_id"],
+             "values": {campo: p["chat_id"]},
+             "requested_by": p.get("requested_by", ""),
+             "added_by": p.get("added_by", ""),
+             "at": p.get("at")}
+            for p in tj.proposals(tier, name) if p.get("chat_id") != bound]
 
 
 def _owned_schemes(connector: Connector) -> set[str]:
@@ -372,6 +395,9 @@ def apply(connector: Connector, action: TopicAction, tier: str, name: str, *,
     if chat:
         from ..tools import telegram_bindings as tb
         tb.set_binding(chat, "messaggero", tier, name)
+        if connector.id == "telegram":
+            from ..tools import telegram_join as tj
+            tj.drop(tier, name, chat)
     return state(connector, action, tier, name)
 
 

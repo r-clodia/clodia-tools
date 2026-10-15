@@ -1935,6 +1935,19 @@ _TELEGRAM_TOOLS: list[Tool] = [
              "tier": {"type": "string"}, "name": {"type": "string"},
              "chat_id": {"type": "string"}},
              "required": ["tier", "name", "chat_id"]}),
+    Tool(name="telegram.join_link",
+         description=("Link per far entrare il bot in un gruppo Telegram per QUESTO "
+                      "topic (clodia-platform#549). Un bot non può unirsi da un link "
+                      "d'invito: è un umano che lo aggiunge. Questo verbo ritorna un "
+                      "link `t.me/<bot>?startgroup=<token>` (monouso, scade in 1 ora) "
+                      "da dare a chi amministra il gruppo: aprendolo sceglie il gruppo "
+                      "e il bot entra. Il gateway riconosce il token e propone il "
+                      "gruppo all'OWNER del topic, che approva ingress+egress dal "
+                      "pulsante Telegram del topic. Non scrivere mai chat_id a mano. "
+                      "Richiede che tu sia partecipante del topic."),
+         inputSchema={"type": "object", "properties": {
+             "tier": {"type": "string"}, "name": {"type": "string"}},
+             "required": ["tier", "name"]}),
 ]
 
 
@@ -2351,6 +2364,21 @@ def _dispatch_telegram(name: str, a: dict):
                             thread_id=a.get("thread_id"))
     if verb == "lease_release":
         return tg.lease_release(a["chat_id"])
+    if verb == "join_link":
+        # The link only asks Telegram to add the bot; what it authorises is
+        # decided later by the topic owner (clodia-platform#549).
+        from .tools import telegram_join as tj
+        tier, tname = a["tier"], a["name"]
+        _require_topic_member(_topics(), tier, tname)
+        uname = tg.bot_username()
+        if not uname:
+            raise ValueError("bot Telegram non configurato (username sconosciuto): "
+                             "collega prima un bot dalla scheda Tools")
+        out = tj.mint(tier, tname, by=agent_name())
+        return {"link": f"https://t.me/{uname}?startgroup={out['token']}",
+                "expires_in_s": out["expires_in"], "topic": f"{tier}/{tname}",
+                "next": ("dai il link a chi amministra il gruppo; quando il bot entra "
+                         "l'owner del topic riceve la proposta da approvare")}
     if verb in ("listen", "unlisten"):
         # Binding sull'ISTANZA del messaggero (telegram-bindings.json), NON nel
         # meta del topic. Il messaggero dev'essere partecipante del topic in cui
