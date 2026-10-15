@@ -10,12 +10,10 @@ import ipaddress
 import json
 import logging
 import os
-import secrets
 import shlex
 import socket
 import stat
 import subprocess
-import sys
 import zlib
 from pathlib import Path
 from typing import Iterable
@@ -49,21 +47,10 @@ LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost", "ip6-localhost"})
 LOG_MAX_BYTES = 5 * 1024 * 1024
 
 #: Where the isolation self-check keeps its sentinel, under `<datadir>/services`
-#: — the same volume as the state dirs and the vault (clodia-platform#544).
+#: — the same volume as the state dirs and the vault (clodia-platform#544). Il
+#: sentinella e il figlio che prova a leggerlo stanno in `server/isolation.py`:
+#: è lo stesso probe che il gateway esegue all'avvio.
 PROBE_DIR = ".isolation-probe"
-
-#: The child of the isolation probe. Exit 0 = it READ the sentinel (no
-#: isolation), 3 = permission denied (isolated), anything else = inconclusive.
-_PROBE_READER = (
-    "import sys\n"
-    "try:\n"
-    "    open(sys.argv[1], 'rb').read(1)\n"
-    "except PermissionError:\n"
-    "    sys.exit(3)\n"
-    "except BaseException:\n"
-    "    sys.exit(4)\n"
-    "sys.exit(0)\n"
-)
 
 
 class ServiceRefused(RuntimeError):
@@ -463,37 +450,13 @@ def isolation_probe(privs: tuple[int, int] | None) -> str:
     bits: a dedicated uid there isolates nothing, and a service would read the
     vault. Inconclusive means unavailable: this check fails closed.
     """
-    root = data_dir() / "services" / PROBE_DIR
-    root.mkdir(parents=True, exist_ok=True)
-    os.chmod(root, 0o711)
-    sentinel = root / "sentinel"
-    try:
-        os.unlink(sentinel)
-    except FileNotFoundError:
-        pass
-    fd = os.open(sentinel, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW
-                 | _CLOEXEC, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        os.write(fd, secrets.token_hex(16).encode())
-    finally:
-        os.close(fd)
-    kw: dict = {}
-    if privs is not None:
-        kw.update(user=privs[0], group=privs[1], extra_groups=[])
-    done = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        [sys.executable, "-I", "-c", _PROBE_READER, str(sentinel)],
-        env={"PATH": BASE_PATH}, cwd="/", stdin=subprocess.DEVNULL,
-        capture_output=True, timeout=15, check=False, **kw)
-    who = f"uid {privs[0]}" if privs is not None else "the gateway user"
-    if done.returncode == 3:
-        return ""
-    if done.returncode == 0:
-        return (f"{who} could read a 0600 file owned by the gateway "
-                f"({sentinel}): this storage does not enforce permission bits "
-                f"(clodia-platform#544), so a service uid isolates nothing")
-    return (f"isolation probe inconclusive (exit {done.returncode}) as {who}: "
-            f"failing closed")
+    # Una sola implementazione del probe, in `server/isolation.py`: la stessa
+    # domanda se la pone il gateway all'avvio (#544), e due copie darebbero due
+    # risposte il giorno in cui una delle due viene corretta. `runner` è il
+    # `subprocess.run` di QUESTO modulo, così resta sostituibile dai test di qui.
+    from .. import isolation
+    return isolation.denied(data_dir() / "services", privs,
+                            runner=subprocess.run)
 
 
 # -- network exposure --------------------------------------------------------
