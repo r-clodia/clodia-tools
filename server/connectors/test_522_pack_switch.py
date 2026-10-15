@@ -165,6 +165,41 @@ class TheSwitchMovesTheConnectorTests(_Istanza):
         self.assertEqual(instance_profile.connector_mode("telegram"), "native")
         self.assertTrue(resolved.registry().by_id("telegram").builtin)
 
+    def test_on_pack_without_a_backend_the_verb_does_not_exist(self):
+        """Il controllo che prova che il ramo NATIVO è davvero spento (da #373).
+
+        Niente implementazione nativa e nessun backend MCP montato ⇒ il verbo
+        non esiste, e `_verb_implemented` lo dice prima di ogni gate (#539 §7).
+        Se il dispatch avesse ancora il suo ramo questo passerebbe lo stesso, e
+        a servire la chiamata sarebbe il gateway: l'interruttore spegnerebbe
+        l'elenco lasciando acceso il negozio.
+        """
+        self.posizione("pack")
+        from .. import main
+        with patch.object(main.proxy, "is_proxied", lambda _n: False):
+            self.assertFalse(main._verb_implemented("telegram.send"))
+            self.assertFalse(main._verb_implemented("telegram.roster"))
+            self.assertTrue(main._verb_implemented("email.send"))
+
+    def test_on_pack_without_the_pack_installed_nobody_answers(self):
+        """L'interruttore non INVENTA un connettore: se il pack che lo dichiara
+        non è installato, in posizione `pack` non risponde nessuno. È lo stato
+        in cui l'owner si trova fra la PR 1 e la PR 2, e deve essere leggibile
+        come «manca il pack», non come un gateway rotto."""
+        (self.dir / "packs" / "comms-pack" / "pack.yaml").unlink()
+        self.posizione("pack")
+        self.assertIsNone(resolved.registry().by_id("telegram"))
+        from .. import egress
+        self.assertIsNone(egress.spec_for("telegram.send"))
+
+    def test_a_document_left_without_connectors_is_dropped_whole(self):
+        """Un file builtin i cui connettori sono TUTTI passati a un pack non
+        resta come documento vuoto: un `name:` senza niente sotto terrebbe
+        occupato un nome di pack per un manifest che non dichiara nulla."""
+        self.posizione("pack")
+        self.assertNotIn("gateway-telegram", B.manifests())
+        self.assertIn("gateway-telegram", B._all())
+
     def test_the_other_connectors_do_not_move(self):
         """L'interruttore nomina UN connettore: gli altri file builtin restano
         dove sono, e con loro i namespace riservati."""
@@ -506,6 +541,25 @@ class TheGrammarRefusesWhatItCannotFillTests(unittest.TestCase):
                 context=[{"arg": "channel", "value": "channel"}]),
             pack="sms-pack", reserved=())
         self.assertEqual(c.context[0].arg, "channel")
+
+    def test_a_gateway_manifest_may_not_declare_one(self):
+        """Da #373. Un connettore che il GATEWAY implementa il contesto ce
+        l'ha già — lo legge dal claim firmato della sessione — e scriverlo in
+        un argomento sovrascriverebbe un argomento vero del verbo nativo.
+        `context:` è per chi gira fuori di qui."""
+        with self.assertRaises(M.ManifestError) as e:
+            M.parse_connector(
+                self._connettore(context=[{"arg": "channel", "value": "channel"}]),
+                pack="gateway-sms", reserved=(), builtin=True)
+        self.assertIn("PACK", str(e.exception))
+
+    def test_no_builtin_manifest_declares_one(self):
+        """E nessuno dei file che il gateway spedisce lo fa: la regola di sopra
+        è una porta chiusa, non una porta che qualcuno sta già forzando."""
+        for nome, doc in B._all().items():
+            for entry in doc.get("connectors") or []:
+                with self.subTest(pack=nome, connettore=entry.get("id")):
+                    self.assertNotIn("context", entry)
 
     def test_it_is_optional(self):
         c = M.parse_connector(self._connettore(), pack="sms-pack", reserved=())

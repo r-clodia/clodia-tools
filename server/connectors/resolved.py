@@ -629,6 +629,8 @@ def context_arguments(verb: str) -> dict[str, str]:
     """
     out: dict[str, str] = {}
     for connector, arg in registry().context_for(verb):
+        # Un builtin non può dichiarare contesto (il parser lo rifiuta): il
+        # ramo resta perché è la regola, non perché c'è un caso da servire.
         if not connector.builtin:
             try:
                 check_namespace(connector.namespace, [verb],

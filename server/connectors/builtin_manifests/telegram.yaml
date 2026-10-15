@@ -1,5 +1,10 @@
 # Telegram, come il gateway lo implementa oggi (clodia-platform#518).
 # La migrazione #522 sposta questo file in comms-pack e lo cancella da qui.
+# Nel frattempo l'interruttore per istanza lo toglie dal SERVIZIO senza
+# cancellarlo: con `connectors: {telegram: pack}` in `profile.yaml` questo
+# documento non entra nel registry (`builtin.manifests`) e la dichiarazione
+# identica del pack prende il suo posto — una istanza alla volta, e reversibile
+# senza un rollback del codice.
 #
 # Nessun `seal_cap`: il tetto SEAL di un binding non è un campo del manifest
 # (decisione dell'epic #527). `_CHANNEL_SEAL_CAP` resta dov'è finché la

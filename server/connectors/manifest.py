@@ -1609,6 +1609,18 @@ def parse_connector(raw: Any, *, pack: str,
             f"ceiling on a binding: the owner decides, at the gate, per binding")
 
     context = _parse_context(data.get("context"), where)
+    if context and builtin:
+        # Un connettore che il GATEWAY implementa il contesto ce l'ha già: lo
+        # legge dal processo, dal claim firmato della sessione. Scriverlo in un
+        # argomento non gli aggiungerebbe niente e sovrascriverebbe un
+        # argomento vero del verbo nativo. `context:` è per chi gira fuori di
+        # qui. (Merito di #373, che chiudeva questa porta e io l'avevo lasciata
+        # aperta.)
+        raise ManifestError(
+            f"{where}: 'context' is for a connector a PACK implements. A "
+            f"gateway connector already has the call's context — it reads the "
+            f"signed claim of the session — and filling an argument with it "
+            f"would overwrite a real argument of the native verb")
     # Il gateway non riempie un argomento da cui il PDP ricava la destinazione.
     # Due ragioni, e basta la prima: la destinazione di una chiamata è una
     # proprietà della CHIAMATA — è ciò che l'owner legge sulla card e ciò che

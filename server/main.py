@@ -788,13 +788,6 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name"]},
     ),
     Tool(
-        name="telegram.roster",
-        description=("Amministratori e membri noti di un gruppo, con uid e "
-                     "username: serve a mappare le persone senza digitare numeri."),
-        inputSchema={"type": "object", "properties": {
-            "chat_id": {"type": "string"}}, "required": ["chat_id"]},
-    ),
-    Tool(
         name="topic.list",
         description="Elenca i topic (riga sintetica). Gli archived sono nascosti salvo include_archived.",
         inputSchema={"type": "object", "properties": {
@@ -1948,6 +1941,19 @@ _TELEGRAM_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {
              "tier": {"type": "string"}, "name": {"type": "string"}},
              "required": ["tier", "name"]}),
+    # Stava in `_TOPIC_TOOLS` (serviva a mappare le persone di un topic) ed è
+    # un verbo `telegram.`, dispatchato da `_dispatch_telegram`. Portato qui da
+    # #373: il namespace si libera solo se se ne va TUTTO, e un verbo elencato
+    # altrove è l'unico modo in cui una migrazione può sembrare fatta e non
+    # esserlo. Non è ciò che FA cadere il namespace — quello lo deriva
+    # `_packaged_namespaces()` dal manifest, e trova questo verbo ovunque
+    # stia — ma è dove il verbo va letto, e rende la PR 3 la cancellazione di
+    # una lista sola.
+    Tool(name="telegram.roster",
+         description=("Amministratori e membri noti di un gruppo, con uid e "
+                      "username: serve a mappare le persone senza digitare numeri."),
+         inputSchema={"type": "object", "properties": {
+             "chat_id": {"type": "string"}}, "required": ["chat_id"]}),
 ]
 
 
