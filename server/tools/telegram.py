@@ -28,6 +28,7 @@ from typing import Optional
 
 from .. import vault
 from ..whitelist import agent_name, current_channel, tool_allowed
+from . import telegram_join as _join
 
 TELEGRAM_CRED = "telegram_bot_token"
 _API_BASE = "https://api.telegram.org/bot{token}/{method}"
@@ -243,6 +244,10 @@ def poll_updates(timeout: int = 25) -> list:
             msg = upd.get("message") or upd.get("edited_message")
             if not msg or "chat" not in msg:
                 continue
+            # `/start <token>` from a startgroup link (clodia-platform#549): a
+            # join for a topic, consumed here — it is not a message to relay.
+            if upd.get("message") and _join.intercept(msg, bot_uname):
+                continue
             frm = msg.get("from") or {}
             # Reply a un messaggio del BOT stesso → conta come menzione diretta.
             rfrm = (msg.get("reply_to_message") or {}).get("from") or {}
@@ -346,6 +351,8 @@ def _refresh(st: dict, token: str) -> int:
         msg = upd.get("message") or upd.get("edited_message")
         if not msg or "chat" not in msg:
             continue
+        if upd.get("message") and _join.intercept(msg, st.get("bot_username")):
+            continue  # a startgroup join (#549), not a message for the queue
         chat = msg["chat"]
         cid = str(chat["id"])
         slot = st["chats"].setdefault(cid, {"title": "", "queue": [], "lease": None,
@@ -561,6 +568,21 @@ def status() -> dict:
         "active_chats": active,
         "last_error": st.get("last_error"),
     }
+
+
+def bot_username() -> Optional[str]:
+    """The bot's @username without the `@`, cached; asked to Telegram (getMe)
+    the first time it is missing. None if no bot is configured."""
+    with _LOCK:
+        u = _load_state().get("bot_username")
+    if not u:
+        try:
+            u = (api_call(_token_internal(), "getMe", {}) or {}).get("username")
+        except Exception:  # noqa: BLE001 — no bot, or Telegram unreachable
+            return None
+        if u:
+            set_bot_username(u)
+    return str(u).lstrip("@") if u else None
 
 
 def set_bot_username(username: Optional[str]) -> None:
