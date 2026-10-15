@@ -98,6 +98,10 @@ connectors:
     topic_actions:
       - id: mailbox-link
         label: Autorizza una casella
+        # Solo un admin dell'istanza: una casella di sistema è posta che non è
+        # dell'owner del topic (decisione del 27 set 2026, finora scritta come
+        # `{#if $isAdmin}` attorno al bottone Mailbox nella webui).
+        admin_only: true
         fields:
           - name: account
             label: Casella di sistema
@@ -107,6 +111,13 @@ connectors:
             - 'inbox:{address}'
           egress:
             - 'outbox:{address}'
+    tools_card:
+      icon: email
+      setup_label: Gestisci caselle
+      blurb: >-
+        Connettore multi-casella: aggiungi/togli mailbox IMAP/SMTP (info@,
+        IONOS, …). Le caselle si autorizzano per canale, non per agente.
+      scope: IMAP/SMTP
     # Posta in arrivo: il mittente non è controllato. `email.read` non è qui
     # perché ha UNA fonte dichiarata sopra, e una fonte vagliata non contamina;
     # questi tre mescolano più mittenti in una risposta sola, quindi non c'è

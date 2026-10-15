@@ -225,8 +225,13 @@ class RouteTests(unittest.TestCase):
         google = next(c for c in body["connectors"] if c["id"] == "google")
         self.assertTrue(google["providers"])
         for p in google["providers"]:
+            # `connected` (#520) è un BOOLEANO: dice che sotto quella voce c'è
+            # qualcosa, mai cosa. L'insieme resta chiuso apposta — è il
+            # controllo che si accorge di una chiave in più il giorno che
+            # qualcuno ci mette l'account «per comodità».
             self.assertEqual(set(p) - {"id", "label", "kind", "vault_entry",
-                                       "fields"}, set())
+                                       "fields", "connected"}, set())
+            self.assertIsInstance(p["connected"], bool)
 
     def test_the_instance_profile_filters_the_listing(self) -> None:
         def _no_telegram(cid: str) -> None:

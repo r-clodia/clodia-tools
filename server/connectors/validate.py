@@ -119,10 +119,15 @@ def summary(connector) -> dict:
                                   for f in (p.credential.fields
                                             if p.credential else ())]}
                       for p in connector.providers],
+        # `dtype` è la FAMIGLIA di uscita con cui il reference monitor nomina
+        # un'osservazione (`egress:telegram`, `egress:drive`): senza, la webui
+        # può solo tenere una propria tabella di quei nomi, cioè sapere chi
+        # sono i connettori (#520).
         "verbs": [{"verb": v.verb, "direction": v.direction,
-                   "scheme": v.scheme, "prefix": v.prefix}
+                   "scheme": v.scheme, "prefix": v.prefix, "dtype": v.dtype}
                   for v in connector.verbs],
         "topic_actions": [{"id": a.id, "label": a.label, "binding": a.binding,
+                           "admin_only": a.admin_only,
                            "fields": [{"name": f.name, "label": f.label,
                                        "required": f.required,
                                        "placeholder": f.placeholder}
@@ -132,7 +137,10 @@ def summary(connector) -> dict:
                           for a in connector.topic_actions],
         "tools_card": ({"setup_label": connector.tools_card.setup_label,
                         "status_verb": connector.tools_card.status_verb,
-                        "docs_url": connector.tools_card.docs_url}
+                        "docs_url": connector.tools_card.docs_url,
+                        "blurb": connector.tools_card.blurb,
+                        "scope": connector.tools_card.scope,
+                        "icon": connector.tools_card.icon}
                        if connector.tools_card else None),
         "taint": list(connector.taint_prefixes),
     }

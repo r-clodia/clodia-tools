@@ -21,6 +21,13 @@ connectors:
             - name: token
               label: Personal access token
               secret: true
+    tools_card:
+      icon: github
+      setup_label: Connetti con un PAT
+      blurb: >-
+        Repo, issue, PR e code search via il server MCP ufficiale GitHub (tool
+        github.*). Connetti con un Personal Access Token.
+      scope: api.githubcopilot.com/mcp
     danger_uris:
       # Sapere se un repo è pubblico richiederebbe l'API GitHub, che può
       # sbagliare ed essere stale, e sposterebbe la decisione dal giudizio
