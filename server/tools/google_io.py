@@ -6,17 +6,21 @@ parent walk and adoption, the folder labels, and the two pre-PDP lookups in
 `main.py`/`tools_api.py`. What decides — the perimeter, the PDP, the scratch
 I/O, the taint — stays in the callers; this module only moves bytes.
 
-Why one entry point. #524 moves the HTTP transport to google-pack while the
-credential stays here. With a single seam that move is a change of
-`_transport`, not of thirty call sites, and the request shape below is already
-the one the pack tool will receive:
+Why one entry point. Since clodia-platform#558 the same code also lives in
+google-pack's gateway component (r-clodia/clodia-logic,
+`catalogs/packs/google-pack/gateway/google_io.py`), which serves Google on
+`connectors: {google: pack}`. This module serves the `native` position only;
+in `pack` position `call()` REFUSES (`NativeDisabled`) instead of running: the
+verbs, the perimeter and the gateway's own lookups go to the component
+(`tools/google_switch.py`), and a native path reached by mistake must fail,
+not quietly use the vault's credential beside the component. The pack
+transport of #524 step 3 (`google.request` over MCP) is gone: superseded by
+the component, which runs in the gateway's process and needs no transport.
 
-    google.request {access_token, api, version, method, path, params, body,
-                    media_b64, download}
+The request shape `request()` builds:
 
-`request()` builds exactly that, minus the token (added per call, see below)
-and with the media still as a local path (`Media`): the in-process transport
-streams it from the scratch, a pack transport would ship it base64-encoded.
+    {api, version, method, path, template, path_params, params, body, media,
+     download}
 
 The transport is plain REST over `urllib`, no `googleapiclient`:
 
@@ -42,26 +46,9 @@ up at the next refresh, or at once if Google answers 401 to the old token. The
 token is never logged and never part of an exception message; the refresh
 token never leaves this process.
 
-Pack position (#524 step 3). With `connectors: {google: pack}` the request is
-not sent from here: `call()` hands it to google-pack's provider transport
-(`resolved.transport_for("google")`, a backend google-pack mounted itself) as
-`google.request` — see `pack_payload` for the exact contract, also written in
-`connectors/SCHEMA.md`. What changes is only who opens the socket: the request
-is built here, the token is refreshed here (only the short-lived access token
-travels, never the refresh token or the client secret), and the answer is
-decoded here into exactly what the in-process path returns — the same JSON,
-the same bytes, the same `HttpError` with the same status, method, URL and
-reason, the same single retry on 401 — so `gdrive_root` fails closed on an
-error exactly as before. No transport (pack missing, connector refused,
-backend not the pack's own) is a `TransportUnavailable`, never the in-process
-client: an owner who turned the switch must not be verifying the wrong
-implementation on real traffic.
 """
 from __future__ import annotations
 
-import base64
-import binascii
-import http
 import json
 import logging
 import mimetypes
@@ -114,13 +101,9 @@ class RefreshError(RuntimeError):
     """The token endpoint refused the refresh token (revoked, expired, …)."""
 
 
-class TransportError(RuntimeError):
-    """The pack transport failed, or answered outside its contract (#524).
-    A failed call, like a network error of the in-process transport."""
-
-
-class TransportUnavailable(TransportError, PermissionError):
-    """`pack` position, but no usable transport: the call is refused."""
+class NativeDisabled(PermissionError):
+    """`connectors: {google: pack}`: the native Google code does not run here;
+    google-pack's gateway component serves Google (clodia-platform#558)."""
 
 
 @dataclass(frozen=True)
@@ -185,12 +168,14 @@ def call(account: str, api: str, version: str, method_path: str, *,
     req = request(api, version, method_path, params=params, body=body,
                   media=media, download=download)
     if _in_pack_position():
-        return _pack_transport(account, req)
+        raise NativeDisabled(
+            "google is in `pack` position on this instance: google-pack's gateway "
+            "component serves Google, the native client does not run")
     return _transport(account, req)
 
 
 def _http_transport(account: str, req: dict) -> Union[dict, bytes]:
-    """In-process REST transport. Replaced by the pack transport in #524 step 3+."""
+    """The REST transport, in the gateway's process."""
     try:
         return _send(access_token(account), req)
     except HttpError as e:
@@ -201,14 +186,9 @@ def _http_transport(account: str, req: dict) -> Union[dict, bytes]:
     return _send(access_token(account), req)
 
 
-#: The IN-PROCESS transport (`native` position). Tests replace it with a fake
-#: service; in `pack` position `call()` does not use it at all.
+#: The transport (`native` position). Tests replace it with a fake service.
 _transport = _http_transport
 
-
-# ---------------------------------------------------------------------------
-# the pack transport (#524 step 3)
-# ---------------------------------------------------------------------------
 
 #: The connector id of the instance switch (`profile.yaml`, `connectors:`).
 CONNECTOR = "google"
@@ -219,127 +199,6 @@ def _in_pack_position() -> bool:
     lever. In doubt `native` — `connector_mode` never raises."""
     from .. import instance_profile
     return instance_profile.connector_mode(CONNECTOR) == "pack"
-
-
-def _pack_transport(account: str, req: dict) -> Union[dict, bytes]:
-    """`_http_transport`, with google-pack opening the socket.
-
-    Same token handling: a 401 drops the cached token and retries once with a
-    fresh one — the refresh happens HERE, the pack only ever sees access
-    tokens."""
-    from ..connectors import resolved
-    try:
-        transport = resolved.transport_for(CONNECTOR)
-    except Exception as e:  # noqa: BLE001 — an unreadable registry is no transport
-        LOG.error("google_io: pack transport not resolvable (%s)", type(e).__name__)
-        transport = None
-    if transport is None:
-        raise TransportUnavailable(
-            "Google transport provider not available: the google connector is "
-            "in `pack` position on this instance, but no installed pack holds "
-            "the `google` connector with a `transport` on a backend it has "
-            "mounted itself. Install/repair google-pack, or set "
-            "`connectors: {google: native}` in profile.yaml.")
-    try:
-        return _pack_send(transport, access_token(account), req)
-    except HttpError as e:
-        if e.status != 401:
-            raise
-    forget(account)
-    return _pack_send(transport, access_token(account), req)
-
-
-def pack_payload(token: str, req: dict) -> dict:
-    """The arguments of `google.request`, the pack transport tool.
-
-        {"access_token": "<short-lived OAuth access token>",
-         "api": "drive" | "docs" | "sheets" | "calendar",
-         "version": "v3" | "v1" | "v4" | "v3",
-         "method": "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
-         "path": "<method path, path parameters already percent-encoded>",
-         "params": {<query parameters, JSON-typed; None already dropped>},
-         "body": <JSON body, or the metadata part of a multipart upload> | null,
-         "media_b64": "<base64 bytes to upload>" | null,
-         "media_mime": "<content type of the media>" | null,
-         "download": true | false}
-
-    The pack sends it as `_send` does: URL = root of (api, version) in
-    `API_ROOTS` (`UPLOAD_ROOTS` when there is media) + `path`; query =
-    `params` plus `alt=media` for a download, else `alt=json` unless DELETE,
-    plus `uploadType=multipart` (media with body) or `uploadType=media`
-    (media alone); booleans as `true`/`false`, a list as a repeated key;
-    header `Authorization: Bearer <access_token>`, never carried across a
-    redirect off its host.
-    """
-    media = req["media"]
-    media_b64 = media_mime = None
-    if media is not None:
-        with open(media.path, "rb") as fh:
-            media_b64 = base64.b64encode(fh.read()).decode("ascii")
-        media_mime = media.content_type()
-    return {"access_token": token, "api": req["api"], "version": req["version"],
-            "method": req["method"], "path": req["path"],
-            "params": dict(req["params"]), "body": req["body"],
-            "media_b64": media_b64, "media_mime": media_mime,
-            "download": bool(req["download"])}
-
-
-def _pack_send(transport: tuple[str, str], token: str,
-               req: dict) -> Union[dict, bytes]:
-    """One request through the pack; the answer decoded as `_send` decodes.
-
-    Answer contract: the JSON text `{"status": <int>, "json"?: <any>,
-    "bytes_b64"?: "<base64>", "headers"?: {…}}` — `json` for a JSON answer
-    (absent or null = empty), `bytes_b64` for a download and for a non-JSON
-    error body. A non-2xx `status` becomes the very `HttpError` the in-process
-    path raises. Anything else is a `TransportError`. Neither message ever
-    carries the request: it holds the token.
-    """
-    from .. import proxy
-    backend, tool = transport
-    try:
-        text = proxy.call_backend_tool_sync(backend, tool, pack_payload(token, req),
-                                            TIMEOUT_S)
-    except Exception as e:  # noqa: BLE001 — the transport failed, the call did
-        # The backend's own text is NOT relayed: a pack that echoed its
-        # arguments would put the access token in front of the agent
-        # (review of clodia-tools#381). Logged for the operator by type only.
-        LOG.warning("google transport '%s.%s' failed (%s)", backend, tool,
-                    type(e).__name__)
-        raise TransportError(
-            f"google transport '{backend}.{tool}' error ({type(e).__name__})") from None
-    try:
-        data = json.loads(text)
-        status = data["status"]
-        if not isinstance(status, int) or isinstance(status, bool):
-            raise TypeError("status")
-        raw = data.get("bytes_b64")
-        content = base64.b64decode(raw, validate=True) if raw is not None else None
-    except (ValueError, KeyError, TypeError, AttributeError, binascii.Error):
-        raise TransportError(
-            f"google transport '{backend}.{tool}' answered outside its "
-            "contract {status, json?, bytes_b64?}") from None
-    key = (req["api"], req["version"])
-    root = UPLOAD_ROOTS[key] if req["media"] is not None else API_ROOTS[key]
-    shown = f"{root}{req['path']}"
-    if not 200 <= status < 300:
-        if content is None:
-            j = data.get("json")
-            content = b"" if j is None else json.dumps(j).encode("utf-8")
-        try:
-            phrase = http.HTTPStatus(status).phrase
-        except ValueError:
-            phrase = ""
-        raise HttpError(status, req["method"], shown, _reason(content, phrase),
-                        content)
-    if req["download"]:
-        if content is None:
-            raise TransportError(
-                f"google transport '{backend}.{tool}': a download answered "
-                "without bytes_b64")
-        return content
-    j = data.get("json")
-    return {} if j is None else j
 
 
 def _query(req: dict) -> str:
@@ -530,5 +389,4 @@ def _refresh(bundle: dict) -> tuple[str, int]:
 
 
 __all__ = ["call", "request", "access_token", "forget", "Media", "HttpError",
-           "RefreshError", "TransportError", "TransportUnavailable",
-           "pack_payload", "API_ROOTS", "UPLOAD_ROOTS"]
+           "RefreshError", "NativeDisabled", "API_ROOTS", "UPLOAD_ROOTS"]

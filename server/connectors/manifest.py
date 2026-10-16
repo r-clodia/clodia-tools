@@ -1049,6 +1049,12 @@ class Connector:
     verbs: tuple[VerbMapping, ...] = ()
     danger_rules: tuple[DangerRule, ...] = ()
     taint_prefixes: tuple[str, ...] = ()
+    #: Verbs of the namespace that deliberately carry NO egress/source mapping
+    #: (`unmapped:`, clodia-platform#558): the PDP has nothing to read for them
+    #: and the implementation enforces its own perimeter. Required for a
+    #: gateway component's verb that has neither a mapping nor a taint prefix,
+    #: which is otherwise denied as unclassified (`components.loader`).
+    unmapped_verbs: tuple[str, ...] = ()
     topic_actions: tuple[TopicAction, ...] = ()
     tools_card: ToolsCard | None = None
     services: tuple[Service, ...] = ()
@@ -1709,7 +1715,7 @@ def parse_connector(raw: Any, *, pack: str,
     # source, and `gcalendar.list_events` tainting is the whole of what the
     # PDP knows about it. Taint only ever makes a channel MORE restricted.
     if not (schemes or extends or data.get("providers") or data.get("verbs")
-            or data.get("taint")):
+            or data.get("taint") or data.get("unmapped")):
         raise ManifestError(
             f"{where}: declares no scheme, no verb, no provider and no taint, "
             f"and extends nothing, so it is an empty connector")
@@ -1755,6 +1761,22 @@ def parse_connector(raw: Any, *, pack: str,
                 f"{where}: taint prefix '{prefix}' is outside namespace "
                 f"'{namespace}'. Declaring what does not taint a channel is a "
                 f"statement about one's own tools, never about someone else's")
+
+    unmapped: list[str] = []
+    for i, raw_verb in enumerate(_seq(data.get("unmapped"), f"{where}.unmapped")):
+        verb = _matching(_text(raw_verb, f"{where}.unmapped[{i}]"), _VERB,
+                         f"{where}.unmapped[{i}]")
+        if verb in unmapped:
+            raise ManifestError(f"{where}: verb '{verb}' is listed twice in 'unmapped'")
+        unmapped.append(verb)
+    mapped_here = sorted({v.verb for v in verbs} & set(unmapped))
+    if mapped_here:
+        raise ManifestError(
+            f"{where}: '{mapped_here[0]}' is both mapped in 'verbs' and listed in "
+            f"'unmapped'. A verb either has a destination/source the PDP reads, "
+            f"or it has none")
+    if not builtin:
+        check_namespace(namespace, unmapped, reserved=reserved, where=where)
 
     defaults = _parse_defaults(data.get("defaults"), f"{where}.defaults")
     if defaults and builtin:
@@ -1865,6 +1887,7 @@ def parse_connector(raw: Any, *, pack: str,
         verbs=verbs,
         danger_rules=danger_rules,
         taint_prefixes=taint,
+        unmapped_verbs=tuple(unmapped),
         topic_actions=actions,
         tools_card=_parse_tools_card(card, f"{where}.tools_card") if card else None,
         services=services,
@@ -2108,6 +2131,10 @@ class Registry:
 
     def taint_prefixes(self) -> tuple[str, ...]:
         return tuple(sorted({p for c in self.connectors for p in c.taint_prefixes}))
+
+    def unmapped_verbs(self) -> frozenset[str]:
+        """Verbs a held connector declares as having no PDP mapping (#558)."""
+        return frozenset(v for c in self.connectors for v in c.unmapped_verbs)
 
     def services(self) -> tuple[Service, ...]:
         return tuple(s for c in self.connectors for s in c.services)

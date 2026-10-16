@@ -5,7 +5,9 @@ the gateway goes through the object it receives:
 
     host.register_verb(tool, handler, *, offload=True)
     host.register_route(path, methods, handler, *, auth="owner")
+    host.register_service(name, fn)
     host.credentials(prefix)  -> ScopedCredentials
+    host.perimeter            -> read-only perimeter facts (config, lists, topics)
     host.topics               -> read_file / put_file with membership checks
     host.note_crossing(data=None, *, path=None, kind="file")
     host.scratch_path(path)   -> str inside the caller's spawn scratch
@@ -46,6 +48,7 @@ RESERVED_ROUTE_PATHS = frozenset({"test"})
 _ROUTE_PATH = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}(/[a-z0-9][a-z0-9_-]{0,39}){0,4}$")
 _VERB = re.compile(r"^[a-z][a-z0-9_]{0,31}\.[A-Za-z0-9_.]{1,63}$")
 _CONFIG_KEY = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+_SERVICE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 
 #: Set by the route dispatcher while an OWNER-authenticated route runs: the
 #: only context in which a component may write its config (perimeter).
@@ -65,6 +68,18 @@ class VerbSpec:
     tool: Tool
     handler: Callable
     offload: bool
+
+
+@dataclass(frozen=True)
+class ServiceSpec:
+    """A callable the GATEWAY calls itself (never an agent): the hooks through
+    which core code that stays in the gateway — the confinement API, the
+    labels of a whitelist, the PDP's argument lookup, a mail provider — asks
+    the component for what only the component knows how to do."""
+    component: str
+    pack: str
+    name: str
+    handler: Callable
 
 
 @dataclass(frozen=True)
@@ -187,6 +202,60 @@ class Topics:
 
 
 # --------------------------------------------------------------------------
+# perimeter
+# --------------------------------------------------------------------------
+
+class Perimeter:
+    """Read-only facts about the perimeter, as the GATEWAY holds them.
+
+    The perimeter is declared in places the agent-server cannot write — the
+    gateway's config (`gdrive_roots`, the egress/source lists), the signed
+    channel claim, the topic's `meta` — and the component reads it here, per
+    call, never from a copy of its own. Nothing here writes: moving the
+    perimeter stays an admin action on the gateway's own endpoints.
+    """
+
+    def gdrive_roots(self) -> dict:
+        """The `gdrive_roots` mapping of the gateway config, as written there
+        (`{account | "*": [folder id, …] | folder id}`), or `{}`."""
+        import copy
+        from .. import whitelist
+        raw = (getattr(whitelist, "CONFIG", None) or {}).get("gdrive_roots") or {}
+        return copy.deepcopy(raw) if isinstance(raw, dict) else {}
+
+    def egress_uris(self, scope: str | None = None) -> list[str]:
+        """The egress entries in force for the current call: global PLUS the
+        calling room's (or `scope`'s), as `egress.effective_uris` gives them."""
+        from .. import egress
+        return list(egress.effective_uris("egress", scope))
+
+    def approved_calendars(self, scope: str | None = None) -> list[str]:
+        """Calendar ids approved by `gcal:` entries for the current call."""
+        from .. import egress
+        return list(egress.approved_calendars(scope))
+
+    def calendar_allowed(self, calendar_id: str, scope: str | None = None) -> bool:
+        """Is `calendar_id` approved for the current call (`gcal:` matching,
+        domain wildcards and case included)?"""
+        from .. import egress
+        return bool(egress.calendar_allowed(calendar_id, scope))
+
+    def topic_drive_folders(self, tier: str, name: str) -> list[dict]:
+        """The Drive folders a topic declares (`meta.drive_folders`), read by
+        the gateway. A perimeter fact of the room the CALL comes from — the
+        caller passes the tier/name of the signed channel, not an argument."""
+        from .. import main
+        from ..topics.service import drive_folders
+        meta = (main._topics().open(tier, name) or {}).get("meta") or {}
+        return [dict(d) for d in drive_folders(meta)]
+
+    def in_channel(self) -> bool:
+        """True when the call comes from a topic channel (signed claim)."""
+        from ..whitelist import in_channel
+        return bool(in_channel())
+
+
+# --------------------------------------------------------------------------
 # config
 # --------------------------------------------------------------------------
 
@@ -219,7 +288,9 @@ class Host:
         self._open = True
         self.verbs: dict[str, VerbSpec] = {}
         self.routes: dict[str, RouteSpec] = {}
+        self.services: dict[str, ServiceSpec] = {}
         self.topics = Topics()
+        self.perimeter = Perimeter()
         self.log = logging.getLogger(
             f"clodia-tools.component.{component.pack}.{component.id}")
 
@@ -287,6 +358,25 @@ class Host:
         self.routes[path] = RouteSpec(component=self._c.key, pack=self._c.pack,
                                       path=path, methods=ms, handler=handler,
                                       auth=auth)
+
+    def register_service(self, name: str, handler: Callable) -> None:
+        """A callable the GATEWAY calls itself (`components.service(pack, name)`).
+
+        Not a verb: an agent never reaches it, and it runs inside whatever
+        gateway code calls it — after that code's own checks. The names the
+        gateway calls are fixed by the gateway (e.g. `pdp_arguments`,
+        `describe_folder`, `mail_run`); registering another name is harmless
+        and unused."""
+        self._require_open()
+        name = str(name or "")
+        if not _SERVICE.match(name):
+            raise HostError(f"service name '{name}' is invalid")
+        if not callable(handler):
+            raise HostError(f"handler of service '{name}' is not callable")
+        if name in self.services:
+            raise HostError(f"service '{name}' registered twice")
+        self.services[name] = ServiceSpec(component=self._c.key, pack=self._c.pack,
+                                          name=name, handler=handler)
 
     # -- capabilities -----------------------------------------------------
 

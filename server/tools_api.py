@@ -199,22 +199,17 @@ def _describe_folder(account: str, fid: str) -> dict:
 
     Un id di 33 caratteri non è verificabile a occhio: senza il nome, l'unico
     errore possibile — confinare alla cartella sbagliata — è anche invisibile.
+
+    Answered by whichever side implements Google on this instance
+    (`google_switch`, #558): the component's `describe_folder` in `pack`
+    position. A component that is not serving is a folder that cannot be
+    confirmed — refused like an unreachable one.
     """
-    from .tools import gdrive
-    out = {"id": fid}
+    from .tools import google_switch
     try:
-        from .tools import google_io
-        meta = google_io.call(gdrive._resolve_account(account), "drive", "v3",
-                              "GET files/{fileId}", params={
-                                  "fileId": fid, "fields": "id, name, mimeType",
-                                  "supportsAllDrives": True})
-        out["name"] = meta.get("name")
-        out["is_folder"] = meta.get("mimeType") == \
-            "application/vnd.google-apps.folder"
-    except Exception as e:                       # noqa: BLE001
-        out["error"] = f"{type(e).__name__}: {str(e)[:100]}"
-        out["is_folder"] = False
-    return out
+        return google_switch.describe_folder(account, fid)
+    except google_switch.ComponentUnavailable as e:
+        return {"id": fid, "is_folder": False, "error": str(e)[:200]}
 
 
 async def gdrive_confinement(request: Request):
@@ -222,11 +217,15 @@ async def gdrive_confinement(request: Request):
     if not _authorized_owner(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     from . import whitelist
-    from .tools import gdrive
+    from .tools import google_switch
     whitelist.reload_config()
     roots = whitelist.gdrive_roots_all()
     out = []
-    for acct in gdrive.gworkspace_accounts():
+    try:
+        accounts = google_switch.accounts()
+    except google_switch.ComponentUnavailable as e:
+        return JSONResponse({"error": str(e)}, status_code=503)
+    for acct in accounts:
         ids = roots.get(acct) or roots.get("*") or []
         out.append({"account": acct, "confined": bool(ids),
                     "folders": [_describe_folder(acct, i) for i in ids]})
@@ -255,8 +254,12 @@ async def gdrive_confinement_set(request: Request):
     if isinstance(raw, str):
         raw = [raw]
     from . import whitelist
-    from .tools import gdrive, gdrive_root
-    if account not in gdrive.gworkspace_accounts():
+    from .tools import google_switch
+    try:
+        accounts = google_switch.accounts()
+    except google_switch.ComponentUnavailable as e:
+        return JSONResponse({"error": str(e)}, status_code=503)
+    if account not in accounts:
         return JSONResponse({"error": f"account '{account}' non collegato"},
                             status_code=400)
     ids = [_folder_id(r) for r in raw]
@@ -268,7 +271,7 @@ async def gdrive_confinement_set(request: Request):
                 f"'{account}' da qualunque agente con il grant: ripeti la "
                 "richiesta con confirm_widen=true")}, status_code=409)
         whitelist.set_gdrive_roots(account, [])
-        gdrive_root.reset_cache()
+        google_switch.perimeter_changed()
         LOG.warning("gdrive confinement RIMOSSO per %s", account)
         return JSONResponse({"account": account, "confined": False, "folders": []})
     described = [_describe_folder(account, i) for i in ids]
@@ -280,7 +283,7 @@ async def gdrive_confinement_set(request: Request):
         return JSONResponse({"error": "non sono cartelle raggiungibili da questo "
                                       "account", "folders": bad}, status_code=400)
     whitelist.set_gdrive_roots(account, ids)
-    gdrive_root.reset_cache()
+    google_switch.perimeter_changed()
     LOG.info("gdrive confinement per %s → %s", account, ids)
     return JSONResponse({"account": account, "confined": True, "folders": described})
 
@@ -839,11 +842,40 @@ def _account_from_email(email: str) -> str:
     return email.split("@")[0].replace(".", "_")
 
 
+async def _google_component_route(request: Request, path: str):
+    """`/tools/google/<path>` in `pack` position (#558): the same route of
+    google-pack's gateway component (`/tools/google-pack/<path>`), with ITS
+    authentication (a human admin or the trusted core), method check and
+    audit — so the Tools page keeps calling the URL it knows. The component
+    not serving is a 503 that says why, never the native handler."""
+    from . import components_api
+    from .tools import google_switch
+    from . import components
+    spec = components.route(google_switch.PACK, path)
+    if spec is None:
+        try:
+            google_switch.service("accounts")      # raises with the reason
+        except google_switch.ComponentUnavailable as e:
+            return JSONResponse({"error": "component_unavailable", "detail": str(e)},
+                                status_code=503)
+        return JSONResponse({"error": "component_unavailable",
+                             "detail": f"google-pack's component has no route '{path}'"},
+                            status_code=503)
+    return await components_api.serve(request, spec)
+
+
+def _google_in_pack() -> bool:
+    from .tools import google_switch
+    return google_switch.in_pack()
+
+
 async def google_auth(request: Request):
     """Avvia il consenso Google UNIFICATO (Gmail + Drive + Docs + Calendar)."""
     g = _connector_guard("google")
     if g is not None:
         return g
+    if _google_in_pack():
+        return await _google_component_route(request, "auth")
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
@@ -869,6 +901,8 @@ async def google_connect(request: Request):
     g = _connector_guard("google")
     if g is not None:
         return g
+    if _google_in_pack():
+        return await _google_component_route(request, "connect")
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
@@ -1119,6 +1153,8 @@ async def openai_connect(request: Request):
 
 async def google_app_status(request: Request):
     """L'app OAuth Google (client_id/secret) è configurata nel vault?"""
+    if _google_in_pack():
+        return await _google_component_route(request, "app")
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
@@ -1132,6 +1168,8 @@ async def google_app_status(request: Request):
 async def google_app_config(request: Request):
     """Deposita la credenziale d'app OAuth Google. Body: {client_json} (il JSON
     scaricato da Google Cloud) oppure {client_id, client_secret, redirect_uri}."""
+    if _google_in_pack():
+        return await _google_component_route(request, "app")
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
@@ -1753,6 +1791,11 @@ def _test_connector(cid: str) -> dict:
             return ({"ok": True, "detail": "API key valida"} if r.status_code == 200
                     else {"ok": False, "detail": f"OpenAI {r.status_code}"})
 
+        if cid == "google":
+            from .tools import google_switch
+            if google_switch.in_pack():
+                # #558: the unified card is google-pack's component's.
+                return google_switch.component_test_connection()
         if cid in _GOOGLE_CARD:
             return _test_google(cid)
 

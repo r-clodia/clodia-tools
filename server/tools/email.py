@@ -500,7 +500,7 @@ MAIL_CONNECTOR = "mail"
 #: The switch Gmail follows (#524): Gmail is google-pack's provider of the mail
 #: vocabulary (`mail-gmail`, `extends: mail`), so it moves with Google.
 GOOGLE_CONNECTOR = "google"
-#: The provider id of Gmail in the mail vocabulary (`resolved.transport_for`).
+#: The provider id of Gmail in the mail vocabulary.
 GMAIL_PROVIDER = "gmail"
 
 
@@ -530,13 +530,16 @@ def _pack_transport(account: str | None = None) -> bool:
     return instance_profile.connector_mode(switch) == "pack"
 
 
-def _transport_or_refuse(account: str) -> tuple[str, str]:
-    """`(backend, tool)` of the pack transport for `account`, or a refusal.
+def _transport_or_refuse(account: str):
+    """The pack transport for `account`, or a refusal: `(backend, tool)` of an
+    MCP backend, or a callable `payload -> answer`.
 
-    Per provider (#524): a Gmail account (`_is_gmail`) goes to google-pack's
-    `gmail` provider of the mail vocabulary, any other account to the mail
-    connector's own (IMAP) transport. Same argument and answer contract for
-    both (`_run_transport`); what differs is which credential's files travel.
+    Per provider: a Gmail account (`_is_gmail`) goes to google-pack's GATEWAY
+    COMPONENT (its `mail_run` service, clodia-platform#558 — the
+    `gmail-transport` MCP backend of #524 is gone), any other account to the
+    mail connector's own (IMAP) transport. Same argument and answer contract
+    for both (`_run_transport`); what differs is which credential's files
+    travel, and that Gmail's stay in the gateway's process.
 
     Fail closed, never a fallback to the in-process client: an owner who
     turned the switch to `pack` and silently got the gateway's own client
@@ -554,23 +557,15 @@ def _transport_or_refuse(account: str) -> tuple[str, str]:
         # Gmail is google-pack's provider (#524), never the IMAP transport's:
         # handing comms-pack the instance's OAuth client and the account's
         # refresh token would give the wrong pack the keys to the whole Google
-        # account (review of clodia-tools#378). Its own transport receives
-        # the per-call OAuth files `_secrets_env` materialises, as the
-        # in-process client does.
+        # account (review of clodia-tools#378). Its gateway component (#558)
+        # receives the per-call OAuth files `_secrets_env` materialises, as
+        # the in-process client does, and runs in the gateway's process.
+        from . import google_switch
         try:
-            transport = _connectors.transport_for(MAIL_CONNECTOR, GMAIL_PROVIDER)
-        except Exception as e:  # noqa: BLE001 — an unreadable registry is no transport
-            LOG.error("email: trasporto Gmail del pack non risolvibile (%s)", e)
-            transport = None
-        if transport is None:
+            return google_switch.gmail_runner()
+        except google_switch.ComponentUnavailable as e:
             raise PermissionError(
-                f"Gmail transport provider not available for '{account}': the "
-                "google connector is in `pack` position on this instance, but "
-                "no installed google-pack holds the `mail-gmail` connector "
-                "(`extends: mail`, provider `gmail`) with a `transport` on a "
-                "backend it has mounted itself. Install/repair google-pack, or "
-                "set `connectors: {google: native}` in profile.yaml.")
-        return transport
+                f"Gmail provider not available for '{account}': {e}") from None
     try:
         transport = _connectors.transport_for(MAIL_CONNECTOR)
     except Exception as e:  # noqa: BLE001 — an unreadable registry is no transport
@@ -658,7 +653,15 @@ def _run_transport(transport: tuple[str, str], account: str,
     """
     from .. import proxy
 
-    backend, tool = transport
+    if callable(transport):
+        # A gateway component's provider (#558): same payload, same answer,
+        # called in-process instead of over MCP.
+        backend, tool = "google-pack", "mail_run"
+        send = lambda payload, t: json.dumps(transport(payload))  # noqa: E731
+    else:
+        backend, tool = transport
+        send = lambda payload, t: proxy.call_backend_tool_sync(  # noqa: E731
+            backend, tool, payload, t)
     secrets_dir = env.get("CLODIA_SECRETS_DIR") or None
     if secrets_dir and (secrets_dir == os.environ.get("CLODIA_SECRETS_DIR")
                         or not Path(secrets_dir).name.startswith(_SECRETS_TMP_PREFIX)):
@@ -670,9 +673,7 @@ def _run_transport(transport: tuple[str, str], account: str,
             "casella di questa chiamata, non la directory dei segreti del gateway")
     argv, files = _transport_payload(account, cli_args, secrets_dir)
     try:
-        text = proxy.call_backend_tool_sync(
-            backend, tool, {"argv": argv, "files": files, "timeout": timeout},
-            timeout)
+        text = send({"argv": argv, "files": files, "timeout": timeout}, timeout)
     except Exception as e:  # noqa: BLE001 — the transport failed, the verb did
         raise RuntimeError(
             f"email {cli_args[0]} failed: mail transport '{backend}.{tool}' "
