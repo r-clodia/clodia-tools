@@ -187,6 +187,17 @@ class ReapTests(_Base):
         self.assertEqual(launch.reap_orphans((), {pid}), 1)
         self.assertEqual(self._stato(pid), "", "lo zombie è ancora lì")
 
+    def test_a_session_with_no_process_left_is_forgotten(self):
+        """Pid reuse (review of #370): once nothing holds the session id, the
+        supervisor drops it, so a recycled pid cannot look like a service."""
+        pid = self._zombie()
+        sup = self.supervisor()
+        sup._sessions[pid] = None
+        sup.reconcile()                      # reaps it…
+        sup.reconcile()                      # …and the empty session goes
+        self.assertNotIn(pid, sup._sessions)
+        self.assertEqual(launch.live_sessions({pid}), set())
+
     def test_another_child_of_the_gateway_is_never_reaped(self):
         """Review of #370: a `subprocess.run` (restic, git, IMAP) that has
         just exited is a zombie until its own wait; stealing it made a failed

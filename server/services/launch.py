@@ -245,6 +245,36 @@ def reap_orphans(tracked: Iterable[int] = (), sessions: Iterable[int] = ()) -> i
     return raccolti
 
 
+def live_sessions(sessions: Iterable[int]) -> set[int]:
+    """Which of `sessions` still has at least one process (zombies included).
+
+    A session id that no process holds any more can be forgotten: the kernel
+    does not hand out a pid while it is still some process's session id, so
+    keeping only the live ones is what stops a RECYCLED pid — e.g. an MCP
+    stdio backend, which the SDK also starts with `start_new_session=True` —
+    from being mistaken for a service session (review of clodia-tools#370).
+    """
+    cercate = {int(p) for p in sessions}
+    if not cercate:
+        return set()
+    vive: set[int] = set()
+    try:
+        voci = list(Path("/proc").glob("[0-9]*"))
+    except OSError:
+        return cercate          # cannot tell: keep them all
+    for entry in voci:
+        try:
+            coda = (entry / "stat").read_text().rpartition(")")[2].split()
+            sid = int(coda[3])
+        except (OSError, ValueError, IndexError):
+            continue
+        if sid in cercate:
+            vive.add(sid)
+            if vive == cercate:
+                break
+    return vive
+
+
 def _uid_map_path() -> Path:
     return data_dir() / "services" / UID_MAP_FILE
 

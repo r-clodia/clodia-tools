@@ -148,6 +148,11 @@ class Supervisor:
             # `_tick`, così i servizi che sono appena usciti li ha già
             # raccolti `Popen.poll()` e non c'è niente da togliergli.
             launch.reap_orphans(self._live_pids(), self._sessions)
+            # Forget sessions with no process left (pid reuse, see
+            # `launch.live_sessions`); the live services always keep theirs.
+            vive = launch.live_sessions(self._sessions) | self._live_pids()
+            for sid in [s for s in self._sessions if s not in vive]:
+                del self._sessions[sid]
 
     def _tick(self, entry: _Running) -> None:
         if entry.proc is not None:
