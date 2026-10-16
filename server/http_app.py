@@ -228,6 +228,14 @@ def run_http(host: str = "0.0.0.0", port: int = 7849) -> None:
     # Dopo l'attach, se no la riga finisce nel buco cieco (clodia-platform#382).
     from .main import log_spawn_compartment_mode
     log_spawn_compartment_mode()
+    # …e PRIMA di servire: l'uid di sandbox riesce a leggere un file 0600 del
+    # gateway? Su uno storage che ignora i bit di permesso la risposta è sì, e
+    # allora la vault è leggibile da qualunque spawn (clodia-platform#544).
+    # In `enforce` (il default) questa chiamata non ritorna: solleva SystemExit.
+    # Dopo l'attach del log su file, se no il CRITICAL che spiega il rifiuto
+    # finisce nel buco cieco di #382.
+    from . import isolation
+    isolation.check_at_boot()
     LOG.info("clodia-tools MCP HTTP in ascolto su %s:%s/mcp (log: %s)",
              host, port, _dove or "solo stdout")
     uvicorn.run(build_app(), host=host, port=port, log_level="info")
