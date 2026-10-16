@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 import os
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -71,10 +72,128 @@ _CACHE: tuple[tuple, Registry, tuple[str, ...], dict] | None = None
 
 
 def _manifest_files() -> list[Path]:
+    """The installed manifests, OLDEST FIRST — i.e. in install order.
+
+    The order is the tie-breaker of a clash (clodia-platform#545 §1: the
+    incumbent keeps its namespace, the newcomer is the one dropped), so it has
+    to mean something. `sorted()` by path meant «whoever sorts first», which is
+    not a fact about the instance.
+
+    Install time is NOT the mtime of `pack.yaml` (review of clodia-tools#369):
+    the agent-server rewrites that file on setup, flow approval and update,
+    so one click on the incumbent made it the «newcomer» and handed its
+    namespace to the intruder. It is the moment the GATEWAY first saw the pack
+    (`_first_seen`), stamped once in the gateway's own state and never moved.
+    """
     try:
-        return sorted((_DATA / PACKS_DIR).glob("*/pack.yaml"))
+        files = list((_DATA / PACKS_DIR).glob("*/pack.yaml"))
     except OSError:  # unreadable data dir: no connectors, never an exception
         return []
+    try:
+        seen = _first_seen([p.parent.name for p in files], prune=True)
+    except Exception:  # noqa: BLE001 — no stamps: path order, never an exception
+        LOG.warning("connectors: anzianità dei pack non disponibile")
+        seen = {}
+    return sorted(files, key=lambda p: (seen.get(p.parent.name, math.inf), str(p)))
+
+
+#: Packs first seen in this process when the state file cannot be written.
+_SEEN_MEMORY: dict[str, float] = {}
+#: When each stamped pack was first found missing (pruning grace period).
+_MISSING_SINCE: dict[str, float] = {}
+#: How long a pack must be missing before its stamp is forgotten.
+PRUNE_AFTER_S = 300.0
+
+
+def _first_seen_path() -> Path:
+    """In the gateway-only state dir when there is one (#80), else next to
+    the packs' data dir — never in a directory the tests did not choose."""
+    if os.environ.get("CLODIA_TOOLS_STATE_DIR"):
+        from .. import state_paths
+        return state_paths.state_path("connectors-first-seen.json")
+    return _DATA / "clodia-tools-connectors-first-seen.json"
+
+
+def _first_seen(dirs: list[str], *, prune: bool = False) -> dict[str, float]:
+    """`{pack dir: when the gateway first saw it}`, stamping the new ones now.
+
+    Never updated afterwards, whatever happens to `pack.yaml`. Packs seen for
+    the first time in the same call share the same stamp — the first boot of
+    an instance, or two packs dropped in together — and a clash between equal
+    stamps drops both sides (`_build_isolated`): no order is invented.
+    """
+    import json
+    import time
+    path = _first_seen_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data = {**_SEEN_MEMORY, **data}
+    now = time.time()
+    # A stamp that is not a finite positive number (a hand edit, a corrupted
+    # file, NaN which json accepts) is no evidence of seniority: that pack
+    # counts as arriving NOW, i.e. the newcomer — never the incumbent, and
+    # never a value that breaks the ordering (review of #369: NaN looped
+    # `_build_isolated` forever, 0 made an intruder the incumbent).
+    def _valid(v) -> bool:
+        return (isinstance(v, (int, float)) and not isinstance(v, bool)
+                and math.isfinite(v) and v > 0)
+    bad = [d for d in dirs if d in data and not _valid(data[d])]
+    # `prune` only when `dirs` is the COMPLETE list of installed packs, and
+    # only after the pack has been missing for a while: an update that
+    # replaces the directory non-atomically must not cost the incumbent its
+    # seniority in the instant the glob runs (re-review of #369).
+    gone = []
+    if prune:
+        for d in [d for d in list(data) if d not in dirs]:
+            since = _MISSING_SINCE.setdefault(d, now)
+            if now - since >= PRUNE_AFTER_S:
+                gone.append(d)
+        for d in dirs:
+            _MISSING_SINCE.pop(d, None)
+    for d in gone:
+        # Stamps of removed packs go: a new pack in the same directory name
+        # must not inherit the old one's seniority.
+        data.pop(d, None)
+        _SEEN_MEMORY.pop(d, None)
+        _MISSING_SINCE.pop(d, None)
+    new = [d for d in dirs if d not in data] + bad
+    if new or gone:
+        for d in new:
+            data[d] = now
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=1, sort_keys=True),
+                           encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            LOG.warning("connectors: %s non scrivibile, anzianità in memoria", path)
+        _SEEN_MEMORY.update({d: data[d] for d in new})
+    return {d: float(data[d]) if _valid(data.get(d)) else now for d in dirs}
+
+
+def seniority() -> dict[str, float]:
+    """`{pack name: first seen}` for the installed packs (see `_first_seen`)."""
+    import yaml
+    out: dict[str, float] = {}
+    files = _manifest_files()
+    try:
+        seen = _first_seen([p.parent.name for p in files])
+    except Exception:  # noqa: BLE001
+        return {}
+    for path in files:
+        try:
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        name = str((loaded or {}).get("name") or path.parent.name) \
+            if isinstance(loaded, Mapping) else path.parent.name
+        out[name] = seen.get(path.parent.name, math.inf)
+    return out
 
 
 def _signature(paths: list[Path]) -> tuple:
@@ -93,15 +212,25 @@ def _signature(paths: list[Path]) -> tuple:
 _CORE_BACKENDS = frozenset({"github"})
 
 
-def _norm(name: str) -> str:
+def norm_name(name: str) -> str:
     """Un nome di backend o di namespace nella forma in cui si confrontano.
 
     Gli slug dei backend usano `-` (`tools_api._slugify`), i namespace `_`:
     `norm-attiva` e `norm_attiva` sono lo stesso nome, e un confronto a stringa
     lo mancherebbe.
+
+    Pubblica perché la PROPRIETÀ di un backend e il controllo di conflitto che
+    decide se montarlo (`tools_api.register_mcp_core`) devono rispondere alla
+    stessa domanda: finché il secondo confrontava gli slug grezzi, un nome
+    scritto a mano in `config.yaml` passava il 409 e poi risultava lo stesso
+    backend qui (clodia-platform#545 §2).
     """
     import re as _re
     return _re.sub(r"[^a-z0-9]", "_", (name or "").strip().lower())
+
+
+#: Nome storico, usato in tutto questo modulo.
+_norm = norm_name
 
 
 def _backend_entries() -> list[dict]:
@@ -163,7 +292,12 @@ def reserved_for(pack: str) -> frozenset[str]:
 
 
 def manifests() -> dict[str, dict]:
-    """`{pack name: parsed pack.yaml}` for every installed pack.
+    """`{pack name: parsed pack.yaml}` for every installed pack, OLDEST FIRST.
+
+    The iteration order is install order (`_manifest_files`) and it is load
+    bearing: `_build_isolated` reads it to know which side of a clash was there
+    first. Tests that patch this function declare that order by building the
+    dict in it.
 
     A file that does not parse is skipped with a warning: it is already the
     agent-server's job to refuse it, and one broken pack must not make the other
@@ -240,7 +374,8 @@ def _builtin_registry() -> Registry:
     return build_registry(own, builtin=tuple(own), reserved=frozenset())
 
 
-def _build_isolated(own: dict, installed: dict
+def _build_isolated(own: dict, installed: dict,
+                    seniority: Mapping[str, float] | None = None
                     ) -> tuple[Registry, list[str], list[str]]:
     """The registry with every pack that can be held, and why the others not.
 
@@ -248,11 +383,33 @@ def _build_isolated(own: dict, installed: dict
     not half-valid — but the INSTANCE must not be: one malformed or clashing
     pack used to drop every pack's connectors (and with #517 their egress
     checks). The packs a refusal is about (`ManifestError.packs`) are removed
-    and the build is retried; a clash removes BOTH sides, so the winner of a
-    contested scheme is never «whoever sorts first». Raises when a refusal
-    names no installed pack (then the floor is the builtins alone).
+    and the build is retried. Raises when a refusal names no installed pack
+    (then the floor is the builtins alone).
+
+    When a refusal blames MORE than one pack it is a clash, and only the pack
+    installed LAST is dropped (clodia-platform#545 §1). Dropping both sides was
+    meant to keep the winner from being «whoever sorts first», but it made
+    installing an unrelated pack a way to switch off a healthy one: its
+    connectors left the registry and its outbound verbs fell into the failsafe,
+    i.e. denied. The incumbent is not an arbitrary winner — it is the one whose
+    connectors the instance has been using, and the newcomer is the change an
+    owner can undo. `installed` is in install order (see `manifests`).
     """
     remaining = dict(installed)
+    # When the packs arrived: the gateway's own first-seen stamps if known,
+    # else the iteration order (tests build the dict in install order).
+    # A pack with no (or no usable) stamp counts as the NEWEST arrival: the
+    # unsafe default would be to make it the incumbent (review of #369).
+    def _when(p: str, i: int) -> float:
+        if not seniority:
+            return float(i)
+        v = seniority.get(p)
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return math.inf
+        return v if math.isfinite(v) else math.inf
+    order = {p: _when(p, i) for i, p in enumerate(installed)}
     dropped: list[str] = []
     while True:
         try:
@@ -262,6 +419,15 @@ def _build_isolated(own: dict, installed: dict
             culprits = [p for p in e.packs if p in remaining]
             if not culprits:
                 raise
+            if len(culprits) > 1:
+                # A clash: the latest arrival loses, the others stay. One per
+                # round — a second clash among those left raises again here.
+                # Arrivals with the SAME stamp are all dropped: between them
+                # there is no incumbent, and inventing one would be the
+                # «whoever sorts first» this replaced (review of #369).
+                ultimo = max(order.get(p, math.inf) for p in culprits)
+                culprits = [p for p in culprits
+                            if order.get(p, math.inf) == ultimo] or culprits
             for p in culprits:
                 remaining.pop(p)
                 dropped.append(f"pack '{p}' refused, its connectors are "
@@ -378,7 +544,11 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
         own = _builtin.manifests()
         installed = {k: v for k, v in manifests().items() if k not in own}
         owners = backend_owners(installed)
-        reg, dropped, dropped_packs = _build_isolated(own, installed)
+        try:
+            anz = seniority()
+        except Exception:  # noqa: BLE001 — no stamps: iteration order
+            anz = None
+        reg, dropped, dropped_packs = _build_isolated(own, installed, anz)
         refused = list(dropped) + list(reg.refused)
         # Namespace di backend MCP montati: riservati come quelli nativi, salvo
         # il server MCP che il pack monta come proprio. Il connettore che ne

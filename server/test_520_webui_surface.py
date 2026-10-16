@@ -392,6 +392,31 @@ class DocsUrlTests(unittest.TestCase):
                 with self.assertRaises(cm.ManifestError):
                     cm.parse_connector(self._card(url), pack="p")
 
+    def test_https_without_a_host_is_refused(self):
+        """clodia-platform#545 §7: `netloc` is not a host.
+
+        `https://@` and `https://:443` have a netloc (`'@'`, `':443'`) and no
+        hostname at all, and a NUL byte travels through `urlsplit` untouched:
+        all three were accepted here and refused by the web side, which is the
+        wrong place to find out. A userinfo is refused with them — the href is
+        read by an admin, and `https://docs.pack.io@evil.it` reads like the
+        first host and goes to the second.
+        """
+        for url in ("https://@", "https://@/docs", "https://:443",
+                    "https://:443/docs", "https://ex\x00ample.it/docs",
+                    "https://\x7f.it/docs", "https://docs.pack.io@evil.it/x",
+                    "https://user:pw@evil.it/x"):
+            with self.subTest(url=url):
+                with self.assertRaises(cm.ManifestError):
+                    cm.parse_connector(self._card(url), pack="p")
+
+    def test_a_host_with_a_port_or_an_idn_is_kept(self):
+        for url in ("https://example.com:8443/docs", "https://café.fr/docs",
+                    "https://[::1]/docs"):
+            with self.subTest(url=url):
+                c = cm.parse_connector(self._card(url), pack="p")
+                self.assertEqual(c.tools_card.docs_url, url)
+
     def test_an_https_url_is_kept(self):
         c = cm.parse_connector(self._card("https://example.com/docs"), pack="p")
         self.assertEqual(c.tools_card.docs_url, "https://example.com/docs")
