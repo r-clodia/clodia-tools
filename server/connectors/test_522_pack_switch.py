@@ -677,8 +677,19 @@ class NoVerbIsLeftBehindTests(_Istanza):
         from .. import main
         rimasti = [n for n in main.all_native_verb_names()
                    if n.startswith("telegram.")]
-        self.assertEqual(rimasti, [])
+        # Only the binding verbs stay with the gateway: they write its own
+        # binding registry, never a pack's business (review of logic#527).
+        self.assertEqual(sorted(rimasti), sorted(main._GATEWAY_RETAINED_VERBS))
         self.assertTrue(main._is_packaged_verb("telegram.roster"))
+
+    def test_the_binding_verbs_stay_served_by_the_gateway(self):
+        self.posizione("pack")
+        from .. import main
+        for verbo in ("telegram.listen", "telegram.unlisten", "telegram.join_link"):
+            with self.subTest(verbo=verbo):
+                self.assertFalse(main._is_packaged_verb(verbo))
+                self.assertTrue(main._verb_implemented(verbo))
+        self.assertTrue(main._is_packaged_verb("telegram.send"))
 
     def test_they_are_all_there_in_the_other_position(self):
         """Il controllo gemello: l'interruttore su `native` non deve togliere
