@@ -1995,12 +1995,21 @@ def _packaged_namespaces() -> frozenset[str]:
 #: with them. So the pack declares the mail VOCABULARY (the egress/source
 #: mappings the PDP reads) and provides the TRANSPORT (`resolved.
 #: transport_for`), and the verbs stay here.
+#:
+#: The four git verbs of `github` too (clodia-platform#525): they are
+#: reference-monitor work — the room from the signed claim, the per-scope
+#: repository perimeter, the repository read from the gateway-written origin
+#: (never the caller), the scope-then-platform credential, the per-spawn
+#: scratch they run git in, the PDP/gate inputs of `_push_destination`. A pack
+#: process must not reach the spawn's scratch, so they stay here; it-pack
+#: declares the `github` connector (credential, mappings, taint, danger) and
+#: mounts the GitHub MCP backend, whose `github.*` tools are its own.
 _GATEWAY_RETAINED_VERBS = frozenset({
     "telegram.listen", "telegram.unlisten", "telegram.join_link",
     "email.send", "email.folders", "email.list", "email.read",
     "email.get_attachment", "email.save_attachment", "email.search",
     "email.reply",
-})
+}) | _GITHUB_NATIVE_NAMES   # github.clone, .pull, .push, .pull_request
 
 
 def _is_packaged_verb(name: str) -> bool:

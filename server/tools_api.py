@@ -565,6 +565,42 @@ def _legacy_adoptable(entry: dict, pack: str) -> bool:
     return False
 
 
+def _core_entry_released(entry: dict, pack: str = "",
+                         new: dict | None = None) -> bool:
+    """Is `entry` the native connector's own backend, released to a pack?
+
+    clodia-platform#525. `github_connect` mounted the official GitHub MCP
+    backend as `github`, unstamped — it belonged to the core, not to a pack.
+    With `connectors: {github: pack}` it-pack declares the connector and
+    mounts that backend itself; without this its import would get the 409 for
+    «already mounted by an administrator» and the switch could never complete.
+
+    Narrow on purpose: only in `pack` position, only an UNSTAMPED entry, only
+    a backend the core mounts (`resolved._CORE_BACKEND_CONNECTORS`), and only
+    in the exact shape the native handler wrote (http, the official URL). An
+    admin mount that merely shares the name is not the core's, and stays
+    protected by the 409.
+    """
+    from .connectors import resolved as _resolved
+    if not isinstance(entry, dict) or entry.get("pack"):
+        return False
+    cid = _resolved._CORE_BACKEND_CONNECTORS.get(
+        _resolved.norm_name(str(entry.get("name") or "")))
+    if cid is None or instance_profile.connector_mode(cid) != "pack":
+        return False
+    # Only the pack the connector is switched TO, and only to mount the same
+    # official endpoint: otherwise any pack imported first replaced the
+    # official mount with its own URL, carrying the PAT (review of #379).
+    from .connectors import builtin as _builtin
+    if pack != _builtin.RELEASED_TO.get(cid):
+        return False
+    if not (isinstance(new, dict) and new.get("transport") == "http"
+            and str(new.get("url") or "") == GITHUB_MCP_URL):
+        return False
+    return (entry.get("transport") == "http"
+            and str(entry.get("url") or "") == GITHUB_MCP_URL)
+
+
 def register_mcp_core(config, secrets: dict | None = None,
                       pack: str | None = None) -> dict:
     """Core riutilizzabile della registrazione MCP (UI Add-MCP e tool mcp.add).
@@ -661,6 +697,14 @@ def register_mcp_core(config, secrets: dict | None = None,
                 # adopted, and the new entry below carries `pack: <adesso>`.
                 LOG.info("mcp: backend '%s' senza proprietario adottato dal "
                          "pack '%s' (path nel suo plugin dir)", slug, adesso)
+            elif prima != adesso and not prima and adesso and \
+                    _core_entry_released(precedente, adesso, backend):
+                # The gateway's own GitHub mount, left behind by the native
+                # connector, on an instance whose profile hands `github` to a
+                # pack (#525): the pack's mount replaces it.
+                LOG.info("mcp: backend '%s' del connettore nativo sostituito "
+                         "dal mount del pack '%s' (connettore passato al pack)",
+                         slug, adesso)
             elif prima != adesso:
                 chi_prima = f"il pack '{prima}'" if prima else "un amministratore"
                 chi_ora = f"il pack '{adesso}'" if adesso else "un amministratore"
@@ -1257,14 +1301,24 @@ GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
 async def github_connect(request: Request):
     """Deposita il PAT GitHub nel vault e registra/rimuove il backend MCP ufficiale
     GitHub. Body: {pat}. pat vuoto → disconnette (rimuove cred + backend).
-    Il PAT non transita mai dal modello: il proxy lo risolve via ${VAULT:github_pat}."""
+    Il PAT non transita mai dal modello: il proxy lo risolve via ${VAULT:github_pat}.
+
+    In `pack` position (`connectors: {github: pack}`, clodia-platform#525) the
+    backend is it-pack's own mount, so this handler deposits the PAT only —
+    same entry, same `{"value": pat}` shape, which the pack's mount reads as
+    `${VAULT:github_pat.value}` — and keeps the grant to clodia. It mounts
+    nothing, and it never touches the pack's stamped mount: what it removes is
+    the native connector's leftover unstamped `github` entry, which would
+    otherwise keep the pack's connector refused for a namespace clash."""
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad_json"}, status_code=400)
-    pat = (body.get("pat") or body.get("token") or "").strip()
+    # `value` is the field the connector manifest declares (#525): the form a
+    # generic UI renders posts it under that name.
+    pat = (body.get("pat") or body.get("token") or body.get("value") or "").strip()
     if pat:
         g = _connector_guard("github")
         if g is not None:
@@ -1275,20 +1329,27 @@ async def github_connect(request: Request):
             instance_profile.integrations_check("github")
         except PermissionError as e:
             return JSONResponse({"error": str(e)}, status_code=403)
-    backends = [b for b in (whitelist.CONFIG.get("mcp_backends") or [])
-                if b.get("name") != "github"]
+    in_pack = instance_profile.connector_mode("github") == "pack"
+    if in_pack:
+        backends = [b for b in (whitelist.CONFIG.get("mcp_backends") or [])
+                    if not (b.get("name") == "github" and not b.get("pack"))]
+    else:
+        backends = [b for b in (whitelist.CONFIG.get("mcp_backends") or [])
+                    if b.get("name") != "github"]
     if not pat:
         vault.remove("github_pat")
         whitelist.CONFIG["mcp_backends"] = backends
         whitelist.save_config(); whitelist.reload_config(); proxy.clear_cache()
-        LOG.info("github_connect: disconnesso (cred + backend rimossi)")
+        LOG.info("github_connect: disconnesso (cred%s rimossi)",
+                 "" if in_pack else " + backend")
         return JSONResponse({"connected": False})
     vault.deposit("github_pat", {"value": pat}, cred_type="mcp_secret", grant_agents=[])
-    backends.append({
-        "name": "github", "label": "GitHub", "transport": "http",
-        "url": GITHUB_MCP_URL,
-        "headers": {"Authorization": "Bearer ${VAULT:github_pat}"},
-    })
+    if not in_pack:
+        backends.append({
+            "name": "github", "label": "GitHub", "transport": "http",
+            "url": GITHUB_MCP_URL,
+            "headers": {"Authorization": "Bearer ${VAULT:github_pat}"},
+        })
     whitelist.CONFIG["mcp_backends"] = backends
     # I verbi che il collegamento concede a clodia, per NOME. Prima qui c'era
     # `github.*`, e una wildcard sul namespace di un backend esterno concede
@@ -1314,7 +1375,9 @@ async def github_connect(request: Request):
         if v not in ct:
             ct.append(v)
     whitelist.save_config(); whitelist.reload_config(); proxy.clear_cache()
-    LOG.info("github_connect: PAT depositato + backend github registrato (len=%d)", len(pat))
+    LOG.info("github_connect: PAT depositato%s (len=%d)",
+             " (backend: quello del pack)" if in_pack
+             else " + backend github registrato", len(pat))
     return JSONResponse({"connected": True})
 
 

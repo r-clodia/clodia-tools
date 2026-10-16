@@ -219,7 +219,10 @@ class RouteTests(unittest.TestCase):
         with _Auth():
             body = _client().get("/internal/connectors", headers=_H).json()
         raw = json.dumps(body)
-        for forbidden in ("value", "token\":", "secret_value", "password",
+        # `"value":` as a KEY, like `token":` — not the bare word: since #525
+        # GitHub's declared field is NAMED `value` (the key its vault entry
+        # really has), which is the shape of the form, not a stored secret.
+        for forbidden in ("\"value\":", "token\":", "secret_value", "password",
                           "refresh_token", "client_secret"):
             self.assertNotIn(forbidden, raw, forbidden)
         google = next(c for c in body["connectors"] if c["id"] == "google")

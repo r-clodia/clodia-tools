@@ -100,9 +100,9 @@ def _manifest_files() -> list[Path]:
 
 
 #: Packs first seen in this process when the state file cannot be written.
-_SEEN_MEMORY: dict[str, float] = {}
+_SEEN_MEMORY: dict[str, dict[str, float]] = {}
 #: When each stamped pack was first found missing (pruning grace period).
-_MISSING_SINCE: dict[str, float] = {}
+_MISSING_SINCE: dict[str, dict[str, float]] = {}
 #: How long a pack must be missing before its stamp is forgotten.
 PRUNE_AFTER_S = 300.0
 
@@ -133,7 +133,12 @@ def _first_seen(dirs: list[str], *, prune: bool = False) -> dict[str, float]:
             data = {}
     except (OSError, ValueError):
         data = {}
-    data = {**_SEEN_MEMORY, **data}
+    # In-process memories are per STATE FILE: two data dirs in one process
+    # (tests, a second instance) must not share seniority or grace periods.
+    chiave = str(path)
+    mem = _SEEN_MEMORY.setdefault(chiave, {})
+    mancanti = _MISSING_SINCE.setdefault(chiave, {})
+    data = {**mem, **data}
     now = time.time()
     # A stamp that is not a finite positive number (a hand edit, a corrupted
     # file, NaN which json accepts) is no evidence of seniority: that pack
@@ -151,17 +156,17 @@ def _first_seen(dirs: list[str], *, prune: bool = False) -> dict[str, float]:
     gone = []
     if prune:
         for d in [d for d in list(data) if d not in dirs]:
-            since = _MISSING_SINCE.setdefault(d, now)
+            since = mancanti.setdefault(d, now)
             if now - since >= PRUNE_AFTER_S:
                 gone.append(d)
         for d in dirs:
-            _MISSING_SINCE.pop(d, None)
+            mancanti.pop(d, None)
     for d in gone:
         # Stamps of removed packs go: a new pack in the same directory name
         # must not inherit the old one's seniority.
         data.pop(d, None)
-        _SEEN_MEMORY.pop(d, None)
-        _MISSING_SINCE.pop(d, None)
+        mem.pop(d, None)
+        mancanti.pop(d, None)
     new = [d for d in dirs if d not in data] + bad
     if new or gone:
         for d in new:
@@ -174,7 +179,7 @@ def _first_seen(dirs: list[str], *, prune: bool = False) -> dict[str, float]:
             os.replace(tmp, path)
         except OSError:
             LOG.warning("connectors: %s non scrivibile, anzianità in memoria", path)
-        _SEEN_MEMORY.update({d: data[d] for d in new})
+        mem.update({d: data[d] for d in new})
     return {d: float(data[d]) if _valid(data.get(d)) else now for d in dirs}
 
 
@@ -211,7 +216,32 @@ def _signature(paths: list[Path]) -> tuple:
 
 #: Backend MCP che il CORE monta da sé (il connettore GitHub nativo): non sono
 #: di nessun pack, nemmeno di uno che li dichiari fra i propri `mcp_servers`.
-_CORE_BACKENDS = frozenset({"github"})
+#: `{backend: connector id}` — the connector whose native implementation mounts
+#: that backend (`tools_api.github_connect`).
+_CORE_BACKEND_CONNECTORS = {"github": "github"}
+#: The full set, whatever the switch says. Kept for readers that want the
+#: shipped list; the checks below use `core_backends()`.
+_CORE_BACKENDS = frozenset(_CORE_BACKEND_CONNECTORS)
+
+
+def core_backends() -> frozenset[str]:
+    """The core backends reserved on THIS instance (clodia-platform#525).
+
+    `github` is the core's own mount only while the gateway implements the
+    GitHub connector. With `connectors: {github: pack}` it-pack declares the
+    connector (namespace `github`) and mounts the GitHub MCP backend itself:
+    reserving the name then would refuse exactly the connector that has to
+    take over — the same reason `manifest.reserved_namespaces()` follows
+    `builtin.released()`. The reservation goes with the switch, and only with
+    it: in `native` position, or when the profile cannot be read, `github`
+    stays reserved for everyone, which is yesterday's gateway.
+    """
+    try:
+        from .. import instance_profile
+        return frozenset(b for b, cid in _CORE_BACKEND_CONNECTORS.items()
+                         if instance_profile.connector_mode(cid) != "pack")
+    except Exception:  # noqa: BLE001 — in doubt everything stays reserved
+        return _CORE_BACKENDS
 
 
 def norm_name(name: str) -> str:
@@ -238,6 +268,17 @@ _norm = norm_name
 def _backend_entries() -> list[dict]:
     from .. import proxy
     return list(proxy._backends().values())
+
+
+def _switch_signature() -> frozenset[str]:
+    """The connectors the profile hands to packs: part of every cache key here,
+    because the switch decides which builtins exist and which core backends
+    are reserved (#525) — a registry built in the other position would answer
+    for a connector that is not the one in charge."""
+    try:
+        return _builtin._packaged()
+    except Exception:  # noqa: BLE001
+        return frozenset()
 
 
 def mounted_backends() -> frozenset[str]:
@@ -267,7 +308,7 @@ def backend_owners(packs: Mapping[str, Mapping] | None = None) -> dict[str, froz
     for b in _backend_entries():
         pack = b.get("pack")
         name = _norm(str(b.get("name") or ""))
-        if isinstance(pack, str) and pack and name and name not in _CORE_BACKENDS:
+        if isinstance(pack, str) and pack and name and name not in core_backends():
             out.setdefault(pack, set()).add(name)
     return {k: frozenset(v) for k, v in out.items()}
 
@@ -283,7 +324,7 @@ def foreign_backends(pack: str) -> frozenset[str]:
     spegnere il taint.
     """
     owned = _build_owners().get(pack, frozenset())
-    return (mounted_backends() | _CORE_BACKENDS) - owned
+    return (mounted_backends() | core_backends()) - owned
 
 
 def reserved_for(pack: str) -> frozenset[str]:
@@ -320,6 +361,45 @@ def manifests() -> dict[str, dict]:
         name = str(loaded.get("name") or path.parent.name)
         out[name] = dict(loaded)
     return out
+
+
+def _strip_foreign_claims(installed: dict) -> tuple[dict, list[str]]:
+    """Drop, from packs other than the expected one, any connector entry that
+    claims a builtin connector switched to a pack (by id or by namespace).
+
+    `connectors: {github: pack}` means "to it-pack", not "to whoever comes
+    first": before this, a pack imported ahead of it-pack held `github` (the
+    push lost its egress mapping) and `openai-images` (its transport received
+    the API key). Stripped BEFORE the build, so the expected pack is never
+    dropped as the "newcomer" of a clash with an intruder (review of #379).
+    """
+    try:
+        claims = _builtin.expected_claims()
+    except Exception:  # noqa: BLE001
+        claims = {}
+    if not claims:
+        return installed, []
+    out: dict = {}
+    refused: list[str] = []
+    for pack, meta in installed.items():
+        entries = meta.get("connectors") if isinstance(meta, Mapping) else None
+        if not isinstance(entries, list):
+            out[pack] = meta
+            continue
+        kept = []
+        for e in entries:
+            if isinstance(e, Mapping):
+                atteso = claims.get(str(e.get("id") or "")) or \
+                    claims.get("ns:" + str(e.get("namespace") or ""))
+                if atteso and atteso != pack:
+                    refused.append(
+                        f"pack '{pack}', connector '{e.get('id')}': on this "
+                        f"instance that connector is switched to '{atteso}', "
+                        f"not to '{pack}'; refused")
+                    continue
+            kept.append(e)
+        out[pack] = {**meta, "connectors": kept} if len(kept) != len(entries) else meta
+    return out, refused
 
 
 def registry() -> Registry:
@@ -493,7 +573,7 @@ def _failsafe_from(packs: Mapping[str, Mapping],
         pass
     taken |= {_norm(x) for x in (reserved or ())}
     try:
-        mounted = {_norm(b) for b in (mounted_backends() | _CORE_BACKENDS)}
+        mounted = {_norm(b) for b in (mounted_backends() | core_backends())}
     except Exception:  # noqa: BLE001
         mounted = {_norm(b) for b in _CORE_BACKENDS}
     try:
@@ -539,7 +619,7 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
     # Nella firma anche i plugin (chi possiede quale server MCP) e i backend
     # montati: un `mcp.add` fatto dopo la costruzione deve riservare quel
     # namespace alla chiamata successiva, non al prossimo cambio di pack.yaml.
-    sig = (_signature(_manifest_files()), _mount_signature())
+    sig = (_signature(_manifest_files()), _mount_signature(), _switch_signature())
     if _CACHE is not None and _CACHE[0] == sig:
         return _CACHE[1], _CACHE[2]
     # 1. The floor: the gateway's own connectors. If THEY fail the result is
@@ -563,17 +643,18 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
     try:
         own = _builtin.manifests()
         installed = {k: v for k, v in manifests().items() if k not in own}
+        installed, foreign = _strip_foreign_claims(installed)
         owners = backend_owners(installed)
         try:
             anz = seniority()
         except Exception:  # noqa: BLE001 — no stamps: iteration order
             anz = None
         reg, dropped, dropped_packs = _build_isolated(own, installed, anz)
-        refused = list(dropped) + list(reg.refused)
+        refused = list(foreign) + list(dropped) + list(reg.refused)
         # Namespace di backend MCP montati: riservati come quelli nativi, salvo
         # il server MCP che il pack monta come proprio. Il connettore che ne
         # prende uno altrui è rifiutato da solo — gli altri restano.
-        mounted = mounted_backends() | _CORE_BACKENDS
+        mounted = mounted_backends() | core_backends()
         keep = []
         for c in reg.connectors:
             if not c.builtin and \
@@ -584,7 +665,7 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
                     f"pack's own; a pack cannot claim another backend's verbs")
             else:
                 keep.append(c)
-        if len(keep) != len(reg.connectors) or dropped:
+        if len(keep) != len(reg.connectors) or dropped or foreign:
             # The outbound verbs of a DROPPED pack fail closed (second
             # verification): unmapped would mean unchecked.
             reg = Registry(connectors=tuple(keep), refused=tuple(refused),
@@ -946,7 +1027,7 @@ def transport_for(connector_id: str) -> tuple[str, str] | None:
         return None
     backend = provider.transport.backend
     owned = backend_owners().get(connector.pack, frozenset())
-    if _norm(backend) not in owned or _norm(backend) in _CORE_BACKENDS:
+    if _norm(backend) not in owned or _norm(backend) in core_backends():
         LOG.warning("connectors: transport of '%s' names backend '%s', which "
                     "pack '%s' has not mounted: not used", connector_id,
                     backend, connector.pack)
@@ -974,7 +1055,7 @@ def transport_backends() -> frozenset[str]:
     mounts, never a neighbour's, a core one or an unclaimed admin mount.
     """
     global _TRANSPORTS
-    sig = (_signature(_manifest_files()), _mount_signature())
+    sig = (_signature(_manifest_files()), _mount_signature(), _switch_signature())
     if _TRANSPORTS is not None and _TRANSPORTS[0] == sig:
         return _TRANSPORTS[1]
     owners = backend_owners()
@@ -987,7 +1068,7 @@ def transport_backends() -> frozenset[str]:
                 t = p.get("transport") if isinstance(p, Mapping) else None
                 name = _norm(str(t.get("backend") or "")) \
                     if isinstance(t, Mapping) else ""
-                if not name or name in _CORE_BACKENDS:
+                if not name or name in core_backends():
                     continue
                 # Only the pack's OWN stamped mounts: an unclaimed backend
                 # (mounted by an admin, e.g. normattiva) must not be hideable

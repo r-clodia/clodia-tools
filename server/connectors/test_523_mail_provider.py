@@ -113,6 +113,8 @@ class _MailIstanza:
         self.scrivi_pack(_comms_pack())
         for p in (patch.dict(os.environ, {"CLODIA_DATA": str(self.dir)}),
                   patch.object(resolved, "_DATA", self.dir),
+                  patch.object(resolved, "_first_seen_path",
+                               lambda: self.dir / "first-seen.json"),
                   patch.dict(proxy.CONFIG, {"mcp_backends": [_backend()]})):
             p.start()
             self.addCleanup(p.stop)

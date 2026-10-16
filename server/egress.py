@@ -788,7 +788,15 @@ def danger_note(uri: str) -> str:
     if rule:
         return rule
     scheme = reg.scheme(u.partition(":")[0])
-    return scheme.danger if scheme else ""
+    generic = scheme.danger if scheme else ""
+    # The connector the owner moved to a pack (#525: GitHub's warning on
+    # github.com) keeps warning — added to the scheme's text, never instead.
+    try:
+        from .connectors import builtin as _builtin
+        elected = reg.elected_danger_for(u, _builtin._packaged())
+    except Exception:  # noqa: BLE001 — the generic warning stands alone
+        elected = ""
+    return " ".join(t for t in (elected, generic) if t)
 
 
 def gate_reason(agent: str, verb: str, dtype: str, dests: list[str]) -> str:
