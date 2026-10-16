@@ -335,6 +335,44 @@ def reserved_for(pack: str) -> frozenset[str]:
 
 
 def manifests() -> dict[str, dict]:
+    """`{pack name: manifest}` for every installed pack, OLDEST FIRST.
+
+    The datadir copies (`_installed_manifests`), except for a first-party pack
+    with a pinned gateway component: its manifest is the PINNED upstream copy
+    (clodia-platform#558, `components.store.pinned_manifest`). The datadir is
+    written by the agent-server; once code of a pack runs in the gateway, the
+    mappings that make the PDP check that code cannot come from there.
+    """
+    return _with_pinned(_installed_manifests())
+
+
+def _with_pinned(installed: dict[str, dict]) -> dict[str, dict]:
+    try:
+        from ..components import store as _store
+        first_party = _builtin.FIRST_PARTY_SOURCES
+    except Exception:  # noqa: BLE001
+        return installed
+    out: dict[str, dict] = {}
+    for name, doc in installed.items():
+        pinned = None
+        if name in first_party:
+            try:
+                pinned = _store.pinned_manifest(name)
+            except Exception as e:  # noqa: BLE001
+                LOG.error("connectors: pinned manifest of %s unreadable (%s)", name, e)
+        out[name] = pinned if pinned is not None else doc
+    return out
+
+
+def _pins_signature() -> tuple:
+    try:
+        from ..components import store as _store
+        return _store.pins_signature()
+    except Exception:  # noqa: BLE001
+        return ()
+
+
+def _installed_manifests() -> dict[str, dict]:
     """`{pack name: parsed pack.yaml}` for every installed pack, OLDEST FIRST.
 
     The iteration order is install order (`_manifest_files`) and it is load
@@ -619,7 +657,8 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
     # Nella firma anche i plugin (chi possiede quale server MCP) e i backend
     # montati: un `mcp.add` fatto dopo la costruzione deve riservare quel
     # namespace alla chiamata successiva, non al prossimo cambio di pack.yaml.
-    sig = (_signature(_manifest_files()), _mount_signature(), _switch_signature())
+    sig = (_signature(_manifest_files()), _mount_signature(), _switch_signature(),
+           _pins_signature())
     if _CACHE is not None and _CACHE[0] == sig:
         return _CACHE[1], _CACHE[2]
     # 1. The floor: the gateway's own connectors. If THEY fail the result is
@@ -1089,7 +1128,8 @@ def transport_backends() -> frozenset[str]:
     mounts, never a neighbour's, a core one or an unclaimed admin mount.
     """
     global _TRANSPORTS
-    sig = (_signature(_manifest_files()), _mount_signature(), _switch_signature())
+    sig = (_signature(_manifest_files()), _mount_signature(), _switch_signature(),
+           _pins_signature())
     if _TRANSPORTS is not None and _TRANSPORTS[0] == sig:
         return _TRANSPORTS[1]
     owners = backend_owners()

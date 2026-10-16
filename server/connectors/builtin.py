@@ -161,13 +161,26 @@ RELEASED_TO: dict[str, str] = {
 }
 
 
-#: The packs this gateway knows as FIRST-PARTY (clodia-platform#558): the only
-#: packs whose `target: gateway` components it fetches and runs inside the
-#: reference monitor. Derived from `RELEASED_TO` — the packs the native
-#: connectors move to are, by construction, the platform's own. The
-#: `first_party: true` flag of a `pack.yaml` is necessary but not sufficient:
-#: that file is written by the agent-server, this set is not.
-FIRST_PARTY_PACKS: frozenset[str] = frozenset(RELEASED_TO.values())
+#: The upstream of every FIRST-PARTY pack (clodia-platform#558):
+#: `{pack: (repository, directory prefix of the pack in it)}`. The only packs
+#: whose `target: gateway` components this gateway fetches and runs inside the
+#: reference monitor, and the only place they may come from. Code, not
+#: datadir: `/datadir/packs/<pack>/pack.yaml` is written by the agent-server,
+#: so a component's `source` must EQUAL the repository here and its path must
+#: lie under the prefix, and the pack's manifest itself is then taken from
+#: `<prefix>pack.yaml` at the pinned commit (`components.store`), never from
+#: the datadir copy. A pack missing here has no gateway component, whatever its
+#: manifest says.
+FIRST_PARTY_SOURCES: dict[str, tuple[str, str]] = {
+    "google-pack": ("r-clodia/clodia-logic", "catalogs/packs/google-pack/"),
+    "comms-pack": ("r-clodia/clodia-logic", "catalogs/packs/comms-pack/"),
+    "it-pack": ("r-clodia/clodia-packs", "packs/it-pack/"),
+}
+
+#: The packs this gateway knows as first-party: the keys of
+#: `FIRST_PARTY_SOURCES`. The `first_party: true` flag of a `pack.yaml` is
+#: necessary but not sufficient.
+FIRST_PARTY_PACKS: frozenset[str] = frozenset(FIRST_PARTY_SOURCES)
 
 
 #: Vault prefixes (ending in `_`) and exact entries of the gateway's custody

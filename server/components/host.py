@@ -266,9 +266,10 @@ class Host:
                        *, auth: str = "owner") -> None:
         """Mount `handler(request)` at `/tools/<pack>/<path>`.
 
-        `auth` is `owner` (a human admin or the trusted core: for anything that
-        widens a perimeter or stores a credential) or `admin` (also the
-        agent-server's signed role). There is no public route."""
+        Both levels require a HUMAN admin (or the trusted core's UI token) and
+        every call is audited. `owner` routes may also write the component's
+        config (`set_config`); `admin` routes may not. There is no public
+        route."""
         self._require_open()
         if auth not in ROUTE_AUTH:
             raise HostError(f"route auth must be one of {list(ROUTE_AUTH)}, "

@@ -120,12 +120,17 @@ def refusal(name: str) -> str:
     if spec is not None:
         try:
             held = _holds(spec.pack, ns)
+            classified = _classified(name)
         except Exception:  # noqa: BLE001 — unknown registry state: fail closed
-            held = False
+            held = classified = False
         if not held:
             return (f"the connector of pack '{spec.pack}' for '{ns}' is not active "
                     f"on this instance (manifest refused or absent): '{name}' is "
                     "not served")
+        if not classified:
+            return (f"'{name}' has no egress, source or taint classification in the "
+                    f"pinned manifest of '{spec.pack}': an unclassified component "
+                    "verb is not served")
         return ""
     for st in list(_STATES.values()):
         if st.status != "loaded" and ns in st.component.namespaces.values():
@@ -137,6 +142,15 @@ def refusal(name: str) -> str:
             return (f"gateway component '{st.component.key}' is disabled "
                     f"({st.status}): {st.reason}")
     return ""
+
+
+def _classified(name: str) -> bool:
+    """Defence in depth: the pack's (pinned) manifest says what this verb does —
+    an egress or source mapping, or a taint prefix that covers it."""
+    from ..connectors import resolved
+    if resolved.egress_mappings(name) or resolved.source_mappings(name):
+        return True
+    return any(name.startswith(p) for p in resolved.registry().taint_prefixes())
 
 
 def _served_elsewhere(name: str, ns: str) -> bool:
@@ -348,6 +362,9 @@ def reconcile(*, force: bool = False, refresh_pack: str | None = None,
                     fetcher = fetcher_factory()
                 pin = store.ensure(comp, fetcher, refresh=refresh,
                                    allow_downgrade=allow_downgrade and refresh)
+                # What runs is what the PINNED manifest declares — entry,
+                # path, connectors, credentials — not the trigger.
+                comp = store.pinned_component(pin)
             except Exception as e:  # noqa: BLE001
                 reason = f"fetch: {type(e).__name__}: {e}"
                 if current is not None and current.status == "loaded" and \

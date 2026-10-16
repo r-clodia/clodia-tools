@@ -17,6 +17,7 @@ import tarfile
 import tempfile
 import textwrap
 import unittest
+import yaml
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -33,7 +34,9 @@ TOKEN = {"agent": "clodia", "execution_id": "clodia-558", "principal": "davide",
          "chat": "chan:SEAL-2:titulon-tech:clodia"}
 
 REPO = "r-clodia/clodia-logic"
-GW_PATH = "catalogs/packs/fixture-pack/gateway"
+FIXTURE_PREFIX = "catalogs/packs/fixture-pack/"
+BROKEN_PREFIX = "catalogs/packs/broken-pack/"
+GW_PATH = FIXTURE_PREFIX + "gateway"
 
 
 def _connector(cid: str, ns: str, verbs=()) -> dict:
@@ -73,7 +76,7 @@ def broken_manifest() -> dict:
         "name": "broken-pack", "first_party": True,
         "connectors": [_connector("broken", "broken")],
         "components": [{"id": "gw", "target": "gateway",
-                        "source": {"repo": REPO, "path": "catalogs/packs/broken-pack/gw",
+                        "source": {"repo": REPO, "path": BROKEN_PREFIX + "gw",
                                    "ref": "main"},
                         "entry": "broken_component", "connectors": ["broken"]}],
     }
@@ -133,11 +136,17 @@ def tarball(files: dict[str, str], *, top: str = "r-clodia-clodia-logic-abc1234"
     return buf.getvalue()
 
 
-def fixture_tree(value: str = "v1", *, component: str = FIXTURE_COMPONENT) -> dict[str, str]:
+def fixture_tree(value: str = "v1", *, component: str = FIXTURE_COMPONENT,
+                 manifest: dict | None = None, broken: dict | None = None
+                 ) -> dict[str, str]:
+    """The upstream repository: both packs' code AND their `pack.yaml`."""
     return {f"{GW_PATH}/fixture_component.py": component,
             f"{GW_PATH}/helper.py": f"VALUE = {value!r}\n",
+            f"{GW_PATH}/evil.py": "import builtins\nbuiltins.CLODIA_558_EVIL_RAN = True\n",
+            f"{FIXTURE_PREFIX}pack.yaml": yaml.safe_dump(manifest or fixture_manifest()),
             "catalogs/packs/other/x.py": "import server.vault\n",   # outside path
-            f"catalogs/packs/broken-pack/gw/broken_component.py": BROKEN_COMPONENT}
+            f"{BROKEN_PREFIX}pack.yaml": yaml.safe_dump(broken or broken_manifest()),
+            f"{BROKEN_PREFIX}gw/broken_component.py": BROKEN_COMPONENT}
 
 
 class FakeFetcher:
@@ -157,6 +166,10 @@ class FakeFetcher:
             self.commits.append(sha)
         self.refs[branch] = sha
         return sha
+
+    def rewind(self, sha: str) -> None:
+        """Upstream `main` force-pushed back to `sha`."""
+        self.refs["main"] = sha
 
     def resolve(self, repo: str, ref: str) -> str:
         if ref in self.refs:
@@ -214,7 +227,11 @@ class _Instance(unittest.TestCase):
                   patch.object(resolved, "_DATA", self.base / "data"),
                   patch.object(builtin, "FIRST_PARTY_PACKS",
                                frozenset({"fixture-pack", "broken-pack",
-                                          *builtin.FIRST_PARTY_PACKS}))):
+                                          *builtin.FIRST_PARTY_PACKS})),
+                  patch.object(builtin, "FIRST_PARTY_SOURCES",
+                               {**builtin.FIRST_PARTY_SOURCES,
+                                "fixture-pack": (REPO, FIXTURE_PREFIX),
+                                "broken-pack": (REPO, BROKEN_PREFIX)})):
             p.start()
             self.addCleanup(p.stop)
         self.manifests: dict[str, dict] = {}
@@ -222,7 +239,9 @@ class _Instance(unittest.TestCase):
             self.manifests["fixture-pack"] = fixture_manifest()
         if "broken" in self.PACKS:
             self.manifests["broken-pack"] = broken_manifest()
-        m = patch.object(resolved, "manifests", lambda: dict(self.manifests))
+        # The DATADIR copies (what the agent-server writes). `resolved.
+        # manifests()` substitutes the pinned upstream copy on top of them.
+        m = patch.object(resolved, "_installed_manifests", lambda: dict(self.manifests))
         m.start()
         self.addCleanup(m.stop)
         self.fetcher = FakeFetcher()
@@ -389,12 +408,13 @@ class PinTests(_Instance):
         self.assertFalse(str(pin.dir.resolve()).startswith(str((self.base / "data").resolve())))
         # Only source.path is extracted, and importing it wrote no bytecode.
         self.assertEqual(sorted(p.name for p in pin.dir.iterdir()),
-                         ["fixture_component.py", "helper.py"])
+                         ["evil.py", "fixture_component.py", "helper.py"])
+        self.assertTrue(pin.manifest_path.is_file())
         self.assertEqual(store.verify(pin), "")
         rec = json.loads((state / "components" / "pins.json").read_text())
         self.assertEqual(set(rec["fixture-pack"]["gw"]),
                          {"pack", "id", "repo", "path", "ref", "entry", "commit",
-                          "tree_sha256", "fetched_at", "previous"})
+                          "tree_sha256", "fetched_at", "manifest_sha256", "previous"})
         self.assertTrue(rec["fixture-pack"]["gw"]["tree_sha256"].startswith("sha256:"))
 
     def test_a_branch_ref_stays_pinned_until_a_refresh(self) -> None:
@@ -419,26 +439,33 @@ class PinTests(_Instance):
 
     def test_downgrade_refused_unless_the_owner_allows_it(self) -> None:
         old = self.fetcher.commits[-1]
-        self.fetcher.refs["v1"] = old
         self.fetcher.push(fixture_tree("v2"))
         self.reconcile()
         self.assertEqual(store.pin_of("fixture-pack", "gw").commit, self.fetcher.commits[-1])
-        self.manifests["fixture-pack"] = fixture_manifest(ref="v1")
-        rows = self.reconcile()
-        self.assertEqual(rows["fixture-pack/gw"]["status"], "failed")
+        self.fetcher.rewind(old)                 # upstream force-pushed back
+        rows = self.reconcile(refresh_pack="fixture-pack")
         self.assertIn("downgrade refused", rows["fixture-pack/gw"]["reason"])
+        self.assertNotEqual(rows["fixture-pack/gw"]["commit"], old)
         # `allow_downgrade` without a refresh is ignored…
         rows = self.reconcile(allow_downgrade=True)
-        self.assertEqual(rows["fixture-pack/gw"]["status"], "failed")
-        # …and honoured on the owner's refresh.
+        self.assertNotEqual(rows["fixture-pack/gw"]["commit"], old)
+        # …and honoured on the owner's refresh, which lowers the floor.
         rows = self.reconcile(refresh_pack="fixture-pack", allow_downgrade=True)
         self.assertEqual(rows["fixture-pack/gw"]["status"], "loaded")
         self.assertEqual(rows["fixture-pack/gw"]["commit"], old)
+        self.assertEqual(store.floor_of("fixture-pack", "gw")["commit"], old)
 
     def test_a_repository_change_is_a_downgrade(self) -> None:
+        """The known upstream itself moves (a code change of the table): the
+        floor names the old repository, so only the owner can accept it."""
         self.reconcile()
-        self.manifests["fixture-pack"] = fixture_manifest(repo="r-clodia/clodia-packs")
-        rows = self.reconcile()
+        with patch.object(builtin, "FIRST_PARTY_SOURCES",
+                          {**builtin.FIRST_PARTY_SOURCES,
+                           "fixture-pack": ("r-clodia/clodia-packs", FIXTURE_PREFIX)}):
+            self.manifests["fixture-pack"] = fixture_manifest(repo="r-clodia/clodia-packs")
+            with patch.object(store, "pinned_manifest", lambda p: None):
+                resolved.invalidate()
+                rows = self.reconcile(refresh_pack="fixture-pack")
         self.assertIn("source repository changed", rows["fixture-pack/gw"]["reason"])
 
     def test_a_tampered_tree_is_not_loaded(self) -> None:
@@ -952,6 +979,25 @@ class RouteTests(_Instance):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json(), {"ok": True, "folder": "f1"})
 
+    def test_admin_routes_need_a_human_admin_and_are_audited(self) -> None:
+        loaded = loader._STATES["fixture-pack/gw"]
+        from .host import RouteSpec
+        loaded.routes["status"] = RouteSpec(component="fixture-pack/gw",
+                                            pack="fixture-pack", path="status",
+                                            methods=frozenset({"POST"}),
+                                            handler=lambda r: {"ok": 1}, auth="admin")
+        r = self.post("/tools/fixture-pack/status", {}, owner=False, admin=True)
+        self.assertEqual(r.status_code, 401)
+        r = self.post("/tools/fixture-pack/status", {}, owner=True, admin=True)
+        self.assertEqual(r.status_code, 200)
+        out = []
+        for seg in sorted((self.base / "audit").glob("events-*.jsonl")):
+            out += [json.loads(x) for x in seg.read_text().splitlines() if x.strip()]
+        rec = [e for e in out if e["event"]["type"] == "control.component"]
+        self.assertEqual([(e["event"]["resource"], e["result"]["status"]) for e in rec],
+                         [("/tools/fixture-pack/status", 401),
+                          ("/tools/fixture-pack/status", 200)])
+
     def test_config_is_written_from_an_owner_route_only(self) -> None:
         host = self.component_module().HOST[0]
         with self.assertRaises(HostError):
@@ -977,11 +1023,12 @@ class RouteTests(_Instance):
     def test_status_and_refresh(self) -> None:
         r = self.post("/internal/components/fixture-pack/refresh", {}, owner=False, admin=False)
         self.assertEqual(r.status_code, 401)
-        r = self.post("/internal/components/fixture-pack/refresh", {"allow_downgrade": True},
-                      owner=False, admin=True)
-        self.assertEqual(r.status_code, 403)
-        self.fetcher.push(fixture_tree("v3"))
+        # A super-agent or the agent-server's service role passes `_authorized`
+        # but is not a human admin: refused.
         r = self.post("/internal/components/fixture-pack/refresh", {}, owner=False, admin=True)
+        self.assertEqual(r.status_code, 401)
+        self.fetcher.push(fixture_tree("v3"))
+        r = self.post("/internal/components/fixture-pack/refresh", {}, owner=True, admin=True)
         self.assertEqual(r.status_code, 200, r.text)
         (row,) = r.json()["components"]
         self.assertEqual(row["commit"], self.fetcher.commits[-1])
@@ -1041,6 +1088,215 @@ class TopicsTests(_Instance):
                 patch.object(main, "_require_topic_member", refuse):
             with self.assertRaises(PermissionError):
                 host.topics.read_file("SEAL-1", "t", "files/a")
+
+
+# --------------------------------------------------------------------------
+# review of #382 — the three blockers, as the reviewer reproduced them
+# --------------------------------------------------------------------------
+
+class ProvenanceTests(_Instance):
+    """Blocker 1: a tampered datadir pack.yaml cannot choose the code."""
+
+    def _tamper(self, **source) -> dict:
+        m = fixture_manifest()
+        m["components"][0]["source"] = {**m["components"][0]["source"], **source}
+        self.manifests["fixture-pack"] = m
+        return self.reconcile()
+
+    def test_another_merged_repository_of_the_org_is_refused(self) -> None:
+        rows = self._tamper(repo="r-clodia/clodia-tools")
+        self.assertEqual(rows["fixture-pack/gw"]["status"], "refused")
+        self.assertIn("is not the upstream of 'fixture-pack'",
+                      rows["fixture-pack/gw"]["reason"])
+        self.assertEqual(self.fetcher.tarball_calls, 0)
+
+    def test_a_path_outside_the_pack_directory_is_refused(self) -> None:
+        rows = self._tamper(path="catalogs/packs/other")
+        self.assertEqual(rows["fixture-pack/gw"]["status"], "refused")
+        self.assertIn("outside the directory", rows["fixture-pack/gw"]["reason"])
+        self.assertEqual(self.fetcher.tarball_calls, 0)
+
+    def test_a_ref_other_than_the_default_branch_is_refused(self) -> None:
+        sha = self.fetcher.push(fixture_tree("v1"), branch="feature")
+        for ref in ("feature", sha, "v1.0.0"):
+            with self.subTest(ref=ref):
+                rows = self._tamper(ref=ref)
+                self.assertEqual(rows["fixture-pack/gw"]["status"], "failed")
+                self.assertIn("not the default branch", rows["fixture-pack/gw"]["reason"])
+        self.assertEqual(self.fetcher.tarball_calls, 0)
+
+    def test_the_entry_module_comes_from_the_pinned_manifest(self) -> None:
+        """Same repo and prefix, different module: the datadir names `evil`,
+        upstream names `fixture_component` — upstream wins."""
+        import builtins
+        self.manifests["fixture-pack"] = m = fixture_manifest()
+        m["components"][0]["entry"] = "evil"
+        rows = self.reconcile()
+        self.assertEqual(rows["fixture-pack/gw"]["status"], "loaded", rows)
+        self.assertFalse(getattr(builtins, "CLODIA_558_EVIL_RAN", False))
+        self.assertNotIn("clodia_components.fixture_pack.gw.evil", sys.modules)
+        self.assertEqual(store.pin_of("fixture-pack", "gw").entry, "fixture_component")
+
+    def test_the_org_list_only_narrows_the_table(self) -> None:
+        with _with({"components": {"allowed_orgs": ["someone-else"]}}):
+            rows = self.reconcile()
+        self.assertEqual(rows["fixture-pack/gw"]["status"], "refused")
+
+
+class ManifestAuthorityTests(_Instance):
+    """Blocker 2: the pinned upstream manifest governs, not the datadir copy."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.reconcile()
+        self.gate = AsyncMock(return_value={})
+
+    def send(self, to: str):
+        async def go():
+            with ClaimsContext(TOKEN, "t"), \
+                    patch.object(main, "_require_gate_consent", self.gate), \
+                    _with(_cfg("mailto:collega@casa.it")):
+                return await main.call_tool("fixture.send", {"to": to})
+        return asyncio.run(go())
+
+    def calls(self):
+        return sys.modules["clodia_components.fixture_pack.gw.fixture_component"].CALLS
+
+    def _datadir(self, connector: dict) -> None:
+        m = fixture_manifest()
+        m["connectors"] = [connector]
+        self.manifests["fixture-pack"] = m
+        self.reconcile()
+
+    def test_dropping_the_mapping_in_the_datadir_does_not_bypass_the_pdp(self) -> None:
+        self._datadir(_connector("fixture", "fixture", [
+            {"verb": "fixture.read", "direction": "source", "scheme": "mailfrom",
+             "arg": "sender", "template": "mailfrom:{value}"}]))
+        out = self.send("estraneo@fuori.it")
+        self.assertTrue(out[0].text.startswith("DENIED"), out[0].text)
+        self.assertEqual(self.calls(), [])
+
+    def test_a_taint_only_datadir_connector_does_not_bypass_the_pdp(self) -> None:
+        self._datadir(_connector("fixture", "fixture"))       # taint only
+        out = self.send("estraneo@fuori.it")
+        self.assertTrue(out[0].text.startswith("DENIED"), out[0].text)
+        self.assertEqual(self.calls(), [])
+
+    def test_the_served_manifest_is_the_pinned_one(self) -> None:
+        self.manifests["fixture-pack"] = {"name": "fixture-pack", "connectors": []}
+        served = resolved.manifests()["fixture-pack"]
+        self.assertEqual(served["connectors"], fixture_manifest()["connectors"])
+
+    def test_an_unclassified_component_verb_is_denied(self) -> None:
+        """Defence in depth: even the pinned manifest must classify the verb."""
+        upstream = fixture_manifest()
+        upstream["connectors"] = [_connector("fixture", "fixture", [
+            {"verb": "fixture.read", "direction": "source", "scheme": "mailfrom",
+             "arg": "sender", "template": "mailfrom:{value}"}])]
+        self.fetcher.push(fixture_tree(manifest=upstream))
+        rows = self.reconcile(refresh_pack="fixture-pack")
+        self.assertEqual(rows["fixture-pack/gw"]["status"], "loaded")
+        out = self.send("collega@casa.it")
+        self.assertTrue(out[0].text.startswith("DENIED"), out[0].text)
+        self.assertIn("no egress, source or taint classification", out[0].text)
+        self.assertEqual(self.calls(), [])
+
+    def test_a_tampered_pinned_manifest_disables_the_component(self) -> None:
+        pin = store.pin_of("fixture-pack", "gw")
+        pin.manifest_path.write_text("name: fixture-pack\nconnectors: []\n")
+        self.assertIn("changed on disk", store.verify(pin))
+        self.assertIsNone(store.pinned_manifest("fixture-pack"))
+
+
+class DowngradeFloorTests(_Instance):
+    """Blocker 3: uninstalling for one round does not reset the floor."""
+
+    def test_reinstall_after_a_rewind_cannot_pin_an_older_commit(self) -> None:
+        old = self.fetcher.commits[-1]
+        self.fetcher.push(fixture_tree("v2"))
+        self.reconcile()
+        high = store.pin_of("fixture-pack", "gw").commit
+        self.assertNotEqual(high, old)
+        self.manifests.pop("fixture-pack")             # one round without it
+        self.reconcile()
+        self.assertIsNone(store.pin_of("fixture-pack", "gw"))
+        self.assertEqual(store.floor_of("fixture-pack", "gw")["commit"], high)
+        self.fetcher.rewind(old)
+        self.manifests["fixture-pack"] = fixture_manifest()
+        rows = self.reconcile()
+        self.assertEqual(rows["fixture-pack/gw"]["status"], "failed")
+        self.assertIn("does not descend", rows["fixture-pack/gw"]["reason"])
+        self.assertIsNone(store.pin_of("fixture-pack", "gw"))
+
+    def test_reinstall_with_an_old_ref_is_refused(self) -> None:
+        old = self.fetcher.commits[-1]
+        self.fetcher.push(fixture_tree("v2"))
+        self.reconcile()
+        self.manifests.pop("fixture-pack")
+        self.reconcile()
+        self.manifests["fixture-pack"] = fixture_manifest(ref=old)
+        rows = self.reconcile()
+        self.assertEqual(rows["fixture-pack/gw"]["status"], "failed")
+        self.assertIsNone(store.pin_of("fixture-pack", "gw"))
+
+    def test_the_owner_can_still_go_back(self) -> None:
+        old = self.fetcher.commits[-1]
+        self.fetcher.push(fixture_tree("v2"))
+        self.reconcile()
+        self.fetcher.rewind(old)
+        rows = self.reconcile(refresh_pack="fixture-pack", allow_downgrade=True)
+        self.assertEqual(rows["fixture-pack/gw"]["commit"], old)
+
+
+class ReviewNonBlockingTests(_Instance):
+    def test_dot_repository_names_are_refused(self) -> None:
+        for repo in ("r-clodia/..", "r-clodia/.", "../x", "r-clodia/..."):
+            with self.subTest(repo=repo):
+                m = fixture_manifest(repo=repo)
+                comps, problems = parse_components(m, pack="fixture-pack")
+                self.assertEqual(comps, [])
+                self.assertTrue(problems)
+
+    def test_one_gateway_component_per_pack(self) -> None:
+        extra = dict(fixture_manifest()["components"][0], id="gw2")
+        comps, problems = parse_components(fixture_manifest(extra_components=[extra]),
+                                           pack="fixture-pack")
+        self.assertEqual([c.id for c in comps], ["gw"])
+        self.assertIn("at most one", problems[0])
+
+    def test_gitattributes_with_archive_attributes_refuse_the_fetch(self) -> None:
+        for where in ("", "catalogs/", FIXTURE_PREFIX, GW_PATH + "/"):
+            for attr in ("export-ignore", "export-subst"):
+                with self.subTest(where=where, attr=attr):
+                    tree = fixture_tree()
+                    tree[f"{where}.gitattributes"] = f"helper.py {attr}\n"
+                    self.fetcher.push(tree)
+                    rows = self.reconcile(refresh_pack="fixture-pack")
+                    self.assertIn(".gitattributes", rows["fixture-pack/gw"]["reason"])
+        tree = fixture_tree()
+        tree["elsewhere/.gitattributes"] = "x export-ignore\n"
+        tree[".gitattributes"] = "*.png binary\n"
+        self.fetcher.push(tree)
+        rows = self.reconcile(refresh_pack="fixture-pack")
+        self.assertEqual(rows["fixture-pack/gw"]["reason"], "")
+
+    def test_tarball_is_streamed_with_a_cap(self) -> None:
+        import httpx
+        sent = []
+
+        def handler(request):
+            def body():
+                for _ in range(100):
+                    sent.append(1)
+                    yield b"x" * 1024
+            return httpx.Response(200, content=body())
+        real = httpx.Client
+        with patch.object(httpx, "Client",
+                          lambda **kw: real(transport=httpx.MockTransport(handler), **kw)), \
+                patch.object(store, "MAX_TARBALL_BYTES", 10 * 1024), \
+                self.assertRaises(store.FetchError):
+            store.GitHubFetcher(token_source=lambda: "").tarball("r-clodia/x", "a" * 40)
+        self.assertLess(len(sent), 100)
 
 
 if __name__ == "__main__":

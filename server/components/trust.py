@@ -5,19 +5,28 @@ privileges. Nothing in a `pack.yaml` can make that safe — the file is written
 by the agent-server — so the decision is taken here, from facts the
 agent-server cannot write, and the default is NO:
 
-1. the pack is one the GATEWAY knows as first-party
-   (`connectors.builtin.FIRST_PARTY_PACKS`), and its manifest says
-   `first_party: true` too (necessary, not sufficient);
-2. `source.repo` belongs to an allowed GitHub organisation — gateway config
-   `components.allowed_orgs` in `clodia-tools-config.yaml` (gateway-only state),
-   else `CLODIA_COMPONENT_ORGS` (comma separated), else `r-clodia`;
+1. the pack is in `connectors.builtin.FIRST_PARTY_SOURCES` (code, not
+   datadir), and its manifest says `first_party: true` too (necessary, not
+   sufficient);
+2. `source.repo` EQUALS the repository of that table entry and `source.path`
+   lies under its pack prefix — a tampered datadir manifest cannot point the
+   gateway at another repository, directory or module;
+   secondarily, the repository's organisation is in the allowed list (gateway
+   config `components.allowed_orgs`, else `CLODIA_COMPONENT_ORGS`, else
+   `r-clodia`), which can only narrow the table;
 3. the gateway's state directory is ISOLATED from the shared datadir (#80): the
    pinned code lives there, and on a shared volume the agent-server could
    rewrite it between the integrity check and the import.
 
-Two more rules are applied by the store at fetch time, because they need the
-upstream: the commit is reachable from the repository's DEFAULT branch (merged
-code, not any branch somebody pushed), and it is not older than the pinned one.
+More rules are applied by the store at fetch time, because they need the
+upstream: `source.ref` must BE the repository's default branch (no tag, branch
+or sha chosen by the datadir), the commit is its head, it descends from the
+highest commit ever pinned (the floor survives uninstall), and the manifest
+that governs the pack from then on is the one at that commit.
+
+The boundary is PROVENANCE — this table, merged code on the default branch, a
+pinned commit, review upstream. The import guard and the host API are not a
+sandbox: a component runs in-process with the gateway's privileges.
 
 Anything else is refused. `owner_approved` is the hook for the future SYSTEM
 gate through which an owner could approve a third-party component; it answers
@@ -55,6 +64,28 @@ def first_party_packs() -> frozenset[str]:
     return frozenset(builtin.FIRST_PARTY_PACKS)
 
 
+def first_party_source(pack: str) -> tuple[str, str] | None:
+    """`(repository, pack directory prefix)` the gateway knows for `pack`."""
+    from ..connectors import builtin
+    return builtin.FIRST_PARTY_SOURCES.get(pack)
+
+
+def source_problem(component: GatewayComponent) -> str:
+    """Why the declared `source` is not the pack's known upstream, or ""."""
+    known = first_party_source(component.pack)
+    if known is None:
+        return (f"'{component.pack}' is not a pack this gateway knows as "
+                "first-party (no entry in FIRST_PARTY_SOURCES)")
+    repo, prefix = known
+    if component.repo.lower() != repo.lower():
+        return (f"source repository '{component.repo}' is not the upstream of "
+                f"'{component.pack}' ('{repo}')")
+    if not (component.path.rstrip("/") + "/").startswith(prefix):
+        return (f"source.path '{component.path}' is outside the directory of "
+                f"'{component.pack}' in '{repo}' ('{prefix}')")
+    return ""
+
+
 def owner_approved(component: GatewayComponent) -> bool:
     """Hook: has the owner approved this (third-party) component through the
     SYSTEM gate? Not implemented — default deny (#558)."""
@@ -78,9 +109,10 @@ def refusal(component: GatewayComponent, manifest: Mapping[str, Any]) -> str:
     problems = []
     if manifest.get("first_party") is not True:
         problems.append("the pack manifest does not declare 'first_party: true'")
-    if component.pack not in first_party_packs():
-        problems.append(f"'{component.pack}' is not a pack this gateway knows as "
-                        "first-party")
+    src = source_problem(component)
+    if src:
+        problems.append(src)
+    # Secondary: the table above is the rule; the org list can only narrow it.
     orgs = allowed_orgs()
     if component.org not in orgs:
         problems.append(f"source repository '{component.repo}' is outside the "

@@ -129,7 +129,8 @@ def parse_gateway(raw: Mapping[str, Any], *, pack: str,
     if unknown:
         raise ComponentError(f"{where}: unknown source key(s) {unknown}")
     repo = _text(src.get("repo"), "source.repo", where)
-    if not _REPO.match(repo):
+    if not _REPO.match(repo) or any(part in (".", "..") or part.strip(".") == ""
+                                    for part in repo.split("/")):
         raise ComponentError(f"{where}: source.repo '{repo}' must be "
                              "'<owner>/<repository>' on GitHub")
     path = _source_path(_text(src.get("path"), "source.path", where), where)
@@ -207,6 +208,12 @@ def parse_components(manifest: Mapping[str, Any], *, pack: str
             continue
         seen.add(cid)
         if target != "gateway":
+            continue
+        if out:
+            # One gateway component per pack: its pin carries the pack's
+            # manifest (`store.py`), and two pins could carry two of them.
+            problems.append(f"{_where(pack, cid)}: a pack has at most one "
+                            "'target: gateway' component")
             continue
         try:
             out.append(parse_gateway(entry, pack=pack, manifest=manifest))
