@@ -126,6 +126,8 @@ class _ItIstanza:
         self.backends = [_backend("github"), _backend(IMG_BACKEND)]
         for p in (patch.dict(os.environ, {"CLODIA_DATA": str(self.dir)}),
                   patch.object(resolved, "_DATA", self.dir),
+                  patch.object(resolved, "_first_seen_path",
+                               lambda: self.dir / "first-seen.json"),
                   patch.dict(proxy.CONFIG, {"mcp_backends": self.backends})):
             p.start()
             self.addCleanup(p.stop)

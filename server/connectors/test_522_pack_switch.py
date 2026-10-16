@@ -84,6 +84,10 @@ class _Istanza(unittest.TestCase):
         data = patch.object(resolved, "_DATA", self.dir)
         data.start()
         self.addCleanup(data.stop)
+        seen = patch.object(resolved, "_first_seen_path",
+                            lambda: self.dir / "first-seen.json")
+        seen.start()
+        self.addCleanup(seen.stop)
         self.posizione("native")
 
     def _ricarica(self) -> None:

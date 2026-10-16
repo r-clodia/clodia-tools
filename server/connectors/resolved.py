@@ -100,9 +100,9 @@ def _manifest_files() -> list[Path]:
 
 
 #: Packs first seen in this process when the state file cannot be written.
-_SEEN_MEMORY: dict[str, float] = {}
+_SEEN_MEMORY: dict[str, dict[str, float]] = {}
 #: When each stamped pack was first found missing (pruning grace period).
-_MISSING_SINCE: dict[str, float] = {}
+_MISSING_SINCE: dict[str, dict[str, float]] = {}
 #: How long a pack must be missing before its stamp is forgotten.
 PRUNE_AFTER_S = 300.0
 
@@ -133,7 +133,12 @@ def _first_seen(dirs: list[str], *, prune: bool = False) -> dict[str, float]:
             data = {}
     except (OSError, ValueError):
         data = {}
-    data = {**_SEEN_MEMORY, **data}
+    # In-process memories are per STATE FILE: two data dirs in one process
+    # (tests, a second instance) must not share seniority or grace periods.
+    chiave = str(path)
+    mem = _SEEN_MEMORY.setdefault(chiave, {})
+    mancanti = _MISSING_SINCE.setdefault(chiave, {})
+    data = {**mem, **data}
     now = time.time()
     # A stamp that is not a finite positive number (a hand edit, a corrupted
     # file, NaN which json accepts) is no evidence of seniority: that pack
@@ -151,17 +156,17 @@ def _first_seen(dirs: list[str], *, prune: bool = False) -> dict[str, float]:
     gone = []
     if prune:
         for d in [d for d in list(data) if d not in dirs]:
-            since = _MISSING_SINCE.setdefault(d, now)
+            since = mancanti.setdefault(d, now)
             if now - since >= PRUNE_AFTER_S:
                 gone.append(d)
         for d in dirs:
-            _MISSING_SINCE.pop(d, None)
+            mancanti.pop(d, None)
     for d in gone:
         # Stamps of removed packs go: a new pack in the same directory name
         # must not inherit the old one's seniority.
         data.pop(d, None)
-        _SEEN_MEMORY.pop(d, None)
-        _MISSING_SINCE.pop(d, None)
+        mem.pop(d, None)
+        mancanti.pop(d, None)
     new = [d for d in dirs if d not in data] + bad
     if new or gone:
         for d in new:
@@ -174,7 +179,7 @@ def _first_seen(dirs: list[str], *, prune: bool = False) -> dict[str, float]:
             os.replace(tmp, path)
         except OSError:
             LOG.warning("connectors: %s non scrivibile, anzianità in memoria", path)
-        _SEEN_MEMORY.update({d: data[d] for d in new})
+        mem.update({d: data[d] for d in new})
     return {d: float(data[d]) if _valid(data.get(d)) else now for d in dirs}
 
 

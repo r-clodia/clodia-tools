@@ -85,6 +85,18 @@ class InstallOrderTests(unittest.TestCase):
     """`manifests()` answers in install order: when the gateway FIRST saw each
     pack, not the mtime of `pack.yaml` (review of clodia-tools#369)."""
 
+    def setUp(self) -> None:
+        # The stamp file must be this test's: under `make test` a shared
+        # CLODIA_TOOLS_STATE_DIR would carry other tests' stamps in.
+        import tempfile
+        from pathlib import Path
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = patch.object(resolved, "_first_seen_path",
+                         lambda: Path(d.name) / "first-seen.json")
+        p.start()
+        self.addCleanup(p.stop)
+
     def _root(self, d):
         from pathlib import Path
         return Path(d) / "packs"
