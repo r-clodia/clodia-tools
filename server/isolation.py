@@ -31,7 +31,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-LOG = logging.getLogger("clodia-tools.isolation")
+# The reference-monitor logger, which `tools/logs.py` also writes to the
+# gateway's log FILE: a refusal to start that only reached stdout would be the
+# blind spot of #382 again (review of clodia-tools#371).
+LOG = logging.getLogger("clodia-tools.refmon")
 
 #: Modalità del self-check, da `CLODIA_ISOLATION_SELFCHECK`.
 #: ``enforce`` (default) = il gateway non parte; ``warn`` = CRITICAL e si parte
@@ -153,7 +156,22 @@ def denied(directory: Path, privs: tuple[int, int] | None, *,
     perché senza poter scendere di uid non c'è isolamento da dimostrare.
     """
     run = runner or subprocess.run
-    path = _sentinel(directory)
+    # Absolute: the child runs with cwd="/", and a relative CLODIA_DATA would
+    # make the probe inconclusive for the wrong reason (review of #371).
+    path = _sentinel(Path(directory).resolve())
+    try:
+        return _probe(path, privs, run)
+    finally:
+        # The sentinel is evidence of the check, not state: never leave it in
+        # the vault or the secrets (it would end up in backups).
+        try:
+            os.unlink(path)
+            os.rmdir(path.parent)
+        except OSError:
+            pass
+
+
+def _probe(path: Path, privs: tuple[int, int] | None, run) -> str:
     kw: dict = {}
     if privs is not None:
         kw.update(user=privs[0], group=privs[1], extra_groups=[])

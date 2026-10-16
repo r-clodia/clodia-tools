@@ -77,11 +77,22 @@ class VerdettoTests(_Base):
         self.assertIn("inconclusive", problema)
 
     def test_il_sentinella_e_davvero_0600_e_dentro_la_dir_sorvegliata(self):
-        runner = _Runner(returncode=3)
+        visto = {}
+
+        class _Guarda(_Runner):
+            def __call__(self, argv, **kw):
+                p = Path(argv[-1])
+                visto["mode"] = p.stat().st_mode & 0o777
+                return super().__call__(argv, **kw)
+        runner = _Guarda(returncode=3)
         isolation.selfcheck(runner=runner)
         percorso = Path(runner.calls[0]["argv"][-1])
-        self.assertTrue(percorso.is_relative_to(self.root / "vault"))
-        self.assertEqual(percorso.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(percorso.is_relative_to((self.root / "vault").resolve()))
+        self.assertEqual(visto["mode"], 0o600)
+        # The sentinel is removed after the probe (review of #371): it must
+        # not stay in the vault or end up in backups.
+        self.assertFalse(percorso.exists())
+        self.assertFalse(percorso.parent.exists())
 
     def test_il_probe_vero_legge_davvero_il_sentinella(self):
         """Niente runner finto: il figlio parte sul serio e, senza privilegi da
@@ -152,12 +163,12 @@ class ModalitaTests(_Base):
 
     def test_un_valore_sconosciuto_non_disattiva_il_controllo(self):
         with patch.dict(os.environ, {"CLODIA_ISOLATION_SELFCHECK": "enfrce"}):
-            with self.assertLogs("clodia-tools.isolation", logging.WARNING):
+            with self.assertLogs("clodia-tools.refmon", logging.WARNING):
                 self.assertEqual(isolation.mode(), "enforce")
 
     def test_warn_logga_critical_e_lascia_partire(self):
         with patch.dict(os.environ, {"CLODIA_ISOLATION_SELFCHECK": "warn"}):
-            with self.assertLogs("clodia-tools.isolation", logging.CRITICAL) as log:
+            with self.assertLogs("clodia-tools.refmon", logging.CRITICAL) as log:
                 isolation.check_at_boot(runner=_Runner(returncode=0))
         self.assertTrue(any("ISOLAMENTO ASSENTE" in r.getMessage()
                             for r in log.records))
@@ -165,7 +176,7 @@ class ModalitaTests(_Base):
     def test_off_non_prova_niente_ma_lo_dichiara(self):
         runner = _Runner(returncode=0)
         with patch.dict(os.environ, {"CLODIA_ISOLATION_SELFCHECK": "off"}):
-            with self.assertLogs("clodia-tools.isolation", logging.WARNING):
+            with self.assertLogs("clodia-tools.refmon", logging.WARNING):
                 isolation.check_at_boot(runner=runner)
         self.assertEqual(runner.calls, [])
 
@@ -195,7 +206,7 @@ class AvvioDelGatewayTests(_Base):
         return chiamate, None
 
     def test_un_sentinella_leggibile_rifiuta_l_avvio(self):
-        with self.assertLogs("clodia-tools.isolation", logging.CRITICAL):
+        with self.assertLogs("clodia-tools.refmon", logging.CRITICAL):
             chiamate, exc = self._run_http("uid 60123 could read a 0600 file")
         self.assertIsNotNone(exc, "il gateway è partito con la vault leggibile")
         self.assertIn("544", str(exc))
