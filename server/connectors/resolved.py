@@ -99,6 +99,10 @@ def _manifest_files() -> list[Path]:
 
 #: Packs first seen in this process when the state file cannot be written.
 _SEEN_MEMORY: dict[str, float] = {}
+#: When each stamped pack was first found missing (pruning grace period).
+_MISSING_SINCE: dict[str, float] = {}
+#: How long a pack must be missing before its stamp is forgotten.
+PRUNE_AFTER_S = 300.0
 
 
 def _first_seen_path() -> Path:
@@ -138,13 +142,24 @@ def _first_seen(dirs: list[str], *, prune: bool = False) -> dict[str, float]:
         return (isinstance(v, (int, float)) and not isinstance(v, bool)
                 and math.isfinite(v) and v > 0)
     bad = [d for d in dirs if d in data and not _valid(data[d])]
-    # `prune` only when `dirs` is the COMPLETE list of installed packs.
-    gone = [d for d in list(data) if d not in dirs] if prune else []
+    # `prune` only when `dirs` is the COMPLETE list of installed packs, and
+    # only after the pack has been missing for a while: an update that
+    # replaces the directory non-atomically must not cost the incumbent its
+    # seniority in the instant the glob runs (re-review of #369).
+    gone = []
+    if prune:
+        for d in [d for d in list(data) if d not in dirs]:
+            since = _MISSING_SINCE.setdefault(d, now)
+            if now - since >= PRUNE_AFTER_S:
+                gone.append(d)
+        for d in dirs:
+            _MISSING_SINCE.pop(d, None)
     for d in gone:
         # Stamps of removed packs go: a new pack in the same directory name
         # must not inherit the old one's seniority.
         data.pop(d, None)
         _SEEN_MEMORY.pop(d, None)
+        _MISSING_SINCE.pop(d, None)
     new = [d for d in dirs if d not in data] + bad
     if new or gone:
         for d in new:

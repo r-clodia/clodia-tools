@@ -156,15 +156,39 @@ class InstallOrderTests(unittest.TestCase):
         from pathlib import Path
         with tempfile.TemporaryDirectory() as d, \
                 patch.object(resolved, "_DATA", Path(d)), \
-                patch.dict(resolved._SEEN_MEMORY, clear=True):
+                patch.dict(resolved._SEEN_MEMORY, clear=True), \
+                patch.dict(resolved._MISSING_SINCE, clear=True):
             root = self._root(d)
             self._install(root, "old-removed", 1000)
             self._install(root, "zeta2", 2000)
             shutil.rmtree(root / "old-removed")
             with patch("time.time", return_value=2500.0):
                 resolved.manifests()          # the gateway notices the removal
+            with patch("time.time", return_value=2500.0 + resolved.PRUNE_AFTER_S):
+                resolved.manifests()          # …and forgets it after the grace
             self._install(root, "old-removed", 3000)
             self.assertEqual(list(resolved.manifests()), ["zeta2", "old-removed"])
+
+    def test_a_briefly_missing_incumbent_keeps_its_stamp(self):
+        """An update that replaces the directory non-atomically: the glob may
+        run while it is missing. Within the grace period nothing is pruned."""
+        import shutil
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d, \
+                patch.object(resolved, "_DATA", Path(d)), \
+                patch.dict(resolved._SEEN_MEMORY, clear=True), \
+                patch.dict(resolved._MISSING_SINCE, clear=True):
+            root = self._root(d)
+            self._install(root, "mail-pack", 1000)
+            self._install(root, "evil-pack", 2000)
+            shutil.move(str(root / "mail-pack"), str(Path(d) / "aside"))
+            with patch("time.time", return_value=3000.0):
+                resolved.manifests()
+            shutil.move(str(Path(d) / "aside"), str(root / "mail-pack"))
+            with patch("time.time", return_value=3010.0):
+                self.assertEqual(list(resolved.manifests()),
+                                 ["mail-pack", "evil-pack"])
 
     def test_a_pack_without_stamp_counts_as_newest(self):
         from server.connectors.manifest import ManifestError
