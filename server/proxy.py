@@ -17,6 +17,7 @@ Vincolo: i nomi dei backend NON devono collidere coi prefissi nativi
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from contextlib import asynccontextmanager
 
@@ -50,6 +51,8 @@ MAX_RESULT_BYTES = 64 * 1024
 # dalla vault (read_internal) → il valore reale NON sta mai nel config.yaml.
 _VAULT_RE = re.compile(r"\$\{VAULT:([A-Za-z0-9_.-]+)\}")
 
+LOG = logging.getLogger("clodia-tools.proxy")
+
 # cache {backend_name: [Tool, ...]} popolata lazy
 _TOOL_CACHE: dict[str, list[Tool]] = {}
 
@@ -60,15 +63,47 @@ def clear_cache() -> None:
 
 
 def _resolve_secrets(val):
-    """Sostituisce ricorsivamente ${VAULT:cred} nelle stringhe col segreto dal
-    vault (bundle['value']). Invariato se la credenziale non è risolvibile."""
+    """Sostituisce ricorsivamente `${VAULT:cred}` nelle stringhe col segreto dal
+    vault. Invariato se la credenziale non è risolvibile.
+
+    Due forme, e la seconda è nata con clodia-platform#522:
+
+        ${VAULT:cred}         il campo `value` del bundle
+        ${VAULT:cred.campo}   quel campo del bundle
+
+    Un bundle non è sempre `{"value": …}`. `telegram_bot_token` è
+    `{"token", "bot_username", "bot_id"}` — lo scrive `tools_api.telegram_connect`
+    dopo aver validato con `getMe` — e con la sola prima forma il server MCP del
+    pack che quella credenziale deve usarla partiva con il token **stringa
+    vuota**: Telegram rispondeva 401 e il sintomo era «il token del bot è
+    sbagliato», cioè il posto giusto dove non guardare. Il selettore di campo è
+    già ammesso dalla grammatica del placeholder (il `.` sta in `_VAULT_RE`):
+    quello che mancava era implementarlo.
+
+    **Un campo che non c'è lascia il placeholder com'è**, e lo dice nei log.
+    Prima `bundle.get("value", "")` produceva silenziosamente `""`: un segreto
+    vuoto è indistinguibile da un segreto sbagliato, mentre un
+    `${VAULT:…}` letterale arrivato fino alla API di un vendor è un errore che
+    nomina sé stesso. Stessa direzione del ramo che già esisteva per la
+    credenziale assente.
+    """
     if isinstance(val, str):
         def _sub(m):
+            name, _, field = m.group(1).partition(".")
             try:
-                b = vault.read_internal(m.group(1))
+                b = vault.read_internal(name)
             except Exception:
                 return m.group(0)
-            return str(b.get("value", "")) if isinstance(b, dict) else str(b)
+            if not isinstance(b, dict):
+                return str(b)
+            key = field or "value"
+            if key not in b:
+                LOG.warning(
+                    "backend MCP: il bundle '%s' non ha il campo '%s', "
+                    "placeholder lasciato intatto (campi: %s)",
+                    name, key, ", ".join(sorted(b)) or "nessuno")
+                return m.group(0)
+            return str(b[key])
         return _VAULT_RE.sub(_sub, val)
     if isinstance(val, dict):
         return {k: _resolve_secrets(v) for k, v in val.items()}

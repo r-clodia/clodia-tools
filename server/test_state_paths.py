@@ -54,8 +54,13 @@ class MigrationTests(unittest.TestCase):
         self._state = tempfile.TemporaryDirectory()
         self.data = Path(self._data.name)
         self.state = Path(self._state.name)
+        # Questi test verificano la MIGRAZIONE, quindi devono poterla far
+        # scattare: dal #545 §6 un processo di test non migra se non lo
+        # dichiara (clodia-platform#541 — una run della suite spostò lo stato
+        # vivo del gateway dalla datadir della colonia).
         self.env = patch.dict("os.environ", {"CLODIA_DATA": str(self.data),
-                                             "CLODIA_TOOLS_STATE_DIR": str(self.state)})
+                                             "CLODIA_TOOLS_STATE_DIR": str(self.state),
+                                             state_paths.MIGRATE_ENV: "1"})
         self.env.start()
 
     def tearDown(self) -> None:

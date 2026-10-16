@@ -90,11 +90,38 @@ NORMALISERS = ("url_origin", "repo_url", "repo_pair", "email_from")
 #: al posto suo. Le implementazioni stanno in `actions.OPTION_SETS`.
 OPTION_SETS = ("mailboxes",)
 
+#: Fatti sulla CHIAMATA in corso che il gateway sa riempire da sé, e che un
+#: connettore di pack può chiedere come argomenti (clodia-platform#522).
+#: Lista chiusa come `NORMALISERS` e `OPTION_SETS`, e per una ragione più
+#: forte: questi non sono dati, sono IDENTITÀ.
+#:
+#: Un verbo nativo le legge dal contesto del processo — `current_chat()` è il
+#: claim FIRMATO della stanza, `agent_name()` l'agente autenticato — e quindi
+#: nessun chiamante può mentire su chi è e da dove scrive. Un server MCP di
+#: pack non ha né il claim né l'identità: gliele deve passare qualcuno. Se a
+#: passarle fosse l'agente, sarebbero argomenti come gli altri, cioè
+#: falsificabili, e «manda questo alla chat di questo topic» tornerebbe a
+#: essere «manda questo alla chat che dico io» — il difetto che ha prodotto gli
+#: invii al gruppo sbagliato del 23 set 2026.
+#:
+#: Perciò li riempie il GATEWAY, e SOVRASCRIVE sempre quello che il chiamante
+#: ha messo: un valore del chiamante che venisse preferito, o anche solo usato
+#: quando il gateway non ne ha uno, sarebbe la stessa falsificazione con un
+#: passaggio in più.
+CONTEXT_VALUES = ("channel", "agent")
+
 #: I nomi che ciascun insieme RISOLVE, interpolabili nei template dell'azione
 #: oltre ai nomi dei campi. Dichiarati qui perché la grammatica deve poterli
 #: convalidare al caricamento; `actions.OPTION_SETS` li produce, e un test
 #: verifica che le due facce dicano la stessa cosa.
 OPTION_SET_VALUES = {"mailboxes": ("account", "address")}
+
+#: Valori che il gateway sa mettere in un argomento OMESSO (`defaults:`).
+#: `binding` = la chat legata al canale da cui si chiama, per QUESTO connettore
+#: (`channel_bindings`). È l'altro fatto che un backend di pack non ha: il
+#: registro dei binding è del gateway, lo scrive il bottone del topic, e un
+#: processo che lo leggesse da sé leggerebbe anche i binding di tutti gli altri.
+DEFAULT_VALUES = ("binding",)
 
 _ID = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
 _NAMESPACE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
@@ -126,6 +153,30 @@ CORE_VAULT_PREFIXES = (
 MIGRATING_NAMESPACES = frozenset(p.rstrip("_") for p in CORE_VAULT_PREFIXES)
 
 
+def reserved_namespaces() -> frozenset[str]:
+    """`MIGRATING_NAMESPACES` meno i connettori che su QUESTA istanza stanno
+    già in un pack (clodia-platform#522).
+
+    La riserva esiste per tenere un namespace e il suo prefisso di vault fuori
+    dalla portata dei pack *finché il gateway li implementa*. Quando l'owner
+    gira l'interruttore su `pack`, quel finché è finito: continuare a riservarli
+    rifiuterebbe esattamente il manifest che deve subentrare — ed è una
+    riserva, non un divieto, quindi la toglie la stessa decisione che la
+    rendeva necessaria.
+
+    `MIGRATING_NAMESPACES` resta il nome della lista PIENA: è la mappa delle
+    migrazioni che restano da fare, e non dipende da come è configurata una
+    istanza.
+    """
+    from . import builtin as _builtin
+
+    try:
+        namespaces, prefixes = _builtin.released()
+    except Exception:  # noqa: BLE001 — in dubbio si riserva tutto, come ieri
+        return MIGRATING_NAMESPACES
+    return MIGRATING_NAMESPACES - namespaces - {p.rstrip("_") for p in prefixes}
+
+
 def entry_owner(entry: str, namespaces: Iterable[str]) -> str:
     """The namespace a vault entry belongs to: the LONGEST of `namespaces` that
     is `entry` itself or a `<ns>_` prefix of it, or "" when none is.
@@ -146,11 +197,11 @@ def vault_entry_problem(entry: str, namespace: str,
     prefix whose stem IS the namespace can only occur for a namespace that the
     namespace rule let through, and in production `MIGRATING_NAMESPACES` are
     reserved: there is no exemption by name. `reserved` is the namespace
-    reservation in force (default `MIGRATING_NAMESPACES`); only a registry
+    reservation in force (default `reserved_namespaces()`); only a registry
     reproduced with an explicit, smaller one — a test of the day after a
     migration — lets a stem namespace use its own prefix.
     """
-    taken = MIGRATING_NAMESPACES if reserved is None else frozenset(reserved)
+    taken = reserved_namespaces() if reserved is None else frozenset(reserved)
     if entry != namespace and not entry.startswith(f"{namespace}_"):
         return (f"vault entry '{entry}' is outside namespace '{namespace}': a "
                 f"connector stores its credential as '{namespace}' or "
@@ -774,6 +825,57 @@ class VerbMapping:
 
 
 @dataclass(frozen=True)
+class DefaultArg:
+    """Un argomento che il gateway riempie SOLO se il chiamante lo ha omesso.
+
+    Non è un `ContextArg`, e la differenza è tutta nella regola: il contesto è
+    un'identità e si sovrascrive sempre, perché il caso «ce l'ha già messo il
+    chiamante» è esattamente l'attacco. Un default è una comodità — «manda alla
+    chat di questo topic» — e un valore esplicito del chiamante deve vincere,
+    altrimenti non si potrebbe più scrivere a una chat diversa da quella legata.
+
+    Vale per un VERBO alla volta, non per il namespace: `telegram.inbox` non ha
+    una chat da riempire, e riempirgliela comunque significherebbe passare al
+    backend un argomento che il suo schema non dichiara.
+    """
+
+    verb: str
+    arg: str
+    value: str
+
+
+@dataclass(frozen=True)
+class FileArgument:
+    """Un argomento che nomina un FILE DI TOPIC, che il gateway consegna.
+
+    `telegram.send_file` prende il path di un file dentro un topic. Leggerlo è
+    lavoro di piattaforma, non di connettore: ci stanno attaccati il
+    compartimento (chi chiama dev'essere partecipante del topic) e l'audit di
+    ciò che attraversa il confine. Un backend di pack che leggesse da sé il
+    filesystem dei topic li aggirerebbe entrambi — e potrebbe leggere i file di
+    un topic di cui il chiamante non sa nulla.
+
+    Così invece il pack dichiara *quali argomenti* sono il path, i byte e il
+    nome; il gateway risolve il topic, verifica la membership, legge, annota il
+    passaggio e riempie i due argomenti. Il pack riceve dei byte e non ha mai
+    visto un percorso.
+
+    Il topic si risolve in quest'ordine — lo stesso del codice nativo che
+    sostituisce: `tier_arg`/`topic_arg` se il chiamante li passa entrambi,
+    altrimenti il topic legato alla chat di `chat_arg`, altrimenti il canale da
+    cui arriva la chiamata.
+    """
+
+    verb: str
+    path_arg: str
+    bytes_arg: str
+    name_arg: str = ""
+    tier_arg: str = ""
+    topic_arg: str = ""
+    chat_arg: str = ""
+
+
+@dataclass(frozen=True)
 class ActionField:
     """Un campo dell'azione: testo libero, oppure una scelta fra valori che il
     gateway fornisce (`options:`).
@@ -889,6 +991,21 @@ class StorageRemote:
 
 
 @dataclass(frozen=True)
+class ContextArg:
+    """Un argomento che il GATEWAY riempie al posto del chiamante (#522).
+
+    `arg` è il nome dell'argomento nella chiamata, `value` il fatto da metterci
+    (`CONTEXT_VALUES`). Vale per OGNI verbo del namespace del connettore, non
+    per i soli verbi mappati: `telegram.send` dichiara una destinazione,
+    `telegram.inbox` no, e tutti e due hanno bisogno di sapere da quale stanza
+    e da quale agente arriva la chiamata.
+    """
+
+    arg: str
+    value: str
+
+
+@dataclass(frozen=True)
 class Connector:
     """One connector as a pack declares it.
 
@@ -914,6 +1031,14 @@ class Connector:
     tools_card: ToolsCard | None = None
     services: tuple[Service, ...] = ()
     storage_remote: StorageRemote | None = None
+    #: Argomenti che il gateway riempie SOLO se omessi (`DefaultArg`).
+    defaults: tuple[DefaultArg, ...] = ()
+    #: Argomenti che nominano un file di topic e che il gateway consegna come
+    #: byte (`FileArgument`): la lettura resta dove stanno compartimento e audit.
+    files: tuple[FileArgument, ...] = ()
+    #: Gli argomenti di contesto che il gateway riempie nelle chiamate ai verbi
+    #: di questo connettore (`ContextArg`, clodia-platform#522).
+    context: tuple[ContextArg, ...] = ()
     #: Shipped by the gateway itself (`builtin/*.yaml`) rather than installed
     #: with a pack. Those files are the connectors this gateway still implements
     #: natively, declared in the same grammar so the PDP has one source — see
@@ -946,7 +1071,7 @@ def core_namespaces() -> frozenset[str]:
 
     return frozenset(
         name.split(".", 1)[0] for name in all_native_verb_names()
-        if "." in name) | MIGRATING_NAMESPACES
+        if "." in name) | reserved_namespaces()
 
 
 def check_namespace(namespace: str, verbs: Iterable[str], *,
@@ -1111,6 +1236,45 @@ def _parse_provider(raw: Any, where: str, *, pack: str) -> Provider:
     )
 
 
+def _parse_defaults(raw: Any, where: str) -> tuple[DefaultArg, ...]:
+    """Il blocco `defaults:` — `[{verb, arg, value}]`."""
+    out = []
+    for i, entry in enumerate(_seq(raw, where)):
+        at = f"{where}[{i}]"
+        data = _mapping(entry, at)
+        out.append(DefaultArg(
+            verb=_matching(_text(data.get("verb"), f"{at}.verb"), _VERB, f"{at}.verb"),
+            arg=_matching(_text(data.get("arg"), f"{at}.arg"), _ARG, f"{at}.arg"),
+            value=_one_of(_text(data.get("value"), f"{at}.value"), DEFAULT_VALUES,
+                          f"{at}.value")))
+    return tuple(out)
+
+
+def _parse_files(raw: Any, where: str) -> tuple[FileArgument, ...]:
+    """Il blocco `files:` — gli argomenti di file che il gateway consegna."""
+    out = []
+    for i, entry in enumerate(_seq(raw, where)):
+        at = f"{where}[{i}]"
+        data = _mapping(entry, at)
+        campi = {}
+        for chiave, obbligatorio in (("path_arg", True), ("bytes_arg", True),
+                                     ("name_arg", False), ("tier_arg", False),
+                                     ("topic_arg", False), ("chat_arg", False)):
+            valore = _text(data.get(chiave), f"{at}.{chiave}", required=obbligatorio)
+            if valore:
+                _matching(valore, _ARG, f"{at}.{chiave}")
+            campi[chiave] = valore
+        if campi["path_arg"] == campi["bytes_arg"]:
+            raise ManifestError(
+                f"{at}: 'path_arg' e 'bytes_arg' sono lo stesso argomento: i byte "
+                f"sovrascriverebbero il percorso da cui sono stati letti")
+        out.append(FileArgument(
+            verb=_matching(_text(data.get("verb"), f"{at}.verb"), _VERB,
+                           f"{at}.verb"),
+            **campi))
+    return tuple(out)
+
+
 def _parse_verb(raw: Any, where: str) -> VerbMapping:
     data = _mapping(raw, where)
     verb = _matching(_text(data.get("verb"), f"{where}.verb"), _VERB, f"{where}.verb")
@@ -1241,16 +1405,33 @@ def _docs_url(raw: Any, where: str) -> str:
     """`docs_url` goes into an `href` on the Tools page, where the session
     token sits in localStorage: a `javascript:` or `data:` URL would run in
     that origin. A pack may point at its documentation, nothing else, so only
-    an absolute `https://` URL with a host is accepted (review of #365)."""
+    an absolute `https://` URL with a host is accepted (review of #365).
+
+    A HOST, not a netloc (clodia-platform#545 §7): `https://@` and
+    `https://:443` have a netloc and no hostname, and a control character —
+    NUL included — goes through `urlsplit` untouched. Userinfo is refused as
+    well: `https://docs.pack.io@evil.it` reads as the first host and resolves
+    to the second, and no documentation link needs credentials.
+    """
     value = _text(raw, where, required=False)
     if not value:
         return ""
-    parts = urlsplit(value)
-    if not value.startswith("https://") or parts.scheme != "https" \
-            or not parts.netloc or any(c.isspace() for c in value):
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+    except ValueError:
+        # `https://[` raises here, and a ValueError escaping the parser used
+        # to empty the WHOLE registry instead of refusing this one pack
+        # (review of clodia-tools#369).
+        parts, host = None, None
+    if parts is None or not value.startswith("https://") or parts.scheme != "https" \
+            or not host or "@" in parts.netloc \
+            or any(c.isspace() or not c.isprintable() for c in value):
         raise ManifestError(
-            f"{where}: '{value}' is not an https:// URL; only https:// "
-            f"documentation links are accepted")
+            # `repr`: the refused value may carry control characters, and a log
+            # line or a card that prints them raw is a second defect.
+            f"{where}: {value!r} is not an https:// URL with a host; "
+            f"only https:// documentation links are accepted")
     return value
 
 
@@ -1363,7 +1544,34 @@ def _parse_service(raw: Any, where: str, *, pack: str) -> Service:
 #: implementation, never a meaning: letting it re-declare a scheme, a canonical
 #: form or a verb mapping would hand the vocabulary of another pack to the one
 #: that installed second.
-_OWNER_ONLY = ("schemes", "verbs", "taint", "topic_actions")
+#: `context`, `files` e `defaults` sono fra questi perché sono frasi sui VERBI
+#: del namespace, e i verbi sono del proprietario del vocabolario: un
+#: contributore che potesse dichiararli riscriverebbe gli argomenti delle
+#: chiamate altrui — o si farebbe consegnare i file di topic, o la chat legata
+#: al canale, per il verbo di un altro.
+_OWNER_ONLY = ("schemes", "verbs", "taint", "topic_actions", "context",
+               "files", "defaults")
+
+
+def _parse_context(raw: Any, where: str) -> tuple[ContextArg, ...]:
+    """Il blocco `context:` di un connettore: `{arg, value}` per riga."""
+    out: list[ContextArg] = []
+    seen: set[str] = set()
+    for i, item in enumerate(_seq(raw, f"{where}.context")):
+        at = f"{where}.context[{i}]"
+        data = _mapping(item, at)
+        arg = _matching(_text(data.get("arg"), f"{at}.arg"), _ARG, f"{at}.arg")
+        value = _text(data.get("value"), f"{at}.value")
+        if value not in CONTEXT_VALUES:
+            raise ManifestError(
+                f"{at}: context value '{value}' is not one the gateway can "
+                f"fill; it knows {', '.join(CONTEXT_VALUES)}. A connector names "
+                f"a fact about the call, it does not define one")
+        if arg in seen:
+            raise ManifestError(f"{at}: argument '{arg}' is filled twice")
+        seen.add(arg)
+        out.append(ContextArg(arg=arg, value=value))
+    return tuple(out)
 
 
 def parse_connector(raw: Any, *, pack: str,
@@ -1473,6 +1681,25 @@ def parse_connector(raw: Any, *, pack: str,
                 f"'{namespace}'. Declaring what does not taint a channel is a "
                 f"statement about one's own tools, never about someone else's")
 
+    defaults = _parse_defaults(data.get("defaults"), f"{where}.defaults")
+    if defaults and builtin:
+        raise ManifestError(
+            f"{where}: 'defaults' is for a connector a PACK implements; this "
+            f"gateway resolves a binding from the inside")
+    if not builtin:
+        check_namespace(namespace, [d.verb for d in defaults], reserved=reserved,
+                        where=where)
+    files = _parse_files(data.get("files"), f"{where}.files")
+    if files and builtin:
+        raise ManifestError(
+            f"{where}: 'files' is for a connector a PACK implements; this "
+            f"gateway reads a topic file from the inside")
+    if not builtin:
+        # Stessa regola di namespace dei verbi (#516): un pack non si fa
+        # consegnare i file di topic per il verbo di un altro.
+        check_namespace(namespace, [f.verb for f in files], reserved=reserved,
+                        where=where)
+
     actions = tuple(
         _parse_topic_action(a, f"{where}.topic_actions[{i}]")
         for i, a in enumerate(
@@ -1522,6 +1749,36 @@ def parse_connector(raw: Any, *, pack: str,
             f"{where}: 'seal_cap' is not part of the manifest. There is no SEAL "
             f"ceiling on a binding: the owner decides, at the gate, per binding")
 
+    context = _parse_context(data.get("context"), where)
+    if context and builtin:
+        # Un connettore che il GATEWAY implementa il contesto ce l'ha già: lo
+        # legge dal processo, dal claim firmato della sessione. Scriverlo in un
+        # argomento non gli aggiungerebbe niente e sovrascriverebbe un
+        # argomento vero del verbo nativo. `context:` è per chi gira fuori di
+        # qui. (Merito di #373, che chiudeva questa porta e io l'avevo lasciata
+        # aperta.)
+        raise ManifestError(
+            f"{where}: 'context' is for a connector a PACK implements. A "
+            f"gateway connector already has the call's context — it reads the "
+            f"signed claim of the session — and filling an argument with it "
+            f"would overwrite a real argument of the native verb")
+    # Il gateway non riempie un argomento da cui il PDP ricava la destinazione.
+    # Due ragioni, e basta la prima: la destinazione di una chiamata è una
+    # proprietà della CHIAMATA — è ciò che l'owner legge sulla card e ciò che
+    # la whitelist confronta — e lasciarla scrivere alla dichiarazione del
+    # connettore significherebbe che a dire dove si va è il manifest. La
+    # seconda: un fatto che il gateway non ha svuota l'argomento, e un
+    # estrattore senza valore è un verbo senza destinazione dichiarata, cioè
+    # il PDP disarmato su quel verbo, in silenzio.
+    letti_dal_pdp = {v.arg for v in verbs if v.arg}
+    collisione = sorted({a.arg for a in context} & letti_dal_pdp)
+    if collisione:
+        raise ManifestError(
+            f"{where}: context fills '{collisione[0]}', which is also the "
+            f"argument a verb mapping reads its destination from. A destination "
+            f"is a property of the call, not of the manifest: pick another "
+            f"argument name")
+
     return Connector(
         id=cid,
         label=_text(data.get("label"), f"{where}.label", required=False) or cid,
@@ -1537,6 +1794,9 @@ def parse_connector(raw: Any, *, pack: str,
         tools_card=_parse_tools_card(card, f"{where}.tools_card") if card else None,
         services=services,
         storage_remote=storage,
+        context=context,
+        defaults=defaults,
+        files=files,
         builtin=builtin,
     )
 
@@ -1619,6 +1879,22 @@ class Registry:
                     return picked
         return ()
 
+    def context_for(self, verb: str) -> tuple[tuple[Connector, ContextArg], ...]:
+        """Gli `(connettore, argomento di contesto)` da riempire in `verb`.
+
+        Selezionati per NAMESPACE e non fra i verbi mappati: un verbo in
+        ingresso (`telegram.inbox`) non dichiara una destinazione, quindi non
+        compare in `verbs:`, e ha comunque bisogno di sapere da quale stanza e
+        da quale agente arriva la chiamata. Il namespace è già ciò che un pack
+        deve dimostrare di possedere (`check_namespace`), e chi lo possiede
+        possiede i suoi verbi: è la stessa autorità, non una più larga.
+        """
+        ns = verb.split(".", 1)[0] if "." in verb else ""
+        if not ns:
+            return ()
+        return tuple((c, a) for c in self.connectors if c.namespace == ns
+                     for a in c.context)
+
     def danger_for(self, uri: str) -> str:
         """The warning for this URI from a connector that claims its hosts, or
         `""`. Builtins first, so a pack cannot soften the gateway's own text.
@@ -1679,6 +1955,31 @@ class Registry:
         return {v.verb: v for c in self.connectors for v in c.verbs
                 if v.direction == direction}
 
+    def defaults_for(self, verb: str) -> tuple[Connector, tuple[DefaultArg, ...]] | None:
+        """Il connettore e i default dichiarati per QUESTO verbo, o None."""
+        for c in self.connectors:
+            if c.builtin:
+                continue
+            hits = tuple(d for d in c.defaults if d.verb == verb)
+            if hits:
+                return c, hits
+        return None
+
+    def file_for(self, verb: str) -> tuple[Connector, FileArgument] | None:
+        """Il connettore e la dichiarazione di file per questa chiamata, o None.
+
+        Per NOME ESATTO del verbo, e mai per un connettore `builtin`: consegnare
+        dei byte a codice che vive dentro il gateway significherebbe leggere un
+        file di topic due volte, e la seconda senza chi la sorveglia.
+        """
+        for c in self.connectors:
+            if c.builtin:
+                continue
+            for f in c.files:
+                if f.verb == verb:
+                    return c, f
+        return None
+
     def taint_prefixes(self) -> tuple[str, ...]:
         return tuple(sorted({p for c in self.connectors for p in c.taint_prefixes}))
 
@@ -1729,7 +2030,7 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
     #: Names a pack namespace may not be a `_`-prefix of: with `foo` installed,
     #: `foo_bar…` entries would fall to the pack whenever the core `foo_bar`
     #: namespace is not itself a connector in this registry.
-    core_names = set(reserved_set) | builtin_namespaces | set(MIGRATING_NAMESPACES)
+    core_names = set(reserved_set) | builtin_namespaces | set(reserved_namespaces())
     for pack in sorted(set(manifests) - set(builtin_names)):
         # Each pack is checked against the gateway's namespaces *and* against the
         # namespaces already claimed by the packs parsed before it.

@@ -10,6 +10,7 @@ import ipaddress
 import json
 import logging
 import os
+import sys
 import shlex
 import socket
 import stat
@@ -45,6 +46,59 @@ LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost", "ip6-localhost"})
 
 #: Size past which `service.log` is rotated into `service.log.1` (one kept).
 LOG_MAX_BYTES = 5 * 1024 * 1024
+
+#: Limiti di risorsa con cui parte OGNI servizio di pack
+#: (clodia-platform#545 §5). Senza, un servizio eredita quelli del gateway.
+#:
+#: `RLIMIT_CORE = 0` non è igiene: un core dump finisce nella state dir del
+#: servizio e contiene IN CHIARO le credenziali che il manifest gli fa
+#: ricevere. `RLIMIT_NPROC` è per uid, e l'uid è dedicato: è esattamente il
+#: confine giusto perché un fork bomb di un pack non esaurisca i processi del
+#: container — cioè non fermi il gateway.
+#:
+#: SHORTCUT: un solo insieme di limiti per tutti i servizi, non dichiarabile
+#:           per servizio. Regge finché i servizi sono i processi piccoli che
+#:           #515 descrive (un poller, un bridge). Il giorno che un pack
+#:           dichiara un servizio che ha bisogno di più — un indice, una
+#:           build — il manifest deve poter dichiarare i propri limiti, e
+#:           questi restano i default sotto cui ricade chi non dichiara nulla.
+DEFAULT_RLIMITS = {
+    "RLIMIT_CORE": 0,
+    "RLIMIT_NPROC": 256,
+    "RLIMIT_NOFILE": 4096,
+    "RLIMIT_FSIZE": 1024 * 1024 * 1024,
+}
+
+#: Lo stub che si abbassa i limiti e poi `exec`a il comando vero.
+#:
+#: Un processo separato e non `preexec_fn`: quello esegue codice Python fra
+#: `fork` e `exec` in un gateway che ha altri thread, ed è la ricetta per un
+#: deadlock su un lock preso da un thread che nel figlio non esiste. Qui il
+#: figlio è un interprete nuovo (`-I`), che si limita da sé e sparisce
+#: nell'`exec`: il pid che il supervisore tiene resta quello del servizio.
+#:
+#: I limiti si CLAMPANO sul tetto duro esistente: alzarlo non è permesso a chi
+#: non è root, e pretenderlo farebbe fallire l'avvio invece di confinarlo.
+_LIMITER = (
+    "import json, os, resource, sys\n"
+    "for nome, valore in json.loads(sys.argv[1]).items():\n"
+    "    chiave = getattr(resource, nome, None)\n"
+    "    if chiave is None:\n"
+    "        continue\n"
+    "    try:\n"
+    "        _, duro = resource.getrlimit(chiave)\n"
+    "        if duro != resource.RLIM_INFINITY:\n"
+    "            valore = min(valore, duro)\n"
+    "        resource.setrlimit(chiave, (valore, valore))\n"
+    "    except (OSError, ValueError) as exc:\n"
+    "        sys.stderr.write('rlimit %s: %s\\n' % (nome, exc))\n"
+    "        os._exit(71)\n"
+    "os.execvp(sys.argv[2], sys.argv[2:])\n"
+)
+
+#: Dove si ricorda quale uid appartiene a quale servizio, sotto
+#: `<datadir>/services/`.
+UID_MAP_FILE = "uids.json"
 
 #: Where the isolation self-check keeps its sentinel, under `<datadir>/services`
 #: — the same volume as the state dirs and the vault (clodia-platform#544). Il
@@ -96,6 +150,159 @@ def _uid_span() -> int:
     return int(raw) if raw.isdigit() and int(raw) > 0 else 200
 
 
+def rlimits() -> dict[str, int]:
+    """I limiti con cui parte un servizio. `CLODIA_SERVICE_<NOME>` li cambia
+    (`CLODIA_SERVICE_RLIMIT_NPROC=512`); un valore non numerico è il default,
+    non un errore — un limite scritto male non deve impedire un avvio."""
+    out: dict[str, int] = {}
+    for nome, default in DEFAULT_RLIMITS.items():
+        raw = (os.environ.get(f"CLODIA_SERVICE_{nome}") or "").strip()
+        out[nome] = int(raw) if raw.isdigit() else default
+    return out
+
+
+def with_rlimits(command: Iterable[str],
+                 limits: dict[str, int] | None = None) -> list[str]:
+    """`command` preceduto dallo stub che applica i limiti (vedi `_LIMITER`).
+
+    Si antepone sempre, anche con l'isolamento disattivato: i limiti valgono
+    per il processo, non per l'identità, e in sviluppo locale confinare un
+    servizio che fa `fork` resta esattamente ciò che si vuole.
+    """
+    argv = [str(x) for x in command]
+    if not argv:
+        raise ServiceRefused("comando vuoto: non c'è niente da avviare")
+    scelti = rlimits() if limits is None else limits
+    return [sys.executable, "-I", "-c", _LIMITER, json.dumps(scelti), *argv]
+
+
+def reap_orphans(tracked: Iterable[int] = (), sessions: Iterable[int] = ()) -> int:
+    """Raccoglie gli zombie orfani DEI SERVIZI, e nessun altro.
+
+    Solo un processo della **sessione di un servizio** (`sessions`: i pid dei
+    servizi avviati, che partono con `start_new_session=True` e ne sono quindi
+    i session leader) è un orfano da raccogliere. Il gateway ha molti altri
+    figli suoi — `subprocess.run` di restic, git, del client IMAP, i backend
+    MCP stdio — e uno di loro appena uscito è uno zombie finché il SUO `wait`
+    non arriva: raccoglierlo prima faceva leggere a `subprocess.run` un
+    `ECHILD`, cioè `returncode = 0` per un backup fallito (review di
+    clodia-tools#370).
+
+    Il gateway è PID 1 nel suo container, quindi i nipoti orfani di un
+    servizio gli vengono riparentati: senza raccoglierli la tabella dei
+    processi si riempie, e il sintomo arriva molto dopo come un `fork` che
+    fallisce (clodia-platform#545 §5).
+
+    Si raccoglie PER PID, mai con `waitpid(-1)`: quello ruberebbe l'uscita di
+    un servizio supervisionato e lascerebbe il suo `Popen` senza codice di
+    uscita — un servizio «vivo» che non c'è più. Per lo stesso motivo
+    `tracked` non è una precauzione: è la condizione di correttezza.
+    """
+    noti = {int(p) for p in tracked}
+    sessioni = {int(p) for p in sessions}
+    if not sessioni:
+        return 0
+    mio = os.getpid()
+    raccolti = 0
+    try:
+        voci = list(Path("/proc").glob("[0-9]*"))
+    except OSError:
+        return 0
+    for entry in voci:
+        try:
+            pid = int(entry.name)
+        except ValueError:
+            continue
+        if pid in noti or pid == mio:
+            continue
+        try:
+            # `comm` sta fra parentesi e può contenere spazi: si parte da
+            # DOPO l'ultima `)`, se no i campi scalano.
+            coda = (entry / "stat").read_text().rpartition(")")[2].split()
+            # Campi dopo `)`: stato, ppid, pgrp, session.
+            if len(coda) < 4 or coda[0] != "Z" or int(coda[1]) != mio:
+                continue
+            if int(coda[3]) not in sessioni:
+                continue
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                raccolti += 1
+        except (OSError, ValueError):
+            continue
+    if raccolti:
+        LOG.info("services: raccolti %s processi zombie orfani", raccolti)
+    return raccolti
+
+
+def live_sessions(sessions: Iterable[int]) -> set[int]:
+    """Which of `sessions` still has at least one process (zombies included).
+
+    A session id that no process holds any more can be forgotten: the kernel
+    does not hand out a pid while it is still some process's session id, so
+    keeping only the live ones is what stops a RECYCLED pid — e.g. an MCP
+    stdio backend, which the SDK also starts with `start_new_session=True` —
+    from being mistaken for a service session (review of clodia-tools#370).
+    """
+    cercate = {int(p) for p in sessions}
+    if not cercate:
+        return set()
+    vive: set[int] = set()
+    try:
+        voci = list(Path("/proc").glob("[0-9]*"))
+    except OSError:
+        return cercate          # cannot tell: keep them all
+    for entry in voci:
+        try:
+            coda = (entry / "stat").read_text().rpartition(")")[2].split()
+            sid = int(coda[3])
+        except (OSError, ValueError, IndexError):
+            continue
+        if sid in cercate:
+            vive.add(sid)
+            if vive == cercate:
+                break
+    return vive
+
+
+def _uid_map_path() -> Path:
+    return data_dir() / "services" / UID_MAP_FILE
+
+
+def uid_map() -> dict[str, int]:
+    """`{"<pack>/<servizio>": uid}` come è stato registrato finora.
+
+    Tollerante a tutto: il file sta sotto la datadir, che l'agent-server monta,
+    quindi un contenuto assurdo è uno scenario da gestire e non da credere.
+    Illeggibile o malformato = nessun ricordo, e si deriva come prima.
+    """
+    base, span = _uid_base(), _uid_span()
+    try:
+        raw = json.loads(_uid_map_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): int(v) for k, v in raw.items()
+            if isinstance(v, int) and not isinstance(v, bool)
+            and base <= v < base + span}
+
+
+def _remember_uid(key: str, uid: int) -> None:
+    mappa = uid_map()
+    if mappa.get(key) == uid:
+        return
+    mappa[key] = uid
+    path = _uid_map_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(mappa, sort_keys=True), encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError as exc:  # noqa: BLE001 - il servizio parte lo stesso
+        LOG.warning("services: uid di '%s' non memorizzato (%s): al prossimo "
+                    "riavvio potrebbe cambiare", key, exc)
+
+
 def gid_for(pack: str) -> int:
     """gid stabile per PACK: i servizi di uno stesso pack possono condividere
     file fra loro, mai con quelli di un altro pack."""
@@ -110,12 +317,28 @@ def uid_for(service: Service, taken: frozenset[int] | set[int] = frozenset()) ->
     sarebbe più sua. `taken` risolve la collisione fra due nomi che cadono sullo
     stesso resto: due servizi con lo stesso uid si leggerebbero lo stato a
     vicenda, che è l'isolamento che si voleva.
+
+    La derivazione da sola però NON basta a essere stabili, ed è il difetto di
+    clodia-platform#545 §5: la risoluzione di una collisione dipendeva da
+    `taken`, cioè da CHI era partito prima. Due servizi che cadono sullo stesso
+    resto si scambiavano l'uid al riavvio — e ciascuno trovava una state dir
+    0700 che non era più sua, cioè un servizio che non riparte per un motivo
+    che non nomina la causa. Quindi l'assegnazione si RICORDA (`uid_map`): il
+    ricordo vince sulla derivazione, e un uid già di un altro servizio non
+    viene mai riassegnato, nemmeno se quel servizio adesso è fermo.
     """
     base, span = _uid_base(), _uid_span()
-    start = zlib.crc32(f"{service.pack}/{service.name}".encode()) % span
+    key = f"{service.pack}/{service.name}"
+    mappa = uid_map()
+    occupati = set(taken) | {u for k, u in mappa.items() if k != key}
+    ricordato = mappa.get(key)
+    if ricordato is not None and ricordato not in set(taken):
+        return ricordato
+    start = zlib.crc32(key.encode()) % span
     for step in range(span):
         candidate = base + (start + step) % span
-        if candidate not in taken:
+        if candidate not in occupati:
+            _remember_uid(key, candidate)
             return candidate
     raise IsolationUnavailable(
         f"nessun uid libero nel pool ({base}..{base + span - 1}): "
@@ -474,8 +697,8 @@ def exposed_listeners(uid: int, tables: list[str] | None = None) -> list[str]:
     """TCP sockets in LISTEN owned by `uid` and bound outside loopback.
 
     Read from `/proc/net/tcp{,6}` of the gateway's network namespace, which the
-    services share: cheap enough to run on every reconcile. UDP is not covered
-    (an unconnected client socket looks like a bound one).
+    services share: cheap enough to run on every reconcile. UDP is covered by
+    `exposed_udp`, which needs a different rule.
     """
     if tables is None:
         tables = []
@@ -502,4 +725,79 @@ def exposed_listeners(uid: int, tables: list[str] | None = None) -> list[str]:
             if addr.is_loopback or (mapped is not None and mapped.is_loopback):
                 continue
             found.append(f"[{addr}]:{port}" if addr.version == 6 else f"{addr}:{port}")
+    return found
+
+
+_PROC_NET_UDP = ("/proc/net/udp", "/proc/net/udp6")
+
+#: Intervallo delle porte effimere quando `/proc/sys` non si legge. È il
+#: default del kernel Linux dal 2.6.
+_EPHEMERAL = (32768, 60999)
+
+
+def _ephemeral_range() -> tuple[int, int]:
+    try:
+        lo, hi = Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split()[:2]
+        return int(lo), int(hi)
+    except (OSError, ValueError):
+        return _EPHEMERAL
+
+
+def exposed_udp(uid: int, tables: list[str] | None = None,
+                ephemeral: tuple[int, int] | None = None) -> list[str]:
+    """UDP socket di `uid` che significano «sono raggiungibile da fuori».
+
+    Il motivo per cui #515 aveva lasciato fuori UDP è vero: UDP non ha uno
+    stato LISTEN, e un socket di CLIENT è anch'esso «bound». Quindi non si
+    guarda il bind, si guarda cosa quel bind dichiara:
+
+    * **connesso** (la parte remota ha una porta) = un client che ha già
+      scritto a qualcuno. Mai segnalato — ed è il caso che rendeva inutile la
+      regola ingenua, perché una volta connesso il kernel mette come indirizzo
+      locale quello dell'interfaccia d'uscita, cioè un indirizzo NON loopback;
+    * **loopback** = il caso buono, come per TCP;
+    * **indirizzo specifico non-loopback, non connesso** = qualcuno ha scelto
+      di stare su quell'interfaccia e di aspettare: è un servizio;
+    * **wildcard, non connesso** = dipende dalla porta.
+
+    SHORTCUT: sul wildcard la discriminante è l'intervallo delle porte
+              effimere — un client riceve una porta da lì, un servizio ne
+              sceglie una fissa fuori. Regge finché il pack non chiede una
+              porta fissa DENTRO quell'intervallo, che è legale e qui
+              passerebbe inosservata. Il modo di salire è farsi dichiarare la
+              porta dal manifest (`Service`) e confrontare quella, invece di
+              dedurla; allora questa euristica serve solo a chi non dichiara.
+    """
+    if tables is None:
+        tables = []
+        for name in _PROC_NET_UDP:
+            try:
+                tables.append(Path(name).read_text())
+            except OSError:
+                continue
+    lo, hi = ephemeral if ephemeral is not None else _ephemeral_range()
+    found: list[str] = []
+    for table in tables:
+        for line in table.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) < 8:
+                continue
+            try:
+                if int(fields[7]) != uid:
+                    continue
+                addr_hex, port_hex = fields[1].split(":")
+                addr = _decode_address(addr_hex)
+                port = int(port_hex, 16)
+                remote = int(fields[2].split(":")[1], 16)
+            except ValueError:
+                continue
+            if remote:                      # connesso: è un client
+                continue
+            mapped = getattr(addr, "ipv4_mapped", None)
+            if addr.is_loopback or (mapped is not None and mapped.is_loopback):
+                continue
+            if addr.is_unspecified and lo <= port <= hi:
+                continue                    # porta effimera sul wildcard
+            found.append(f"udp [{addr}]:{port}" if addr.version == 6
+                         else f"udp {addr}:{port}")
     return found

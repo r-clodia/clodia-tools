@@ -788,13 +788,6 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name"]},
     ),
     Tool(
-        name="telegram.roster",
-        description=("Amministratori e membri noti di un gruppo, con uid e "
-                     "username: serve a mappare le persone senza digitare numeri."),
-        inputSchema={"type": "object", "properties": {
-            "chat_id": {"type": "string"}}, "required": ["chat_id"]},
-    ),
-    Tool(
         name="topic.list",
         description="Elenca i topic (riga sintetica). Gli archived sono nascosti salvo include_archived.",
         inputSchema={"type": "object", "properties": {
@@ -1948,7 +1941,65 @@ _TELEGRAM_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {
              "tier": {"type": "string"}, "name": {"type": "string"}},
              "required": ["tier", "name"]}),
+    # Stava in `_TOPIC_TOOLS` (serviva a mappare le persone di un topic) ed è
+    # un verbo `telegram.`, dispatchato da `_dispatch_telegram`. Portato qui da
+    # #373: il namespace si libera solo se se ne va TUTTO, e un verbo elencato
+    # altrove è l'unico modo in cui una migrazione può sembrare fatta e non
+    # esserlo. Non è ciò che FA cadere il namespace — quello lo deriva
+    # `_packaged_namespaces()` dal manifest, e trova questo verbo ovunque
+    # stia — ma è dove il verbo va letto, e rende la PR 3 la cancellazione di
+    # una lista sola.
+    Tool(name="telegram.roster",
+         description=("Amministratori e membri noti di un gruppo, con uid e "
+                      "username: serve a mappare le persone senza digitare numeri."),
+         inputSchema={"type": "object", "properties": {
+             "chat_id": {"type": "string"}}, "required": ["chat_id"]}),
 ]
+
+
+def _packaged_namespaces() -> frozenset[str]:
+    """I namespace di cui, su questa istanza, il gateway non è più il padrone.
+
+    Quando il profilo mette un connettore su `pack` (clodia-platform#522,
+    `instance_profile.connector_mode`), i verbi di quel namespace arrivano dal
+    backend MCP del pack e il gateway smette di esporli e di servirli.
+
+    Derivati dal MANIFEST builtin del connettore (`builtin.released()`), non da
+    una lista Python scritta qui: è il manifest a dire quale namespace quel
+    connettore occupa, e un elenco di gruppi `_*_TOOLS` lascerebbe indietro i
+    verbi che stanno altrove — `telegram.roster` è dichiarato dentro
+    `_TOPIC_TOOLS`, e una migrazione che lo dimenticasse lo lascerebbe servito
+    dal gateway mentre il pack lo dichiara suo. Non darebbe errore: funzionerebbe
+    dalla parte sbagliata.
+
+    Mai un'eccezione: in dubbio non si sposta niente, che è il gateway di ieri.
+    """
+    try:
+        from .connectors import builtin as _builtin
+        return _builtin.released()[0]
+    except Exception:  # noqa: BLE001
+        return frozenset()
+
+
+def _is_packaged_verb(name: str) -> bool:
+    """Questo verbo lo implementa un pack, non più il gateway.
+
+    Interrogato dal dispatch PRIMA del ramo nativo: senza, i Tool sparirebbero
+    dall'elenco ma il ramo `name.startswith("telegram.")` continuerebbe a
+    servirli, e l'interruttore spegnerebbe la vetrina lasciando acceso il
+    negozio.
+    """
+    ns = name.split(NS_SEP_DOT, 1)[0] if NS_SEP_DOT in name else ""
+    return bool(ns) and ns in _packaged_namespaces()
+
+
+def _migrated_away(tools: list[Tool]) -> list[Tool]:
+    """`tools` meno i verbi dei namespace passati a un pack."""
+    packaged = _packaged_namespaces()
+    if not packaged:
+        return list(tools)
+    return [t for t in tools
+            if t.name.split(NS_SEP_DOT, 1)[0] not in packaged]
 
 
 # memory.* — seed memory scrivibile dell'agente (universale, non richiede grant).
@@ -2519,7 +2570,7 @@ def _native_tool_namespaces() -> list[str]:
              + _copybrain.TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
-    ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in tools})
+    ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in _migrated_away(tools)})
     return ns
 
 
@@ -3105,7 +3156,13 @@ def _all_native_tools() -> list:
                   + _copybrain.TOOLS)
     if instance_profile.rag_enabled():
         native += list(_EU_CORPUS_TOOLS + _RAG_TOOLS)
-    return native
+    # I connettori passati a un pack (#522) escono dal CATALOGO dei verbi
+    # nativi, non solo dall'elenco che un agente vede: da qui discendono
+    # `all_native_verb_names()` e quindi i namespace che `core_namespaces()`
+    # riserva ai pack. Senza questa sottrazione il connettore del pack
+    # resterebbe rifiutato per collisione con il gateway che ha appena smesso
+    # di implementarlo.
+    return _migrated_away(native)
 
 
 def _verb_implemented(name: str) -> bool:
@@ -3124,6 +3181,136 @@ def _verb_implemented(name: str) -> bool:
         return bool(proxy.is_proxied(name))
     except Exception:  # noqa: BLE001 — in dubbio, lascia parlare il dispatch
         return True
+
+
+def _bound_chat(namespace: str) -> str:
+    """La chat legata al canale da cui si chiama, per questo connettore.
+
+    Il registro dei binding (`channel_bindings`) è del gateway: lo scrive il
+    bottone del topic e tiene i binding di TUTTI i connettori. Un backend di
+    pack che lo leggesse da sé leggerebbe anche quelli degli altri — e lo
+    farebbe con l'uid del gateway, cioè esattamente ciò che clodia-platform#544
+    sta chiudendo.
+    """
+    scope = current_channel()
+    if not scope or "/" not in scope:
+        return ""
+    tier, _, topic = scope.partition("/")
+    from .tools import channel_bindings as _cb
+    for cid, b in (_cb.load(namespace) or {}).items():
+        if (b.get("tier"), b.get("topic")) == (tier, topic):
+            return str(cid)
+    return ""
+
+
+def _fill_declared_defaults(name: str, arguments: dict) -> list[str]:
+    """Riempie gli argomenti OMESSI che il manifest dichiara in `defaults:`.
+
+    Differenza con `_fill_declared_context`, ed è tutta la ragione per cui sono
+    due blocchi e non uno: il contesto è un'identità e si sovrascrive sempre;
+    un default è una comodità e il valore esplicito del chiamante VINCE — se no
+    non si potrebbe più scrivere a una chat diversa da quella legata al topic.
+
+    Un default dichiarato che non si può risolvere è un errore spiegato, non un
+    argomento lasciato vuoto: vuoto, il PDP calcolerebbe una destinazione
+    inesistente e negherebbe l'invio parlando di «destinazione ignota», che è il
+    sintomo sbagliato per «questo topic non ha una chat collegata».
+    """
+    from .connectors import resolved as _connectors
+
+    hit = _connectors.default_arguments(name)
+    if hit is None:
+        return []
+    namespace, decls = hit
+    riempiti = []
+    for d in decls:
+        if str(arguments.get(d.arg) or "").strip():
+            continue          # il chiamante ha scelto: non si tocca
+        if d.value != "binding":
+            raise ValueError(f"default '{d.value}' non previsto da questo gateway")
+        chat = _bound_chat(namespace)
+        if not chat:
+            raise ValueError(
+                f"nessuna chat '{namespace}' collegata a questo topic: collegala "
+                f"dal pulsante del topic, oppure passa '{d.arg}' esplicito")
+        arguments[d.arg] = chat
+        riempiti.append(d.arg)
+    if riempiti:
+        LOG.info("default di pack su %s: %s dal binding del canale", name,
+                 ", ".join(riempiti))
+    return riempiti
+
+
+def _declared_file_topic(namespace: str, decl, arguments: dict) -> tuple[str, str]:
+    """Il topic da cui leggere il file, nell'ordine che usava il codice nativo.
+
+    `tier`+`name` espliciti → quelli. Altrimenti il topic legato alla chat che
+    il chiamante indica (il registro dei binding è del gateway, non del pack).
+    Altrimenti il canale da cui arriva la chiamata, che è la sola fonte che non
+    può sbagliare quando nessuno ha nominato nulla.
+    """
+    tier = str(arguments.get(decl.tier_arg) or "") if decl.tier_arg else ""
+    tname = str(arguments.get(decl.topic_arg) or "") if decl.topic_arg else ""
+    if tier and tname:
+        return tier, tname
+    chat = str(arguments.get(decl.chat_arg) or "").strip() if decl.chat_arg else ""
+    if chat:
+        # Oggi la chiave del registro dei binding coincide col namespace del
+        # connettore (`channel_bindings`, l'azione generica di #519 scrive lì).
+        from .tools import channel_bindings as _cb
+        legame = _cb.get(namespace, chat)
+        if not legame:
+            raise ValueError(
+                f"chat {chat} non legata a un topic: passa {decl.tier_arg}+"
+                f"{decl.topic_arg} del topic da cui leggere il file")
+        return str(legame.get("tier")), str(legame.get("topic"))
+    scope = current_channel()
+    if not scope or "/" not in scope:
+        raise ValueError(
+            f"nessun topic da cui leggere '{decl.path_arg}': passa "
+            f"{decl.tier_arg}+{decl.topic_arg}, oppure chiama da un topic")
+    tier, _, tname = scope.partition("/")
+    return tier, tname
+
+
+def _fill_declared_file(name: str, arguments: dict) -> bool:
+    """Consegna al verbo di un pack i BYTE del file di topic che ha chiesto.
+
+    Il pack dichiara quale argomento è il percorso e dove vanno i byte
+    (`files:` del manifest); il gateway risolve il topic, verifica che il
+    chiamante ne sia partecipante, legge e annota il passaggio. È l'unico modo
+    in cui un file di topic può finire in un processo che non è il gateway:
+    leggerlo dal pack salterebbe il compartimento e l'audit, e il percorso lo
+    sceglie il chiamante.
+
+    Gli argomenti che descrivevano DOVE leggere vengono tolti: hanno già fatto
+    il loro lavoro, e lasciarli vorrebbe dire mandare al backend un percorso di
+    topic che lui non deve conoscere.
+    """
+    from .connectors import resolved as _connectors
+
+    hit = _connectors.file_argument(name)
+    if hit is None:
+        return False
+    namespace, decl = hit
+    path = str(arguments.get(decl.path_arg) or "").strip()
+    if not path:
+        raise ValueError(f"'{decl.path_arg}' è obbligatorio per {name}")
+    tier, tname = _declared_file_topic(namespace, decl, arguments)
+    svc = _topics()
+    _require_topic_member(svc, tier, tname)
+    data = svc.read_file(tier, tname, path)
+    _note_crossing(data=data, kind="file")
+    import base64 as _b64
+    arguments[decl.bytes_arg] = _b64.b64encode(data).decode("ascii")
+    if decl.name_arg:
+        arguments[decl.name_arg] = _os.path.basename(path)
+    for chiave in (decl.path_arg, decl.tier_arg, decl.topic_arg):
+        if chiave:
+            arguments.pop(chiave, None)
+    LOG.info("file di topic consegnato a %s: %s/%s (%d byte)", name, tier,
+             tname, len(data))
+    return True
 
 
 def all_native_verb_names() -> list[str]:
@@ -4519,9 +4706,80 @@ def _resource_tier_of(arguments) -> str | None:
     return str(t) if isinstance(t, str) and t.strip() else None
 
 
+def _fill_declared_context(name: str, arguments: dict) -> dict:
+    """Gli argomenti di contesto che il manifest del connettore dichiara (#522).
+
+    Riempiti QUI, prima di tutto il resto, perché tutto il resto legge
+    `arguments`: l'audit ne pubblica l'hash, `_resource_tier_of` ne ricava il
+    livello, il PDP ne estrae le destinazioni e la card del gate le mostra a un
+    umano. Riempirli più avanti vorrebbe dire far decidere, registrare e
+    approvare una chiamata diversa da quella che parte.
+
+    Mai un'eccezione: un registry illeggibile non deve trasformare una chiamata
+    in un errore. Gli argomenti restano quelli del chiamante — che per un verbo
+    nativo sono già tutto, e per un verbo di pack significano una chiamata
+    senza contesto, cioè rifiutata dal connettore, non eseguita a caso.
+    """
+    try:
+        from .connectors import resolved as _conn
+        if not _conn.context_arguments(name):
+            return arguments
+        try:
+            _who = agent_name() or ""
+        except Exception:  # noqa: BLE001 — no identity: the argument is removed
+            _who = ""
+        return _conn.fill_context(name, arguments, {
+            "channel": current_chat() or "",
+            # Not `agent_name_safe()`: its "?" would become a forged identity
+            # instead of a missing one (review of clodia-tools#374).
+            "agent": _who,
+        })
+    except Exception as e:  # noqa: BLE001
+        if _is_packaged_verb(name):
+            # A pack verb whose context could not be filled must not run with
+            # the caller's own arguments: that is the forgery `context:`
+            # exists to prevent (review of clodia-tools#374).
+            raise _PackVerbRefused(
+                f"contesto del connettore non applicabile a '{name}': "
+                f"chiamata rifiutata") from e
+        LOG.warning("connectors: contesto non applicato a '%s' (%s)", name, e)
+        return arguments
+
+
+class _PackVerbRefused(PermissionError):
+    """A verb of a namespace moved to a pack that cannot be served safely."""
+
+
+def _check_pack_connector_held(name: str) -> None:
+    """In `pack` position, refuse a verb whose pack connector is not held.
+
+    If comms-pack's connector is refused (bad manifest, clash) while its
+    backend stays mounted, the call would reach the pack without its declared
+    context or egress mapping — e.g. a forged `agent` taking over another
+    agent's lease. Fail closed (review of clodia-tools#374)."""
+    if not _is_packaged_verb(name):
+        return
+    ns = name.split(NS_SEP_DOT, 1)[0]
+    try:
+        from .connectors import resolved as _conn
+        held = _conn.held_by_pack(ns)
+    except Exception:  # noqa: BLE001
+        held = False
+    if not held:
+        raise _PackVerbRefused(
+            f"il connettore del pack per '{ns}' non è attivo su questa istanza "
+            f"(manifest rifiutato o assente): '{name}' non viene servito")
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     from . import audit as _audit
+    try:
+        _check_pack_connector_held(name)
+        arguments = _fill_declared_context(name, arguments)
+    except _PackVerbRefused as e:
+        LOG.warning("connectors: %s", e)
+        return [TextContent(type="text", text=f"DENIED: {e}")]
     tok = _audit.set_resource_tier(_resource_tier_of(arguments))
     try:
         return await _call_tool_recorded(name, arguments)
@@ -4552,7 +4810,18 @@ async def _call_tool_recorded(name: str, arguments: dict) -> list[TextContent]:
     tok_e = _AUDIT_EGRESS.set(egress_seen)
     tok_r = _AUDIT_READS.set({})
     try:
-        out = await _call_tool_unaudited(name, arguments)
+        # Per-agent cap on slow calls (#553): one agent's burst waits for its
+        # own slots instead of taking the whole offload pool.
+        from . import slow_calls as _slow
+        try:
+            _who = agent_name()
+        except PermissionError:
+            _who = None
+        try:
+            async with _slow.slot(name, _who):
+                out = await _call_tool_unaudited(name, arguments)
+        except _slow.TooManySlowCalls as e:
+            out = [TextContent(type="text", text=f"ERROR: TooManySlowCalls: {e}")]
     finally:
         _AUDIT_READS.reset(tok_r)
         _AUDIT_EGRESS.reset(tok_e)
@@ -4681,6 +4950,26 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
         # saltarne il gate, che è l'errore che non si vede.
         if not _verb_implemented(name):
             raise ValueError(f"unknown tool: {name}")
+
+        # I DEFAULT dichiarati dal pack (la chat legata a questo topic),
+        # PRIMA del verdetto egress: con l'argomento vuoto il PDP calcolerebbe
+        # una destinazione inesistente e negherebbe un invio legittimo parlando
+        # di «destinazione ignota», che è il sintomo sbagliato.
+        await asyncio.to_thread(_fill_declared_defaults, name, arguments)
+        # Se il verbo di un pack si fa consegnare un FILE DI TOPIC, i byte li
+        # mette il gateway: la lettura (compartimento + audit) resta di qua
+        # anche quando l'implementazione è di là. Prima del gate e prima del
+        # verdetto egress, per la stessa ragione per cui `call_tool` riempie
+        # lassù il contesto: la card che l'owner legge, la destinazione che il
+        # PDP calcola e gli argomenti che il backend riceve devono descrivere
+        # la STESSA chiamata — e la card dice quanti byte stanno per uscire,
+        # non un percorso che il backend non vedrà mai.
+        #
+        # Qui e non in `call_tool` come il contesto, perché leggere il file
+        # ANNOTA il passaggio (`_note_crossing`), e l'accumulatore dell'audit
+        # lo apre `_call_tool_recorded`: più in alto l'evidenza di ciò che
+        # attraversa il confine si perderebbe in silenzio.
+        await asyncio.to_thread(_fill_declared_file, name, arguments)
 
         # M-gate: conferma umana su azioni sotto supervisione — UN SOLO meccanismo.
         # (a) VERBI gated (packs/mcp/agents/…): consenso one-shot per-verbo.
@@ -5035,7 +5324,9 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 await asyncio.to_thread(_note_crossing, _p, kind="attachment",
                                         trusted=True)
             try:
-                result = email.send(
+                # Off the event loop (#553): SMTP/IMAP are seconds of network.
+                result = await asyncio.to_thread(
+                    email.send,
                     arguments["to"],
                     arguments["subject"],
                     arguments["body"],
@@ -5048,21 +5339,25 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                     import shutil as _sh
                     _sh.rmtree(_tmpdir, ignore_errors=True)
         elif name == "email.folders":
-            result = email.folders(account=_email_account(arguments))
+            result = await asyncio.to_thread(email.folders,
+                                             account=_email_account(arguments))
         elif name == "email.list":
-            result = email.list_messages(
+            result = await asyncio.to_thread(
+                email.list_messages,
                 account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
                 limit=arguments.get("limit", 10),
             )
         elif name == "email.read":
-            result = email.read_message(
+            result = await asyncio.to_thread(
+                email.read_message,
                 arguments["email_id"],
                 account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
             )
         elif name == "email.get_attachment":
-            result = email.get_attachment(
+            result = await asyncio.to_thread(
+                email.get_attachment,
                 arguments["email_id"],
                 arguments["filename"],
                 account=_email_account(arguments),
@@ -5087,7 +5382,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 raise ValueError(
                     "non sono riuscito a ricavare il topic dal canale: passa "
                     "`tier`+`name`, oppure `dest` per scrivere nel tuo scratch")
-            raw, meta = email.get_attachment_bytes(
+            raw, meta = await asyncio.to_thread(
+                email.get_attachment_bytes,
                 arguments["email_id"],
                 arguments["filename"],
                 account=_email_account(arguments),
@@ -5105,7 +5401,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # Provenienza `untrusted` d'ufficio: un file introdotto da un verbo
                 # non ha nessuno da interrogare (#104 §3), e la posta in arrivo è
                 # la definizione di sorgente non controllata.
-                r = svc.put_file(_tier, _tname, fn, raw, "untrusted", by=_ag or "")
+                r = await asyncio.to_thread(svc.put_file, _tier, _tname, fn, raw,
+                                            "untrusted", by=_ag or "")
                 # E CONTAMINA il canale: è contenuto di terzi che entra adesso.
                 # Senza questo l'archiviazione sarebbe un modo di far entrare un
                 # PDF ostile senza lasciare traccia nel flag.
@@ -5121,7 +5418,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                     f.write(raw)
                 result = {"local_path": dest, "size": len(raw), **meta}
         elif name == "email.search":
-            result = email.search(
+            result = await asyncio.to_thread(
+                email.search,
                 arguments["query"],
                 account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
@@ -5131,7 +5429,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             _own = _agent_attachments(arguments.get("attachments"))
             for _p in _own:
                 await asyncio.to_thread(_note_crossing, _p, kind="attachment")
-            result = email.reply(
+            result = await asyncio.to_thread(
+                email.reply,
                 arguments["email_id"],
                 arguments["body"],
                 account=_email_account(arguments),
@@ -5154,8 +5453,15 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_profile(name, arguments, _ag)
         elif name.startswith("settings."):
             result = _dispatch_settings(name, arguments, _ag)
-        elif name.startswith("telegram."):
-            result = _dispatch_telegram(name, arguments)
+        elif name.startswith("telegram.") and not _is_packaged_verb(name):
+            # `and not _is_packaged_verb`: con l'interruttore su `pack` (#522)
+            # questi verbi li serve il backend MCP del pack, quindi la chiamata
+            # deve scendere fino al ramo `proxy.is_proxied`. Il ramo nativo
+            # resta qui finché la PR 3 lo porta via: due implementazioni dello
+            # stesso verbo non girano mai insieme — è il profilo a dire quale.
+            # `to_thread` è di #553: `_dispatch_telegram` fa rete (getUpdates,
+            # sendMessage) e fuori dal loop ci deve restare.
+            result = await asyncio.to_thread(_dispatch_telegram, name, arguments)
         elif name.startswith("memory."):
             result = _dispatch_memory(name, arguments)
         elif name in _GITHUB_NATIVE_NAMES:
@@ -5165,13 +5471,13 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             # scendono fino al ramo `proxy.is_proxied`, che è il loro.
             result = await asyncio.to_thread(_dispatch_github, name, arguments)
         elif name.startswith("gdrive."):
-            result = _dispatch_gdrive(name, arguments)
+            result = await asyncio.to_thread(_dispatch_gdrive, name, arguments)
         elif name.startswith("gcalendar."):
-            result = _dispatch_gcalendar(name, arguments)
+            result = await asyncio.to_thread(_dispatch_gcalendar, name, arguments)
         elif name.startswith("gdocs."):
-            result = _dispatch_gdocs(name, arguments)
+            result = await asyncio.to_thread(_dispatch_gdocs, name, arguments)
         elif name.startswith("gsheets."):
-            result = _dispatch_gsheets(name, arguments)
+            result = await asyncio.to_thread(_dispatch_gsheets, name, arguments)
         elif name.startswith(("egress.", "ingress.")):
             result = _dispatch_egress_admin(name, arguments)
         elif name.startswith("runtime."):

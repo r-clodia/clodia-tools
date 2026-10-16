@@ -71,6 +71,9 @@ That is a connector which only needs a credential — image generation is one.
 | `tools_card` | no | what the Tools page shows: `setup_label`, `status_verb`, `test_verb`, `docs_url`, `blurb`, `scope`, `icon` |
 | `services` | no | long-running processes, see #515 |
 | `storage_remote` | no | topic storage backend the pack provides, see #524 |
+| `context` | no | call facts the gateway fills in, see below |
+| `files` | no | arguments that name a TOPIC FILE, which the gateway reads and delivers as bytes |
+| `defaults` | no | arguments the gateway fills **only when omitted**, see below |
 
 `blurb`, `scope` and `icon` (#520) are the card's COPY and its glyph. The
 drawing is a frontend asset — a logo is an SVG file, not gateway data — but the
@@ -242,6 +245,111 @@ Without the distinction, the mailbox action would take the address to authorise
 from the request body, and a whitelist written by whoever is subject to it is not
 a whitelist. A pack may *point at* an option set, never define one.
 
+### `context[]`
+
+Facts about the call in progress that the **gateway** fills in, one row per
+argument (`arg` + `value`). `value` is one of a closed list — today `channel`
+(the room the call comes from, `TIER/name`) and `agent` (who is calling).
+
+```
+context:
+  - arg: channel
+    value: channel
+  - arg: agent
+    value: agent
+```
+
+This is not a convenience. A native verb reads both from the process: the
+channel is a **signed claim** and the agent an authenticated identity, so no
+caller can lie about either. A pack's MCP server has neither, and if the agent
+passed them they would be ordinary arguments — forgeable — and «send this to
+this topic's chat» would become «send this to whichever chat I name», which is
+the defect that produced the messages to the wrong group on 23 Sep 2026.
+
+So the gateway fills them, and **overwrites** whatever the caller sent. It does
+not prefer the caller's value, and it does not fall back to it: a fallback is
+the same forgery with one more step, reachable by calling from wherever the
+gateway has no answer. When the gateway genuinely has no answer — there is no
+channel outside a room — the argument is **removed** rather than blanked, so
+the connector can tell «I don't know» from «it is empty».
+
+The rows apply to every verb of the connector's namespace, not only to the ones
+listed in `verbs:`: an inbound verb declares no destination and still needs to
+know who is asking. They belong to the pack that **owns the vocabulary**; a
+contributor (`extends`) may not declare them.
+
+An `arg` that a verb mapping reads its destination from is **refused**. A
+destination is a property of the call — it is what the owner reads on the gate
+card and what the whitelist compares — and letting the manifest write it would
+mean the manifest decides where the call goes. It is also how the PDP would be
+disarmed in silence: a fact the gateway has no answer for empties the argument,
+and an extractor with no value is a verb with no declared destination.
+
+### `defaults[]`
+
+```
+defaults:
+  - verb: telegram.send
+    arg: chat_id
+    value: binding      # the chat bound to the calling topic
+```
+
+The gateway fills these arguments **only when the caller left them out**, and
+that rule is the whole difference from `context:`. A context is an *identity*
+and is always overwritten, because «the caller already set it» is the attack. A
+default is a convenience — «send it to this topic's chat» — and an explicit
+value from the caller has to win, or you could no longer write to any chat other
+than the bound one.
+
+Per **verb**, not per namespace: `telegram.inbox` has no chat to fill, and
+filling it anyway would hand the backend an argument its schema does not
+declare.
+
+`binding` is the whole list of values. It resolves through the gateway's
+bindings registry — the one the topic's button writes, which holds every
+connector's bindings — and that is the point: a pack process reading it itself
+would also be reading everybody else's, with the gateway's uid.
+
+A declared default that cannot be resolved is an **explained error**, not an
+argument left empty: empty, the PDP would compute a destination that does not
+exist and refuse the send talking about «unknown destination», which is the
+wrong symptom for «this topic has no chat connected».
+
+### `files[]`
+
+```
+files:
+  - verb: telegram.send_file
+    path_arg: path            # what the caller names
+    bytes_arg: content_b64    # where the gateway puts the bytes
+    name_arg: filename        # where it puts the basename
+    tier_arg: tier            # optional: explicit topic
+    topic_arg: name
+    chat_arg: chat_id         # optional: the topic bound to this chat
+```
+
+Some verbs act on a file that lives in a topic. **Reading it is platform work,
+not connector work**: the compartment (the caller must be a participant of that
+topic) and the audit of what crosses the boundary hang off that read. A pack
+backend reading the topics' filesystem itself would walk past both, and the path
+is chosen by the caller.
+
+So the pack says *which arguments* are the path, the bytes and the name; the
+gateway resolves the topic, checks the membership, reads, records the crossing
+and fills in the two arguments. The backend receives bytes and never sees a
+path — the arguments that said *where to read* are removed once they have done
+their job.
+
+The topic is resolved in the order the native code used: `tier_arg`+`topic_arg`
+when the caller passes both, else the topic bound to the chat in `chat_arg`
+(the bindings registry belongs to the gateway, not to the pack), else the
+channel the call comes from.
+
+`verb` must be inside the connector's namespace — the same rule as `verbs:`, for
+the same reason: a pack does not get somebody else's topic files delivered. A
+**builtin** manifest declaring `files` is refused: the gateway reads a topic
+file from the inside.
+
 ### `services[]`
 
 The shape #515 fixed, parsed here so the supervisor consumes one format instead
@@ -327,6 +435,27 @@ it. Letting the pack win would mean an installed manifest redefining what
 `mailto:` means while the native implementation is still the thing doing the
 sending. Each migration deletes its file in the change that adds the pack.
 
+**The switch, while a migration is in flight (#522).** Deleting the file is the
+end of a migration, not its beginning: in between, the owner of one instance
+turns the connector over to the pack and watches real traffic. That is
+`profile.yaml`:
+
+```
+connectors:
+  telegram: pack        # native (default) | pack
+```
+
+With `pack`, three things happen together, and they are three faces of one
+statement — *the gateway no longer implements this*: the builtin file above is
+left out of the registry, the native verbs of that namespace leave the tool
+catalogue and the dispatch, and the namespace and its vault prefix stop being
+reserved, so the pack's declaration is finally held instead of being refused
+for collision. Nothing is shared and nothing runs twice: a connector has one
+implementation per instance, and the profile says which.
+
+Absent, unreadable or misspelled, the file means `native`. A migration is
+switched on; it is never suffered.
+
 ---
 
 ## Examples
@@ -384,6 +513,27 @@ connectors:
         scheme: tg
         arg: chat_id
         dtype: telegram
+    # `chat_id` omesso = la chat legata al topic da cui si chiama. Lo risolve
+    # il gateway, che è l'unico a tenere il registro dei binding; un esplicito
+    # del chiamante vince, se no non si potrebbe più scrivere altrove.
+    defaults:
+      - verb: telegram.send
+        arg: chat_id
+        value: binding
+      - verb: telegram.send_file
+        arg: chat_id
+        value: binding
+    # `telegram.send_file` manda un file che sta in un topic. Il path lo nomina
+    # l'agente, i byte li mette il gateway: leggere un file di topic è lavoro
+    # suo — ci stanno attaccati il compartimento e l'audit di ciò che esce.
+    files:
+      - verb: telegram.send_file
+        path_arg: path
+        bytes_arg: content_b64
+        name_arg: filename
+        tier_arg: tier
+        topic_arg: name
+        chat_arg: chat_id
     # No `telegram.read`: today no Telegram read goes through
     # `_RESOURCE_READ_VERBS`, so declaring one would add a check that does not
     # exist — inside a migration (#522) whose whole point is parity. What the
@@ -407,6 +557,15 @@ connectors:
     tools_card:
       setup_label: Connect a bot
       status_verb: telegram.status
+    # Who is calling, and from which room. The native verbs read both from the
+    # process — the signed channel claim and the authenticated agent — and a
+    # pack's MCP server has neither. Declared here, filled by the gateway, and
+    # overwritten even when the caller sent them: see `context[]`.
+    context:
+      - arg: channel
+        value: channel
+      - arg: agent
+        value: agent
 
   - id: mail
     manifest_version: 1
