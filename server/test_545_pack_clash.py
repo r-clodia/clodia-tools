@@ -82,21 +82,66 @@ class ClashKeepsTheIncumbentTests(unittest.TestCase):
 
 
 class InstallOrderTests(unittest.TestCase):
-    """`manifests()` answers in install order — oldest `pack.yaml` first."""
+    """`manifests()` answers in install order: when the gateway FIRST saw each
+    pack, not the mtime of `pack.yaml` (review of clodia-tools#369)."""
+
+    def _root(self, d):
+        from pathlib import Path
+        return Path(d) / "packs"
+
+    def _install(self, root, name, when):
+        p = root / name
+        p.mkdir(parents=True)
+        (p / "pack.yaml").write_text(f"name: {name}\n", encoding="utf-8")
+        with patch("time.time", return_value=float(when)):
+            resolved._first_seen([name])
 
     def test_manifests_are_returned_oldest_first(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d, \
+                patch.object(resolved, "_DATA", Path(d)):
+            root = self._root(d)
+            self._install(root, "zz-old", 1000)
+            self._install(root, "aa-new", 2000)
+            self.assertEqual(list(resolved.manifests()), ["zz-old", "aa-new"])
+
+    def test_rewriting_the_incumbent_does_not_make_it_the_newcomer(self):
+        """The defect of the first version: «Finish setup» or a flow approval
+        rewrites `pack.yaml`; with mtime ordering the incumbent became the
+        latest arrival and lost its namespace to the intruder."""
         import os
         import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            from pathlib import Path
-            root = Path(d) / "packs"
-            for name, when in (("zz-old", 1000), ("aa-new", 2000)):
-                p = root / name
-                p.mkdir(parents=True)
-                (p / "pack.yaml").write_text(f"name: {name}\n", encoding="utf-8")
-                os.utime(p / "pack.yaml", (when, when))
-            with patch.object(resolved, "_DATA", Path(d)):
-                self.assertEqual(list(resolved.manifests()), ["zz-old", "aa-new"])
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d, \
+                patch.object(resolved, "_DATA", Path(d)):
+            root = self._root(d)
+            self._install(root, "mail-pack", 1000)
+            self._install(root, "evil-pack", 2000)
+            os.utime(root / "mail-pack" / "pack.yaml", (3000, 3000))
+            (root / "mail-pack" / "pack.yaml").write_text(
+                "name: mail-pack\nsetup_done: true\n", encoding="utf-8")
+            self.assertEqual(list(resolved.manifests()), ["mail-pack", "evil-pack"])
+            self.assertEqual(resolved.seniority(),
+                             {"mail-pack": 1000.0, "evil-pack": 2000.0})
+
+    def test_packs_first_seen_together_have_no_incumbent(self):
+        """Same stamp (first boot, or dropped in together): a clash between
+        them drops both sides — no order is invented."""
+        from server.connectors.manifest import ManifestError
+        calls = {"n": 0}
+
+        def fake_build(packs, builtin=()):
+            calls["n"] += 1
+            if {"a-pack", "b-pack"} <= set(packs):
+                e = ManifestError("namespace 'x' clash")
+                e.packs = ("a-pack", "b-pack")
+                raise e
+            return resolved.Registry()
+        with patch.object(resolved, "build_registry", fake_build):
+            _reg, dropped, packs = resolved._build_isolated(
+                {}, {"a-pack": {}, "b-pack": {}}, {"a-pack": 5.0, "b-pack": 5.0})
+        self.assertEqual(sorted(packs), ["a-pack", "b-pack"])
 
 
 if __name__ == "__main__":  # pragma: no cover

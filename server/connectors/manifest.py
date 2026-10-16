@@ -1252,9 +1252,16 @@ def _docs_url(raw: Any, where: str) -> str:
     value = _text(raw, where, required=False)
     if not value:
         return ""
-    parts = urlsplit(value)
-    if not value.startswith("https://") or parts.scheme != "https" \
-            or not parts.hostname or "@" in parts.netloc \
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+    except ValueError:
+        # `https://[` raises here, and a ValueError escaping the parser used
+        # to empty the WHOLE registry instead of refusing this one pack
+        # (review of clodia-tools#369).
+        parts, host = None, None
+    if parts is None or not value.startswith("https://") or parts.scheme != "https" \
+            or not host or "@" in parts.netloc \
             or any(c.isspace() or not c.isprintable() for c in value):
         raise ManifestError(
             # `repr`: the refused value may carry control characters, and a log

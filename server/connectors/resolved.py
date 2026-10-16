@@ -78,26 +78,83 @@ def _manifest_files() -> list[Path]:
     to mean something. `sorted()` by path meant «whoever sorts first», which is
     not a fact about the instance.
 
-    SHORTCUT: install time is the mtime of `pack.yaml`. It holds while that file
-    is only written by an install or an update — and an update of the incumbent
-    does not change who was there first, because the other pack's file is not
-    touched. It stops holding the day a restore/rsync rewrites every manifest
-    with the same timestamp, or a `touch` reorders them: then the agent-server
-    has to stamp an `installed_at` in the manifest at install time and this
-    reads that instead, with the mtime as the fallback for the files already on
-    disk.
+    Install time is NOT the mtime of `pack.yaml` (review of clodia-tools#369):
+    the agent-server rewrites that file on setup, flow approval and update,
+    so one click on the incumbent made it the «newcomer» and handed its
+    namespace to the intruder. It is the moment the GATEWAY first saw the pack
+    (`_first_seen`), stamped once in the gateway's own state and never moved.
     """
     try:
         files = list((_DATA / PACKS_DIR).glob("*/pack.yaml"))
     except OSError:  # unreadable data dir: no connectors, never an exception
         return []
+    seen = _first_seen([p.parent.name for p in files])
+    return sorted(files, key=lambda p: (seen.get(p.parent.name, 0.0), str(p)))
 
-    def _when(p: Path) -> tuple:
+
+#: Packs first seen in this process when the state file cannot be written.
+_SEEN_MEMORY: dict[str, float] = {}
+
+
+def _first_seen_path() -> Path:
+    """In the gateway-only state dir when there is one (#80), else next to
+    the packs' data dir — never in a directory the tests did not choose."""
+    if os.environ.get("CLODIA_TOOLS_STATE_DIR"):
+        from .. import state_paths
+        return state_paths.state_path("connectors-first-seen.json")
+    return _DATA / "clodia-tools-connectors-first-seen.json"
+
+
+def _first_seen(dirs: list[str]) -> dict[str, float]:
+    """`{pack dir: when the gateway first saw it}`, stamping the new ones now.
+
+    Never updated afterwards, whatever happens to `pack.yaml`. Packs seen for
+    the first time in the same call share the same stamp — the first boot of
+    an instance, or two packs dropped in together — and a clash between equal
+    stamps drops both sides (`_build_isolated`): no order is invented.
+    """
+    import json
+    import time
+    path = _first_seen_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data = {**_SEEN_MEMORY, **data}
+    now = time.time()
+    new = [d for d in dirs if d not in data]
+    if new:
+        for d in new:
+            data[d] = now
         try:
-            return (p.stat().st_mtime_ns, str(p))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=1, sort_keys=True),
+                           encoding="utf-8")
+            os.replace(tmp, path)
         except OSError:
-            return (0, str(p))
-    return sorted(files, key=_when)
+            LOG.warning("connectors: %s non scrivibile, anzianità in memoria", path)
+        _SEEN_MEMORY.update({d: data[d] for d in new})
+    return {d: float(data.get(d, 0.0)) for d in dirs}
+
+
+def seniority() -> dict[str, float]:
+    """`{pack name: first seen}` for the installed packs (see `_first_seen`)."""
+    import yaml
+    out: dict[str, float] = {}
+    files = _manifest_files()
+    seen = _first_seen([p.parent.name for p in files])
+    for path in files:
+        try:
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        name = str((loaded or {}).get("name") or path.parent.name) \
+            if isinstance(loaded, Mapping) else path.parent.name
+        out[name] = seen.get(path.parent.name, 0.0)
+    return out
 
 
 def _signature(paths: list[Path]) -> tuple:
@@ -278,7 +335,8 @@ def _builtin_registry() -> Registry:
     return build_registry(own, builtin=tuple(own), reserved=frozenset())
 
 
-def _build_isolated(own: dict, installed: dict
+def _build_isolated(own: dict, installed: dict,
+                    seniority: Mapping[str, float] | None = None
                     ) -> tuple[Registry, list[str], list[str]]:
     """The registry with every pack that can be held, and why the others not.
 
@@ -299,7 +357,10 @@ def _build_isolated(own: dict, installed: dict
     owner can undo. `installed` is in install order (see `manifests`).
     """
     remaining = dict(installed)
-    order = {p: i for i, p in enumerate(installed)}
+    # When the packs arrived: the gateway's own first-seen stamps if known,
+    # else the iteration order (tests build the dict in install order).
+    order = {p: float((seniority or {}).get(p, i)) if seniority else float(i)
+             for i, p in enumerate(installed)}
     dropped: list[str] = []
     while True:
         try:
@@ -312,7 +373,11 @@ def _build_isolated(own: dict, installed: dict
             if len(culprits) > 1:
                 # A clash: the latest arrival loses, the others stay. One per
                 # round — a second clash among those left raises again here.
-                culprits = [max(culprits, key=lambda p: order.get(p, 0))]
+                # Arrivals with the SAME stamp are all dropped: between them
+                # there is no incumbent, and inventing one would be the
+                # «whoever sorts first» this replaced (review of #369).
+                ultimo = max(order.get(p, 0.0) for p in culprits)
+                culprits = [p for p in culprits if order.get(p, 0.0) == ultimo]
             for p in culprits:
                 remaining.pop(p)
                 dropped.append(f"pack '{p}' refused, its connectors are "
@@ -429,7 +494,11 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
         own = _builtin.manifests()
         installed = {k: v for k, v in manifests().items() if k not in own}
         owners = backend_owners(installed)
-        reg, dropped, dropped_packs = _build_isolated(own, installed)
+        try:
+            anz = seniority()
+        except Exception:  # noqa: BLE001 — no stamps: iteration order
+            anz = None
+        reg, dropped, dropped_packs = _build_isolated(own, installed, anz)
         refused = list(dropped) + list(reg.refused)
         # Namespace di backend MCP montati: riservati come quelli nativi, salvo
         # il server MCP che il pack monta come proprio. Il connettore che ne

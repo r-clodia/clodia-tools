@@ -442,3 +442,14 @@ class DeclarationNotGrantTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class DocsUrlParseErrorTests(unittest.TestCase):
+    """Review of clodia-tools#369: `urlsplit("https://[")` raises ValueError,
+    which escaped the parser and emptied the whole registry."""
+
+    def test_an_unparseable_docs_url_is_a_manifest_error(self):
+        from .manifest import ManifestError, _docs_url
+        for bad in ("https://[", "https://[::1", "https://a]"):
+            with self.subTest(bad=bad), self.assertRaises(ManifestError):
+                _docs_url(bad, "pack 'x'.tools_card.docs_url")

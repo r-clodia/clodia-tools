@@ -215,6 +215,11 @@ class IsolationTests(unittest.TestCase):
             json.dumps({"name": pack, "connectors": list(connectors)}),
             encoding="utf-8")
         self._quando = getattr(self, "_quando", 1_000_000) + 60
+        # Install order is when the GATEWAY first saw the pack (review
+        # of clodia-tools#369), stamped here instead of hoped for.
+        from unittest.mock import patch as _patch
+        with _patch("time.time", return_value=float(self._quando)):
+            resolved._first_seen([pack])
         os.utime(manifest, (self._quando, self._quando))
 
     def _ids(self):
