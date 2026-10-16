@@ -21,6 +21,7 @@ from .manifest import (  # noqa: F401
     Registry,
     Scheme,
     Service,
+    Transport,
     VerbMapping,
     build_registry,
     check_namespace,

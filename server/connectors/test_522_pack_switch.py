@@ -679,7 +679,10 @@ class NoVerbIsLeftBehindTests(_Istanza):
                    if n.startswith("telegram.")]
         # Only the binding verbs stay with the gateway: they write its own
         # binding registry, never a pack's business (review of logic#527).
-        self.assertEqual(sorted(rimasti), sorted(main._GATEWAY_RETAINED_VERBS))
+        # (`email.*` is retained too since #523, in its own namespace.)
+        self.assertEqual(sorted(rimasti),
+                         sorted(v for v in main._GATEWAY_RETAINED_VERBS
+                                if v.startswith("telegram.")))
         self.assertTrue(main._is_packaged_verb("telegram.roster"))
 
     def test_the_binding_verbs_stay_served_by_the_gateway(self):

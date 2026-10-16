@@ -766,6 +766,25 @@ class Credential:
 
 
 @dataclass(frozen=True)
+class Transport:
+    """The pack's MCP tool that carries out a gateway verb's I/O (#523).
+
+    Mail cannot follow the Telegram pattern, where the pack implements the
+    verbs and the gateway only fills their context: before any byte of a
+    mailbox comes back, the gateway takes decisions that belong to the
+    reference monitor — which mailbox this channel may use, strict ingress
+    (#503), topic attachments in and out. So the verbs stay in the gateway and
+    only the TRANSPORT moves: `backend` is an MCP backend the pack mounts,
+    `tool` the one tool of it the gateway calls, with that call's credential
+    and nothing else. Agents never see that backend (`resolved.
+    transport_backends`): it is a socket of the gateway, not a verb.
+    """
+
+    backend: str
+    tool: str
+
+
+@dataclass(frozen=True)
 class Provider:
     """One implementation of a scheme vocabulary (Gmail and IMAP for mail)."""
 
@@ -775,6 +794,9 @@ class Provider:
     credential: Credential | None = None
     status_verb: str = ""
     test_verb: str = ""
+    #: Where the gateway sends the transport operations of this provider when
+    #: the connector is in `pack` position (`Transport`, #523). Pack-only.
+    transport: Transport | None = None
 
 
 @dataclass(frozen=True)
@@ -1067,14 +1089,21 @@ def core_namespaces() -> frozenset[str]:
     (#518) without a cycle, and so that a namespace added to the gateway is
     reserved here the same day it exists, without anybody remembering to.
     """
-    from ..main import _GATEWAY_RETAINED_VERBS, all_native_verb_names
+    from ..main import (_GATEWAY_RETAINED_VERBS, _packaged_namespaces,
+                        all_native_verb_names)
 
-    # The binding verbs the gateway keeps in a packaged namespace (they write
-    # the gateway's own binding registry) do not make the namespace the
-    # gateway's again: otherwise keeping them would refuse the pack connector.
+    # The verbs the gateway keeps in a packaged namespace (Telegram's binding
+    # verbs, which write the gateway's own binding registry; every `email.*`
+    # verb, whose transport alone moves to the pack — #523) do not make the
+    # namespace the gateway's again: otherwise keeping them would refuse the
+    # pack connector. Only when the namespace IS packaged, though: in `native`
+    # position `email` has nothing but retained verbs, and dropping them there
+    # would leave `email` claimable by any pack while the gateway serves it.
+    packaged = _packaged_namespaces()
     return frozenset(
         name.split(".", 1)[0] for name in all_native_verb_names()
-        if "." in name and name not in _GATEWAY_RETAINED_VERBS
+        if "." in name and not (name in _GATEWAY_RETAINED_VERBS
+                                and name.split(".", 1)[0] in packaged)
     ) | reserved_namespaces()
 
 
@@ -1225,9 +1254,45 @@ def _parse_credential(raw: Any, where: str) -> Credential:
     )
 
 
-def _parse_provider(raw: Any, where: str, *, pack: str) -> Provider:
+def _parse_transport(raw: Any, where: str) -> Transport:
+    """`transport: {backend, tool}` — both names, never a command or a URL.
+
+    The backend is NAMED, not described: what it runs and with which secrets
+    is the mount's business (`mcp_backends`, stamped with the pack that
+    mounted it). A manifest that could spell a command here would be a second,
+    unreviewed way to mount a process. Whether the named backend is really the
+    pack's own is checked when it is used (`resolved.transport_for`), because
+    a mount can change after the manifest was read.
+    """
+    data = _mapping(raw, where)
+    unknown = sorted(set(data) - {"backend", "tool"})
+    if unknown:
+        raise ManifestError(
+            f"{where}: unknown keys {', '.join(unknown)}; a transport names a "
+            f"mounted MCP backend and one of its tools, nothing else")
+    return Transport(
+        backend=_matching(_text(data.get("backend"), f"{where}.backend"), _ID,
+                          f"{where}.backend"),
+        tool=_matching(_text(data.get("tool"), f"{where}.tool"), _ARG,
+                       f"{where}.tool"))
+
+
+def _parse_provider(raw: Any, where: str, *, pack: str,
+                    builtin: bool = False) -> Provider:
     data = _mapping(raw, where)
     cred = data.get("credential")
+    transport = None
+    if data.get("transport") is not None:
+        if builtin:
+            # A gateway manifest describes what the GATEWAY implements: its
+            # transport is in-process by definition, and a builtin naming a
+            # backend would route a native verb's credentials to whatever is
+            # mounted under that name.
+            raise ManifestError(
+                f"{where}.transport: a gateway manifest cannot declare a "
+                f"transport — only a PACK provider hands the gateway's I/O to "
+                f"an MCP backend")
+        transport = _parse_transport(data.get("transport"), f"{where}.transport")
     return Provider(
         id=_matching(_text(data.get("id"), f"{where}.id"), _ID, f"{where}.id"),
         label=_text(data.get("label"), f"{where}.label", required=False)
@@ -1237,6 +1302,7 @@ def _parse_provider(raw: Any, where: str, *, pack: str) -> Provider:
         status_verb=_text(data.get("status_verb"), f"{where}.status_verb",
                           required=False),
         test_verb=_text(data.get("test_verb"), f"{where}.test_verb", required=False),
+        transport=transport,
     )
 
 
@@ -1644,7 +1710,7 @@ def parse_connector(raw: Any, *, pack: str,
             f"nothing, so it is an empty connector")
 
     providers = tuple(
-        _parse_provider(p, f"{where}.providers[{i}]", pack=pack)
+        _parse_provider(p, f"{where}.providers[{i}]", pack=pack, builtin=builtin)
         for i, p in enumerate(_seq(data.get("providers"), f"{where}.providers")))
     seen_providers: set[str] = set()
     for p in providers:
