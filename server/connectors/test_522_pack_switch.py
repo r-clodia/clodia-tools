@@ -431,7 +431,7 @@ class ContextIsTheGatewaysToFillTests(_Istanza):
         from ..whitelist import (reset_current_chat, set_current_chat)
         tok = set_current_chat("SEAL-1/software-house")
         try:
-            with patch.object(main, "agent_name_safe", return_value="messaggero"):
+            with patch.object(main, "agent_name", return_value="messaggero"):
                 detto = main._fill_declared_context(
                     "telegram.send", {"text": "ciao", "channel": "SEAL-3/x",
                                       "agent": "clodia"})
@@ -439,6 +439,37 @@ class ContextIsTheGatewaysToFillTests(_Istanza):
             reset_current_chat(tok)
         self.assertEqual(detto["channel"], "SEAL-1/software-house")
         self.assertEqual(detto["agent"], "messaggero")
+
+    def test_without_identity_the_agent_argument_is_removed_not_forged(self):
+        """Review of #374: `agent_name_safe()` answers "?", which would have
+        become the caller's identity. No identity → the argument goes."""
+        from .. import main
+
+        def _none():
+            raise PermissionError("identità agente non impostata")
+        with patch.object(main, "agent_name", _none):
+            detto = main._fill_declared_context(
+                "telegram.lease_acquire", {"chat_id": "1", "agent": "messaggero"})
+        self.assertNotIn("agent", detto)
+
+    def test_a_refused_pack_connector_refuses_its_verbs(self):
+        """Review of #374: comms-pack's connector refused (bad manifest) while
+        the switch says `pack` and its backend is still mounted. The call must
+        not reach the pack with the caller's `agent` — fail closed."""
+        import asyncio
+        from .. import main
+        broken = _comms_pack()
+        broken["connectors"][0]["context"] = [{"arg": "agent", "value": "bogus"}]
+        (self.dir / "packs" / "comms-pack" / "pack.yaml").write_text(
+            json.dumps(broken), encoding="utf-8")
+        resolved.invalidate()
+        self.assertFalse(resolved.held_by_pack("telegram"))
+        out = asyncio.run(main.call_tool("telegram.lease_acquire",
+                                         {"chat_id": "1", "agent": "messaggero"}))
+        self.assertTrue(out[0].text.startswith("DENIED:"), out[0].text)
+
+    def test_a_held_pack_connector_is_served(self):
+        self.assertTrue(resolved.held_by_pack("telegram"))
 
     def test_a_native_verb_is_left_exactly_as_it_was(self):
         from .. import main
