@@ -306,6 +306,16 @@ class Perimeter:
         from .. import egress
         return bool(egress.is_vetted_source(uri, scope))
 
+    def google_mail_account_exists(self, account: str) -> bool:
+        """Whether a Google mail credential (`google_<acct>`/`gmail_<acct>`)
+        EXISTS for `account` — a yes/no on the NAME, never its content. Lets
+        a mail component refuse such an account while google-pack is down,
+        instead of silently serving a same-named IMAP mailbox with another
+        sender address (review of clodia-tools#384)."""
+        from .. import vault
+        a = str(account or "")
+        return any(vault.has_credential(f"{p}{a}") for p in ("google_", "gmail_"))
+
     def legacy_mail_accounts(self) -> dict[str, str | None]:
         """`{account: address | None}` of the LEGACY mail accounts of the
         gateway's `secrets/email_config.json`: names and addresses, never the
