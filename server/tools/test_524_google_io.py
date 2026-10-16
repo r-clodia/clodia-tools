@@ -132,7 +132,7 @@ class WireParityTests(_TempDir):
     def sent(self, method_path, api="drive", version="v3", answer=b"{}", **kw):
         wire = _Wire(_Resp(answer))
         with patch.object(google_io, "access_token", lambda _a: TOKEN), \
-                patch.object(google_io.urllib.request, "urlopen", wire):
+                patch.object(google_io, "_open", wire):
             out = google_io.call("conto", api, version, method_path, **kw)
         self.assertEqual(len(wire.sent), 1)
         req = google_io.request(api, version, method_path, **kw)
@@ -314,7 +314,7 @@ class RequestTests(unittest.TestCase):
 class TransportTests(_TempDir):
     def run_call(self, wire, *a, **kw):
         with patch.object(google_io, "access_token", lambda _a: TOKEN), \
-                patch.object(google_io.urllib.request, "urlopen", wire):
+                patch.object(google_io, "_open", wire):
             return google_io.call("conto", "drive", "v3", *a, **kw)
 
     def test_an_empty_answer_is_an_empty_dict(self):
@@ -342,7 +342,7 @@ class TransportTests(_TempDir):
         forgotten = []
         with patch.object(google_io, "access_token", lambda _a: next(tokens)), \
                 patch.object(google_io, "forget", lambda a=None: forgotten.append(a)), \
-                patch.object(google_io.urllib.request, "urlopen", wire):
+                patch.object(google_io, "_open", wire):
             out = google_io.call("conto", "drive", "v3", "GET files/{fileId}",
                                  params={"fileId": "F"})
         self.assertEqual(out, {"id": "F"})
@@ -392,7 +392,7 @@ class TokenTests(_TempDir):
     def test_refresh_form_and_cache(self):
         wire = _Wire(_Resp(json.dumps({"access_token": "AT1", "expires_in": 3599,
                                        "token_type": "Bearer"}).encode()))
-        with patch.object(google_io.urllib.request, "urlopen", wire):
+        with patch.object(google_io, "_open", wire):
             self.assertEqual(google_io.access_token("conto"), "AT1")
             self.assertEqual(google_io.access_token("conto"), "AT1")
         self.assertEqual(len(wire.sent), 1, "the second call is served from the cache")
@@ -409,7 +409,7 @@ class TokenTests(_TempDir):
         wire = _Wire(_Resp(b'{"access_token": "AT1", "expires_in": 3600}'),
                      _Resp(b'{"access_token": "AT2", "expires_in": 3600}'))
         now = [1000.0]
-        with patch.object(google_io.urllib.request, "urlopen", wire), \
+        with patch.object(google_io, "_open", wire), \
                 patch.object(google_io.time, "monotonic", lambda: now[0]):
             self.assertEqual(google_io.access_token("conto"), "AT1")
             now[0] += 3600 - google_io.TOKEN_MARGIN_S - 1
@@ -420,7 +420,7 @@ class TokenTests(_TempDir):
     def test_forget_drops_the_cached_token(self):
         wire = _Wire(_Resp(b'{"access_token": "AT1", "expires_in": 3600}'),
                      _Resp(b'{"access_token": "AT2", "expires_in": 3600}'))
-        with patch.object(google_io.urllib.request, "urlopen", wire):
+        with patch.object(google_io, "_open", wire):
             google_io.access_token("conto")
             google_io.forget("conto")
             self.assertEqual(google_io.access_token("conto"), "AT2")
@@ -428,7 +428,7 @@ class TokenTests(_TempDir):
     def test_a_refused_refresh_names_the_cause_and_no_secret(self):
         wire = _Wire(_http_error(400, {"error": "invalid_grant",
                                        "error_description": "Token has been expired or revoked."}))
-        with patch.object(google_io.urllib.request, "urlopen", wire), \
+        with patch.object(google_io, "_open", wire), \
                 self.assertRaises(google_io.RefreshError) as ctx:
             google_io.access_token("conto")
         msg = str(ctx.exception)
@@ -452,7 +452,7 @@ class TokenTests(_TempDir):
         self.addCleanup(root.setLevel, old)
         wire = _Wire(_Resp(b'{"access_token": "AT-secret", "expires_in": 3600}'),
                      _Resp(b'{"id": "F"}'))
-        with patch.object(google_io.urllib.request, "urlopen", wire):
+        with patch.object(google_io, "_open", wire):
             google_io.call("conto", "drive", "v3", "GET files/{fileId}",
                            params={"fileId": "F"})
         for line in records:
@@ -462,7 +462,7 @@ class TokenTests(_TempDir):
     def test_the_cache_deadline_uses_a_monotonic_clock(self):
         """Wall-clock jumps (NTP, suspend) must not extend a token's life."""
         wire = _Wire(_Resp(b'{"access_token": "AT1", "expires_in": 3600}'))
-        with patch.object(google_io.urllib.request, "urlopen", wire), \
+        with patch.object(google_io, "_open", wire), \
                 patch.object(google_io.time, "time", lambda: 10 ** 12):
             google_io.access_token("conto")
         _tok, deadline = google_io._tokens["google_conto"]
@@ -471,3 +471,42 @@ class TokenTests(_TempDir):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TokenStaysOnItsHostTests(unittest.TestCase):
+    """Review of #380: urllib forwarded `Authorization` on a redirect to any
+    host. A cross-host (or non-https) redirect must arrive without it."""
+
+    def _redir(self, old, new):
+        import io
+        from server.tools import google_io as G
+        req = urllib.request.Request(old, headers={"Authorization": "Bearer ya29.x"})
+        h = G._NoTokenAcrossHosts()
+        fp = io.BytesIO(b"")
+        return h.redirect_request(req, fp, 302, "Found", {}, new)
+
+    def test_cross_host_drops_the_token(self):
+        new = self._redir("https://www.googleapis.com/drive/v3/files",
+                          "https://evil.example/x")
+        self.assertNotIn("Authorization", {k.title() for k in new.headers})
+
+    def test_downgrade_to_http_drops_the_token(self):
+        new = self._redir("https://www.googleapis.com/a", "http://www.googleapis.com/a")
+        self.assertNotIn("Authorization", {k.title() for k in new.headers})
+
+    def test_same_host_keeps_it(self):
+        new = self._redir("https://www.googleapis.com/a", "https://www.googleapis.com/b")
+        self.assertEqual(new.headers.get("Authorization"), "Bearer ya29.x")
+
+
+class TokenCacheFollowsTheVaultTests(unittest.TestCase):
+    def test_redepositing_a_google_credential_drops_the_cached_tokens(self):
+        from server.tools import google_io as G
+        from server import vault
+        G._tokens["google_x"] = ("ya29.old", 10**12)
+        vault._forget_google_token("google_x")
+        self.assertNotIn("google_x", G._tokens)
+        G._tokens["google_x"] = ("ya29.old", 10**12)
+        vault._forget_google_token("telegram_bot_token")
+        self.assertIn("google_x", G._tokens)
+        G._tokens.clear()

@@ -227,7 +227,7 @@ def _send(token: str, req: dict) -> Union[dict, bytes]:
     shown = f"{root}{req['path']}"          # no query string in errors or logs
     r = urllib.request.Request(url, data=data, method=req["method"], headers=headers)
     try:
-        with urllib.request.urlopen(r, timeout=TIMEOUT_S) as resp:
+        with _open(r, timeout=TIMEOUT_S) as resp:
             content = resp.read()
     except urllib.error.HTTPError as e:
         try:
@@ -258,6 +258,36 @@ def _reason(content: bytes, fallback: Any) -> str:
 # ---------------------------------------------------------------------------
 # the access token
 # ---------------------------------------------------------------------------
+
+class _NoTokenAcrossHosts(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect, but never carry the bearer token off its host.
+
+    urllib copies every header to the redirected request, so `Authorization`
+    would follow a 3xx to any host, even over plain http; httplib2 (what
+    googleapiclient used) did not forward it (review of clodia-tools#380).
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        prima = urllib.parse.urlsplit(req.full_url)
+        dopo = urllib.parse.urlsplit(new.full_url)
+        if (dopo.scheme != "https" or dopo.hostname != prima.hostname
+                or dopo.port != prima.port):
+            for h in list(new.headers):
+                if h.lower() == "authorization":
+                    del new.headers[h]
+            new.unredirected_hdrs.pop("Authorization", None)
+        return new
+
+
+_OPENER = urllib.request.build_opener(_NoTokenAcrossHosts())
+
+
+def _open(req, timeout):
+    return _OPENER.open(req, timeout=timeout)
+
 
 #: credential name → (access token, monotonic deadline)
 _tokens: dict[str, tuple[str, float]] = {}
@@ -313,7 +343,7 @@ def _refresh(bundle: dict) -> tuple[str, int]:
         headers={"Content-Type": "application/x-www-form-urlencoded",
                  "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(r, timeout=TIMEOUT_S) as resp:
+        with _open(r, timeout=TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as e:
         try:
