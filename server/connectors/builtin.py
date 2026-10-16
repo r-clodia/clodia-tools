@@ -161,6 +161,48 @@ RELEASED_TO: dict[str, str] = {
 }
 
 
+#: The upstream of every FIRST-PARTY pack (clodia-platform#558):
+#: `{pack: (repository, directory prefix of the pack in it)}`. The only packs
+#: whose `target: gateway` components this gateway fetches and runs inside the
+#: reference monitor, and the only place they may come from. Code, not
+#: datadir: `/datadir/packs/<pack>/pack.yaml` is written by the agent-server,
+#: so a component's `source` must EQUAL the repository here and its path must
+#: lie under the prefix, and the pack's manifest itself is then taken from
+#: `<prefix>pack.yaml` at the pinned commit (`components.store`), never from
+#: the datadir copy. A pack missing here has no gateway component, whatever its
+#: manifest says.
+FIRST_PARTY_SOURCES: dict[str, tuple[str, str]] = {
+    "google-pack": ("r-clodia/clodia-logic", "catalogs/packs/google-pack/"),
+    "comms-pack": ("r-clodia/clodia-logic", "catalogs/packs/comms-pack/"),
+    "it-pack": ("r-clodia/clodia-packs", "packs/it-pack/"),
+}
+
+#: The packs this gateway knows as first-party: the keys of
+#: `FIRST_PARTY_SOURCES`. The `first_party: true` flag of a `pack.yaml` is
+#: necessary but not sufficient.
+FIRST_PARTY_PACKS: frozenset[str] = frozenset(FIRST_PARTY_SOURCES)
+
+
+#: Vault prefixes (ending in `_`) and exact entries of the gateway's custody
+#: that a GATEWAY COMPONENT of the switched pack may use (#558):
+#: `{prefix or entry: switch id}`. Reachable through `host.credentials` only
+#: while that switch is on `pack` and `RELEASED_TO` hands it to the
+#: component's own pack; checked again at every access, so flipping the switch
+#: back revokes it at once.
+#:
+#: Needed because #524 kept credential custody in the gateway: `google.yaml`
+#: declares no provider credential, so `released()` frees no Google prefix, and
+#: `app_` (the OAuth app client) is no connector's prefix at all. The credentials
+#: stay in the gateway vault — no re-consent — and the component that now
+#: implements the verbs reaches them through the host, scoped.
+CORE_CREDENTIALS_FOLLOW: dict[str, str] = {
+    "google_": "google",
+    "gworkspace_": "google",
+    "gmail_": "google",
+    "app_google_oauth": "google",
+}
+
+
 #: The browser hosts whose URLs the pack connector a switch elects may
 #: canonicalise into its own schemes (#524, `Registry.canonical`). The builtin
 #: `google.yaml` reads `https:` to turn a Drive folder URL copied from the
@@ -228,7 +270,33 @@ def released() -> tuple[frozenset[str], frozenset[str]]:
 
     Mai un'eccezione: in dubbio non si libera nulla, che è il gateway di ieri.
     """
-    packaged = _packaged()
+    return _released_for(_packaged())
+
+
+def released_to(pack: str) -> frozenset[str]:
+    """The vault prefixes released by the connectors switched to `pack` ONLY
+    (#558). A prefix shared with a connector switched to another pack, or kept
+    by the gateway, is not in it. Never raises: in doubt, nothing."""
+    try:
+        mine = frozenset(c for c in _packaged() if RELEASED_TO.get(c) == pack)
+        return _released_for(mine)[1] if mine else frozenset()
+    except Exception:  # noqa: BLE001
+        return frozenset()
+
+
+def follows_switch_to(entry: str, pack: str) -> bool:
+    """True when `entry` is a `CORE_CREDENTIALS_FOLLOW` credential whose switch
+    is on `pack` position and hands its connector to `pack` (#558)."""
+    switch = CORE_CREDENTIALS_FOLLOW.get(entry)
+    if not switch:
+        return False
+    try:
+        return switch in _packaged() and RELEASED_TO.get(switch) == pack
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _released_for(packaged: frozenset[str]) -> tuple[frozenset[str], frozenset[str]]:
     if not packaged:
         return frozenset(), frozenset()
     memo = _RELEASED.get(packaged)

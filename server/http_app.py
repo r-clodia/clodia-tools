@@ -136,6 +136,11 @@ async def _lifespan(_app):
         # blocca il boot e non muore con un pack rotto.
         from . import services as _services
         servizi = asyncio.create_task(_services.reconcile_loop())
+        # Gateway components of first-party packs (clodia-platform#558): the
+        # first round fetches/loads at boot, the next ones follow pack
+        # install/Update/removal. A failing component is disabled alone.
+        from . import components as _components
+        componenti = asyncio.create_task(_components.reconcile_loop())
         try:
             yield
         finally:
@@ -143,6 +148,7 @@ async def _lifespan(_app):
             checkpoints.cancel()
             retention.cancel()
             servizi.cancel()
+            componenti.cancel()
             # In un thread: fermare un servizio è SIGTERM e attesa, e il loop
             # qui sta chiudendo le connessioni degli agenti.
             try:
@@ -195,6 +201,11 @@ def build_app() -> Starlette:
     # Connettori, generici (#519): elenco dal registry per la webui, e convalida
     # del blocco `connectors:` di un pack prima che l'agent-server lo registri.
     from .connectors_api import routes as connectors_routes
+    # Gateway components (#558): status/refresh, and the routes components
+    # register under /tools/<pack>/… — that catch-all goes LAST, so every core
+    # route keeps winning.
+    from .components_api import catch_all_routes as component_routes
+    from .components_api import internal_routes as components_internal
     from .audit.trace import TraceparentMiddleware
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
@@ -202,7 +213,8 @@ def build_app() -> Starlette:
                 *telegram_routes, *agents_routes, *vault_routes,
                 *tool_routes, *mint_routes, *gate_routes, *logic_routes,
                 *egress_routes, *proxy_auth_routes, *rag_routes,
-                *audit_routes, *egress_proxy_routes, *connectors_routes],
+                *audit_routes, *egress_proxy_routes, *connectors_routes,
+                *components_internal, *component_routes],
         # Chi è in volo, su tutte le rotte (clodia-platform#316). Attorno a tutto
         # e non alle due rotte della issue: nell'incidente del 7 set le rotte
         # «innocenti» erano quelle in timeout, e un contatore puntato sui

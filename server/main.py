@@ -3231,6 +3231,27 @@ def _all_native_tools() -> list:
     return _migrated_away(native)
 
 
+def _component_tools() -> list:
+    """The verbs registered by loaded gateway components (#558). Listed next
+    to the native ones but NOT part of `_all_native_tools()`: that catalogue
+    is what `core_namespaces()` reserves, and a component's verbs live in its
+    pack connector's namespace. Never raises."""
+    try:
+        from . import components as _components
+        return list(_components.tools())
+    except Exception as e:  # noqa: BLE001
+        LOG.error("components: catalogue unavailable (%s)", e)
+        return []
+
+
+def _component_verb(name: str):
+    try:
+        from . import components as _components
+        return _components.verb(name)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _verb_implemented(name: str) -> bool:
     """Il dispatch sa servire questo verbo? (clodia-platform#539 §7)
 
@@ -3242,6 +3263,8 @@ def _verb_implemented(name: str) -> bool:
     """
     if name in {t.name for t in _all_native_tools()} | \
             {t.name for t in _EU_CORPUS_TOOLS + _RAG_TOOLS}:
+        return True
+    if _component_verb(name) is not None:
         return True
     try:
         return bool(proxy.is_proxied(name))
@@ -3404,7 +3427,7 @@ async def list_tools() -> list[Tool]:
     # Stessa sorgente della scheda del seed: due concatenazioni identiche
     # divergerebbero al primo namespace aggiunto — ed è già successo, vedi la nota
     # in `_native_tool_namespaces`.
-    native = list(_all_native_tools())
+    native = list(_all_native_tools()) + _component_tools()
     # C1: tool dei backend MCP montati (namespaced), aggregati dal proxy.
     try:
         proxied = await proxy.list_proxied_tools()
@@ -4869,12 +4892,26 @@ def _check_not_transport(name: str) -> None:
             f"il gateway, dai propri verbi (es. email.*), mai un agente")
 
 
+def _check_component(name: str) -> None:
+    """Refuse a verb of a disabled gateway component, or one whose pack
+    connector is not held right now (#558). Unknown state: refused too."""
+    try:
+        from . import components as _components
+        why = _components.refusal(name)
+    except Exception as e:  # noqa: BLE001
+        why = (f"gateway components unavailable ({type(e).__name__})"
+               if _component_verb(name) is not None else "")
+    if why:
+        raise _PackVerbRefused(why)
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     from . import audit as _audit
     try:
         _check_not_transport(name)
         _check_pack_connector_held(name)
+        _check_component(name)
         arguments = _fill_declared_context(name, arguments)
     except _PackVerbRefused as e:
         LOG.warning("connectors: %s", e)
@@ -5644,6 +5681,12 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             result = eu_corpus.remove(arguments["doc_name"], arguments.get("version"))
         elif name.startswith("rag."):
             result = _dispatch_rag(name, arguments)
+        elif (_cspec := _component_verb(name)) is not None:
+            # A verb of a gateway component (#558): every check above has
+            # run exactly as for a native verb; this is where a native
+            # handler would be called, and taint/audit follow below.
+            from .components.host import invoke as _invoke_component
+            result = await _invoke_component(_cspec, arguments)
         elif proxy.is_proxied(name):
             # C1: instrada al backend MCP montato (già passato il check whitelist).
             text = await proxy.call_proxied(name, arguments)
