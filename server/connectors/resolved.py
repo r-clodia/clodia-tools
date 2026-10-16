@@ -49,6 +49,8 @@ from . import builtin as _builtin
 from . import normalise as _normalise
 from .manifest import (
     Connector,
+    DefaultArg,
+    FileArgument,
     ManifestError,
     Registry,
     Scheme,
@@ -700,6 +702,35 @@ def egress_mapping(verb: str) -> VerbMapping | None:
 def source_mapping(verb: str) -> VerbMapping | None:
     mappings = source_mappings(verb)
     return mappings[0] if mappings else None
+
+
+def default_arguments(verb: str) -> tuple[str, tuple[DefaultArg, ...]] | None:
+    """`(namespace, default dichiarati)` per questo verbo, o None.
+
+    Senza `try`, come per il contesto e per i file: con un registry illeggibile
+    la chiamata non parte, invece di partire con un argomento in meno e una
+    destinazione vuota.
+    """
+    hit = registry().defaults_for(verb)
+    if hit is None:
+        return None
+    connector, decls = hit
+    return connector.namespace, decls
+
+
+def file_argument(verb: str) -> tuple[str, FileArgument] | None:
+    """`(namespace, dichiarazione)` del file che questo verbo si fa consegnare.
+
+    Senza `try`, per la stessa ragione di `context_arguments`: se il registry
+    non è interrogabile la chiamata non parte. L'alternativa sarebbe spedire al
+    backend gli argomenti così come sono arrivati — cioè, per un verbo che
+    aspetta dei byte, niente; oppure dei byte scelti dal chiamante.
+    """
+    hit = registry().file_for(verb)
+    if hit is None:
+        return None
+    connector, decl = hit
+    return connector.namespace, decl
 
 
 def destinations(mapping: VerbMapping, arguments: dict | None,

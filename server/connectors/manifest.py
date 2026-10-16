@@ -116,6 +116,13 @@ CONTEXT_VALUES = ("channel", "agent")
 #: verifica che le due facce dicano la stessa cosa.
 OPTION_SET_VALUES = {"mailboxes": ("account", "address")}
 
+#: Valori che il gateway sa mettere in un argomento OMESSO (`defaults:`).
+#: `binding` = la chat legata al canale da cui si chiama, per QUESTO connettore
+#: (`channel_bindings`). È l'altro fatto che un backend di pack non ha: il
+#: registro dei binding è del gateway, lo scrive il bottone del topic, e un
+#: processo che lo leggesse da sé leggerebbe anche i binding di tutti gli altri.
+DEFAULT_VALUES = ("binding",)
+
 _ID = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
 _NAMESPACE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _SCHEME = re.compile(r"^[a-z][a-z0-9+.-]{0,31}$")
@@ -818,6 +825,57 @@ class VerbMapping:
 
 
 @dataclass(frozen=True)
+class DefaultArg:
+    """Un argomento che il gateway riempie SOLO se il chiamante lo ha omesso.
+
+    Non è un `ContextArg`, e la differenza è tutta nella regola: il contesto è
+    un'identità e si sovrascrive sempre, perché il caso «ce l'ha già messo il
+    chiamante» è esattamente l'attacco. Un default è una comodità — «manda alla
+    chat di questo topic» — e un valore esplicito del chiamante deve vincere,
+    altrimenti non si potrebbe più scrivere a una chat diversa da quella legata.
+
+    Vale per un VERBO alla volta, non per il namespace: `telegram.inbox` non ha
+    una chat da riempire, e riempirgliela comunque significherebbe passare al
+    backend un argomento che il suo schema non dichiara.
+    """
+
+    verb: str
+    arg: str
+    value: str
+
+
+@dataclass(frozen=True)
+class FileArgument:
+    """Un argomento che nomina un FILE DI TOPIC, che il gateway consegna.
+
+    `telegram.send_file` prende il path di un file dentro un topic. Leggerlo è
+    lavoro di piattaforma, non di connettore: ci stanno attaccati il
+    compartimento (chi chiama dev'essere partecipante del topic) e l'audit di
+    ciò che attraversa il confine. Un backend di pack che leggesse da sé il
+    filesystem dei topic li aggirerebbe entrambi — e potrebbe leggere i file di
+    un topic di cui il chiamante non sa nulla.
+
+    Così invece il pack dichiara *quali argomenti* sono il path, i byte e il
+    nome; il gateway risolve il topic, verifica la membership, legge, annota il
+    passaggio e riempie i due argomenti. Il pack riceve dei byte e non ha mai
+    visto un percorso.
+
+    Il topic si risolve in quest'ordine — lo stesso del codice nativo che
+    sostituisce: `tier_arg`/`topic_arg` se il chiamante li passa entrambi,
+    altrimenti il topic legato alla chat di `chat_arg`, altrimenti il canale da
+    cui arriva la chiamata.
+    """
+
+    verb: str
+    path_arg: str
+    bytes_arg: str
+    name_arg: str = ""
+    tier_arg: str = ""
+    topic_arg: str = ""
+    chat_arg: str = ""
+
+
+@dataclass(frozen=True)
 class ActionField:
     """Un campo dell'azione: testo libero, oppure una scelta fra valori che il
     gateway fornisce (`options:`).
@@ -973,6 +1031,11 @@ class Connector:
     tools_card: ToolsCard | None = None
     services: tuple[Service, ...] = ()
     storage_remote: StorageRemote | None = None
+    #: Argomenti che il gateway riempie SOLO se omessi (`DefaultArg`).
+    defaults: tuple[DefaultArg, ...] = ()
+    #: Argomenti che nominano un file di topic e che il gateway consegna come
+    #: byte (`FileArgument`): la lettura resta dove stanno compartimento e audit.
+    files: tuple[FileArgument, ...] = ()
     #: Gli argomenti di contesto che il gateway riempie nelle chiamate ai verbi
     #: di questo connettore (`ContextArg`, clodia-platform#522).
     context: tuple[ContextArg, ...] = ()
@@ -1171,6 +1234,45 @@ def _parse_provider(raw: Any, where: str, *, pack: str) -> Provider:
                           required=False),
         test_verb=_text(data.get("test_verb"), f"{where}.test_verb", required=False),
     )
+
+
+def _parse_defaults(raw: Any, where: str) -> tuple[DefaultArg, ...]:
+    """Il blocco `defaults:` — `[{verb, arg, value}]`."""
+    out = []
+    for i, entry in enumerate(_seq(raw, where)):
+        at = f"{where}[{i}]"
+        data = _mapping(entry, at)
+        out.append(DefaultArg(
+            verb=_matching(_text(data.get("verb"), f"{at}.verb"), _VERB, f"{at}.verb"),
+            arg=_matching(_text(data.get("arg"), f"{at}.arg"), _ARG, f"{at}.arg"),
+            value=_one_of(_text(data.get("value"), f"{at}.value"), DEFAULT_VALUES,
+                          f"{at}.value")))
+    return tuple(out)
+
+
+def _parse_files(raw: Any, where: str) -> tuple[FileArgument, ...]:
+    """Il blocco `files:` — gli argomenti di file che il gateway consegna."""
+    out = []
+    for i, entry in enumerate(_seq(raw, where)):
+        at = f"{where}[{i}]"
+        data = _mapping(entry, at)
+        campi = {}
+        for chiave, obbligatorio in (("path_arg", True), ("bytes_arg", True),
+                                     ("name_arg", False), ("tier_arg", False),
+                                     ("topic_arg", False), ("chat_arg", False)):
+            valore = _text(data.get(chiave), f"{at}.{chiave}", required=obbligatorio)
+            if valore:
+                _matching(valore, _ARG, f"{at}.{chiave}")
+            campi[chiave] = valore
+        if campi["path_arg"] == campi["bytes_arg"]:
+            raise ManifestError(
+                f"{at}: 'path_arg' e 'bytes_arg' sono lo stesso argomento: i byte "
+                f"sovrascriverebbero il percorso da cui sono stati letti")
+        out.append(FileArgument(
+            verb=_matching(_text(data.get("verb"), f"{at}.verb"), _VERB,
+                           f"{at}.verb"),
+            **campi))
+    return tuple(out)
 
 
 def _parse_verb(raw: Any, where: str) -> VerbMapping:
@@ -1442,10 +1544,13 @@ def _parse_service(raw: Any, where: str, *, pack: str) -> Service:
 #: implementation, never a meaning: letting it re-declare a scheme, a canonical
 #: form or a verb mapping would hand the vocabulary of another pack to the one
 #: that installed second.
-#: `context` è fra questi perché è una frase sui VERBI del namespace, e i verbi
-#: sono del proprietario del vocabolario: un contributore che potesse
-#: dichiararlo riscriverebbe gli argomenti delle chiamate altrui.
-_OWNER_ONLY = ("schemes", "verbs", "taint", "topic_actions", "context")
+#: `context`, `files` e `defaults` sono fra questi perché sono frasi sui VERBI
+#: del namespace, e i verbi sono del proprietario del vocabolario: un
+#: contributore che potesse dichiararli riscriverebbe gli argomenti delle
+#: chiamate altrui — o si farebbe consegnare i file di topic, o la chat legata
+#: al canale, per il verbo di un altro.
+_OWNER_ONLY = ("schemes", "verbs", "taint", "topic_actions", "context",
+               "files", "defaults")
 
 
 def _parse_context(raw: Any, where: str) -> tuple[ContextArg, ...]:
@@ -1576,6 +1681,25 @@ def parse_connector(raw: Any, *, pack: str,
                 f"'{namespace}'. Declaring what does not taint a channel is a "
                 f"statement about one's own tools, never about someone else's")
 
+    defaults = _parse_defaults(data.get("defaults"), f"{where}.defaults")
+    if defaults and builtin:
+        raise ManifestError(
+            f"{where}: 'defaults' is for a connector a PACK implements; this "
+            f"gateway resolves a binding from the inside")
+    if not builtin:
+        check_namespace(namespace, [d.verb for d in defaults], reserved=reserved,
+                        where=where)
+    files = _parse_files(data.get("files"), f"{where}.files")
+    if files and builtin:
+        raise ManifestError(
+            f"{where}: 'files' is for a connector a PACK implements; this "
+            f"gateway reads a topic file from the inside")
+    if not builtin:
+        # Stessa regola di namespace dei verbi (#516): un pack non si fa
+        # consegnare i file di topic per il verbo di un altro.
+        check_namespace(namespace, [f.verb for f in files], reserved=reserved,
+                        where=where)
+
     actions = tuple(
         _parse_topic_action(a, f"{where}.topic_actions[{i}]")
         for i, a in enumerate(
@@ -1671,6 +1795,8 @@ def parse_connector(raw: Any, *, pack: str,
         services=services,
         storage_remote=storage,
         context=context,
+        defaults=defaults,
+        files=files,
         builtin=builtin,
     )
 
@@ -1828,6 +1954,31 @@ class Registry:
     def verb_map(self, direction: str = "egress") -> dict[str, VerbMapping]:
         return {v.verb: v for c in self.connectors for v in c.verbs
                 if v.direction == direction}
+
+    def defaults_for(self, verb: str) -> tuple[Connector, tuple[DefaultArg, ...]] | None:
+        """Il connettore e i default dichiarati per QUESTO verbo, o None."""
+        for c in self.connectors:
+            if c.builtin:
+                continue
+            hits = tuple(d for d in c.defaults if d.verb == verb)
+            if hits:
+                return c, hits
+        return None
+
+    def file_for(self, verb: str) -> tuple[Connector, FileArgument] | None:
+        """Il connettore e la dichiarazione di file per questa chiamata, o None.
+
+        Per NOME ESATTO del verbo, e mai per un connettore `builtin`: consegnare
+        dei byte a codice che vive dentro il gateway significherebbe leggere un
+        file di topic due volte, e la seconda senza chi la sorveglia.
+        """
+        for c in self.connectors:
+            if c.builtin:
+                continue
+            for f in c.files:
+                if f.verb == verb:
+                    return c, f
+        return None
 
     def taint_prefixes(self) -> tuple[str, ...]:
         return tuple(sorted({p for c in self.connectors for p in c.taint_prefixes}))
