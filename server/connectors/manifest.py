@@ -1099,12 +1099,11 @@ def core_namespaces() -> frozenset[str]:
                         all_native_verb_names)
 
     # The verbs the gateway keeps in a packaged namespace (Telegram's binding
-    # verbs, which write the gateway's own binding registry; every `email.*`
-    # verb, whose transport alone moves to the pack — #523) do not make the
-    # namespace the gateway's again: otherwise keeping them would refuse the
-    # pack connector. Only when the namespace IS packaged, though: in `native`
-    # position `email` has nothing but retained verbs, and dropping them there
-    # would leave `email` claimable by any pack while the gateway serves it.
+    # verbs, which write the gateway's own binding registry; GitHub's git
+    # verbs) do not make the namespace the gateway's again: otherwise keeping
+    # them would refuse the pack connector. Only when the namespace IS
+    # packaged, though: in `native` position dropping them would leave the
+    # namespace claimable by any pack while the gateway serves it.
     packaged = _packaged_namespaces()
     return frozenset(
         name.split(".", 1)[0] for name in all_native_verb_names()

@@ -17,6 +17,7 @@ lo scambio è server-side, il deposito va nella vault.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -332,19 +333,33 @@ def connectors_snapshot() -> list[dict]:
             for row in google_rows if not row["operational"]
         ],
     }]
-    mailbox_rows = [row for row in email_diagnostics if row["kind"] == "mailbox"]
+    # The mailboxes from the side in charge of mail (#558): on `mail: pack`
+    # comms-pack's component reads `mailbox_*`, and says nothing if absent.
+    from .tools import mail_switch
+    mailbox_issue = []
+    if mail_switch.in_pack():
+        mailbox_rows = [row for row in mail_switch.credential_diagnostics()
+                        if row["kind"] == "mailbox"]
+        try:
+            mail_switch.service("diagnostics")
+        except mail_switch.ComponentUnavailable:
+            mailbox_issue = [{"account": "-", "missing": [],
+                              "error": "component_unavailable"}]
+    else:
+        mailbox_rows = [row for row in email_diagnostics if row["kind"] == "mailbox"]
     mailbox_accounts = sorted(row["account"] for row in mailbox_rows if row["operational"])
     connectors.append({
         "id": "mailboxes",
         "label": "Email mailboxes",
         "provider": "email",
         "connected": bool(mailbox_accounts),
-        "operational": bool(mailbox_rows) and all(row["operational"] for row in mailbox_rows),
+        "operational": (bool(mailbox_rows) and not mailbox_issue
+                        and all(row["operational"] for row in mailbox_rows)),
         "accounts": mailbox_accounts,
         "issues": [
             {"account": row["account"], "missing": row["missing"], "error": row["error"]}
             for row in mailbox_rows if not row["operational"]
-        ],
+        ] + mailbox_issue,
     })
     # Integrazione Image generation (OpenAI): attiva se la key è nel vault.
     connectors.append({
@@ -1198,10 +1213,25 @@ async def google_app_config(request: Request):
     return JSONResponse({"configured": True, "redirect_uri": app["redirect_uri"]})
 
 
+def _mail_component_unavailable(e: Exception) -> JSONResponse:
+    return JSONResponse({"error": "component_unavailable", "detail": str(e)},
+                        status_code=503)
+
+
 async def email_mailboxes(request: Request):
-    """GET → lista delle caselle generiche (mailbox_*) nel vault (solo nomi)."""
+    """GET → lista delle caselle generiche (mailbox_*) nel vault (solo nomi).
+
+    On `mail: pack` (#558) the list is comms-pack's component's (service
+    `mailboxes_list`); this URL, its authentication and its answer stay."""
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from .tools import mail_switch
+    if mail_switch.in_pack():
+        try:
+            return JSONResponse(await asyncio.to_thread(
+                mail_switch.call, "mailboxes_list"))
+        except mail_switch.ComponentUnavailable as e:
+            return _mail_component_unavailable(e)
     rows = [
         row for row in email_tool.credential_diagnostics()
         if row["kind"] == "mailbox"
@@ -1229,6 +1259,18 @@ async def email_mailbox_add(request: Request):
         b = await request.json()
     except Exception:
         return JSONResponse({"error": "bad_json"}, status_code=400)
+    from .tools import mail_switch
+    if mail_switch.in_pack():
+        # #558: what a mailbox is (shape, validation, the deposit under
+        # `mailbox_<acct>`) is comms-pack's component's; the URL, the guard,
+        # the authentication and the parsing stay here.
+        if not isinstance(b, dict):
+            b = {}
+        try:
+            out = await asyncio.to_thread(mail_switch.call, "mailbox_add", b)
+        except mail_switch.ComponentUnavailable as e:
+            return _mail_component_unavailable(e)
+        return JSONResponse(out["body"], status_code=int(out["status"]))
     account = (b.get("account") or "").strip().lower()
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,40}", account or ""):
         return JSONResponse({"error": "account non valido (a-z0-9_-)"}, status_code=400)
@@ -1273,8 +1315,19 @@ async def email_mailbox_remove(request: Request):
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     account = request.path_params["account"]
-    indirizzo = email_tool.mailbox_address(account)
-    removed = vault.remove(f"mailbox_{account}")
+    from .tools import mail_switch
+    if mail_switch.in_pack():
+        # #558: the credential is removed by comms-pack's component, which
+        # reads the address first; the whitelist entries are withdrawn HERE,
+        # by the gateway that owns the lists.
+        try:
+            info = await asyncio.to_thread(mail_switch.call, "mailbox_remove", account)
+        except mail_switch.ComponentUnavailable as e:
+            return _mail_component_unavailable(e)
+        indirizzo, removed = info.get("email"), bool(info.get("removed"))
+    else:
+        indirizzo = email_tool.mailbox_address(account)
+        removed = vault.remove(f"mailbox_{account}")
     from . import egress as eg
     pulizia = eg.forget_mailbox(indirizzo or "")
     if pulizia["scopes"] or pulizia["global"]:
@@ -1800,6 +1853,10 @@ def _test_connector(cid: str) -> dict:
             return _test_google(cid)
 
         if cid == "mailboxes":
+            from .tools import mail_switch
+            if mail_switch.in_pack():
+                # #558: the mailboxes card is comms-pack's component's.
+                return mail_switch.component_test_mailboxes()
             return _test_mailboxes()
 
         if cid == "topic-storage":

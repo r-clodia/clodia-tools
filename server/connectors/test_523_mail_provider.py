@@ -1,37 +1,22 @@
-"""#523: the mail TRANSPORT becomes a pack provider; the gateway keeps every check.
+"""#523: the provider `transport:` grammar, as comms-pack 1.4.0 used it.
 
-clodia-platform#523, design comment of 2026-10-16. Mail cannot follow the
-Telegram pattern of #522 (the pack implements the verbs, the gateway fills
-their context): before any byte of a mailbox comes back the gateway enforces
-the mailbox whitelist, strict ingress and its audit record (#503), topic
-attachments with their taint, the reply recipient. So with
-`connectors: {mail: pack}`:
+clodia-platform#523 moved the mail TRANSPORT into comms-pack (backend
+`mail-transport`). #558 superseded that design: since comms-pack 2.0.0 the
+mail code is the pack's GATEWAY COMPONENT (`test_558_mail_switch.py`,
+`test_558_mail_component.py`) and the backend is gone. What stays pinned here:
 
-- the builtin `gateway-mail` manifest is released and comms-pack's `mail`
-  connector (namespace `email`) supplies the vocabulary the PDP reads;
-- the eight `email.*` verbs stay listed and dispatched by the gateway;
-- the I/O goes to the pack provider's `transport` — an MCP backend the pack
-  mounted itself — with only that call's credential.
-
-What is pinned here, in this order:
-
-1. the grammar (`transport:` parsed, refused in a builtin manifest);
+1. the grammar (`transport:` parsed, refused in a builtin manifest) — a
+   generic mechanism (it-pack's images use it), and comms-pack 1.4.0's
+   manifest must stay VALID on a gateway that is updated before the pack;
 2. the resolution (`transport_for` only in `pack` position, only from a held
-   connector, only on the pack's own backend);
-3. parity: the PDP's answers about mail are the same in both positions, and
-   they are not vacuous;
-4. fail closed: no held connector → `email.*` DENIED; no transport → refused,
-   never the in-process client;
-5. the transport backend is the gateway's: hidden from every listing, DENIED
-   to every caller;
-6. the suites that pin #503 (strict ingress), #461/#420 (attachments) and #428
-   (send direction) — run again in `pack` position, with the transport played
-   by a faithful fake of the pack: it writes the `files` it receives, points
-   `CLODIA_SECRETS_DIR` at them, substitutes `{dir}` and runs the very same
-   `vendor/email_client.py`;
-7. an end-to-end send through that fake: the vendored client really runs, on
-   the credential the gateway materialised, and delivers the attachment under
-   its own name to a local HTTP «provider».
+   connector, only on the pack's own backend), and the backend being the
+   gateway's (hidden, denied to every caller);
+3. parity: the PDP's answers about mail are the same with the builtin and
+   with comms-pack's connector, and they are not vacuous;
+4. fail closed: no held connector → `email.*` DENIED.
+
+The suites of #503/#461/#420/#428 run in `pack` position against the REAL
+component in `server/test_558_mail_component.py`.
 """
 from __future__ import annotations
 
@@ -45,14 +30,12 @@ import sys
 import tempfile
 import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
 import yaml
 
 from .. import egress, instance_profile, proxy, taint
-from .. import whitelist as w
 from ..tools import email as EM
 from . import builtin as B
 from . import manifest as M
@@ -64,9 +47,9 @@ PACK = "comms-pack"
 
 
 def _mail_connector() -> dict:
-    """comms-pack's `mail` connector: the builtin vocabulary, verbatim, plus
-    what a PACK must add — `forms:` on the mailbox schemes and the IMAP/SMTP
-    provider with its transport."""
+    """comms-pack 1.4.0's `mail` connector: the builtin vocabulary, verbatim,
+    plus what a PACK must add — `forms:` on the mailbox schemes — and the
+    IMAP/SMTP provider WITH its transport (the #523 design)."""
     doc = yaml.safe_load((B.DIR / "mail.yaml").read_text(encoding="utf-8"))
     entry = copy.deepcopy(doc["connectors"][0])
     forma = [{"label": "address", "pattern": r"^[^@\s]+@[A-Za-z0-9.-]+$",
@@ -283,48 +266,6 @@ EMAIL_VERBS = ("email.send", "email.folders", "email.list", "email.read",
                "email.reply")
 
 
-class StaysGatewayServedTests(_Istanza):
-    def test_the_packs_connector_is_the_one_that_counts(self):
-        mail = resolved.registry().by_id("mail")
-        self.assertEqual((mail.pack, mail.builtin, mail.namespace),
-                         (PACK, False, "email"))
-        self.assertNotIn("gateway-mail", B.manifests())
-        self.assertTrue(resolved.held_by_pack("email"))
-
-    def test_on_native_the_builtin_holds_it(self):
-        self.posizione("native")
-        mail = resolved.registry().by_id("mail")
-        self.assertTrue(mail.builtin)
-        self.assertEqual(mail.pack, "gateway-mail")
-
-    def test_every_verb_is_still_listed_and_served(self):
-        from .. import main
-        nomi = {t.name for t in main._all_native_tools()}
-        for verbo in EMAIL_VERBS:
-            with self.subTest(verbo=verbo):
-                self.assertIn(verbo, nomi)
-                self.assertFalse(main._is_packaged_verb(verbo))
-                self.assertTrue(main._verb_implemented(verbo))
-        self.assertIn("email", main._native_tool_namespaces())
-
-    def test_the_namespace_is_released_only_in_pack_position(self):
-        """Regression guard for the retention rule: in `native` every email
-        verb is retained too, and dropping them from `core_namespaces` there
-        would leave `email` claimable by any pack."""
-        self.assertNotIn("email", M.core_namespaces())
-        self.posizione("native")
-        self.assertIn("email", M.core_namespaces())
-        from .. import main
-        self.assertIn("email", main._native_tool_namespaces())
-
-    def test_telegram_keeps_its_own_rule(self):
-        """`email` being wholly retained must not keep `telegram` native."""
-        from .. import main
-        self.posizione("pack", telegram="pack")
-        self.assertNotIn("telegram", main._native_tool_namespaces())
-        self.assertIn("email", main._native_tool_namespaces())
-
-
 def _risposte() -> dict:
     """The PDP's public answers about mail, as test_522 asks them."""
     def grantable(direzione: str, uri: str) -> bool:
@@ -445,78 +386,6 @@ class FailClosedTests(_Istanza):
         self.posizione("native")
         self._rifiuta_il_connettore()
         main._check_pack_connector_held("email.send")  # no exception
-
-    def test_no_transport_refuses_instead_of_falling_back(self):
-        """An owner who turned the switch and silently got the in-process
-        client would be verifying the wrong thing on real traffic."""
-        self.scrivi_pack(_comms_pack(providers=[{"id": "imap"}]))
-        with patch.object(EM, "known_accounts", return_value={"studio"}), \
-                patch.object(EM.subprocess, "run") as run:
-            with self.assertRaises(PermissionError) as e:
-                EM._run_cli("studio", ["folders"], want_json=True, direction="inbox")
-        self.assertIn("mail transport provider not available", str(e.exception))
-        run.assert_not_called()
-        self.assertEqual(self.transport_calls, [])
-
-    def test_a_legacy_account_is_refused_in_pack_position(self):
-        with patch.object(EM, "known_accounts", return_value={"demo"}), \
-                patch.object(EM.vault, "has_credential", lambda c: False):
-            with self.assertRaises(PermissionError) as e:
-                EM._run_cli("demo", ["folders"], want_json=True, direction="inbox")
-        self.assertIn("legacy", str(e.exception))
-        self.assertEqual(self.transport_calls, [])
-
-    def test_a_gmail_account_never_reaches_the_imap_transport(self):
-        """Review of #378: Gmail belongs to google-pack, never to the IMAP
-        transport, which must not receive the OAuth client secret and refresh
-        token. Since #524 a Gmail account follows the `google` switch: with
-        `google` native it is served in-process whatever `mail` says, and with
-        `google: pack` and no google-pack it is refused, naming google-pack."""
-        import contextlib
-
-        @contextlib.contextmanager
-        def env(_account, _direction):
-            yield dict(os.environ)
-
-        done = subprocess.CompletedProcess([], 0, stdout="[]", stderr="")
-        with patch.object(EM, "known_accounts", return_value={"studio"}), \
-                patch.object(EM.vault, "has_credential",
-                             lambda c: c == "google_studio"), \
-                patch.object(EM, "_secrets_env", env), \
-                patch.object(EM.subprocess, "run", return_value=done) as run:
-            self.assertEqual(EM._run_cli("studio", ["folders"], want_json=True,
-                                         direction="inbox"), [])
-            run.assert_called_once()
-            self.posizione("pack", google="pack")
-            with self.assertRaises(PermissionError) as e:
-                EM._run_cli("studio", ["folders"], want_json=True, direction="inbox")
-        self.assertIn("google-pack", str(e.exception))
-        self.assertEqual(run.call_count, 1)
-        self.assertEqual(self.transport_calls, [])
-
-    def test_the_gateways_secrets_dir_never_leaves(self):
-        """Belt and braces behind the legacy refusal."""
-        with self.assertRaises(PermissionError):
-            EM._run_transport((BACKEND, TOOL), "demo", ["folders"],
-                              {"CLODIA_SECRETS_DIR": "/datadir/secrets"}, 5)
-        self.assertEqual(self.transport_calls, [])
-
-    def test_a_transport_error_is_a_failed_verb(self):
-        def esplode(*a, **k):
-            raise proxy.BackendToolError("boom")
-        with patch.object(proxy, "call_backend_tool_sync", esplode):
-            with self.assertRaises(RuntimeError) as e:
-                EM._run_transport((BACKEND, TOOL), "studio", ["folders"], {}, 5)
-        self.assertIn("boom", str(e.exception))
-
-    def test_an_answer_without_its_shape_is_a_failed_verb(self):
-        for testo in ("not json", "{}", '{"returncode": "0"}', "[]"):
-            with self.subTest(risposta=testo), \
-                    patch.object(proxy, "call_backend_tool_sync",
-                                 lambda *a, _t=testo, **k: _t):
-                with self.assertRaises(RuntimeError):
-                    EM._run_transport((BACKEND, TOOL), "studio", ["folders"], {}, 5)
-
 
 class TelegramBindingVerbsFailClosedTests(unittest.TestCase):
     """The retained Telegram binding verbs follow the same rule now: in `pack`
@@ -645,229 +514,6 @@ class SyncCallTests(unittest.TestCase):
         with patch.dict(proxy.CONFIG, {"mcp_backends": []}):
             with self.assertRaises(proxy.BackendToolError):
                 proxy.call_backend_tool_sync(BACKEND, TOOL, {}, 5)
-
-
-# --------------------------------------------------------------------------
-# 6. the suites of #503, #461, #420 and #428, again in pack position
-# --------------------------------------------------------------------------
-from .. import test_420_attachment_name_is_not_a_path as T420  # noqa: E402
-from .. import test_461_attachments_confined as T461  # noqa: E402
-from .. import test_503_strict_ingress as T503  # noqa: E402
-from ..tools import test_email_send_direction as T428  # noqa: E402
-
-
-class _InPack(_MailIstanza):
-    """Asserts the position really is `pack`: a suite re-run in a position
-    that silently stayed `native` would be green and prove nothing."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        assert resolved.transport_for("mail") == (BACKEND, TOOL), \
-            "pack position not reached: the re-run would measure `native`"
-
-
-class Pack503FlagTests(_InPack, T503.FlagTests):
-    pass
-
-
-class Pack503ListAndSearchTests(_InPack, T503.ListAndSearchTests):
-    pass
-
-
-class Pack503ReadTests(_InPack, T503.ReadTests):
-    pass
-
-
-class Pack503AttachmentAndReplyTests(_InPack, T503.AttachmentAndReplyTests):
-    pass
-
-
-class Pack503LegacyAccountTests(_InPack, T503.LegacyAccountTests):
-    pass
-
-
-class Pack461AttachmentsConfinedTests(_InPack, T461.AttachmentsConfinedTests):
-    pass
-
-
-class Pack420SafeAttachmentNameTests(_InPack, T420.SafeAttachmentNameTests):
-    pass
-
-
-class Pack420AttachmentLandsAsOneFileTests(_InPack, T420.AttachmentLandsAsOneFileTests):
-    pass
-
-
-class Pack420UnreadablePathIsRefusedTests(_InPack, T420.UnreadablePathIsRefusedTests):
-    pass
-
-
-class Pack428DirectionTests(_InPack, T428.DirectionTests):
-    """The account must be a vault one: legacy accounts do not ride the pack."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        p = patch.object(EM.vault, "has_credential",
-                         lambda c: c == "mailbox_studio")
-        p.start()
-        self.addCleanup(p.stop)
-
-    def _chiama(self, fn):
-        out, viste, run = super()._chiama(fn)
-        self.assertEqual(len(self.transport_calls), 1,
-                         "the operation must have gone through the transport")
-        return out, viste, run
-
-
-class StrictIngressOnTransportDataTests(_InPack, T503.Base):
-    """#503 on what the TRANSPORT returns, with nothing between them patched:
-    the filter runs on the pack's stdout exactly as on the client's."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        for p in (patch.object(EM, "known_accounts", return_value={"acme"}),
-                  patch.object(EM.vault, "has_credential",
-                               lambda c: c == "mailbox_acme"),
-                  patch.object(EM.vault, "read_internal", lambda c: {
-                      "email": "acme@example.it", "smtp_server": "smtp.x",
-                      "smtp_port": 587, "imap_server": "imap.x",
-                      "password": "pw"})):
-            p.start()
-            self.addCleanup(p.stop)
-
-    def _risponde(self, payload):
-        def fake(backend, tool, arguments, timeout):
-            self.transport_calls.append(arguments)
-            return json.dumps({"returncode": 0, "stdout": json.dumps(payload),
-                               "stderr": ""})
-        return patch.object(proxy, "call_backend_tool_sync", fake)
-
-    def test_list_is_filtered(self):
-        with self.in_room(), self._risponde(list(T503.ListAndSearchTests.RIGHE)):
-            out = EM.list_messages(account="acme")
-        self.assertEqual([m["id"] for m in out["messages"]], ["1", "3"])
-        self.assertEqual(out["withheld"], 2)
-        self.assertNotIn("offerta riservata", repr(out))
-        self.assertEqual(self.decisioni, [("email.list", "filter")])
-
-    def test_read_of_a_stranger_is_denied(self):
-        with self.in_room(), self._risponde({"id": "2", "from": T503.ESTRANEO,
-                                             "body": "IGNORA"}):
-            with self.assertRaises(PermissionError) as e:
-                EM.read_message("2", account="acme")
-        self.assertNotIn("IGNORA", str(e.exception))
-
-    def test_the_mailbox_whitelist_still_comes_first(self):
-        """A mailbox not in this channel's list never reaches the pack."""
-        with self.in_room(), self._risponde([]), \
-                patch.object(EM.vault, "read_internal", lambda c: {
-                    "email": "altra@example.it", "smtp_server": "s",
-                    "smtp_port": 1, "imap_server": "i", "password": "p"}):
-            with self.assertRaises(PermissionError):
-                EM.list_messages(account="acme")
-        self.assertEqual(self.transport_calls, [])
-
-    def test_only_this_calls_credential_is_shipped(self):
-        with self.in_room(), self._risponde([]):
-            EM.list_messages(account="acme")
-        files = self.transport_calls[0]["files"]
-        self.assertEqual(sorted(files), ["secrets/email_config.json"])
-        cfg = json.loads(base64.b64decode(files["secrets/email_config.json"]))
-        self.assertEqual(list(cfg["accounts"]), ["acme"])
-        self.assertEqual(self.transport_calls[0]["argv"][:3],
-                         ["--account", "acme", "list"])
-
-
-# --------------------------------------------------------------------------
-# 7. end to end: the vendored client really runs behind the fake pack
-# --------------------------------------------------------------------------
-class _Provider(BaseHTTPRequestHandler):
-    received: list = []
-
-    def do_POST(self):  # noqa: N802
-        n = int(self.headers.get("Content-Length") or 0)
-        type(self).received.append(json.loads(self.rfile.read(n)))
-        body = b'{"data": {"failed": 0}}'
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *a):  # silence
-        pass
-
-
-class EndToEndSendTests(_Istanza):
-    def setUp(self) -> None:
-        super().setUp()
-        _Provider.received = []
-        self.http = HTTPServer(("127.0.0.1", 0), _Provider)
-        threading.Thread(target=self.http.serve_forever, daemon=True).start()
-        self.addCleanup(self.http.server_close)
-        self.addCleanup(self.http.shutdown)
-        bundle = {"email": "studio@example.it", "smtp_server": "smtp.invalid",
-                  "smtp_port": 587, "password": "pw", "smtp_backend": "api",
-                  "api_url": f"http://127.0.0.1:{self.http.server_port}/send",
-                  "api_key": "k-123"}
-        self.config = {"egress_allow": ["outbox:studio@example.it"],
-                       "scope_egress_allow": {}, "source_allow": [],
-                       "scope_source_allow": {}, "agents": {}}
-        for p in (patch.object(EM, "tool_allowed", lambda *a, **k: None),
-                  patch.object(EM, "known_accounts", return_value={"studio"}),
-                  patch.object(EM.vault, "has_credential",
-                               lambda c: c == "mailbox_studio"),
-                  patch.object(EM.vault, "read_internal", lambda c: dict(bundle)),
-                  patch.object(w, "CONFIG", self.config)):
-            p.start()
-            self.addCleanup(p.stop)
-        self.att = Path(tempfile.mkdtemp()) / "offerta.pdf"
-        self.addCleanup(shutil.rmtree, self.att.parent, True)
-        self.att.write_bytes(b"%PDF-1.4 offerta")
-
-    def test_the_client_runs_on_the_shipped_credential_and_attachment(self):
-        out = EM.send("dest@example.org", "Offerta", "in allegato",
-                      account="studio", attachments=[str(self.att)])
-        self.assertTrue(out["ok"])
-        self.assertEqual(len(self.transport_calls), 1)
-        call = self.transport_calls[0]
-        self.assertEqual((call["backend"], call["tool"]), (BACKEND, TOOL))
-        self.assertEqual(sorted(call["arguments"]["files"]),
-                         ["att/0/offerta.pdf", "secrets/email_config.json"])
-        # The gateway's path of the attachment does not leave: only its bytes.
-        self.assertNotIn(str(self.att), json.dumps(call["arguments"]["argv"]))
-        self.assertIn("{dir}/att/0/offerta.pdf", call["arguments"]["argv"])
-        [payload] = _Provider.received
-        self.assertEqual(payload["sender"], "studio@example.it")
-        self.assertEqual(payload["to"], ["dest@example.org"])
-        self.assertEqual(payload["api_key"], "k-123")
-        [allegato] = payload["attachments"]
-        # The recipient sees the file's own name, not the transport's layout.
-        self.assertEqual(allegato["filename"], "offerta.pdf")
-        self.assertEqual(base64.b64decode(allegato["fileblob"]), b"%PDF-1.4 offerta")
-
-    def test_a_mailbox_not_in_the_outbox_list_never_reaches_the_pack(self):
-        self.config["egress_allow"] = []
-        with self.assertRaises(PermissionError):
-            EM.send("dest@example.org", "s", "b", account="studio")
-        self.assertEqual(self.transport_calls, [])
-        self.assertEqual(_Provider.received, [])
-
-    def test_the_clients_failure_comes_back_as_the_verbs(self):
-        self.http.shutdown()
-        self.http.server_close()
-        with self.assertRaises(RuntimeError) as e:
-            EM.send("dest@example.org", "s", "b", account="studio")
-        self.assertIn("email send failed", str(e.exception))
-
-    def test_native_position_does_not_touch_the_transport(self):
-        """The control: on `native` the same call goes to the in-process
-        client, and the pack sees nothing."""
-        self.posizione("native")
-        out = EM.send("dest@example.org", "s", "b", account="studio")
-        self.assertTrue(out["ok"])
-        self.assertEqual(self.transport_calls, [])
-        self.assertEqual(len(_Provider.received), 1)
 
 
 if __name__ == "__main__":

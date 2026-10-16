@@ -1150,6 +1150,17 @@ def transport_backends() -> frozenset[str]:
                 if name not in (owners.get(pack) or ()):
                     continue
                 out.add(name)
+    # Transports a pack USED to declare (#558): an Update that drops the
+    # declaration does not unmount the backend — the agent-server copies the
+    # new plugin over the old one and mounts what is declared, it does not
+    # unregister what is not — so `mail-transport` (comms-pack 1.4.0) would
+    # stay mounted and, no longer declared, become an agent-callable raw mail
+    # client. Still the pack's own stamped mount only.
+    from . import builtin as _builtin
+    for pack, names in _builtin.RETIRED_TRANSPORTS.items():
+        for n in names:
+            if _norm(n) in (owners.get(pack) or ()) and _norm(n) not in core_backends():
+                out.add(_norm(n))
     result = frozenset(out)
     _TRANSPORTS = (sig, result)
     return result

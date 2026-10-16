@@ -799,13 +799,15 @@ def _mailbox_state(scope: str) -> dict:
     autorizzata globalmente sembrerebbe rotto.
     """
     from . import egress as eg
-    from .tools import email as email_tool
+    from .tools import mail_switch
     locali = {
         "inbox": set(eg.scope_uris("ingress", scope)),
         "outbox": set(eg.scope_uris("egress", scope)),
     }
     out = []
-    for row in email_tool.system_mailboxes():
+    # From the side in charge of mail (#558): comms-pack's component on
+    # `mail: pack`, nothing when it is not serving.
+    for row in mail_switch.system_mailboxes():
         addr = row["email"]
         out.append({
             **row,
