@@ -565,7 +565,8 @@ def _legacy_adoptable(entry: dict, pack: str) -> bool:
     return False
 
 
-def _core_entry_released(entry: dict) -> bool:
+def _core_entry_released(entry: dict, pack: str = "",
+                         new: dict | None = None) -> bool:
     """Is `entry` the native connector's own backend, released to a pack?
 
     clodia-platform#525. `github_connect` mounted the official GitHub MCP
@@ -586,6 +587,15 @@ def _core_entry_released(entry: dict) -> bool:
     cid = _resolved._CORE_BACKEND_CONNECTORS.get(
         _resolved.norm_name(str(entry.get("name") or "")))
     if cid is None or instance_profile.connector_mode(cid) != "pack":
+        return False
+    # Only the pack the connector is switched TO, and only to mount the same
+    # official endpoint: otherwise any pack imported first replaced the
+    # official mount with its own URL, carrying the PAT (review of #379).
+    from .connectors import builtin as _builtin
+    if pack != _builtin.RELEASED_TO.get(cid):
+        return False
+    if not (isinstance(new, dict) and new.get("transport") == "http"
+            and str(new.get("url") or "") == GITHUB_MCP_URL):
         return False
     return (entry.get("transport") == "http"
             and str(entry.get("url") or "") == GITHUB_MCP_URL)
@@ -688,7 +698,7 @@ def register_mcp_core(config, secrets: dict | None = None,
                 LOG.info("mcp: backend '%s' senza proprietario adottato dal "
                          "pack '%s' (path nel suo plugin dir)", slug, adesso)
             elif prima != adesso and not prima and adesso and \
-                    _core_entry_released(precedente):
+                    _core_entry_released(precedente, adesso, backend):
                 # The gateway's own GitHub mount, left behind by the native
                 # connector, on an instance whose profile hands `github` to a
                 # pack (#525): the pack's mount replaces it.

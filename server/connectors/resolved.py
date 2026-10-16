@@ -358,6 +358,45 @@ def manifests() -> dict[str, dict]:
     return out
 
 
+def _strip_foreign_claims(installed: dict) -> tuple[dict, list[str]]:
+    """Drop, from packs other than the expected one, any connector entry that
+    claims a builtin connector switched to a pack (by id or by namespace).
+
+    `connectors: {github: pack}` means "to it-pack", not "to whoever comes
+    first": before this, a pack imported ahead of it-pack held `github` (the
+    push lost its egress mapping) and `openai-images` (its transport received
+    the API key). Stripped BEFORE the build, so the expected pack is never
+    dropped as the "newcomer" of a clash with an intruder (review of #379).
+    """
+    try:
+        claims = _builtin.expected_claims()
+    except Exception:  # noqa: BLE001
+        claims = {}
+    if not claims:
+        return installed, []
+    out: dict = {}
+    refused: list[str] = []
+    for pack, meta in installed.items():
+        entries = meta.get("connectors") if isinstance(meta, Mapping) else None
+        if not isinstance(entries, list):
+            out[pack] = meta
+            continue
+        kept = []
+        for e in entries:
+            if isinstance(e, Mapping):
+                atteso = claims.get(str(e.get("id") or "")) or \
+                    claims.get("ns:" + str(e.get("namespace") or ""))
+                if atteso and atteso != pack:
+                    refused.append(
+                        f"pack '{pack}', connector '{e.get('id')}': on this "
+                        f"instance that connector is switched to '{atteso}', "
+                        f"not to '{pack}'; refused")
+                    continue
+            kept.append(e)
+        out[pack] = {**meta, "connectors": kept} if len(kept) != len(entries) else meta
+    return out, refused
+
+
 def registry() -> Registry:
     """The connectors of the installed packs, rebuilt when the files change."""
     return _build()[0]
@@ -599,13 +638,14 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
     try:
         own = _builtin.manifests()
         installed = {k: v for k, v in manifests().items() if k not in own}
+        installed, foreign = _strip_foreign_claims(installed)
         owners = backend_owners(installed)
         try:
             anz = seniority()
         except Exception:  # noqa: BLE001 — no stamps: iteration order
             anz = None
         reg, dropped, dropped_packs = _build_isolated(own, installed, anz)
-        refused = list(dropped) + list(reg.refused)
+        refused = list(foreign) + list(dropped) + list(reg.refused)
         # Namespace di backend MCP montati: riservati come quelli nativi, salvo
         # il server MCP che il pack monta come proprio. Il connettore che ne
         # prende uno altrui è rifiutato da solo — gli altri restano.
@@ -620,7 +660,7 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
                     f"pack's own; a pack cannot claim another backend's verbs")
             else:
                 keep.append(c)
-        if len(keep) != len(reg.connectors) or dropped:
+        if len(keep) != len(reg.connectors) or dropped or foreign:
             # The outbound verbs of a DROPPED pack fail closed (second
             # verification): unmapped would mean unchecked.
             reg = Registry(connectors=tuple(keep), refused=tuple(refused),

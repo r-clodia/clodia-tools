@@ -108,6 +108,46 @@ def manifests() -> dict[str, dict]:
 _RELEASED: dict[frozenset, tuple[frozenset, frozenset]] = {}
 
 
+#: The first-party pack each builtin connector moves to (epic #527). The
+#: switch `connectors: {<id>: pack}` hands the connector to THIS pack only:
+#: without the name, whichever pack was imported first could claim the
+#: namespace, the official mount and its credential (review of
+#: clodia-tools#379). A connector not listed here cannot be switched to a pack.
+RELEASED_TO: dict[str, str] = {
+    "telegram": "comms-pack",
+    "mail": "comms-pack",
+    "github": "it-pack",
+    "openai-images": "it-pack",
+}
+
+
+def expected_claims() -> dict[str, str]:
+    """`{connector id or namespace: pack}` for the connectors switched to a pack.
+
+    Both keys, because a foreign pack could claim the vocabulary under another
+    connector id but the same namespace. Never raises: in doubt, nothing."""
+    packaged = _packaged()
+    if not packaged:
+        return {}
+    out: dict[str, str] = {}
+    try:
+        docs = _all()
+    except Exception:  # noqa: BLE001
+        return {}
+    for doc in docs.values():
+        for entry in doc.get("connectors") or []:
+            if not isinstance(entry, dict):
+                continue
+            cid = str(entry.get("id") or "")
+            if cid not in packaged or cid not in RELEASED_TO:
+                continue
+            out[cid] = RELEASED_TO[cid]
+            ns = str(entry.get("namespace") or "")
+            if ns:
+                out["ns:" + ns] = RELEASED_TO[cid]
+    return out
+
+
 def released() -> tuple[frozenset[str], frozenset[str]]:
     """`(namespace, prefissi di vault)` che i connettori passati a un pack lasciano.
 
