@@ -783,6 +783,76 @@ def source_uri(verb: str, arguments: dict | None,
     return uris[0] if len(uris) == 1 else None
 
 
+# --------------------------------------------------------------------------
+# gli argomenti che il gateway riempie da sé (clodia-platform#522)
+# --------------------------------------------------------------------------
+
+def held_by_pack(namespace: str) -> bool:
+    """True when the registry HOLDS a pack connector owning `namespace`.
+
+    In `pack` position the gateway dispatches the namespace's verbs to the
+    pack backend; if the pack's connector was refused (malformed manifest,
+    clash) its context/egress declarations are gone while the backend may
+    still be mounted. Calls must then be refused, not passed through with
+    the caller's own `agent`/`channel` (review of clodia-tools#374).
+    """
+    return any(c.namespace == namespace and not c.builtin
+               for c in registry().connectors)
+
+
+def context_arguments(verb: str) -> dict[str, str]:
+    """`{nome dell'argomento: fatto da metterci}` per una chiamata a `verb`.
+
+    Solo da connettori che il namespace lo possiedono DAVVERO: la stessa
+    verifica di `namespace_violation`, rifatta qui perché la domanda è diversa
+    e la risposta no. Là si chiede «questa mappatura descrive la chiamata»; qui
+    «questo manifest può scrivere dentro la chiamata», che è più invasivo di
+    descriverla — un pack che riuscisse a dichiarare contesto su un verbo
+    altrui potrebbe sovrascriverne un argomento a ogni invocazione.
+    """
+    out: dict[str, str] = {}
+    for connector, arg in registry().context_for(verb):
+        # Un builtin non può dichiarare contesto (il parser lo rifiuta): il
+        # ramo resta perché è la regola, non perché c'è un caso da servire.
+        if not connector.builtin:
+            try:
+                check_namespace(connector.namespace, [verb],
+                                reserved=reserved_for(connector.pack),
+                                where=f"pack '{connector.pack}', connector "
+                                      f"'{connector.id}'")
+            except ManifestError as e:
+                LOG.warning("connectors: contesto di '%s' ignorato (%s)", verb, e)
+                continue
+        out[arg.arg] = arg.value
+    return out
+
+
+def fill_context(verb: str, arguments: Mapping | None,
+                 values: Mapping[str, object]) -> dict:
+    """Una COPIA di `arguments` con gli argomenti di contesto riscritti.
+
+    Sovrascrive sempre: il valore del chiamante non viene né preferito né usato
+    come ripiego. Un ripiego sarebbe la falsificazione di prima con un passaggio
+    in più — basterebbe chiamare da dove il gateway non sa rispondere per
+    tornare a dire da sé chi si è.
+
+    Un fatto che il gateway non ha (fuori da una stanza non c'è un canale) non
+    diventa una stringa vuota: l'argomento viene TOLTO. «Non lo so» e «è vuoto»
+    sono due risposte diverse, e il connettore deve poterle distinguere —
+    `telegram.send` senza canale deve pretendere un `chat_id`, non credere di
+    stare in una stanza che si chiama "".
+    """
+    out = dict(arguments or {})
+    for arg, value in context_arguments(verb).items():
+        got = values.get(value)
+        text = "" if got is None else str(got)
+        if text:
+            out[arg] = text
+        else:
+            out.pop(arg, None)
+    return out
+
+
 def is_declared_read(verb: str) -> bool:
     """True when a pack declares this verb as a read of an outside source.
 

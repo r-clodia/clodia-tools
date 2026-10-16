@@ -11,6 +11,10 @@ vivono dal suo lato del confine:
   fixed = whitelist chiusa (`integrations.allowed`); full = self-service.
 - `topics: single` — creazione topic limitata al workspace unico (i DM
   restano permessi: sono la webchat, non topic di lavoro).
+- `connectors: {<id>: native|pack}` — CHI implementa un connettore su questa
+  istanza: il gateway (come sempre) o il pack che lo dichiara. È
+  l'interruttore della transizione dell'epic clodia-platform#527: vedi
+  `connector_mode`.
 
 Regole: file assente = FULL; file invalido = fallback FULL con warning
 prominente (availability-first, rischio documentato in spec). Loader
@@ -47,6 +51,17 @@ _TRISTATE = {"topics": ("off", "single", "full"),
              "rag": ("off", "single", "full"),
              "integrations": ("off", "fixed", "full")}
 
+#: Le due posizioni dell'interruttore di migrazione (clodia-platform#522,
+#: decisione G3 dell'epic #527). `native`: il connettore è codice del gateway,
+#: cioè tutto quello che è sempre stato. `pack`: il gateway si fa da parte —
+#: non espone i verbi nativi di quel namespace, non carica il proprio manifest
+#: builtin e libera namespace e prefisso di vault — e il connettore che il pack
+#: installato dichiara diventa quello vero.
+CONNECTOR_MODES = ("native", "pack")
+#: Default DELIBERATO: senza una riga nel profilo non cambia niente. Una
+#: migrazione si accende, non si subisce.
+CONNECTOR_DEFAULT = "native"
+
 _CACHE: Optional[dict] = None
 
 
@@ -63,6 +78,7 @@ def _full() -> dict:
         "integrations": {"allowed": []},
         "topics_single": {"name": "workspace", "tier": "SEAL-1"},
         "topics_defaults": {},
+        "connectors": {},
     }
 
 
@@ -100,10 +116,21 @@ def load(force: bool = False) -> dict:
                     val = bool(val)
                 prof["features"][key] = val
             prof["edition"] = str(raw.get("edition") or "full")
-            for section in ("rag", "integrations", "topics_single", "topics_defaults"):
+            for section in ("rag", "integrations", "topics_single",
+                            "topics_defaults", "connectors"):
                 sec = raw.get(section)
                 if isinstance(sec, dict):
                     prof[section].update(sec)
+            for cid, mode in prof["connectors"].items():
+                # Convalidato qui e non al punto d'uso: un valore storpiato
+                # ricade sul profilo FULL, dove `connectors` è vuoto e ogni
+                # connettore resta NATIVO. Tollerarlo al punto d'uso
+                # significherebbe scegliere fra «nativo» e «pack» leggendo una
+                # parola che nessuno ha scritto.
+                if str(mode) not in CONNECTOR_MODES:
+                    raise ValueError(
+                        f"connectors.{cid}: valore '{mode}' non valido "
+                        f"(ammessi: {', '.join(CONNECTOR_MODES)})")
             LOG.info("profilo istanza '%s' caricato da %s", prof["edition"], path)
         except Exception as e:  # noqa: BLE001
             LOG.error(
@@ -170,6 +197,42 @@ def connectors_allowed() -> list[str] | None:
     if val is None:
         return None
     return [str(x) for x in (val or [])]
+
+
+def connector_mode(cid: str) -> str:
+    """Chi implementa il connettore `cid` su questa istanza: `native` o `pack`.
+
+    L'interruttore della transizione di clodia-platform#522. Il gateway e il
+    pack non convivono sullo stesso connettore — due implementazioni dello
+    stesso verbo sarebbero due PDP, due lease e due code di inbound — quindi la
+    domanda ha una sola risposta per istanza, e la dà l'owner nel profilo.
+
+    Fail-safe verso `native` per costruzione: un profilo assente, illeggibile o
+    con un valore che questo lettore non capisce ricade sul profilo FULL, dove
+    `connectors` è vuoto. Il comportamento di sempre non si perde mai per un
+    errore di configurazione; si perde solo su richiesta esplicita.
+    """
+    try:
+        val = (load().get("connectors") or {}).get(cid)
+    except Exception:  # noqa: BLE001 — in dubbio, il gateway resta quello di ieri
+        return CONNECTOR_DEFAULT
+    mode = str(val or CONNECTOR_DEFAULT)
+    return mode if mode in CONNECTOR_MODES else CONNECTOR_DEFAULT
+
+
+def packaged_connectors() -> frozenset[str]:
+    """Gli id dei connettori che su questa istanza li serve un PACK.
+
+    Un insieme e non una domanda per id perché chi deve farsi da parte —
+    l'elenco dei manifest builtin, i Tool nativi, i namespace riservati — deve
+    poter guardare la propria lista e sottrarre, senza sapere quali connettori
+    esistano.
+    """
+    try:
+        conf = load().get("connectors") or {}
+    except Exception:  # noqa: BLE001
+        return frozenset()
+    return frozenset(cid for cid in conf if connector_mode(cid) == "pack")
 
 
 def connector_check(cid: str) -> None:
