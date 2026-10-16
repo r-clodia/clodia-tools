@@ -1241,16 +1241,33 @@ def _docs_url(raw: Any, where: str) -> str:
     """`docs_url` goes into an `href` on the Tools page, where the session
     token sits in localStorage: a `javascript:` or `data:` URL would run in
     that origin. A pack may point at its documentation, nothing else, so only
-    an absolute `https://` URL with a host is accepted (review of #365)."""
+    an absolute `https://` URL with a host is accepted (review of #365).
+
+    A HOST, not a netloc (clodia-platform#545 §7): `https://@` and
+    `https://:443` have a netloc and no hostname, and a control character —
+    NUL included — goes through `urlsplit` untouched. Userinfo is refused as
+    well: `https://docs.pack.io@evil.it` reads as the first host and resolves
+    to the second, and no documentation link needs credentials.
+    """
     value = _text(raw, where, required=False)
     if not value:
         return ""
-    parts = urlsplit(value)
-    if not value.startswith("https://") or parts.scheme != "https" \
-            or not parts.netloc or any(c.isspace() for c in value):
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+    except ValueError:
+        # `https://[` raises here, and a ValueError escaping the parser used
+        # to empty the WHOLE registry instead of refusing this one pack
+        # (review of clodia-tools#369).
+        parts, host = None, None
+    if parts is None or not value.startswith("https://") or parts.scheme != "https" \
+            or not host or "@" in parts.netloc \
+            or any(c.isspace() or not c.isprintable() for c in value):
         raise ManifestError(
-            f"{where}: '{value}' is not an https:// URL; only https:// "
-            f"documentation links are accepted")
+            # `repr`: the refused value may carry control characters, and a log
+            # line or a card that prints them raw is a second defect.
+            f"{where}: {value!r} is not an https:// URL with a host; "
+            f"only https:// documentation links are accepted")
     return value
 
 

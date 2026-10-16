@@ -50,6 +50,17 @@ def _slugify(name: str) -> str:
     return s[:40]
 
 
+def _norm_backend(name) -> str:
+    """Il nome di un backend nella forma in cui lo confronta la PROPRIETÀ.
+
+    Una sola implementazione, quella di `connectors.resolved`: importata qui
+    dentro perché quel modulo tira dentro il registry dei connettori e questo
+    file è importato dal boot del gateway.
+    """
+    from .connectors.resolved import norm_name
+    return norm_name(str(name or ""))
+
+
 def _replace_placeholder(obj, name: str, repl: str):
     """Sostituisce ricorsivamente ${name} con repl nelle stringhe di obj."""
     ph = "${" + name + "}"
@@ -631,7 +642,16 @@ def register_mcp_core(config, secrets: dict | None = None,
         # name `mcp_<slug>_<name>` is shared with the backend already mounted,
         # so depositing first and refusing afterwards overwrote the legitimate
         # owner's secret with the refused caller's value.
-        precedente = next((b for b in backends if b.get("name") == slug), None)
+        # Confronto NORMALIZZATO (clodia-platform#545 §2): `mcp_backends` è un
+        # file, e un nome scritto a mano lì dentro non passa da `_slugify` —
+        # `norm_attiva` non è uguale a `norm-attiva` per `==`, ma per la
+        # proprietà (`resolved.norm_name`, che decide se un pack può prendersi
+        # quel namespace) è lo stesso backend. Due confronti diversi sulla
+        # stessa domanda: quello più largo vince, se no il mount passa qui e la
+        # proprietà lo registra là.
+        precedente = next((b for b in backends
+                           if _norm_backend(b.get("name")) == _norm_backend(slug)),
+                          None)
         if precedente is not None:
             prima = str(precedente.get("pack") or "")
             adesso = str(pack or "")
@@ -659,7 +679,11 @@ def register_mcp_core(config, secrets: dict | None = None,
             cred = f"mcp_{slug}_{sname}"
             deposits.append((cred, sval))
             backend = _replace_placeholder(backend, sname, f"${{VAULT:{cred}}}")
-        backends = [b for b in backends if b.get("name") != slug]  # dedup
+        # Dedup sullo stesso confronto del 409: una riga che si normalizza
+        # come la nuova È la stessa voce, e lasciarla farebbe dipendere la
+        # proprietà da quale delle due viene letta per prima.
+        backends = [b for b in backends
+                    if _norm_backend(b.get("name")) != _norm_backend(slug)]
         backends.append(backend)
         registered.append(slug)
 

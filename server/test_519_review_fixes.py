@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -203,11 +204,23 @@ class IsolationTests(unittest.TestCase):
         self.addCleanup(resolved.invalidate)
 
     def install(self, pack: str, *connectors: dict) -> None:
+        """Installa il pack e DICHIARA quando: l'mtime del manifest è l'ordine
+        di installazione che `resolved` legge per risolvere un clash
+        (clodia-platform#545 §1), e due scritture nello stesso test possono
+        cadere nello stesso istante."""
         d = self.data / resolved.PACKS_DIR / pack
         d.mkdir(parents=True, exist_ok=True)
-        (d / "pack.yaml").write_text(
+        manifest = d / "pack.yaml"
+        manifest.write_text(
             json.dumps({"name": pack, "connectors": list(connectors)}),
             encoding="utf-8")
+        self._quando = getattr(self, "_quando", 1_000_000) + 60
+        # Install order is when the GATEWAY first saw the pack (review
+        # of clodia-tools#369), stamped here instead of hoped for.
+        from unittest.mock import patch as _patch
+        with _patch("time.time", return_value=float(self._quando)):
+            resolved._first_seen([pack])
+        os.utime(manifest, (self._quando, self._quando))
 
     def _ids(self):
         return {c.id for c in resolved.registry().connectors if not c.builtin}
@@ -222,14 +235,20 @@ class IsolationTests(unittest.TestCase):
         self.assertTrue(any("bad-pack" in p for p in resolved.problems()))
         self.assertIsNotNone(egress.spec_for("email.send"))
 
-    def test_two_clashing_packs_are_both_refused_the_rest_stays(self):
+    def test_a_clash_costs_the_newcomer_its_connectors_not_the_incumbent(self):
+        """clodia-platform#545 §1. `aaa-pack` è installato prima e tiene lo
+        schema conteso; `zzz-pack` arriva dopo e lo perde. Prima li perdevano
+        entrambi, cioè installare un pack qualsiasi era un modo per spegnere
+        un pack che funzionava. Nota che il perdente sorta PRIMA in ordine
+        alfabetico: è così che si distingue «chi c'era prima» da «chi sorta
+        per primo»."""
         self.install("good-pack", _sms())
         self.install("aaa-pack", _sms(namespace="aaa", scheme="contested"))
         self.install("zzz-pack", _sms(namespace="zzz", scheme="contested"))
-        self.assertEqual(self._ids(), {"sms"})
+        self.assertEqual(self._ids(), {"sms", "aaa"})
         problems = " ".join(resolved.problems())
-        self.assertIn("aaa-pack", problems)
         self.assertIn("zzz-pack", problems)
+        self.assertNotIn("pack 'aaa-pack' refused", problems)
 
     def test_a_pack_extending_a_refused_pack_goes_too(self):
         self.install("good-pack", _sms())

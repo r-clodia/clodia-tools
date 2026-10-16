@@ -30,32 +30,44 @@ from unittest import mock
 
 from . import main as M
 
+#: La radice del cortile come la vede il CODICE, non come la ricordiamo a
+#: memoria: da clodia-platform#545 §6 `make test` esporta `CLODIA_SPAWNS_ROOT`
+#: su una directory usa e getta, e un test che scrive `/datadir/spawns` a mano
+#: smetterebbe di misurare il controllo — misurerebbe la costante.
+ROOT = M._SPAWNS_ROOT
+
+
+def _in(*parti: str) -> str:
+    """Un path DENTRO il cortile, qualunque sia la radice configurata."""
+    return os.path.join(ROOT, *parti)
+
+
 
 class RootIsNotADestinationTests(unittest.TestCase):
     def test_a_path_inside_a_spawn_is_allowed(self):
         self.assertTrue(
-            M._safe_scratch_path("/datadir/spawns/clodia-1/x.pdf")
+            M._safe_scratch_path(_in("clodia-1/x.pdf"))
             .endswith("/clodia-1/x.pdf"))
 
     def test_a_deeper_path_is_allowed(self):
-        M._safe_scratch_path("/datadir/spawns/clodia-1/out/report.pdf")
+        M._safe_scratch_path(_in("clodia-1/out/report.pdf"))
 
     def test_a_file_at_the_root_is_refused(self):
         """Il caso che ha prodotto i 226 file."""
         with self.assertRaises(ValueError) as cm:
-            M._safe_scratch_path("/datadir/spawns/FPR_3_25.pdf")
+            M._safe_scratch_path(_in("FPR_3_25.pdf"))
         self.assertIn("RADICE", str(cm.exception))
 
     def test_the_root_itself_is_refused(self):
         with self.assertRaises(ValueError):
-            M._safe_scratch_path("/datadir/spawns")
+            M._safe_scratch_path(ROOT)
 
     def test_the_refusal_shows_the_road(self):
         """Un rifiuto che non dice come procedere insegna solo che il sistema
         dice di no — e qui ci sono due strade, a seconda di cosa si stava
         facendo."""
         with self.assertRaises(ValueError) as cm:
-            M._safe_scratch_path("/datadir/spawns/allegato.pdf")
+            M._safe_scratch_path(_in("allegato.pdf"))
         t = str(cm.exception)
         self.assertIn("<spawn>", t)
         self.assertIn("save_attachment", t)
@@ -71,13 +83,13 @@ class EscapeTests(unittest.TestCase):
 
     def test_traversal_out_of_the_yard_is_refused(self):
         with self.assertRaises(ValueError):
-            M._safe_scratch_path("/datadir/spawns/clodia-1/../../topics/x")
+            M._safe_scratch_path(_in("clodia-1/../../topics/x"))
 
     def test_a_sibling_prefix_is_not_inside(self):
-        """`/datadir/spawns-altro` comincia per `/datadir/spawns` ma non ci sta
+        """`<radice>-altro` comincia per la radice del cortile ma non ci sta
         dentro: è il motivo per cui il confronto vuole lo slash."""
         with self.assertRaises(ValueError):
-            M._safe_scratch_path("/datadir/spawns-altro/clodia-1/x")
+            M._safe_scratch_path(ROOT + "-altro/clodia-1/x")
 
     def test_an_empty_path_is_refused(self):
         with self.assertRaises(ValueError):
@@ -203,11 +215,11 @@ class OwnScratchTests(unittest.TestCase):
         self.addCleanup(lambda: w.reset_current_spawn(self.t))
 
     def test_a_spawn_writes_in_its_own_scratch(self):
-        M._safe_scratch_path("/datadir/spawns/clodia-1/x.pdf")
+        M._safe_scratch_path(_in("clodia-1/x.pdf"))
 
     def test_a_spawn_may_not_write_in_anothers(self):
         with self.assertRaises(ValueError) as cm:
-            M._safe_scratch_path("/datadir/spawns/ophelia-2/x.pdf")
+            M._safe_scratch_path(_in("ophelia-2/x.pdf"))
         self.assertIn("ophelia-2", str(cm.exception))
         self.assertIn("clodia-1", str(cm.exception))
 
@@ -216,19 +228,19 @@ class OwnScratchTests(unittest.TestCase):
         è dello spawn — è lo stesso principio della voce 29 applicato al
         filesystem invece che ai topic."""
         with self.assertRaises(ValueError):
-            M._safe_scratch_path("/datadir/spawns/clodia-2/x.pdf")
+            M._safe_scratch_path(_in("clodia-2/x.pdf"))
 
     def test_the_refusal_says_the_road_for_passing_a_file(self):
         """Chi ci arriva vuole quasi sempre consegnare qualcosa a un altro
         spawn, e quella strada esiste: passa dal topic, non dal filesystem."""
         with self.assertRaises(ValueError) as cm:
-            M._safe_scratch_path("/datadir/spawns/altro-3/x.pdf")
+            M._safe_scratch_path(_in("altro-3/x.pdf"))
         self.assertIn("topic del canale", str(cm.exception))
 
     def test_a_prefix_of_a_spawn_name_is_not_that_spawn(self):
         """`clodia-10` comincia per `clodia-1` e non è lo stesso spawn."""
         with self.assertRaises(ValueError):
-            M._safe_scratch_path("/datadir/spawns/clodia-10/x.pdf")
+            M._safe_scratch_path(_in("clodia-10/x.pdf"))
 
 
 class NoClaimTests(unittest.TestCase):
@@ -236,10 +248,10 @@ class NoClaimTests(unittest.TestCase):
         """Un chiamante vecchio o un percorso interno non porta
         `execution_id`. Rifiutare qui trasformerebbe l'assenza di un campo nuovo
         in un guasto, e la retrocompatibilità va verso «come prima»."""
-        M._safe_scratch_path("/datadir/spawns/chiunque-9/x.pdf")
+        M._safe_scratch_path(_in("chiunque-9/x.pdf"))
 
     def test_the_root_stays_refused_even_without_the_claim(self):
         """Il controllo precedente non deve indebolirsi con l'aggiunta del
         nuovo: sono due condizioni, non una scelta."""
         with self.assertRaises(ValueError):
-            M._safe_scratch_path("/datadir/spawns/sciolto.pdf")
+            M._safe_scratch_path(_in("sciolto.pdf"))
