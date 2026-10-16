@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 import os
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -88,8 +89,12 @@ def _manifest_files() -> list[Path]:
         files = list((_DATA / PACKS_DIR).glob("*/pack.yaml"))
     except OSError:  # unreadable data dir: no connectors, never an exception
         return []
-    seen = _first_seen([p.parent.name for p in files])
-    return sorted(files, key=lambda p: (seen.get(p.parent.name, 0.0), str(p)))
+    try:
+        seen = _first_seen([p.parent.name for p in files], prune=True)
+    except Exception:  # noqa: BLE001 — no stamps: path order, never an exception
+        LOG.warning("connectors: anzianità dei pack non disponibile")
+        seen = {}
+    return sorted(files, key=lambda p: (seen.get(p.parent.name, math.inf), str(p)))
 
 
 #: Packs first seen in this process when the state file cannot be written.
@@ -105,7 +110,7 @@ def _first_seen_path() -> Path:
     return _DATA / "clodia-tools-connectors-first-seen.json"
 
 
-def _first_seen(dirs: list[str]) -> dict[str, float]:
+def _first_seen(dirs: list[str], *, prune: bool = False) -> dict[str, float]:
     """`{pack dir: when the gateway first saw it}`, stamping the new ones now.
 
     Never updated afterwards, whatever happens to `pack.yaml`. Packs seen for
@@ -124,8 +129,24 @@ def _first_seen(dirs: list[str]) -> dict[str, float]:
         data = {}
     data = {**_SEEN_MEMORY, **data}
     now = time.time()
-    new = [d for d in dirs if d not in data]
-    if new:
+    # A stamp that is not a finite positive number (a hand edit, a corrupted
+    # file, NaN which json accepts) is no evidence of seniority: that pack
+    # counts as arriving NOW, i.e. the newcomer — never the incumbent, and
+    # never a value that breaks the ordering (review of #369: NaN looped
+    # `_build_isolated` forever, 0 made an intruder the incumbent).
+    def _valid(v) -> bool:
+        return (isinstance(v, (int, float)) and not isinstance(v, bool)
+                and math.isfinite(v) and v > 0)
+    bad = [d for d in dirs if d in data and not _valid(data[d])]
+    # `prune` only when `dirs` is the COMPLETE list of installed packs.
+    gone = [d for d in list(data) if d not in dirs] if prune else []
+    for d in gone:
+        # Stamps of removed packs go: a new pack in the same directory name
+        # must not inherit the old one's seniority.
+        data.pop(d, None)
+        _SEEN_MEMORY.pop(d, None)
+    new = [d for d in dirs if d not in data] + bad
+    if new or gone:
         for d in new:
             data[d] = now
         try:
@@ -137,7 +158,7 @@ def _first_seen(dirs: list[str]) -> dict[str, float]:
         except OSError:
             LOG.warning("connectors: %s non scrivibile, anzianità in memoria", path)
         _SEEN_MEMORY.update({d: data[d] for d in new})
-    return {d: float(data.get(d, 0.0)) for d in dirs}
+    return {d: float(data[d]) if _valid(data.get(d)) else now for d in dirs}
 
 
 def seniority() -> dict[str, float]:
@@ -145,7 +166,10 @@ def seniority() -> dict[str, float]:
     import yaml
     out: dict[str, float] = {}
     files = _manifest_files()
-    seen = _first_seen([p.parent.name for p in files])
+    try:
+        seen = _first_seen([p.parent.name for p in files])
+    except Exception:  # noqa: BLE001
+        return {}
     for path in files:
         try:
             loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -153,7 +177,7 @@ def seniority() -> dict[str, float]:
             continue
         name = str((loaded or {}).get("name") or path.parent.name) \
             if isinstance(loaded, Mapping) else path.parent.name
-        out[name] = seen.get(path.parent.name, 0.0)
+        out[name] = seen.get(path.parent.name, math.inf)
     return out
 
 
@@ -359,8 +383,18 @@ def _build_isolated(own: dict, installed: dict,
     remaining = dict(installed)
     # When the packs arrived: the gateway's own first-seen stamps if known,
     # else the iteration order (tests build the dict in install order).
-    order = {p: float((seniority or {}).get(p, i)) if seniority else float(i)
-             for i, p in enumerate(installed)}
+    # A pack with no (or no usable) stamp counts as the NEWEST arrival: the
+    # unsafe default would be to make it the incumbent (review of #369).
+    def _when(p: str, i: int) -> float:
+        if not seniority:
+            return float(i)
+        v = seniority.get(p)
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return math.inf
+        return v if math.isfinite(v) else math.inf
+    order = {p: _when(p, i) for i, p in enumerate(installed)}
     dropped: list[str] = []
     while True:
         try:
@@ -376,8 +410,9 @@ def _build_isolated(own: dict, installed: dict,
                 # Arrivals with the SAME stamp are all dropped: between them
                 # there is no incumbent, and inventing one would be the
                 # «whoever sorts first» this replaced (review of #369).
-                ultimo = max(order.get(p, 0.0) for p in culprits)
-                culprits = [p for p in culprits if order.get(p, 0.0) == ultimo]
+                ultimo = max(order.get(p, math.inf) for p in culprits)
+                culprits = [p for p in culprits
+                            if order.get(p, math.inf) == ultimo] or culprits
             for p in culprits:
                 remaining.pop(p)
                 dropped.append(f"pack '{p}' refused, its connectors are "

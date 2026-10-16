@@ -125,6 +125,61 @@ class InstallOrderTests(unittest.TestCase):
             self.assertEqual(resolved.seniority(),
                              {"mail-pack": 1000.0, "evil-pack": 2000.0})
 
+    def test_a_corrupted_stamp_never_breaks_or_wins(self):
+        """Review of #369: "x"/null raised, NaN looped forever, 0 made an
+        intruder the incumbent. A bad stamp = the pack arrives now."""
+        import json
+        import math
+        import tempfile
+        from pathlib import Path
+        for bad in ("x", None, float("nan"), 0, -5, True):
+            with self.subTest(bad=bad), tempfile.TemporaryDirectory() as d, \
+                    patch.object(resolved, "_DATA", Path(d)), \
+                    patch.dict(resolved._SEEN_MEMORY, clear=True):
+                root = self._root(d)
+                self._install(root, "mail-pack", 1000)
+                self._install(root, "evil-pack", 2000)
+                f = resolved._first_seen_path()
+                data = json.loads(f.read_text())
+                data["evil-pack"] = bad
+                f.write_text(json.dumps(data))
+                with patch("time.time", return_value=5000.0):
+                    anz = resolved.seniority()
+                    self.assertEqual(list(resolved.manifests()),
+                                     ["mail-pack", "evil-pack"])
+                self.assertTrue(math.isfinite(anz["evil-pack"]))
+                self.assertGreater(anz["evil-pack"], anz["mail-pack"])
+
+    def test_a_removed_pack_s_stamp_is_not_inherited(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d, \
+                patch.object(resolved, "_DATA", Path(d)), \
+                patch.dict(resolved._SEEN_MEMORY, clear=True):
+            root = self._root(d)
+            self._install(root, "old-removed", 1000)
+            self._install(root, "zeta2", 2000)
+            shutil.rmtree(root / "old-removed")
+            with patch("time.time", return_value=2500.0):
+                resolved.manifests()          # the gateway notices the removal
+            self._install(root, "old-removed", 3000)
+            self.assertEqual(list(resolved.manifests()), ["zeta2", "old-removed"])
+
+    def test_a_pack_without_stamp_counts_as_newest(self):
+        from server.connectors.manifest import ManifestError
+
+        def fake_build(packs, builtin=()):
+            if {"a-pack", "b-pack"} <= set(packs):
+                e = ManifestError("clash")
+                e.packs = ("a-pack", "b-pack")
+                raise e
+            return resolved.Registry()
+        with patch.object(resolved, "build_registry", fake_build):
+            _r, _d, packs = resolved._build_isolated(
+                {}, {"a-pack": {}, "b-pack": {}}, {"a-pack": 1000.0})
+        self.assertEqual(packs, ["b-pack"])
+
     def test_packs_first_seen_together_have_no_incumbent(self):
         """Same stamp (first boot, or dropped in together): a clash between
         them drops both sides — no order is invented."""
