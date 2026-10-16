@@ -17,8 +17,12 @@ connectors:
         credential:
           kind: form
           vault_entry: github_pat
+          # `value`, not `token` (#525): the entry is `{"value": pat}` — what
+          # `tools_api.github_connect` writes and what the MCP backend reads as
+          # `${VAULT:github_pat}` / `${VAULT:github_pat.value}`. A field named
+          # otherwise would describe a key that is never there.
           fields:
-            - name: token
+            - name: value
               label: Personal access token
               secret: true
     tools_card:

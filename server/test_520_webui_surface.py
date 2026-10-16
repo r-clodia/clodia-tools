@@ -264,7 +264,7 @@ class CredentialFormTests(_NoPacks):
                        "on_behalf": True, "human_role": "admin"}):
             rows = self.c.get("/tools/connectors", headers=_H).json()["connectors"]
         per_id = {r["id"]: r for r in rows}
-        atteso = {"github": ("github_pat", "token"),
+        atteso = {"github": ("github_pat", "value"),
                   "telegram": ("telegram_bot_token", "token"),
                   "openai-images": ("openai_api_key", "api_key")}
         for cid, (entry, campo) in atteso.items():

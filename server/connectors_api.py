@@ -199,6 +199,26 @@ async def connect(request: Request):
                 {"error": f"il connettore '{cid}' è del gateway: si collega "
                           f"dalla sua pagina, non da qui"}, status_code=400)
         return await _delegate(legacy, request, connector)
+    adopted = _LEGACY_ADOPTED.get(cid)
+    if adopted is not None:
+        # In `pack` position (#525) the connector is the pack's, but the
+        # credential is still read by the GATEWAY in the shape its handler
+        # writes: `github_pat` = `{"value"}` of type `mcp_secret`,
+        # `openai_api_key` = `{"api_key"}` of type `api_key`. The generic
+        # deposit would refuse those entries (their type is not
+        # `connector:<id>`) or rewrite them in a type the native position
+        # does not recognise — so the handler keeps doing it, with the grant
+        # to clodia and the profile checks around it. Only when the pack
+        # declares that very entry: a different one is not what the gateway
+        # reads, and accepting it would deposit a credential nobody uses.
+        entries = {p.credential.vault_entry for p in connector.providers
+                   if p.credential is not None}
+        if entries and entries != {adopted}:
+            return JSONResponse(
+                {"error": f"il connettore '{cid}' deve dichiarare la voce di "
+                          f"vault '{adopted}', quella che il gateway legge"},
+                status_code=409)
+        return await _delegate(_LEGACY_CONNECT[cid], request, connector)
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
@@ -278,6 +298,15 @@ def _cred_type(connector) -> str:
 _LEGACY_CONNECT = {"github": "github_connect",
                    "telegram": "telegram_connect",
                    "openai-images": "openai_connect"}
+
+
+#: Connectors whose credential the GATEWAY keeps reading after the switch to
+#: `pack` (clodia-platform#525): `{connector id: the vault entry it reads}`.
+#: The generic route delegates to the legacy handler for them in BOTH
+#: positions, so the entry keeps its shape and type (`mcp_secret`, `api_key`)
+#: and switching back to `native` finds it where it always was. Telegram is
+#: not here: in `pack` position its credential is the pack's own (#522).
+_LEGACY_ADOPTED = {"github": "github_pat", "openai-images": "openai_api_key"}
 
 
 async def _delegate(handler_name: str, request: Request, connector):

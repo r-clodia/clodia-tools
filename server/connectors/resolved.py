@@ -211,7 +211,32 @@ def _signature(paths: list[Path]) -> tuple:
 
 #: Backend MCP che il CORE monta da sé (il connettore GitHub nativo): non sono
 #: di nessun pack, nemmeno di uno che li dichiari fra i propri `mcp_servers`.
-_CORE_BACKENDS = frozenset({"github"})
+#: `{backend: connector id}` — the connector whose native implementation mounts
+#: that backend (`tools_api.github_connect`).
+_CORE_BACKEND_CONNECTORS = {"github": "github"}
+#: The full set, whatever the switch says. Kept for readers that want the
+#: shipped list; the checks below use `core_backends()`.
+_CORE_BACKENDS = frozenset(_CORE_BACKEND_CONNECTORS)
+
+
+def core_backends() -> frozenset[str]:
+    """The core backends reserved on THIS instance (clodia-platform#525).
+
+    `github` is the core's own mount only while the gateway implements the
+    GitHub connector. With `connectors: {github: pack}` it-pack declares the
+    connector (namespace `github`) and mounts the GitHub MCP backend itself:
+    reserving the name then would refuse exactly the connector that has to
+    take over — the same reason `manifest.reserved_namespaces()` follows
+    `builtin.released()`. The reservation goes with the switch, and only with
+    it: in `native` position, or when the profile cannot be read, `github`
+    stays reserved for everyone, which is yesterday's gateway.
+    """
+    try:
+        from .. import instance_profile
+        return frozenset(b for b, cid in _CORE_BACKEND_CONNECTORS.items()
+                         if instance_profile.connector_mode(cid) != "pack")
+    except Exception:  # noqa: BLE001 — in doubt everything stays reserved
+        return _CORE_BACKENDS
 
 
 def norm_name(name: str) -> str:
@@ -238,6 +263,17 @@ _norm = norm_name
 def _backend_entries() -> list[dict]:
     from .. import proxy
     return list(proxy._backends().values())
+
+
+def _switch_signature() -> frozenset[str]:
+    """The connectors the profile hands to packs: part of every cache key here,
+    because the switch decides which builtins exist and which core backends
+    are reserved (#525) — a registry built in the other position would answer
+    for a connector that is not the one in charge."""
+    try:
+        return _builtin._packaged()
+    except Exception:  # noqa: BLE001
+        return frozenset()
 
 
 def mounted_backends() -> frozenset[str]:
@@ -267,7 +303,7 @@ def backend_owners(packs: Mapping[str, Mapping] | None = None) -> dict[str, froz
     for b in _backend_entries():
         pack = b.get("pack")
         name = _norm(str(b.get("name") or ""))
-        if isinstance(pack, str) and pack and name and name not in _CORE_BACKENDS:
+        if isinstance(pack, str) and pack and name and name not in core_backends():
             out.setdefault(pack, set()).add(name)
     return {k: frozenset(v) for k, v in out.items()}
 
@@ -283,7 +319,7 @@ def foreign_backends(pack: str) -> frozenset[str]:
     spegnere il taint.
     """
     owned = _build_owners().get(pack, frozenset())
-    return (mounted_backends() | _CORE_BACKENDS) - owned
+    return (mounted_backends() | core_backends()) - owned
 
 
 def reserved_for(pack: str) -> frozenset[str]:
@@ -493,7 +529,7 @@ def _failsafe_from(packs: Mapping[str, Mapping],
         pass
     taken |= {_norm(x) for x in (reserved or ())}
     try:
-        mounted = {_norm(b) for b in (mounted_backends() | _CORE_BACKENDS)}
+        mounted = {_norm(b) for b in (mounted_backends() | core_backends())}
     except Exception:  # noqa: BLE001
         mounted = {_norm(b) for b in _CORE_BACKENDS}
     try:
@@ -539,7 +575,7 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
     # Nella firma anche i plugin (chi possiede quale server MCP) e i backend
     # montati: un `mcp.add` fatto dopo la costruzione deve riservare quel
     # namespace alla chiamata successiva, non al prossimo cambio di pack.yaml.
-    sig = (_signature(_manifest_files()), _mount_signature())
+    sig = (_signature(_manifest_files()), _mount_signature(), _switch_signature())
     if _CACHE is not None and _CACHE[0] == sig:
         return _CACHE[1], _CACHE[2]
     # 1. The floor: the gateway's own connectors. If THEY fail the result is
@@ -573,7 +609,7 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
         # Namespace di backend MCP montati: riservati come quelli nativi, salvo
         # il server MCP che il pack monta come proprio. Il connettore che ne
         # prende uno altrui è rifiutato da solo — gli altri restano.
-        mounted = mounted_backends() | _CORE_BACKENDS
+        mounted = mounted_backends() | core_backends()
         keep = []
         for c in reg.connectors:
             if not c.builtin and \
@@ -946,7 +982,7 @@ def transport_for(connector_id: str) -> tuple[str, str] | None:
         return None
     backend = provider.transport.backend
     owned = backend_owners().get(connector.pack, frozenset())
-    if _norm(backend) not in owned or _norm(backend) in _CORE_BACKENDS:
+    if _norm(backend) not in owned or _norm(backend) in core_backends():
         LOG.warning("connectors: transport of '%s' names backend '%s', which "
                     "pack '%s' has not mounted: not used", connector_id,
                     backend, connector.pack)
@@ -974,7 +1010,7 @@ def transport_backends() -> frozenset[str]:
     mounts, never a neighbour's, a core one or an unclaimed admin mount.
     """
     global _TRANSPORTS
-    sig = (_signature(_manifest_files()), _mount_signature())
+    sig = (_signature(_manifest_files()), _mount_signature(), _switch_signature())
     if _TRANSPORTS is not None and _TRANSPORTS[0] == sig:
         return _TRANSPORTS[1]
     owners = backend_owners()
@@ -987,7 +1023,7 @@ def transport_backends() -> frozenset[str]:
                 t = p.get("transport") if isinstance(p, Mapping) else None
                 name = _norm(str(t.get("backend") or "")) \
                     if isinstance(t, Mapping) else ""
-                if not name or name in _CORE_BACKENDS:
+                if not name or name in core_backends():
                     continue
                 # Only the pack's OWN stamped mounts: an unclaimed backend
                 # (mounted by an admin, e.g. normattiva) must not be hideable

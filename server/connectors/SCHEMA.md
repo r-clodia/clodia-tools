@@ -499,6 +499,23 @@ the I/O (see `providers[]`). A retained verb whose pack connector is not held
 is refused: without that connector `email.send` would be unmapped, i.e.
 unchecked.
 
+`github: pack` and `openai-images: pack` (#525) follow the same two shapes.
+GitHub: the four git verbs (`github.clone/pull/push/pull_request`) are retained
+— room, repository perimeter, origin, credential and scratch are the reference
+monitor's — while it-pack's `github` connector supplies the mappings, taint and
+warning, and it-pack mounts the GitHub MCP backend itself: `github` stops being
+a core backend reserved for nobody, `/tools/github/connect` only deposits the
+PAT (`github_pat`, `{"value"}`, readable as `${VAULT:github_pat.value}`), and
+the pack's mount replaces the native connector's unstamped `github` entry
+instead of getting a 409. A pack's `danger_uris` on a scheme it does not own
+apply only for the connector the switch elected, and only **added** to the
+scheme's own warning. OpenAI images: `image.generate` and `/internal/imagegen`
+stay the gateway's; `generate`/`edit` go to the provider's `transport` with
+`{op, prompt, size, quality, background, image_b64?, api_key}` and expect
+`{"png_b64": "<base64>"}` back — no transport, no image, never the in-process
+client. Both credentials keep their legacy vault entries and types; the generic
+connect route hands them to their legacy handlers in both positions.
+
 ---
 
 ## Examples

@@ -1982,6 +1982,35 @@ class Registry:
                     return rule.text
         return ""
 
+    def elected_danger_for(self, uri: str, connector_ids: Iterable[str]) -> str:
+        """The warning a PACK connector the owner put in a builtin's place
+        declares for `uri` on a scheme it does not own, or `""`.
+
+        clodia-platform#525. GitHub owns no scheme: «a public repository shows
+        everything pushed there to anyone» hangs off `https:` URIs. While the
+        gateway declared it that was a builtin rule; once it-pack declares the
+        connector, `danger_for` (rightly) ignores a pack's rule on a shared
+        scheme, and the warning would vanish from the gate card. A pack whose
+        connector id the profile hands to a pack (`connector_ids`, the switch)
+        is not «any pack»: it is the connector the owner elected. Its rules
+        apply — but the caller ADDS them to the scheme's own warning, never
+        in place of it (`egress.danger_note`), so even the elected pack can
+        say more than the core, never less.
+        """
+        ids = frozenset(connector_ids or ())
+        if not ids:
+            return ""
+        scheme = (uri or "").partition(":")[0].lower()
+        for c in self.connectors:
+            if c.builtin or c.id not in ids:
+                continue
+            if scheme in {s.name for s in c.schemes}:
+                continue          # its own scheme: `danger_for` already asked
+            for rule in c.danger_rules:
+                if rule.matches(uri):
+                    return rule.text
+        return ""
+
     def canonical(self, uri: str) -> str | None:
         """The first canonicalisation rule that rewrites `uri`, or None.
 
