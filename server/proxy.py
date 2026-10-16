@@ -226,6 +226,10 @@ async def list_proxied_tools() -> list[Tool]:
     irraggiungibile viene saltato senza far cadere l'intera lista."""
     tools: list[Tool] = []
     for name, b in _backends().items():
+        if _is_transport(name):
+            # A provider transport (#523) is a socket of the gateway, not a
+            # verb: never listed, whoever asks — see `main._check_not_transport`.
+            continue
         if name not in _TOOL_CACHE:
             try:
                 async with _session(b) as s:
@@ -242,6 +246,11 @@ async def list_proxied_tools() -> list[Tool]:
                 _TOOL_CACHE[name] = []  # backend down: cache vuota (riprovabile a restart)
         tools.extend(_TOOL_CACHE[name])
     return tools
+
+
+def _is_transport(backend: str) -> bool:
+    from .connectors import resolved
+    return resolved.is_transport_backend(backend)
 
 
 def _response_text(content: list) -> str:
@@ -316,3 +325,74 @@ async def call_proxied(name: str, arguments: dict) -> str:
         if reauth is None:
             raise
         raise reauth from None
+
+
+#: Margin over the caller's own timeout for opening the session: a stdio
+#: backend is spawned per call (v1), and the transport's `timeout` is the
+#: budget of the OPERATION, not of the process start.
+TRANSPORT_SESSION_MARGIN_S = 30
+
+
+class BackendToolError(RuntimeError):
+    """A backend tool answered with `isError`, or could not be reached."""
+
+
+def _backend_named(name: str) -> dict | None:
+    """The mounted backend called `name`, compared the way ownership is
+    (`resolved.norm_name`: slugs use `-`, namespaces `_`)."""
+    from .connectors.resolved import norm_name
+    found = _backends().get(name)
+    if found is not None:
+        return found
+    want = norm_name(name)
+    return next((b for n, b in _backends().items() if norm_name(n) == want), None)
+
+
+def call_backend_tool_sync(backend: str, tool: str, arguments: dict,
+                           timeout: float) -> str:
+    """Call ONE tool of a mounted backend for the gateway itself; the text.
+
+    The provider transport of #523: the gateway, not an agent, is the caller,
+    so none of `call_proxied`'s agent-facing shaping applies. In particular no
+    `_cappa`: that cap protects a model's context, while here the answer is a
+    mail with its attachments, read by the gateway and filtered by it before
+    anything reaches an agent. Truncated, it would be a broken JSON — i.e. a
+    transport failure manufactured by the gateway.
+
+    Synchronous on purpose: the mail verbs are synchronous code that runs off
+    the event loop (`asyncio.to_thread` in the dispatch, #553), so the call
+    gets a loop of its own. Called from a thread that already runs a loop it
+    cannot nest one, and it moves to a worker thread instead of failing: the
+    owner switching the transport must not turn a caller that used to work
+    (a blocking subprocess) into a `RuntimeError`.
+
+    Raises `BackendToolError` on a tool error (`isError`) and when the backend
+    is not mounted: the caller fails closed, there is no fallback to the
+    in-process client — that would be the switch undoing itself silently.
+    """
+    b = _backend_named(backend)
+    if b is None:
+        raise BackendToolError(f"backend MCP '{backend}' non montato")
+    budget = float(timeout) + TRANSPORT_SESSION_MARGIN_S
+
+    async def _go() -> str:
+        async def _call():
+            async with _session(b) as s:
+                return await s.call_tool(tool, arguments)
+        try:
+            res = await asyncio.wait_for(_call(), timeout=budget)
+        except TimeoutError:
+            raise BackendToolError(
+                f"{backend}.{tool}: nessuna risposta entro {int(budget)}s") from None
+        text = _response_text(res.content)
+        if getattr(res, "isError", False):
+            raise BackendToolError(f"{backend}.{tool}: {text[:500]}")
+        return text
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_go())
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(_go())).result()

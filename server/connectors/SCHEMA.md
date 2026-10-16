@@ -158,6 +158,41 @@ generic without a manifest that describes it would be rewriting it.
   true` for the ones that must never be echoed back);
 - `kind: oauth` — `authorize_url`, `token_url`, `scopes`.
 
+**`transport`** (optional, pack manifests only — refused in a builtin
+manifest): `{backend: <mounted MCP backend>, tool: <tool name>}`. `backend`
+follows the id rule, `tool` the argument rule; no other key is accepted.
+
+It exists for a connector whose verbs the gateway keeps (#523, mail): before
+any byte of a mailbox comes back the gateway takes decisions that belong to the
+reference monitor — the mailbox whitelist (`inbox:`/`outbox:`), strict ingress
+and its audit record (#503), topic attachments in and out with their taint, the
+reply recipient — so the verbs `email.*` stay in the gateway and only the I/O
+moves. With the instance switch on `pack` (`connectors: {mail: pack}`) the
+gateway, inside each verb and after every one of those checks, calls
+`<backend>.<tool>` of the pack connector it holds for that id, with:
+
+```
+{"argv":   ["--account", "<account>", "<operation>", ...],
+ "files":  {"secrets/<rel>": "<base64>", "att/<n>/<name>": "<base64>"},
+ "timeout": <seconds>}
+```
+
+`files` carries only **that call's** credential (the files the gateway
+materialised for one mailbox) and the attachments; `{dir}` in `argv` stands for
+the directory where the transport writes them, and `secrets/` is the secrets
+directory the client reads. The transport answers with the JSON text
+`{"returncode": <int>, "stdout": "...", "stderr": "..."}`, which the gateway
+parses and filters exactly as it filters its in-process client's output.
+
+Three rules hold it in place. The transport is used only when the named backend
+is **the pack's own mount** (the `pack:` stamp of the mount): a manifest naming
+somebody else's backend would be a way to have a credential delivered there. In
+`pack` position with no usable transport — pack missing, connector refused,
+backend not the pack's — every `email.*` call is refused, never served by the
+in-process client. And a transport backend is a socket of the gateway, not a
+verb: its tools are not listed to anybody, and a call to `<backend>.<tool>`
+from an agent or a person is `DENIED`.
+
 ### `verbs[]`
 
 | Field | Required | Meaning |
@@ -456,6 +491,14 @@ implementation per instance, and the profile says which.
 Absent, unreadable or misspelled, the file means `native`. A migration is
 switched on; it is never suffered.
 
+`mail: pack` (#523) is the same lever with one difference: the verbs do not
+leave. `email.*` are retained by the gateway (like Telegram's binding verbs),
+so on `pack` the builtin `mail.yaml` is released, comms-pack's `mail` connector
+supplies the vocabulary the PDP reads, and its provider's `transport` carries
+the I/O (see `providers[]`). A retained verb whose pack connector is not held
+is refused: without that connector `email.send` would be unmapped, i.e.
+unchecked.
+
 ---
 
 ## Examples
@@ -606,6 +649,11 @@ connectors:
     providers:
       - id: imap
         label: IMAP/SMTP mailbox
+        # The pack's own MCP backend that carries the IMAP/SMTP I/O for the
+        # gateway's verbs (#523). Never listed to agents.
+        transport:
+          backend: mail-transport
+          tool: run
         credential:
           kind: form
           vault_entry: mail_imap

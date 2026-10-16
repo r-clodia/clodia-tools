@@ -373,7 +373,25 @@ def _builtin_registry() -> Registry:
     without any table at all.
     """
     own = _builtin.manifests()
-    return build_registry(own, builtin=tuple(own), reserved=frozenset())
+    try:
+        return build_registry(own, builtin=tuple(own), reserved=frozenset())
+    except ManifestError:
+        full = _builtin._all()
+        if set(full) == set(own) and all(full[k] == own[k] for k in own):
+            raise
+        # A connector released to a pack can leave the OTHER builtins unable
+        # to stand alone (#523): `gdrive.upload` shares with a person on
+        # `mailto:`, which `mail.yaml` declares. Healthy, the pack supplies the
+        # scheme and the real registry builds (`_build_isolated`); this floor
+        # is what remains when it cannot — and a floor that refused to build
+        # would deny every native outbound verb of the instance over a pack
+        # problem. So the floor is the gateway's manifests as shipped. The
+        # released connector's verbs stay refused all the same: they need
+        # the PACK's connector held (`main._check_pack_connector_held`), and
+        # a builtin is never that.
+        LOG.info("connectors: i builtin rimasti non stanno in piedi da soli "
+             "(connettori passati ai pack); pavimento = builtin completi")
+        return build_registry(full, builtin=tuple(full), reserved=frozenset())
 
 
 def _build_isolated(own: dict, installed: dict,
@@ -609,8 +627,9 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
 
 def invalidate() -> None:
     """Drop the cache. For tests and for whoever installs a pack in-process."""
-    global _CACHE
+    global _CACHE, _TRANSPORTS
     _CACHE = None
+    _TRANSPORTS = None
 
 
 # --------------------------------------------------------------------------
@@ -892,3 +911,101 @@ def is_declared_read(verb: str) -> bool:
     declares `direction: source` has said the same thing about its own verb.
     """
     return bool(source_mappings(verb))
+
+
+# --------------------------------------------------------------------------
+# provider transports (clodia-platform#523)
+# --------------------------------------------------------------------------
+
+def transport_for(connector_id: str) -> tuple[str, str] | None:
+    """`(backend, tool)` the gateway hands `connector_id`'s I/O to, or None.
+
+    Only in `pack` position (`instance_profile.connector_mode`): in `native`
+    the transport is the gateway's own code, and a pack declaration must not
+    be able to redirect it — the pack connector is not even held there, but
+    the position is checked first so that the answer never depends on a
+    collision happening to refuse it.
+
+    Only from the pack connector the registry HOLDS for that id (the first of
+    its providers that declares a transport): a refused manifest has no say.
+    And only when the named backend is really that pack's own mount
+    (`backend_owners`, the `pack:` stamp of `register_mcp_core`): the gateway
+    hands the transport the credential of one mailbox, and a manifest naming
+    somebody else's backend would be a way to have it delivered there.
+
+    None means «no usable transport»; the caller fails closed on it.
+    """
+    from .. import instance_profile
+    if instance_profile.connector_mode(connector_id) != "pack":
+        return None
+    connector = registry().by_id(connector_id)
+    if connector is None or connector.builtin:
+        return None
+    provider = next((p for p in connector.providers if p.transport), None)
+    if provider is None:
+        return None
+    backend = provider.transport.backend
+    owned = backend_owners().get(connector.pack, frozenset())
+    if _norm(backend) not in owned or _norm(backend) in _CORE_BACKENDS:
+        LOG.warning("connectors: transport of '%s' names backend '%s', which "
+                    "pack '%s' has not mounted: not used", connector_id,
+                    backend, connector.pack)
+        return None
+    return backend, provider.transport.tool
+
+
+#: (signature, declared transport backends) — see `transport_backends`.
+_TRANSPORTS: tuple[tuple, frozenset[str]] | None = None
+
+
+def transport_backends() -> frozenset[str]:
+    """The (normalised) MCP backends packs declare as provider transports.
+
+    Gateway-internal sockets: their tools are never listed to an agent and an
+    agent's call to one is refused (`main._check_not_transport`). A transport
+    takes a raw argv and the files of a credential; exposed as a verb it would
+    be a way around every check the gateway's own verbs make.
+
+    Read from the RAW installed manifests, not from the held connectors, and
+    whatever the switch says: in `native` position the pack's connector is
+    refused for collision with the builtin, but its backend may well be
+    mounted — and is no less raw for that. A backend is withheld unless it is
+    a mount the declaring pack itself stamped: a pack may hide its own
+    mounts, never a neighbour's, a core one or an unclaimed admin mount.
+    """
+    global _TRANSPORTS
+    sig = (_signature(_manifest_files()), _mount_signature())
+    if _TRANSPORTS is not None and _TRANSPORTS[0] == sig:
+        return _TRANSPORTS[1]
+    owners = backend_owners()
+    out: set[str] = set()
+    for pack, meta in manifests().items():
+        entries = meta.get("connectors") if isinstance(meta, Mapping) else None
+        for entry in entries if isinstance(entries, list) else []:
+            providers = entry.get("providers") if isinstance(entry, Mapping) else None
+            for p in providers if isinstance(providers, list) else []:
+                t = p.get("transport") if isinstance(p, Mapping) else None
+                name = _norm(str(t.get("backend") or "")) \
+                    if isinstance(t, Mapping) else ""
+                if not name or name in _CORE_BACKENDS:
+                    continue
+                # Only the pack's OWN stamped mounts: an unclaimed backend
+                # (mounted by an admin, e.g. normattiva) must not be hideable
+                # by any pack that names it (review of clodia-tools#378).
+                if name not in (owners.get(pack) or ()):
+                    continue
+                out.add(name)
+    result = frozenset(out)
+    _TRANSPORTS = (sig, result)
+    return result
+
+
+def is_transport_backend(name: str) -> bool:
+    """True when `name` (a backend, or a `backend.tool` verb) is a transport."""
+    backend = (name or "").split(".", 1)[0]
+    try:
+        return _norm(backend) in transport_backends()
+    except Exception:  # noqa: BLE001 — in doubt the socket stays closed
+        LOG.warning("connectors: transport backends not readable; '%s' "
+                    "withheld", name)
+        return bool(backend)

@@ -1986,8 +1986,20 @@ def _packaged_namespaces() -> frozenset[str]:
 #: the join-by-link tokens of #549), which a pack must never write: moving
 #: them into the pack would either lose them or hand the binding registry to a
 #: pack process (review of clodia-logic#527).
+#:
+#: All of `email.*` too (clodia-platform#523), for a different reason: before
+#: any byte of a mailbox comes back the gateway takes decisions that belong to
+#: the reference monitor — the account's mailbox whitelist, strict ingress and
+#: its audit record (#503), topic attachments in and out with their taint, the
+#: reply recipient. Moving the verbs into a pack would move those decisions
+#: with them. So the pack declares the mail VOCABULARY (the egress/source
+#: mappings the PDP reads) and provides the TRANSPORT (`resolved.
+#: transport_for`), and the verbs stay here.
 _GATEWAY_RETAINED_VERBS = frozenset({
     "telegram.listen", "telegram.unlisten", "telegram.join_link",
+    "email.send", "email.folders", "email.list", "email.read",
+    "email.get_attachment", "email.save_attachment", "email.search",
+    "email.reply",
 })
 
 
@@ -2585,9 +2597,18 @@ def _native_tool_namespaces() -> list[str]:
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
     # The gateway-retained binding verbs do not keep a packaged namespace
     # native: in `pack` position `telegram` belongs to the pack's backend.
-    ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in _migrated_away(tools)
+    # Unless the gateway retains the WHOLE namespace (`email`, #523): there
+    # the pack provides a transport and no verb, nobody else exposes `email`,
+    # and dropping it here would make the gateway's own verbs ungrantable.
+    def _ns(name: str) -> str:
+        return name.split(NS_SEP_DOT, 1)[0]
+    not_retained = {_ns(t.name) for t in tools
+                    if t.name not in _GATEWAY_RETAINED_VERBS}
+    whole = {_ns(t.name) for t in tools} - not_retained
+    ns = sorted({_ns(t.name) for t in _migrated_away(tools)
                  if t.name not in _GATEWAY_RETAINED_VERBS
-                 or not _is_packaged_namespace(t.name)})
+                 or not _is_packaged_namespace(t.name)
+                 or _ns(t.name) in whole})
     return ns
 
 
@@ -4786,8 +4807,15 @@ def _check_pack_connector_held(name: str) -> None:
     If comms-pack's connector is refused (bad manifest, clash) while its
     backend stays mounted, the call would reach the pack without its declared
     context or egress mapping — e.g. a forged `agent` taking over another
-    agent's lease. Fail closed (review of clodia-tools#374)."""
-    if not _is_packaged_verb(name):
+    agent's lease. Fail closed (review of clodia-tools#374).
+
+    The verbs the gateway RETAINS in a packaged namespace are refused too
+    (#523). The gateway serves them, but in `pack` position the builtin
+    manifest is released and the mappings the PDP reads for them come from
+    the pack's connector: without it `email.send` would be an unmapped verb,
+    i.e. a send nobody checks."""
+    if not (_is_packaged_verb(name)
+            or (name in _GATEWAY_RETAINED_VERBS and _is_packaged_namespace(name))):
         return
     ns = name.split(NS_SEP_DOT, 1)[0]
     try:
@@ -4801,10 +4829,28 @@ def _check_pack_connector_held(name: str) -> None:
             f"(manifest rifiutato o assente): '{name}' non viene servito")
 
 
+def _check_not_transport(name: str) -> None:
+    """Refuse an agent's call to a provider transport's backend (#523).
+
+    A transport takes a raw client argv and the files of a credential; the
+    gateway calls it from inside its own verbs, after every check those verbs
+    make. Reached as `<backend>.<tool>` it would be the same I/O with none of
+    them — so nobody but the gateway calls it, super agents and humans
+    included. Not in `list_tools` either (`proxy.list_proxied_tools`)."""
+    if not proxy.is_proxied(name):
+        return
+    from .connectors import resolved as _conn
+    if _conn.is_transport_backend(name):
+        raise _PackVerbRefused(
+            f"'{name}' è il trasporto interno di un connettore: lo chiama solo "
+            f"il gateway, dai propri verbi (es. email.*), mai un agente")
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     from . import audit as _audit
     try:
+        _check_not_transport(name)
         _check_pack_connector_held(name)
         arguments = _fill_declared_context(name, arguments)
     except _PackVerbRefused as e:
@@ -5223,7 +5269,10 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             # con una lettura in più che avviene SOLO per questo verbo.
             _eargs = arguments
             if name == "email.reply" and not (arguments.get("to") or ""):
-                _eargs = {**arguments, "to": _reply_recipient(arguments)}
+                # Off the event loop: the lookup is an IMAP fetch, and with
+                # the pack transport (#523) a call to an MCP backend.
+                _eargs = {**arguments,
+                          "to": await asyncio.to_thread(_reply_recipient, arguments)}
             elif name == "telegram.send":
                 # Un `chat_id` che non è una chat Telegram (il TITOLO del gruppo,
                 # «Clodia Sviluppo») diventava `tg:Clodia Sviluppo`, che nessuna

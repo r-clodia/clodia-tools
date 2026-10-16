@@ -387,6 +387,11 @@ def _assert_mailbox_allowed(direction: str, addr: str) -> None:
     )
 
 
+#: Prefix of the per-call secrets directory. `_run_transport` ships only a
+#: directory with this name: the pack gets one call's credential, never more.
+_SECRETS_TMP_PREFIX = "email_sec_"
+
+
 @contextlib.contextmanager
 def _secrets_env(account: str, direction: str):
     """Ambiente per eseguire il CLI per `account`, con credenziali materializzate
@@ -428,7 +433,7 @@ def _secrets_env(account: str, direction: str):
     bundle = vault.read_internal(cred)
     addr = (bundle.get("email") or account).strip().lower()
     _assert_mailbox_allowed(direction, addr)
-    tmp = tempfile.mkdtemp(prefix="email_sec_")
+    tmp = tempfile.mkdtemp(prefix=_SECRETS_TMP_PREFIX)
     try:
         if cred == gcred:
             vault.materialize_google_oauth(gcred, Path(tmp))
@@ -456,10 +461,20 @@ def _run_cli(account: str, cli_args: list[str], *, want_json: bool,
         raise ValueError(
             f"unknown account '{account}'; available: {sorted(known_accounts())}"
         )
-    with _secrets_env(account, direction) as env:
-        cmd = [_EMAIL_PY, _EMAIL_SCRIPT, "--account", account, *cli_args]
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                                timeout=timeout, env=env)
+    if _pack_transport():
+        # clodia-platform#523: the owner moved the mail TRANSPORT into a pack.
+        # Everything above and around this line is unchanged — the account
+        # check, the mailbox whitelist inside `_secrets_env`, and every
+        # strict-ingress decision the callers take on the result. Only the
+        # process that talks IMAP/SMTP is somebody else's.
+        transport = _transport_or_refuse(account)
+        with _secrets_env(account, direction) as env:
+            result = _run_transport(transport, account, cli_args, env, timeout)
+    else:
+        with _secrets_env(account, direction) as env:
+            cmd = [_EMAIL_PY, _EMAIL_SCRIPT, "--account", account, *cli_args]
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    timeout=timeout, env=env)
     if result.returncode != 0:
         raise RuntimeError(
             f"email {cli_args[0]} failed (exit {result.returncode}): "
@@ -474,6 +489,170 @@ def _run_cli(account: str, cli_args: list[str], *, want_json: bool,
         return json.loads(out)
     except json.JSONDecodeError:
         return {"raw": out}
+
+
+# --------------------------------------------------------------------------
+# The pack transport (clodia-platform#523)
+# --------------------------------------------------------------------------
+
+#: The connector id the instance switch names (`profile.yaml`, `connectors:`).
+MAIL_CONNECTOR = "mail"
+
+
+def _pack_transport() -> bool:
+    """Is the mail transport, on this instance, the pack's provider?
+
+    Asked per call, not at import: the switch is the owner's lever and it
+    takes effect on the next call, like every other `connector_mode` reader.
+    """
+    from .. import instance_profile
+    return instance_profile.connector_mode(MAIL_CONNECTOR) == "pack"
+
+
+def _transport_or_refuse(account: str) -> tuple[str, str]:
+    """`(backend, tool)` of the pack's mail transport, or a refusal.
+
+    Fail closed, never a fallback to the in-process client: an owner who
+    turned the switch to `pack` and silently got the gateway's own client
+    would be verifying the wrong thing on real traffic — the switch undoing
+    itself is exactly the failure a migration must not have.
+
+    A LEGACY account (`email_config.json`, no vault credential) is refused
+    too. Its secrets are the gateway's whole config file, not one mailbox's
+    credential, and «only this call's mailbox credential» is the contract of
+    the provider (#523): the file cannot be handed over as it is, and cutting
+    one account out of it is the vault's job, not a transport's.
+    """
+    from ..connectors import resolved as _connectors
+    try:
+        transport = _connectors.transport_for(MAIL_CONNECTOR)
+    except Exception as e:  # noqa: BLE001 — an unreadable registry is no transport
+        LOG.error("email: transport del pack non risolvibile (%s)", e)
+        transport = None
+    if transport is None:
+        raise PermissionError(
+            "mail transport provider not available: the mail connector is in "
+            "`pack` position on this instance, but no installed pack holds the "
+            "`mail` connector with a `transport` on a backend it has mounted "
+            "itself. Install/repair the pack (comms-pack), or set "
+            "`connectors: {mail: native}` in profile.yaml.")
+    if vault.has_credential(_gmail_cred(account)) \
+            and not vault.has_credential(_mailbox_cred(account)):
+        # Gmail is a provider of google-pack (#524), not of this IMAP
+        # transport: handing it the instance's OAuth client secret and the
+        # account's refresh token would give the wrong pack the keys to the
+        # whole Google account (review of clodia-tools#378).
+        raise PermissionError(
+            f"l'account '{account}' è Gmail (google_{account}): il trasporto "
+            "IMAP del pack non lo serve. Gmail arriverà con il google-pack "
+            "(clodia-platform#524); fino ad allora usa la posizione `native` "
+            "per la posta, o una casella IMAP.")
+    if not (vault.has_credential(_gmail_cred(account))
+            or vault.has_credential(_mailbox_cred(account))):
+        raise PermissionError(
+            f"l'account legacy '{account}' (email_config.json) non si usa con il "
+            "trasporto del pack: al pack si consegna la credenziale di UNA "
+            "casella, e un account legacy non ne ha una sua. Spostalo nella "
+            "vault (Integrazioni → Email) e riprova.")
+    return transport
+
+
+class _TransportResult:
+    """The shape `_run_cli` reads from `subprocess.run`, from a transport."""
+
+    def __init__(self, returncode: int, stdout: str, stderr: str) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _transport_payload(account: str, cli_args: list[str],
+                       secrets_dir: str | None) -> tuple[list[str], dict]:
+    """`(argv, files)` for the transport: the call, and the bytes it needs.
+
+    `files` maps a path relative to the transport's working directory to
+    base64 bytes:
+
+    - `secrets/<rel>` — every file `_secrets_env` materialised for THIS call:
+      one mailbox's `email_config.json`, or one Google account's OAuth files.
+      Nothing else of the gateway's secrets exists in that directory;
+    - `att/<n>/<name>` — each `--attachment`. The paths the gateway validated
+      (an agent's scratch, a topic file it copied out) mean nothing in the
+      pack's process, so the BYTES go and the argument is rewritten to
+      `{dir}/att/<n>/<name>`, `{dir}` being the transport's own directory.
+      One directory per attachment, not `<n>-<name>`: the client names the
+      MIME part after the file, and the recipient must see `offerta.pdf`, not
+      `0-offerta.pdf`.
+    """
+    import base64
+
+    files: dict[str, str] = {}
+    if secrets_dir:
+        root = Path(secrets_dir)
+        for path in sorted(root.rglob("*")):
+            if path.is_file():
+                rel = path.relative_to(root).as_posix()
+                files[f"secrets/{rel}"] = base64.b64encode(
+                    path.read_bytes()).decode("ascii")
+    argv = ["--account", account]
+    n = 0
+    it = iter(cli_args)
+    for arg in it:
+        if arg != "--attachment":
+            argv.append(arg)
+            continue
+        raw = next(it, None)
+        if raw is None:
+            raise ValueError("--attachment senza percorso")
+        src = Path(raw)
+        rel = f"att/{n}/{src.name}"
+        files[rel] = base64.b64encode(src.read_bytes()).decode("ascii")
+        argv += ["--attachment", "{dir}/" + rel]
+        n += 1
+    return argv, files
+
+
+def _run_transport(transport: tuple[str, str], account: str,
+                   cli_args: list[str], env: dict, timeout: int) -> _TransportResult:
+    """One CLI operation through the pack's transport tool.
+
+    The answer is parsed here and is NOT trusted beyond its shape: a
+    `returncode`, a `stdout` and a `stderr`. What the stdout says is filtered
+    by the callers exactly as the in-process client's stdout is — the
+    transport moves bytes, it does not decide what an agent gets to read.
+    """
+    from .. import proxy
+
+    backend, tool = transport
+    secrets_dir = env.get("CLODIA_SECRETS_DIR") or None
+    if secrets_dir and (secrets_dir == os.environ.get("CLODIA_SECRETS_DIR")
+                        or not Path(secrets_dir).name.startswith(_SECRETS_TMP_PREFIX)):
+        # Belt and braces behind the legacy refusal: only the per-call
+        # directory `_secrets_env` made leaves the gateway, never the
+        # gateway's own secrets directory that a legacy account runs on.
+        raise PermissionError(
+            "email: il trasporto del pack riceve solo la credenziale della "
+            "casella di questa chiamata, non la directory dei segreti del gateway")
+    argv, files = _transport_payload(account, cli_args, secrets_dir)
+    try:
+        text = proxy.call_backend_tool_sync(
+            backend, tool, {"argv": argv, "files": files, "timeout": timeout},
+            timeout)
+    except Exception as e:  # noqa: BLE001 — the transport failed, the verb did
+        raise RuntimeError(
+            f"email {cli_args[0]} failed: mail transport '{backend}.{tool}' "
+            f"error: {e}") from None
+    try:
+        data = json.loads(text)
+        rc = data["returncode"]
+        if not isinstance(rc, int) or isinstance(rc, bool):
+            raise TypeError("returncode")
+        return _TransportResult(rc, str(data.get("stdout") or ""),
+                                str(data.get("stderr") or ""))
+    except (ValueError, KeyError, TypeError):
+        raise RuntimeError(
+            f"email {cli_args[0]} failed: mail transport '{backend}.{tool}' "
+            "answered without {returncode, stdout, stderr}") from None
 
 
 def _run_json(account: str, cli_args: list[str], *, timeout: int = 60,
