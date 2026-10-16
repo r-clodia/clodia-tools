@@ -51,6 +51,14 @@ installed second would quietly redefine the first one's vocabulary.
 A third shape is legal and useful: **no schemes, no `extends`, just a provider**.
 That is a connector which only needs a credential — image generation is one.
 
+A fourth: **verbs or taint only**, no scheme and no provider. A connector owns
+one namespace, so a vocabulary used by several verb namespaces is one owner
+plus siblings that map their own verbs onto it — `google-sheets` maps
+`gsheets.*` onto the `gsheets:` scheme `google` declares, and
+`google-calendar` declares nothing but the taint of `gcalendar.list_events`
+(#524). A connector declaring none of schemes, verbs, providers, taint, and
+extending nothing, is empty and refused.
+
 ## Fields
 
 ### Connector
@@ -70,7 +78,7 @@ That is a connector which only needs a credential — image generation is one.
 | `topic_actions` | no | buttons the connector adds to a topic |
 | `tools_card` | no | what the Tools page shows: `setup_label`, `status_verb`, `test_verb`, `docs_url`, `blurb`, `scope`, `icon` |
 | `services` | no | long-running processes, see #515 |
-| `storage_remote` | no | topic storage backend the pack provides, see #524 |
+| `storage_remote` | no | topic storage backend the pack provides. No consumer: topic storage on Drive was repealed (decision record #40), see #524 |
 | `context` | no | call facts the gateway fills in, see below |
 | `files` | no | arguments that name a TOPIC FILE, which the gateway reads and delivers as bytes |
 | `defaults` | no | arguments the gateway fills **only when omitted**, see below |
@@ -456,7 +464,7 @@ gateway code rather than in a pack:
 | `core.yaml` | `http:`, `https:`, `topic:`, `mcp:` | never: this is the core manifest |
 | `mail.yaml` | the mail vocabulary and `email.*` | #522 |
 | `telegram.yaml` | `tg:` and `telegram.*` | #522 |
-| `google.yaml` | `gdrive:`, `gsheets:`, `gcal:` and their verbs | #523 |
+| `google.yaml` | `gdrive:`, `gsheets:`, `gcal:` and the 24 Google verbs, as four connectors (`google`, `google-sheets`, `google-docs`, `google-calendar`) | #524 |
 | `github.yaml` | the GitHub verbs on `https:`, and its warning | #525 |
 | `datastore.yaml` | `datastore:` and `datastore.read` | — |
 
@@ -515,6 +523,82 @@ stay the gateway's; `generate`/`edit` go to the provider's `transport` with
 `{"png_b64": "<base64>"}` back — no transport, no image, never the in-process
 client. Both credentials keep their legacy vault entries and types; the generic
 connect route hands them to their legacy handlers in both positions.
+
+`google: pack` (#524) is the mail shape applied to four connectors at once.
+
+- **One switch, four connectors.** `google.yaml` declares `google` (namespace
+  `gdrive`: the `gdrive:`/`gsheets:`/`gcal:` vocabulary, the account provider,
+  the `drive-folder` button, the Tools card) and the verb-only siblings
+  `google-sheets`, `google-docs`, `google-calendar`. The siblings have no
+  switch of their own: they follow `google` (`builtin.SWITCH_WITH`, a notion
+  of the gateway, not of this grammar — a pack cannot attach itself to
+  somebody else's switch, and `google-sheets: pack` written alone is
+  ignored). `google: pack` releases all four namespaces, and google-pack —
+  only google-pack (`RELEASED_TO`) — must hold a connector in each.
+- **The verbs stay.** The 24 `gdrive/gsheets/gdocs/gcalendar` verbs are
+  retained: listed and dispatched by the gateway, with the whole
+  `gdrive_root` perimeter (parent walk, shortcuts, list filtering,
+  adopt-after-create, writable parent, `gcal:` allowlist), the pre-PDP parent
+  lookup, the scratch I/O and the taint. A namespace whose google-pack
+  connector is not held has its verbs `DENIED`.
+- **The credential stays.** `google_`, `gworkspace_`, `gmail_` and `app_`
+  remain reserved vault prefixes: consent, the app client, the per-account
+  bundles and the refresh are the gateway's, so the switch needs no
+  re-consent. For the same reason `google` stays a reserved NAMESPACE:
+  releasing it would also release the `google_` prefix to its holder
+  (`vault_entry_problem` lets a namespace use its own stem). google-pack's
+  connectors therefore live in the namespaces the switch releases, and
+  `mail-gmail` — a contributor, which declares no verb and needs a namespace
+  only for the rule — sits in `gdrive`, next to its owner.
+- **Browser URLs.** A pack may not read a shared scheme, yet `gdrive:` must
+  keep recognising a Drive URL pasted from the browser. The connector the
+  switch elects may canonicalise `http(s)` URLs whose PARSED host the gateway
+  pins for it (`builtin.ELECTED_URL_HOSTS`: `drive.google.com`,
+  `docs.google.com`), into its own schemes only. The hosts are pinned in the
+  gateway, not in the manifest, because a call's destination is
+  canonicalised too: a manifest choosing its hosts could turn any URL into an
+  approved folder.
+- **`google.request`**, the provider transport of `google`. For every Google
+  API call (`tools/google_io.call`) the gateway, after every check, calls
+  `<backend>.<tool>` of google-pack's `workspace` provider with:
+
+  ```
+  {"access_token": "<short-lived OAuth access token>",
+   "api": "drive|docs|sheets|calendar", "version": "v3|v1|v4|v3",
+   "method": "GET|POST|PUT|PATCH|DELETE",
+   "path": "<method path, path parameters already percent-encoded>",
+   "params": {<query parameters, JSON-typed>},
+   "body": <JSON body, or the metadata part of a multipart upload> | null,
+   "media_b64": "<bytes to upload>" | null, "media_mime": "<type>" | null,
+   "download": true|false}
+  ```
+
+  and the transport sends exactly what the in-process client sends: URL =
+  the API root (`google_io.API_ROOTS`, `UPLOAD_ROOTS` when there is media) +
+  `path`; query = `params` + `alt=media` for a download, else `alt=json`
+  unless DELETE, + `uploadType=multipart` (media and body) or `media` (media
+  alone); booleans as `true`/`false`, a list as a repeated key; `Authorization:
+  Bearer <access_token>`, never carried across a redirect off its host. It
+  answers with the JSON text `{"status": <int>, "json"?: <any>, "bytes_b64"?:
+  "<base64>", "headers"?: {…}}` — `json` for a JSON body (absent = empty),
+  `bytes_b64` for a download and for a non-JSON error body. A non-2xx status
+  becomes the same `HttpError` (status, method, URL, reason) the in-process
+  path raises, a 401 is retried once with a fresh token, anything else is a
+  failed call; `gdrive_root` treats any failure as «outside». No usable
+  transport is a refusal, never the in-process client. The refresh token and
+  the client secret never travel.
+- **Gmail** is google-pack's provider `gmail` of the mail vocabulary
+  (`mail-gmail`, `extends: mail`), with its own transport, found by
+  `resolved.transport_for("mail", "gmail")`. A Gmail account (one with a
+  `google_`/`gmail_` credential) follows the `google` switch, every other
+  account follows `mail`; each is refused when its provider is missing. The
+  Gmail transport has the mail transport's contract (`{argv, files, timeout}`
+  → `{returncode, stdout, stderr}`), and its `files` are the per-call XOAUTH2
+  files the in-process client reads (`secrets/google_oauth_client.json`,
+  `secrets/email_oauth_tokens.json`, `secrets/email_config.json`, as
+  `vault.materialize_google_oauth` writes them) — so, unlike
+  `google.request`, it does receive that account's refresh token and the app
+  client: the vendored client refreshes its own XOAUTH2 token.
 
 ---
 
@@ -716,17 +800,20 @@ connectors:
       setup_label: Add a mailbox
 ```
 
-### google-pack — Drive and Sheets, Gmail as a second provider of `mail`, topic storage
+### google-pack — Drive, Sheets, Docs and Calendar, Gmail as a second provider of `mail`
 
-Note `mail-gmail`: a different pack, the same vocabulary, and not one line of it
-redefines a scheme or a verb.
+The shape #524 switches to (see «The switch»): four connectors, one per verb
+namespace of the gateway's 24 Google verbs, plus `mail-gmail` — a different
+pack, the same mail vocabulary, and not one line of it redefines a scheme or a
+verb. `mail-gmail` sits in the namespace the pack holds after the switch
+(`gdrive`), not in `google`: see «The switch» for why.
 
 ```yaml
 name: google-pack
 connectors:
   - id: google
     manifest_version: 1
-    namespace: google
+    namespace: gdrive
     label: Google Workspace
     schemes:
       - scheme: gdrive
@@ -743,32 +830,37 @@ connectors:
         canonicalise:
           - from: '^gdrive://([\w-]+)/?$'
             to: 'gdrive:folder/{1}'
+          # Read from `https:` only because the switch ELECTS this connector,
+          # and only on the hosts the gateway pins for it (drive.google.com,
+          # docs.google.com): see «The switch».
+          - from: '^https?://drive\.google\.com/drive/folders/([\w-]+)$'
+            to: 'gdrive:folder/{1}'
+          - from: '^https?://drive\.google\.com/drive/folders/([\w-]+)[/?#].*$'
+            to: 'gdrive:folder/{1}'
       - scheme: gsheets
         direction: both
         label: Google spreadsheet
         danger: 'a Google spreadsheet. If it is shared, anyone with the link sees it.'
-        forms:
-          - label: spreadsheet
-            pattern: '^[\w-]+$'
-            example: '1AbCdEfGhIjKlMnOpQrStUv'
         canonicalise:
           - from: '^gsheets://([\w-]+)/?$'
             to: 'gsheets:{1}'
       - scheme: gcal
         direction: egress
         label: Google calendar
+        wildcard: false
         danger: >-
           a Google calendar: approving it grants reading the agenda — titles,
           places and guests — and writing events, which reach the guests as an
           invitation. It cannot be confined to a folder: the perimeter is the
           calendar itself.
-        forms:
-          - label: calendar
-            pattern: '^[^\s/]+$'
-            example: 'primary'
     providers:
       - id: workspace
         label: Google account
+        # google-pack's own backend that carries each Google API call of the
+        # gateway's verbs (`google.request`, see «The switch»). Never listed.
+        transport:
+          backend: google-transport
+          tool: request
         credential:
           kind: oauth
           authorize_url: https://accounts.google.com/o/oauth2/v2/auth
@@ -778,35 +870,24 @@ connectors:
             - https://www.googleapis.com/auth/spreadsheets
             - https://www.googleapis.com/auth/calendar
     verbs:
-      - verb: google.drive_upload
+      - verb: gdrive.upload
+        direction: egress
+        scheme: mailto
+        arg: email
+        dtype: drive
+      - verb: gdrive.upload
         direction: egress
         scheme: gdrive
         arg: folder_id
         template: 'gdrive:folder/{value}'
         dtype: drive
-      - verb: google.drive_share
-        direction: egress
-        scheme: gdrive
-        arg: folder_id
-        template: 'gdrive:folder/{value}'
-        dtype: drive
-      - verb: google.sheets_append_rows
-        direction: egress
-        scheme: gsheets
-        arg: spreadsheet_id
-        dtype: gsheets
-      - verb: google.calendar_insert
-        direction: egress
-        scheme: gcal
-        arg: calendar_id
-        dtype: gcal
-      - verb: google.drive_read
+      - verb: gdrive.download
         direction: source
         scheme: gdrive
-        arg: folder_id
-        template: 'gdrive:folder/{value}'
+        arg: file_id
+        template: 'gdrive:file/{value}'
     topic_actions:
-      - id: drive-link
+      - id: drive-folder
         label: Link a Drive folder
         fields:
           - name: folder
@@ -816,22 +897,57 @@ connectors:
             - 'gdrive:folder/{folder}'
           egress:
             - 'gdrive:folder/{folder}'
-    storage_remote:
-      id: gdrive
-      label: Google Drive
-      versioning: true
     tools_card:
       setup_label: Connect Google
       docs_url: https://developers.google.com/workspace
 
+  # Verb-only: no scheme, no provider. Its verbs point at the owner's schemes.
+  - id: google-sheets
+    manifest_version: 1
+    namespace: gsheets
+    label: Google Sheets
+    verbs:
+      - verb: gsheets.append_rows
+        direction: egress
+        scheme: gsheets
+        arg: spreadsheet_id
+        dtype: gsheets
+      - verb: gsheets.read
+        direction: source
+        scheme: gsheets
+        arg: spreadsheet_id
+
+  - id: google-docs
+    manifest_version: 1
+    namespace: gdocs
+    label: Google Docs
+    verbs:
+      - verb: gdocs.read
+        direction: source
+        scheme: gdrive
+        arg: document_id
+        template: 'gdrive:doc/{value}'
+
+  # Taint-only: what the PDP knows about the calendar verbs is that a list of
+  # events mixes several authors.
+  - id: google-calendar
+    manifest_version: 1
+    namespace: gcalendar
+    label: Google Calendar
+    taint:
+      - gcalendar.list_events
+
   - id: mail-gmail
     manifest_version: 1
-    namespace: google
+    namespace: gdrive
     label: Gmail
     extends: mail
     providers:
       - id: gmail
         label: Gmail account
+        transport:
+          backend: google-transport
+          tool: mail
         credential:
           kind: oauth
           authorize_url: https://accounts.google.com/o/oauth2/v2/auth

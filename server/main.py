@@ -2004,12 +2004,24 @@ def _packaged_namespaces() -> frozenset[str]:
 #: process must not reach the spawn's scratch, so they stay here; it-pack
 #: declares the `github` connector (credential, mappings, taint, danger) and
 #: mounts the GitHub MCP backend, whose `github.*` tools are its own.
+#:
+#: And the 24 Google verbs (clodia-platform#524): the folder/calendar
+#: perimeter (`gdrive_root`: parent walk, shortcut refusal, list filtering,
+#: adopt-after-create, writable parent, `gcal:` allowlist), the pre-PDP parent
+#: lookup, the scratch I/O and the taint are the reference monitor's, and the
+#: `google_<acct>` credential stays in the gateway's custody. With
+#: `connectors: {google: pack}` google-pack declares the four connectors
+#: (schemes, mappings, taint, topic button, Tools card) and carries the HTTP
+#: of each Google API call (`tools.google_io`, short-lived access token only).
+_GOOGLE_NATIVE_NAMES: frozenset[str] = frozenset(
+    t.name for t in _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS)
+
 _GATEWAY_RETAINED_VERBS = frozenset({
     "telegram.listen", "telegram.unlisten", "telegram.join_link",
     "email.send", "email.folders", "email.list", "email.read",
     "email.get_attachment", "email.save_attachment", "email.search",
     "email.reply",
-}) | _GITHUB_NATIVE_NAMES   # github.clone, .pull, .push, .pull_request
+}) | _GITHUB_NATIVE_NAMES | _GOOGLE_NATIVE_NAMES
 
 
 def _is_packaged_verb(name: str) -> bool:

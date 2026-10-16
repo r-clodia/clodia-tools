@@ -1,11 +1,16 @@
-# Google Workspace, come il gateway lo implementa oggi (clodia-platform#518).
-# Migrazione #523: questo file si sposta in google-pack e sparisce da qui.
+# Google Workspace, as the gateway implements it today (clodia-platform#518).
+# Migration #524: this file moves to google-pack and disappears from here.
 #
-# Un solo connettore per tre namespace di verbi (`gdrive.`, `gsheets.`,
-# `gdocs.`, `gcalendar.`): i file del gateway sono organizzati per CONNETTORE,
-# non per namespace, perché è il connettore che possiede il vocabolario in cui
-# tutti e quattro scrivono. Per un pack la regola resta quella di #516 — un
-# namespace solo — ed è `build_registry` a controllarlo.
+# Four connectors, one per verb namespace (`gdrive.`, `gsheets.`, `gdocs.`,
+# `gcalendar.`), switched TOGETHER by the one switch `connectors: {google:
+# pack}` (`builtin.SWITCH_WITH`). The owner, `google`, declares the vocabulary
+# (`gdrive:`/`gsheets:`/`gcal:`), the account provider, the topic button and
+# the Tools card; the three siblings only map their own verbs onto it. They are
+# split rather than one connector spanning four namespaces because a PACK
+# connector owns exactly one namespace (#516): google-pack declares the same
+# four, and the switch has to free — and fail closed on — each namespace by
+# itself (`builtin.released`, `main._check_pack_connector_held`). The PDP's
+# answers are the same as with the single connector (`test_524_google_pins`).
 name: gateway-google
 connectors:
   - id: google
@@ -119,18 +124,40 @@ connectors:
       - {verb: gdrive.update, direction: egress, scheme: mailto, arg: email, dtype: drive}
       - {verb: gdrive.update, direction: egress, scheme: gdrive, arg: folder_id, template: 'gdrive:folder/{value}', dtype: drive}
       - {verb: gdrive.update, direction: egress, scheme: gdrive, arg: parent_id, template: 'gdrive:folder/{value}', dtype: drive}
-      - {verb: gsheets.add_tab, direction: egress, scheme: gsheets, arg: spreadsheet_id, dtype: gsheets}
-      - {verb: gsheets.append_rows, direction: egress, scheme: gsheets, arg: spreadsheet_id, dtype: gsheets}
-      - {verb: gsheets.write_range, direction: egress, scheme: gsheets, arg: spreadsheet_id, dtype: gsheets}
       # Letture di una risorsa PER ID: la fonte è quella risorsa, e l'argomento
       # che la identifica è diverso per ognuna. Senza queste righe un
       # `gsheets.read` su un foglio dichiarato fidato contaminerebbe comunque —
       # la regola «verbo + fonte» applicata a metà.
+      - {verb: gdrive.download, direction: source, scheme: gdrive, arg: file_id, template: 'gdrive:file/{value}'}
+
+  # Verb-only siblings: no scheme, no provider, no card. They map their own
+  # namespace's verbs onto the owner's schemes («using a vocabulary is not
+  # owning it», SCHEMA.md) and follow the `google` switch.
+  - id: google-sheets
+    manifest_version: 1
+    namespace: gsheets
+    label: Google Sheets
+    verbs:
+      - {verb: gsheets.add_tab, direction: egress, scheme: gsheets, arg: spreadsheet_id, dtype: gsheets}
+      - {verb: gsheets.append_rows, direction: egress, scheme: gsheets, arg: spreadsheet_id, dtype: gsheets}
+      - {verb: gsheets.write_range, direction: egress, scheme: gsheets, arg: spreadsheet_id, dtype: gsheets}
       - {verb: gsheets.read, direction: source, scheme: gsheets, arg: spreadsheet_id}
       - {verb: gsheets.list_tabs, direction: source, scheme: gsheets, arg: spreadsheet_id}
+
+  - id: google-docs
+    manifest_version: 1
+    namespace: gdocs
+    label: Google Docs
+    verbs:
       - {verb: gdocs.read, direction: source, scheme: gdrive, arg: document_id, template: 'gdrive:doc/{value}'}
-      - {verb: gdrive.download, direction: source, scheme: gdrive, arg: file_id, template: 'gdrive:file/{value}'}
+
+  - id: google-calendar
+    manifest_version: 1
+    namespace: gcalendar
+    label: Google Calendar
     # Un elenco di eventi mescola più autori in una risposta: non c'è UNA fonte
-    # da vagliare, quindi contamina e basta.
+    # da vagliare, quindi contamina e basta. (No verb mapping: today no
+    # calendar verb has a declared destination or source — the `gcal:`
+    # perimeter is enforced by `gdrive_root`, not by the PDP's tables.)
     taint:
       - gcalendar.list_events

@@ -97,7 +97,7 @@ class DocumentedExamplesTests(unittest.TestCase):
         send = registry.verb_map("egress")["telegram.send"]
         self.assertEqual(send.arg, "chat_id")
         self.assertEqual(send.uri_for("-1001234567890"), "tg:-1001234567890")
-        upload = registry.verb_map("egress")["google.drive_upload"]
+        upload = registry.verb_map("egress")["gdrive.upload"]
         self.assertEqual(upload.uri_for("1AbC"), "gdrive:folder/1AbC")
         # GitHub points at the platform `https` scheme and passes the URL through.
         push = registry.verb_map("egress")["github.push"]

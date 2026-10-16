@@ -466,15 +466,32 @@ class FailClosedTests(_Istanza):
         self.assertIn("legacy", str(e.exception))
         self.assertEqual(self.transport_calls, [])
 
-    def test_a_gmail_account_is_refused_by_the_imap_transport(self):
-        """Review of #378: Gmail belongs to google-pack (#524); the IMAP
-        transport must not receive the OAuth client secret and refresh token."""
+    def test_a_gmail_account_never_reaches_the_imap_transport(self):
+        """Review of #378: Gmail belongs to google-pack, never to the IMAP
+        transport, which must not receive the OAuth client secret and refresh
+        token. Since #524 a Gmail account follows the `google` switch: with
+        `google` native it is served in-process whatever `mail` says, and with
+        `google: pack` and no google-pack it is refused, naming google-pack."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def env(_account, _direction):
+            yield dict(os.environ)
+
+        done = subprocess.CompletedProcess([], 0, stdout="[]", stderr="")
         with patch.object(EM, "known_accounts", return_value={"studio"}), \
                 patch.object(EM.vault, "has_credential",
-                             lambda c: c == "google_studio"):
+                             lambda c: c == "google_studio"), \
+                patch.object(EM, "_secrets_env", env), \
+                patch.object(EM.subprocess, "run", return_value=done) as run:
+            self.assertEqual(EM._run_cli("studio", ["folders"], want_json=True,
+                                         direction="inbox"), [])
+            run.assert_called_once()
+            self.posizione("pack", google="pack")
             with self.assertRaises(PermissionError) as e:
                 EM._run_cli("studio", ["folders"], want_json=True, direction="inbox")
         self.assertIn("google-pack", str(e.exception))
+        self.assertEqual(run.call_count, 1)
         self.assertEqual(self.transport_calls, [])
 
     def test_the_gateways_secrets_dir_never_leaves(self):

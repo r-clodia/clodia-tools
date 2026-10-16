@@ -15,7 +15,8 @@ the gateway ships with itself:
                     stays here forever.
     mail.yaml       → comms-pack with migration #522
     telegram.yaml   → comms-pack with migration #522
-    google.yaml     → google-pack with migration #523
+    google.yaml     → google-pack with migration #524 (four connectors,
+                    one switch: see `SWITCH_WITH`)
     github.yaml     → it-pack with migration #525
 
 A migration deletes its file in the same change that adds the pack, and the
@@ -52,14 +53,46 @@ def _all() -> dict[str, dict]:
     return out
 
 
+#: Connector ids that have no switch of their own: they follow the switch
+#: named here (clodia-platform#524). Google is four connectors — one per verb
+#: namespace, because a pack connector owns exactly one — but ONE decision of
+#: the owner: `connectors: {google: pack}` hands Drive, Sheets, Docs and
+#: Calendar over together, and Gmail's provider of the mail vocabulary
+#: (`mail-gmail`, a pack-only id) with them. Splitting the switch would let an
+#: instance run half of one credential's verbs here and half in the pack.
+#:
+#: A notion of the gateway, not of the manifest grammar: which connectors move
+#: together is a fact about how the GATEWAY implements them, and a pack must
+#: not be able to attach itself to somebody else's switch. A sibling written
+#: alone in `profile.yaml` (`google-sheets: pack`) is ignored.
+SWITCH_WITH: dict[str, str] = {
+    "google-sheets": "google",
+    "google-docs": "google",
+    "google-calendar": "google",
+    "mail-gmail": "google",
+}
+
+
+def switch_of(connector_id: str) -> str:
+    """The id of the switch that decides `connector_id`'s position."""
+    return SWITCH_WITH.get(connector_id, connector_id)
+
+
 def _packaged() -> frozenset[str]:
     """Gli id che il profilo dell'istanza affida a un pack (#522). Mai
-    un'eccezione: un profilo illeggibile lascia il gateway com'era."""
+    un'eccezione: un profilo illeggibile lascia il gateway com'era.
+
+    Expanded with the ids that follow a switch (`SWITCH_WITH`, #524): with
+    `google: pack` the set holds the four Google connectors and `mail-gmail`;
+    a following id written on its own counts for nothing."""
     try:
         from .. import instance_profile
-        return instance_profile.packaged_connectors()
+        raw = instance_profile.packaged_connectors()
     except Exception:  # noqa: BLE001
         return frozenset()
+    switches = {c for c in raw if c not in SWITCH_WITH}
+    return frozenset(switches | {c for c, s in SWITCH_WITH.items()
+                                 if s in switches})
 
 
 def manifests() -> dict[str, dict]:
@@ -118,7 +151,35 @@ RELEASED_TO: dict[str, str] = {
     "mail": "comms-pack",
     "github": "it-pack",
     "openai-images": "it-pack",
+    # #524: the four Google connectors, and Gmail's provider of the mail
+    # vocabulary, which has no builtin counterpart but follows `google`.
+    "google": "google-pack",
+    "google-sheets": "google-pack",
+    "google-docs": "google-pack",
+    "google-calendar": "google-pack",
+    "mail-gmail": "google-pack",
 }
+
+
+#: The browser hosts whose URLs the pack connector a switch elects may
+#: canonicalise into its own schemes (#524, `Registry.canonical`). The builtin
+#: `google.yaml` reads `https:` to turn a Drive folder URL copied from the
+#: browser into `gdrive:folder/<id>`; a pack may not read a shared scheme, and
+#: without this the switch would silently stop recognising those URLs in
+#: whitelists, topic buttons and call destinations. Pinned HERE and not in the
+#: pack's manifest: canonicalisation also applies to a call's destination, so
+#: a manifest that chose its own hosts could rewrite any URL into an approved
+#: folder.
+ELECTED_URL_HOSTS: dict[str, frozenset[str]] = {
+    "google": frozenset({"drive.google.com", "docs.google.com"}),
+}
+
+
+def elected_url_hosts() -> dict[str, frozenset[str]]:
+    """`ELECTED_URL_HOSTS` for the connectors switched to a pack, else `{}`."""
+    packaged = _packaged()
+    return {cid: hosts for cid, hosts in ELECTED_URL_HOSTS.items()
+            if cid in packaged}
 
 
 def expected_claims() -> dict[str, str]:
@@ -145,6 +206,12 @@ def expected_claims() -> dict[str, str]:
             ns = str(entry.get("namespace") or "")
             if ns:
                 out["ns:" + ns] = RELEASED_TO[cid]
+    # Pack-only ids that follow a switch (`mail-gmail`): no builtin entry to
+    # read them from, but no less reserved to their pack — its transport
+    # receives a Google account's mail credential.
+    for cid in packaged:
+        if cid in RELEASED_TO and cid not in out:
+            out[cid] = RELEASED_TO[cid]
     return out
 
 

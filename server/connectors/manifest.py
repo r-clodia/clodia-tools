@@ -1704,10 +1704,15 @@ def parse_connector(raw: Any, *, pack: str,
         if s.name in seen_schemes:
             raise ManifestError(f"{where}: scheme '{s.name}' declared twice")
         seen_schemes.add(s.name)
-    if not (schemes or extends or data.get("providers") or data.get("verbs")):
+    # A connector that only declares what of its own namespace taints is not
+    # empty (#524): `google-calendar` has no verb with a destination or a
+    # source, and `gcalendar.list_events` tainting is the whole of what the
+    # PDP knows about it. Taint only ever makes a channel MORE restricted.
+    if not (schemes or extends or data.get("providers") or data.get("verbs")
+            or data.get("taint")):
         raise ManifestError(
-            f"{where}: declares no scheme, no verb and no provider, and extends "
-            f"nothing, so it is an empty connector")
+            f"{where}: declares no scheme, no verb, no provider and no taint, "
+            f"and extends nothing, so it is an empty connector")
 
     providers = tuple(
         _parse_provider(p, f"{where}.providers[{i}]", pack=pack, builtin=builtin)
@@ -2011,7 +2016,8 @@ class Registry:
                     return rule.text
         return ""
 
-    def canonical(self, uri: str) -> str | None:
+    def canonical(self, uri: str,
+                  elected: Mapping[str, Iterable[str]] | None = None) -> str | None:
         """The first canonicalisation rule that rewrites `uri`, or None.
 
         A PACK's rules apply only to URIs of the scheme that declares them
@@ -2020,11 +2026,31 @@ class Registry:
         rules may read a shared scheme — that is how a Drive URL copied from
         the browser becomes `gdrive:folder/<id>` — because they are code in
         the image, not input.
+
+        `elected` (#524) is `{connector id: hosts}` for the pack connectors
+        the owner put in a builtin's place (`builtin.ELECTED_URL_HOSTS`, only
+        for a switch in `pack` position). Such a connector's rules may also
+        read an `http(s)` URL — but only one whose PARSED host is in its list:
+        google-pack turns `https://drive.google.com/…` into `gdrive:folder/…`
+        as the builtin did, and can never rewrite any other URL (a call's
+        destination is canonicalised too, so `https://evil.example/` becoming
+        an approved folder would be an egress bypass). The output is still in
+        the connector's own scheme (`_parse_canonicalisation`).
         """
         scheme = (uri or "").partition(":")[0].lower()
+        url_host = ""
+        if elected and scheme in ("http", "https"):
+            try:
+                from urllib.parse import urlsplit
+                url_host = (urlsplit(uri).hostname or "").lower()
+            except ValueError:
+                url_host = ""
         for c in sorted(self.connectors, key=lambda c: not c.builtin):
+            hosts = frozenset(h.lower() for h in (elected or {}).get(c.id, ())) \
+                if not c.builtin else frozenset()
             for sch in c.schemes:
-                if not c.builtin and sch.name != scheme:
+                if not c.builtin and sch.name != scheme \
+                        and not (url_host and url_host in hosts):
                     continue
                 for rule in sch.canonicalise:
                     out = rule.apply(uri)
