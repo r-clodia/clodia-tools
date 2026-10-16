@@ -617,6 +617,19 @@ def source_uri(verb: str, arguments: dict | None,
 # gli argomenti che il gateway riempie da sé (clodia-platform#522)
 # --------------------------------------------------------------------------
 
+def held_by_pack(namespace: str) -> bool:
+    """True when the registry HOLDS a pack connector owning `namespace`.
+
+    In `pack` position the gateway dispatches the namespace's verbs to the
+    pack backend; if the pack's connector was refused (malformed manifest,
+    clash) its context/egress declarations are gone while the backend may
+    still be mounted. Calls must then be refused, not passed through with
+    the caller's own `agent`/`channel` (review of clodia-tools#374).
+    """
+    return any(c.namespace == namespace and not c.builtin
+               for c in registry().connectors)
+
+
 def context_arguments(verb: str) -> dict[str, str]:
     """`{nome dell'argomento: fatto da metterci}` per una chiamata a `verb`.
 

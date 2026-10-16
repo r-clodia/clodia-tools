@@ -4594,19 +4594,62 @@ def _fill_declared_context(name: str, arguments: dict) -> dict:
         from .connectors import resolved as _conn
         if not _conn.context_arguments(name):
             return arguments
+        try:
+            _who = agent_name() or ""
+        except Exception:  # noqa: BLE001 — no identity: the argument is removed
+            _who = ""
         return _conn.fill_context(name, arguments, {
             "channel": current_chat() or "",
-            "agent": agent_name_safe() or "",
+            # Not `agent_name_safe()`: its "?" would become a forged identity
+            # instead of a missing one (review of clodia-tools#374).
+            "agent": _who,
         })
     except Exception as e:  # noqa: BLE001
+        if _is_packaged_verb(name):
+            # A pack verb whose context could not be filled must not run with
+            # the caller's own arguments: that is the forgery `context:`
+            # exists to prevent (review of clodia-tools#374).
+            raise _PackVerbRefused(
+                f"contesto del connettore non applicabile a '{name}': "
+                f"chiamata rifiutata") from e
         LOG.warning("connectors: contesto non applicato a '%s' (%s)", name, e)
         return arguments
+
+
+class _PackVerbRefused(PermissionError):
+    """A verb of a namespace moved to a pack that cannot be served safely."""
+
+
+def _check_pack_connector_held(name: str) -> None:
+    """In `pack` position, refuse a verb whose pack connector is not held.
+
+    If comms-pack's connector is refused (bad manifest, clash) while its
+    backend stays mounted, the call would reach the pack without its declared
+    context or egress mapping — e.g. a forged `agent` taking over another
+    agent's lease. Fail closed (review of clodia-tools#374)."""
+    if not _is_packaged_verb(name):
+        return
+    ns = name.split(NS_SEP_DOT, 1)[0]
+    try:
+        from .connectors import resolved as _conn
+        held = _conn.held_by_pack(ns)
+    except Exception:  # noqa: BLE001
+        held = False
+    if not held:
+        raise _PackVerbRefused(
+            f"il connettore del pack per '{ns}' non è attivo su questa istanza "
+            f"(manifest rifiutato o assente): '{name}' non viene servito")
 
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     from . import audit as _audit
-    arguments = _fill_declared_context(name, arguments)
+    try:
+        _check_pack_connector_held(name)
+        arguments = _fill_declared_context(name, arguments)
+    except _PackVerbRefused as e:
+        LOG.warning("connectors: %s", e)
+        return [TextContent(type="text", text=f"DENIED: {e}")]
     tok = _audit.set_resource_tier(_resource_tier_of(arguments))
     try:
         return await _call_tool_recorded(name, arguments)
