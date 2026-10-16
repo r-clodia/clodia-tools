@@ -245,8 +245,9 @@ class IsolationProbeTests(_Base):
         CAN read the sentinel: exactly what virtiofs looks like."""
         problem = launch.isolation_probe(None)
         self.assertIn("could read", problem)
+        # The sentinel is removed after the probe (review of #371).
         sentinel = self.data / "services" / ".isolation-probe" / "sentinel"
-        self.assertEqual(sentinel.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(sentinel.exists())
 
     def test_the_real_probe_accepts_a_permission_denied(self):
         class _Done:
