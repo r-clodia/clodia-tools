@@ -3240,6 +3240,8 @@ def _fill_declared_defaults(name: str, arguments: dict) -> list[str]:
     """
     from .connectors import resolved as _connectors
 
+    if name in _GATEWAY_RETAINED_VERBS:
+        return []          # gateway-kept verb: no pack declaration applies
     hit = _connectors.default_arguments(name)
     if hit is None:
         return []
@@ -3311,6 +3313,8 @@ def _fill_declared_file(name: str, arguments: dict) -> bool:
     """
     from .connectors import resolved as _connectors
 
+    if name in _GATEWAY_RETAINED_VERBS:
+        return False       # gateway-kept verb: no pack declaration applies
     hit = _connectors.file_argument(name)
     if hit is None:
         return False
@@ -4742,6 +4746,10 @@ def _fill_declared_context(name: str, arguments: dict) -> dict:
     nativo sono già tutto, e per un verbo di pack significano una chiamata
     senza contesto, cioè rifiutata dal connettore, non eseguita a caso.
     """
+    if name in _GATEWAY_RETAINED_VERBS:
+        # A pack's declarations never apply to a verb the gateway keeps:
+        # they could only break or bend it (review of clodia-tools#377).
+        return arguments
     try:
         from .connectors import resolved as _conn
         if not _conn.context_arguments(name):

@@ -691,6 +691,16 @@ class NoVerbIsLeftBehindTests(_Istanza):
                 self.assertTrue(main._verb_implemented(verbo))
         self.assertTrue(main._is_packaged_verb("telegram.send"))
 
+    def test_pack_declarations_never_touch_the_binding_verbs(self):
+        """Review of #377: the pack's `context:` applied to `telegram.listen`
+        too, and a `files:` entry on `join_link` broke every call."""
+        self.posizione("pack")
+        from .. import main
+        args = {"tier": "SEAL-1", "name": "x", "chat_id": "1", "agent": "z"}
+        self.assertIs(main._fill_declared_context("telegram.listen", args), args)
+        self.assertEqual(main._fill_declared_defaults("telegram.join_link", {}), [])
+        self.assertFalse(main._fill_declared_file("telegram.join_link", {}))
+
     def test_they_are_all_there_in_the_other_position(self):
         """Il controllo gemello: l'interruttore su `native` non deve togliere
         niente. Senza questa metà, un elenco vuoto sarebbe verde due volte."""
