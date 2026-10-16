@@ -10,7 +10,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from . import gsheets
+from . import gdrive, google_io, gsheets
+from ._google_fake import ServiceTransport
 
 
 class _Exec:
@@ -80,10 +81,12 @@ class GSheetsTest(unittest.TestCase):
     def setUp(self):
         self.svc = _Svc(["preventivo", "personale", "rimodulato"],
                         values=[["a", "b"], ["1", "2"]])
-        p = patch.object(gsheets, "build_service",
-                         return_value=(self.svc, "devnullboxx"))
-        p.start()
-        self.addCleanup(p.stop)
+        # Since #524 the calls go through `google_io`; the fake keeps the
+        # discovery-client shape and `ServiceTransport` maps one onto the other.
+        for p in (patch.object(google_io, "_transport", ServiceTransport(self.svc)),
+                  patch.object(gdrive, "gworkspace_accounts", lambda: ["devnullboxx"])):
+            p.start()
+            self.addCleanup(p.stop)
 
     def test_list_tabs_reports_titles_and_sizes(self):
         r = gsheets.list_tabs("SID")

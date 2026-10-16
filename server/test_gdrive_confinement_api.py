@@ -85,6 +85,13 @@ class UrlTests(unittest.TestCase):
                          "1AbC")
 
 
+def _transport(fake):
+    """Answer the gateway's Google calls from `fake` (#524: through `google_io`)."""
+    from .tools import google_io
+    from .tools._google_fake import ServiceTransport
+    return patch.object(google_io, "_transport", ServiceTransport(fake))
+
+
 class _Ok:
     def __init__(self, meta):
         self.meta = meta
@@ -111,7 +118,7 @@ class WriteTests(unittest.TestCase):
 
     def _with_account(self, meta):
         return (patch("server.tools.gdrive.gworkspace_accounts", lambda: ["conto"]),
-                patch("server.tools.gdrive._service", lambda *a, **k: (_Ok(meta), "conto")))
+                _transport(_Ok(meta)))
 
     def test_a_folder_is_written_and_echoed_by_name(self):
         """Si conferma un NOME, non un id: 33 caratteri non sono verificabili a
@@ -142,8 +149,7 @@ class WriteTests(unittest.TestCase):
     def test_an_unreachable_id_is_refused_not_written(self):
         called = []
         with patch("server.tools.gdrive.gworkspace_accounts", lambda: ["conto"]), \
-                patch("server.tools.gdrive._service",
-                      lambda *a, **k: (_Boom(), "conto")), \
+                _transport(_Boom()), \
                 patch("server.whitelist.set_gdrive_roots",
                       lambda a, f: called.append(f)):
             r = _post(_Req("t", {"account": "conto", "folders": ["MAI_VISTO"]}))

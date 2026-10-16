@@ -1,12 +1,26 @@
 """`gdrive.update`: correggere un file Drive senza farne una copia (clodia-platform#427)."""
 from __future__ import annotations
 
+import contextlib
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from . import gdrive
+from . import google_io
+from ._google_fake import ServiceTransport
+
+
+@contextlib.contextmanager
+def _drive(svc, error=None):
+    """Answer the Google calls from the fake `svc`, or fail them with `error`
+    (#524: the calls go through `google_io`, the fake keeps its old shape)."""
+    def boom(_account, _req):
+        raise error
+    with patch.object(google_io, "_transport", boom if error else ServiceTransport(svc)), \
+            patch.object(gdrive, "gworkspace_accounts", lambda: ["davide"]):
+        yield
 
 
 class _Req:
@@ -49,7 +63,7 @@ class UpdateTests(unittest.TestCase):
     def _run(self, mime, ext):
         svc = _Svc(mime)
         with patch.object(gdrive, "tool_allowed", lambda v: None), \
-                patch.object(gdrive, "_service", return_value=(svc, "davide")), \
+                _drive(svc), \
                 patch.object(gdrive.gdrive_root, "assert_inside") as inside:
             out = gdrive.update("DOC1", _src(ext))
         return out, svc, inside
@@ -80,7 +94,7 @@ class UpdateTests(unittest.TestCase):
     def test_outside_the_perimeter_nothing_is_written(self):
         svc = _Svc("application/vnd.google-apps.document")
         with patch.object(gdrive, "tool_allowed", lambda v: None), \
-                patch.object(gdrive, "_service", return_value=(svc, "davide")), \
+                _drive(svc), \
                 patch.object(gdrive.gdrive_root, "assert_inside",
                              side_effect=gdrive.gdrive_root.OutsideRoot("fuori")):
             with self.assertRaises(gdrive.gdrive_root.OutsideRoot):
@@ -92,7 +106,7 @@ class EgressTests(unittest.TestCase):
     def test_the_destination_is_the_folder_of_the_file(self):
         from .. import egress, main
         self.assertIsNotNone(egress.spec_for("gdrive.update"))
-        with patch.object(gdrive, "_service", return_value=(_Svc("x"), "davide")):
+        with _drive(_Svc("x")):
             self.assertEqual(main._drive_parent_of({"file_id": "DOC1"}), "F1")
         self.assertEqual(
             egress.spec_for("gdrive.update")[1]({"file_id": "DOC1",
@@ -101,7 +115,7 @@ class EgressTests(unittest.TestCase):
 
     def test_an_unresolvable_parent_is_an_unknown_destination(self):
         from .. import main
-        with patch.object(gdrive, "_service", side_effect=RuntimeError("drive giù")):
+        with _drive(None, RuntimeError("drive giù")):
             self.assertEqual(main._drive_parent_of({"file_id": "DOC1"}), "")
 
 

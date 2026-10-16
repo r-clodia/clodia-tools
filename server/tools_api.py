@@ -203,9 +203,11 @@ def _describe_folder(account: str, fid: str) -> dict:
     from .tools import gdrive
     out = {"id": fid}
     try:
-        svc, _ = gdrive._service(account)
-        meta = svc.files().get(fileId=fid, fields="id, name, mimeType",
-                               supportsAllDrives=True).execute()
+        from .tools import google_io
+        meta = google_io.call(gdrive._resolve_account(account), "drive", "v3",
+                              "GET files/{fileId}", params={
+                                  "fileId": fid, "fields": "id, name, mimeType",
+                                  "supportsAllDrives": True})
         out["name"] = meta.get("name")
         out["is_folder"] = meta.get("mimeType") == \
             "application/vnd.google-apps.folder"

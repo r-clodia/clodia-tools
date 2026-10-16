@@ -243,7 +243,14 @@ def reset_topic_cache() -> None:
     _topic_cache.clear()
 
 
-def _parents(svc, account: str, file_id: str) -> tuple[tuple[str, ...], bool]:
+def _get(account: str, file_id: str, fields: str) -> dict:
+    """`files.get` through the Google seam (clodia-platform#524)."""
+    from . import google_io
+    return google_io.call(account, "drive", "v3", "GET files/{fileId}", params={
+        "fileId": file_id, "fields": fields, "supportsAllDrives": True})
+
+
+def _parents(account: str, file_id: str) -> tuple[tuple[str, ...], bool]:
     """(parents, is_shortcut) di un file, con cache breve.
 
     La cache è una **finestra di autorità stantia**: un file spostato fuori dalla
@@ -257,16 +264,14 @@ def _parents(svc, account: str, file_id: str) -> tuple[tuple[str, ...], bool]:
     hit = _parents_cache.get(key)
     if hit and (now - hit[0]) < _PARENTS_TTL:
         return hit[1], hit[2]
-    meta = svc.files().get(fileId=file_id, fields="id, parents, shortcutDetails",
-                           supportsAllDrives=True).execute()
+    meta = _get(account, file_id, "id, parents, shortcutDetails")
     parents = tuple(meta.get("parents") or ())
     is_shortcut = bool(meta.get("shortcutDetails"))
     _parents_cache[key] = (now, parents, is_shortcut)
     return parents, is_shortcut
 
 
-def inside(svc, account: str, file_id: str,
-           row: Optional[dict] = None) -> bool:
+def inside(account: str, file_id: str, row: Optional[dict] = None) -> bool:
     """Vero se `file_id` ha un antenato fra le radici consentite.
 
     `row` è la RIGA restituita da un elenco Drive, non solo i suoi genitori, ed è
@@ -295,7 +300,7 @@ def inside(svc, account: str, file_id: str,
                 return False
             frontier = list(row.get("parents") or ())
         else:
-            parents, is_shortcut = _parents(svc, account, file_id)
+            parents, is_shortcut = _parents(account, file_id)
             if is_shortcut:
                 # Una scorciatoia è un reindirizzamento: non si segue mai.
                 LOG.info("gdrive_root: rifiutata scorciatoia %s", file_id)
@@ -311,7 +316,7 @@ def inside(svc, account: str, file_id: str,
                 if p in seen:
                     continue          # guardia sui cicli
                 seen.add(p)
-                pp, is_shortcut = _parents(svc, account, p)
+                pp, is_shortcut = _parents(account, p)
                 if is_shortcut:
                     continue
                 nxt.extend(pp)
@@ -361,16 +366,16 @@ def _refusal(account: str, verb: str, file_id: str) -> OutsideRoot:
         f"nessuno ha autorizzato per questa richiesta.")
 
 
-def assert_inside(svc, account: str, file_id: str, verb: str,
+def assert_inside(account: str, file_id: str, verb: str,
                   row: Optional[dict] = None) -> None:
     """Solleva `OutsideRoot` se `file_id` non è nel sottoalbero consentito."""
     if not (file_id or "").strip():
         raise ValueError(f"{verb}: id vuoto")
-    if not inside(svc, account, file_id.strip(), row):
+    if not inside(account, file_id.strip(), row):
         raise _refusal(account, verb, file_id)
 
 
-def keep_inside(svc, account: str, rows: list[dict]) -> list[dict]:
+def keep_inside(account: str, rows: list[dict]) -> list[dict]:
     """Filtra le righe di un elenco tenendo solo quelle nel sottoalbero.
 
     Passa la riga INTERA alla verifica: contiene già `parents` e
@@ -382,7 +387,7 @@ def keep_inside(svc, account: str, rows: list[dict]) -> list[dict]:
     out = []
     for r in rows:
         fid = r.get("id")
-        if fid and inside(svc, account, fid, r):
+        if fid and inside(account, fid, r):
             out.append(r)
     return out
 
@@ -398,7 +403,7 @@ def default_parent(account: str) -> Optional[str]:
     return roots[0] if len(roots) == 1 else None
 
 
-def assert_writable_parent(svc, account: str, parent_id: Optional[str],
+def assert_writable_parent(account: str, parent_id: Optional[str],
                            verb: str) -> Optional[str]:
     """Valida (o sceglie) la cartella di destinazione di una scrittura."""
     if not roots_for_call(account)[0]:
@@ -412,7 +417,7 @@ def assert_writable_parent(svc, account: str, parent_id: Optional[str],
             f"confinato a {roots_for_call(account)[0]} e senza destinazione il file "
             f"finirebbe fuori; con più radici consentite non posso indovinare "
             f"quale intendi.")
-    assert_inside(svc, account, parent_id, verb)
+    assert_inside(account, parent_id, verb)
     return parent_id.strip()
 
 
@@ -516,7 +521,7 @@ def reset_cache() -> None:
 
 
 def guard_id(account: Optional[str], file_id: str, verb: str) -> None:
-    """Controlla un id per i moduli che NON hanno un client Drive in mano
+    """Controlla un id per i moduli che non parlano con Drive
     (gdocs, gsheets): un Doc e uno Sheet *sono* file di Drive, e il loro id è un
     id di Drive.
 
@@ -534,8 +539,7 @@ def guard_id(account: Optional[str], file_id: str, verb: str) -> None:
     acct = gdrive._resolve_account(account)
     if not roots_for_call(acct)[0]:
         return
-    svc, _ = gdrive._service(acct)
-    assert_inside(svc, acct, file_id, verb)
+    assert_inside(acct, file_id, verb)
 
 
 def adopt(account: Optional[str], file_id: str, verb: str) -> Optional[str]:
@@ -561,11 +565,11 @@ def adopt(account: Optional[str], file_id: str, verb: str) -> Optional[str]:
         raise OutsideRoot(
             f"{verb}: con più cartelle consentite su '{acct}' non posso scegliere "
             f"dove creare. Crea il file con gdrive.upload nella cartella che vuoi.")
-    svc, _ = gdrive._service(acct)
-    cur = svc.files().get(fileId=file_id, fields="parents",
-                          supportsAllDrives=True).execute()
-    svc.files().update(fileId=file_id, addParents=dest,
-                       removeParents=",".join(cur.get("parents") or ()) or None,
-                       fields="id", supportsAllDrives=True).execute()
+    from . import google_io
+    cur = _get(acct, file_id, "parents")
+    google_io.call(acct, "drive", "v3", "PATCH files/{fileId}", params={
+        "fileId": file_id, "addParents": dest,
+        "removeParents": ",".join(cur.get("parents") or ()) or None,
+        "fields": "id", "supportsAllDrives": True})
     reset_cache()
     return dest

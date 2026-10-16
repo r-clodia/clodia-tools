@@ -21,19 +21,21 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from . import gdrive_root
-from .google_svc import build_service
+from . import google_io
+from . import gdrive
 
 _URL = "https://docs.google.com/spreadsheets/d/{}/edit"
 
 
-def _svc(account: Optional[str]):
-    return build_service("sheets", "v4", account)
+def _sheets(acct: str, method_path: str, **kw) -> dict:
+    """One Sheets v4 call for a resolved account, through the Google seam (#524)."""
+    return google_io.call(acct, "sheets", "v4", method_path, **kw)
 
 
-def _tabs(svc, spreadsheet_id: str) -> list[dict]:
-    meta = svc.spreadsheets().get(
-        spreadsheetId=spreadsheet_id,
-        fields="sheets.properties(title,sheetId,index,gridProperties)").execute()
+def _tabs(acct: str, spreadsheet_id: str) -> list[dict]:
+    meta = _sheets(acct, "GET spreadsheets/{spreadsheetId}", params={
+        "spreadsheetId": spreadsheet_id,
+        "fields": "sheets.properties(title,sheetId,index,gridProperties)"})
     out = []
     for s in meta.get("sheets", []):
         p = s.get("properties", {})
@@ -46,11 +48,11 @@ def _tabs(svc, spreadsheet_id: str) -> list[dict]:
 
 def list_tabs(spreadsheet_id: str, account: Optional[str] = None) -> dict:
     """Tabs of a spreadsheet: title, id, position and size."""
-    svc, acct = _svc(account)
+    acct = gdrive._resolve_account(account)
     gdrive_root.guard_id(account, spreadsheet_id, "gsheets")
-    meta = svc.spreadsheets().get(spreadsheetId=spreadsheet_id,
-                                  fields="properties.title").execute()
-    tabs = _tabs(svc, spreadsheet_id)
+    meta = _sheets(acct, "GET spreadsheets/{spreadsheetId}", params={
+        "spreadsheetId": spreadsheet_id, "fields": "properties.title"})
+    tabs = _tabs(acct, spreadsheet_id)
     return {"account": acct, "spreadsheet_id": spreadsheet_id,
             "title": meta.get("properties", {}).get("title"),
             "tabs": tabs, "url": _URL.format(spreadsheet_id)}
@@ -71,18 +73,18 @@ def read(spreadsheet_id: str, range: Optional[str] = None,  # noqa: A002 - MCP a
     where a formula lives, and write back a constant — destroying exactly what
     this module exists to preserve.
     """
-    svc, acct = _svc(account)
+    acct = gdrive._resolve_account(account)
     gdrive_root.guard_id(account, spreadsheet_id, "gsheets")
     rng = range or tab
     if not rng:
-        tabs = _tabs(svc, spreadsheet_id)
+        tabs = _tabs(acct, spreadsheet_id)
         if not tabs:
             return {"account": acct, "spreadsheet_id": spreadsheet_id,
                     "range": None, "values": [], "rows": 0}
         rng = tabs[0]["title"]
-    res = svc.spreadsheets().values().get(
-        spreadsheetId=spreadsheet_id, range=rng,
-        valueRenderOption="FORMULA" if formulas else "FORMATTED_VALUE").execute()
+    res = _sheets(acct, "GET spreadsheets/{spreadsheetId}/values/{range}", params={
+        "spreadsheetId": spreadsheet_id, "range": rng,
+        "valueRenderOption": "FORMULA" if formulas else "FORMATTED_VALUE"})
     values = res.get("values", [])
     return {"account": acct, "spreadsheet_id": spreadsheet_id,
             "range": res.get("range", rng), "values": values, "rows": len(values),
@@ -97,21 +99,21 @@ def add_tab(spreadsheet_id: str, title: str, index: Optional[int] = None,
     is a mutation of the spreadsheet, not a rewrite of the file: the other tabs
     are not read, not sent and not rewritten.
     """
-    svc, acct = _svc(account)
+    acct = gdrive._resolve_account(account)
     gdrive_root.guard_id(account, spreadsheet_id, "gsheets")
     props: dict[str, Any] = {"title": title}
     if index is not None:
         props["index"] = int(index)
-    existing = [t["title"] for t in _tabs(svc, spreadsheet_id)]
+    existing = [t["title"] for t in _tabs(acct, spreadsheet_id)]
     if title in existing:
         # The API answers 400 with a generic message; say which titles are taken
         # so the caller can pick another one instead of retrying blind.
         raise ValueError(
             f"a tab named '{title}' already exists in this spreadsheet "
             f"(tabs: {', '.join(existing)})")
-    res = svc.spreadsheets().batchUpdate(
-        spreadsheetId=spreadsheet_id,
-        body={"requests": [{"addSheet": {"properties": props}}]}).execute()
+    res = _sheets(acct, "POST spreadsheets/{spreadsheetId}:batchUpdate",
+                  params={"spreadsheetId": spreadsheet_id},
+                  body={"requests": [{"addSheet": {"properties": props}}]})
     added = ((res.get("replies") or [{}])[0].get("addSheet", {}) or {}).get("properties", {})
     return {"account": acct, "spreadsheet_id": spreadsheet_id,
             "title": added.get("title", title), "sheet_id": added.get("sheetId"),
@@ -127,14 +129,15 @@ def append_rows(spreadsheet_id: str, tab: str, rows: list[list],
     typed by a user (USER_ENTERED), so `=SUM(...)` stays a formula and a date
     stays a date.
     """
-    svc, acct = _svc(account)
+    acct = gdrive._resolve_account(account)
     gdrive_root.guard_id(account, spreadsheet_id, "gsheets")
     if not rows:
         raise ValueError("rows vuoto: niente da aggiungere")
-    res = svc.spreadsheets().values().append(
-        spreadsheetId=spreadsheet_id, range=tab,
-        valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
-        body={"values": rows}).execute()
+    res = _sheets(acct, "POST spreadsheets/{spreadsheetId}/values/{range}:append",
+                  params={"spreadsheetId": spreadsheet_id, "range": tab,
+                          "valueInputOption": "USER_ENTERED",
+                          "insertDataOption": "INSERT_ROWS"},
+                  body={"values": rows})
     up = res.get("updates", {})
     return {"account": acct, "spreadsheet_id": spreadsheet_id,
             "range": up.get("updatedRange"), "appended_rows": up.get("updatedRows", len(rows)),
@@ -149,16 +152,17 @@ def write_range(spreadsheet_id: str, range: str,  # noqa: A002 - MCP arg name
     no default and no whole-tab shorthand, because overwriting cells the caller
     did not name is how formulas disappear. For adding data use `append_rows`.
     """
-    svc, acct = _svc(account)
+    acct = gdrive._resolve_account(account)
     gdrive_root.guard_id(account, spreadsheet_id, "gsheets")
     if not (range or "").strip():
         raise ValueError("range obbligatorio (es. 'Foglio1!A1:C10'): "
                          "write_range sovrascrive, quindi non ha un default")
     if not values:
         raise ValueError("values vuoto: niente da scrivere")
-    res = svc.spreadsheets().values().update(
-        spreadsheetId=spreadsheet_id, range=range,
-        valueInputOption="USER_ENTERED", body={"values": values}).execute()
+    res = _sheets(acct, "PUT spreadsheets/{spreadsheetId}/values/{range}",
+                  params={"spreadsheetId": spreadsheet_id, "range": range,
+                          "valueInputOption": "USER_ENTERED"},
+                  body={"values": values})
     return {"account": acct, "spreadsheet_id": spreadsheet_id,
             "range": res.get("updatedRange", range),
             "updated_cells": res.get("updatedCells"),

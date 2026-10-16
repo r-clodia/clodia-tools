@@ -73,6 +73,14 @@ class FakeDrive:
         return _Exec({"files": []})
 
 
+def _inside(d, *a):
+    """`gr.inside` with the Google calls answered by the fake `d` (#524)."""
+    from .tools import google_io
+    from .tools._google_fake import ServiceTransport
+    with patch.object(google_io, "_transport", ServiceTransport(d)):
+        return gr.inside(*a)
+
+
 class _Chat:
     def __init__(self, v):
         self.v = v
@@ -133,8 +141,8 @@ class PerTopicTests(Base):
                 self.assertEqual(roots, [TOPIC_FOLDER])
                 self.assertEqual(fonte, "topic")
                 d = FakeDrive()
-                self.assertTrue(gr.inside(d, "conto", "dentro-topic"))
-                self.assertFalse(gr.inside(d, "conto", "in-legale"))
+                self.assertTrue(_inside(d, "conto", "dentro-topic"))
+                self.assertFalse(_inside(d, "conto", "in-legale"))
         self.run_with(_env(), go)
 
     def test_a_sibling_folder_of_the_remote_is_outside(self):
@@ -143,8 +151,8 @@ class PerTopicTests(Base):
         due che non devono finire in un canale con dei collaboratori."""
         def go():
             with _Chat(self.CHAN):
-                self.assertFalse(gr.inside(FakeDrive(), "conto", "in-legale"))
-                self.assertFalse(gr.inside(FakeDrive(), "conto", "30LEGALE"))
+                self.assertFalse(_inside(FakeDrive(), "conto", "in-legale"))
+                self.assertFalse(_inside(FakeDrive(), "conto", "30LEGALE"))
         self.run_with(_env(), go)
 
     def test_the_parent_of_the_remote_is_outside_too(self):
@@ -152,7 +160,7 @@ class PerTopicTests(Base):
         confinare a una sottocartella non confinerebbe niente."""
         def go():
             with _Chat(self.CHAN):
-                self.assertFalse(gr.inside(FakeDrive(), "conto", "PROGETTO"))
+                self.assertFalse(_inside(FakeDrive(), "conto", "PROGETTO"))
         self.run_with(_env(), go)
 
     def test_outside_any_channel_the_account_roots_apply(self):
@@ -210,7 +218,7 @@ class CeilingTests(Base):
                 self.assertIn("tetto", fonte)
                 self.assertIn(ACCOUNT_ROOT, roots)
                 # una cartella fuori da ENTRAMBI resta fuori
-                self.assertFalse(gr.inside(FakeDrive(), "conto", "altrove"))
+                self.assertFalse(_inside(FakeDrive(), "conto", "altrove"))
         self.run_with(_env(account_roots=[ACCOUNT_ROOT]), go)
 
 

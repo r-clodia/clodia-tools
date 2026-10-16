@@ -77,9 +77,9 @@ def _lookup(fid: str) -> str | None:
         accounts = []
     for acct in accounts:
         try:
-            svc, _a = gdrive._service(acct)
-            f = svc.files().get(fileId=fid, fields="id,name,mimeType",
-                                supportsAllDrives=True).execute(num_retries=0)
+            from . import google_io
+            f = google_io.call(acct, "drive", "v3", "GET files/{fileId}", params={
+                "fileId": fid, "fields": "id,name,mimeType", "supportsAllDrives": True})
             nome = (f or {}).get("name") or None
             if nome:
                 break

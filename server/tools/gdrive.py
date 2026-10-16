@@ -3,8 +3,9 @@ cartella Drive condivisa.
 
 Riusa le credenziali OAuth Google Workspace già nel vault (`gworkspace_<account>`,
 depositate dal flusso "Connetti Google Workspace": client_id/secret/refresh_token
-+ scope `drive` pieno). Il segreto resta nel gateway: la libreria Google rinfresca
-l'access token da sé, non raggiunge mai il modello.
++ scope `drive` pieno). Il segreto resta nel gateway: every API call goes through
+`google_io.call` (clodia-platform#524), which refreshes the access token there;
+it never reaches the model.
 
 Trasferimento file via **scratch** dell'agent (come topic.fetch/put): i byte non
 transitano in base64 nel contesto. Flusso tipico orchestrato da clodia:
@@ -13,14 +14,13 @@ transitano in base64 nel contesto. Flusso tipico orchestrato da clodia:
 """
 from __future__ import annotations
 
-import io
 from typing import Optional
 
 from .. import vault
 from ..whitelist import tool_allowed
 from . import gdrive_root
+from . import google_io
 
-_TOKEN_URI = "https://oauth2.googleapis.com/token"
 _FOLDER_MIME = "application/vnd.google-apps.folder"
 # Export di default per i Google-native doc (non scaricabili con get_media).
 _GOOGLE_EXPORT = {
@@ -68,33 +68,9 @@ def _resolve_account(account: Optional[str]) -> str:
     return accts[0]
 
 
-def _service(account: Optional[str] = None):
-    """Costruisce il client Drive v3 per `account`, con credenziali dal vault
-    lette come infrastruttura (non più grant-checked sull'agente: il
-    perimetro è la cartella Drive del topic, già controllata a monte —
-    refactor whitelist-mailbox, 18 set 2026). L'access token è rinfrescato
-    dalla libreria Google a partire dal refresh_token."""
-    from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request as GoogleRequest
-    from googleapiclient.discovery import build
-
-    acct = _resolve_account(account)
-    b = vault.read_internal(_drive_cred(acct))
-    creds = Credentials(
-        token=None,
-        refresh_token=b["refresh_token"],
-        client_id=b["client_id"],
-        client_secret=b["client_secret"],
-        token_uri=_TOKEN_URI,
-        scopes=(b.get("scope") or "").split(),
-    )
-    creds.refresh(GoogleRequest())
-    # Timeout sull'HTTP di Drive: una chiamata stallata FALLISCE dopo N secondi
-    # invece di bloccare per sempre l'event loop del gateway (freeze totale).
-    import httplib2
-    from google_auth_httplib2 import AuthorizedHttp
-    authed = AuthorizedHttp(creds, http=httplib2.Http(timeout=30))
-    return build("drive", "v3", http=authed, cache_discovery=False), acct
+def _drive(account: str, method_path: str, **kw):
+    """One Drive v3 call for a resolved `account`, through the Google seam."""
+    return google_io.call(account, "drive", "v3", method_path, **kw)
 
 
 def _clean(f: dict) -> dict:
@@ -113,19 +89,19 @@ def list_files(folder_id: Optional[str] = None, query: Optional[str] = None,
     """Elenca file/cartelle di Drive. `folder_id` per il contenuto di una cartella;
     `query` per una query Drive arbitraria (es. \"name contains 'report'\")."""
     tool_allowed("gdrive.list")
-    svc, acct = _service(account)
+    acct = _resolve_account(account)
     clauses = ["trashed = false"]
     if folder_id:
         clauses.append(f"'{folder_id}' in parents")
     if query:
         clauses.append(f"({query})")
-    res = svc.files().list(
-        q=" and ".join(clauses), pageSize=max(1, min(int(limit), 1000)),
-        fields=f"files({_FIELDS})", orderBy="folder,name",
-        corpora="allDrives", **_ALL_DRIVES).execute()
+    res = _drive(acct, "GET files", params={
+        "q": " and ".join(clauses), "pageSize": max(1, min(int(limit), 1000)),
+        "fields": f"files({_FIELDS})", "orderBy": "folder,name",
+        "corpora": "allDrives", **_ALL_DRIVES})
     # Il confinamento sta nel FILTRO degli id, non in una clausola aggiunta a
     # `query`: quella stringa la controlla il chiamante.
-    rows = gdrive_root.keep_inside(svc, acct, res.get("files", []))
+    rows = gdrive_root.keep_inside(acct, res.get("files", []))
     return {"account": acct, "files": [_clean(f) for f in rows]}
 
 
@@ -134,14 +110,14 @@ def search(name: str, limit: int = 20, account: Optional[str] = None) -> dict:
     tool_allowed("gdrive.search")
     if not name:
         raise ValueError("'name' non può essere vuoto")
-    svc, acct = _service(account)
+    acct = _resolve_account(account)
     safe = name.replace("'", "\\'")
-    res = svc.files().list(
-        q=f"name contains '{safe}' and trashed = false",
-        pageSize=max(1, min(int(limit), 1000)),
-        fields=f"files({_FIELDS})", orderBy="folder,name",
-        corpora="allDrives", **_ALL_DRIVES).execute()
-    rows = gdrive_root.keep_inside(svc, acct, res.get("files", []))
+    res = _drive(acct, "GET files", params={
+        "q": f"name contains '{safe}' and trashed = false",
+        "pageSize": max(1, min(int(limit), 1000)),
+        "fields": f"files({_FIELDS})", "orderBy": "folder,name",
+        "corpora": "allDrives", **_ALL_DRIVES})
+    rows = gdrive_root.keep_inside(acct, res.get("files", []))
     return {"account": acct, "files": [_clean(f) for f in rows]}
 
 
@@ -152,19 +128,21 @@ def mkdir(name: str, parent_id: Optional[str] = None,
     tool_allowed("gdrive.mkdir")
     if not name:
         raise ValueError("'name' non può essere vuoto")
-    svc, acct = _service(account)
-    parent_id = gdrive_root.assert_writable_parent(svc, acct, parent_id, "gdrive.mkdir")
+    acct = _resolve_account(account)
+    parent_id = gdrive_root.assert_writable_parent(acct, parent_id, "gdrive.mkdir")
     safe = name.replace("'", "\\'")
     q = (f"name = '{safe}' and mimeType = '{_FOLDER_MIME}' and trashed = false"
          + (f" and '{parent_id}' in parents" if parent_id else ""))
-    existing = svc.files().list(q=q, fields=f"files({_FIELDS})",
-                                corpora="allDrives", **_ALL_DRIVES).execute().get("files", [])
+    existing = _drive(acct, "GET files", params={
+        "q": q, "fields": f"files({_FIELDS})", "corpora": "allDrives",
+        **_ALL_DRIVES}).get("files", [])
     if existing:
         return {"account": acct, "reused": True, **_clean(existing[0])}
     body = {"name": name, "mimeType": _FOLDER_MIME}
     if parent_id:
         body["parents"] = [parent_id]
-    f = svc.files().create(body=body, fields=_FIELDS, supportsAllDrives=True).execute()
+    f = _drive(acct, "POST files", body=body,
+               params={"fields": _FIELDS, "supportsAllDrives": True})
     return {"account": acct, "reused": False, **_clean(f)}
 
 
@@ -174,17 +152,16 @@ def upload(src: str, name: Optional[str] = None, folder_id: Optional[str] = None
     validato dal dispatch). `name` default = nome del file; `folder_id` = cartella
     di destinazione."""
     tool_allowed("gdrive.upload")
-    from googleapiclient.http import MediaFileUpload
     import os
-    svc, acct = _service(account)
-    folder_id = gdrive_root.assert_writable_parent(svc, acct, folder_id, "gdrive.upload")
+    acct = _resolve_account(account)
+    folder_id = gdrive_root.assert_writable_parent(acct, folder_id, "gdrive.upload")
     fname = name or os.path.basename(src)
     body = {"name": fname}
     if folder_id:
         body["parents"] = [folder_id]
-    media = MediaFileUpload(src, resumable=False)
-    f = svc.files().create(body=body, media_body=media, fields=_FIELDS,
-                           supportsAllDrives=True).execute()
+    # Multipart upload (metadata + bytes), mimetype guessed from the name.
+    f = _drive(acct, "POST files", body=body, media=google_io.Media(src),
+               params={"fields": _FIELDS, "supportsAllDrives": True})
     return {"account": acct, "uploaded": True, **_clean(f)}
 
 
@@ -222,13 +199,12 @@ def update(file_id: str, src: str, account: Optional[str] = None) -> dict:
     tool_allowed("gdrive.update")
     import mimetypes as _mt
     import os
-    from googleapiclient.http import MediaFileUpload
     if not os.path.isfile(src):
         raise ValueError(f"gdrive.update: file sorgente non trovato: {src}")
-    svc, acct = _service(account)
-    gdrive_root.assert_inside(svc, acct, file_id, "gdrive.update")
-    meta = svc.files().get(fileId=file_id, fields="id, name, mimeType",
-                           supportsAllDrives=True).execute()
+    acct = _resolve_account(account)
+    gdrive_root.assert_inside(acct, file_id, "gdrive.update")
+    meta = _drive(acct, "GET files/{fileId}", params={
+        "fileId": file_id, "fields": "id, name, mimeType", "supportsAllDrives": True})
     target = meta.get("mimeType", "")
     src_mime = _mt.guess_type(src)[0] or "application/octet-stream"
     if src.lower().endswith(".md"):
@@ -243,9 +219,9 @@ def update(file_id: str, src: str, account: Optional[str] = None) -> dict:
             raise ValueError(
                 f"gdrive.update: {os.path.basename(src)} ({src_mime}) non si può importare "
                 f"in un {target.rsplit('.', 1)[-1]}: usa uno di {sorted(ammessi)}")
-    media = MediaFileUpload(src, mimetype=src_mime, resumable=False)
-    f = svc.files().update(fileId=file_id, media_body=media, fields=_FIELDS,
-                           supportsAllDrives=True).execute()
+    # Media-only upload (no metadata): the content of the same file is replaced.
+    f = _drive(acct, "PATCH files/{fileId}", media=google_io.Media(src, src_mime),
+               params={"fileId": file_id, "fields": _FIELDS, "supportsAllDrives": True})
     return {"account": acct, "updated": True, "same_file": f.get("id") == file_id, **_clean(f)}
 
 
@@ -254,29 +230,25 @@ def download(file_id: str, dest: str, account: Optional[str] = None) -> dict:
     dal dispatch). I Google-native doc (Docs/Sheets/Slides) vengono esportati
     (PDF/xlsx)."""
     tool_allowed("gdrive.download")
-    from googleapiclient.http import MediaIoBaseDownload
-    svc, acct = _service(account)
-    gdrive_root.assert_inside(svc, acct, file_id, "gdrive.download")
-    meta = svc.files().get(fileId=file_id, fields="id, name, mimeType",
-                           supportsAllDrives=True).execute()
+    acct = _resolve_account(account)
+    gdrive_root.assert_inside(acct, file_id, "gdrive.download")
+    meta = _drive(acct, "GET files/{fileId}", params={
+        "fileId": file_id, "fields": "id, name, mimeType", "supportsAllDrives": True})
     mime = meta.get("mimeType", "")
     if mime in _GOOGLE_EXPORT:
         export_mime, _ext = _GOOGLE_EXPORT[mime]
-        request = svc.files().export_media(fileId=file_id, mimeType=export_mime)
+        data = _drive(acct, "GET files/{fileId}/export", download=True,
+                      params={"fileId": file_id, "mimeType": export_mime})
     elif mime.startswith("application/vnd.google-apps"):
         raise ValueError(f"tipo Google non esportabile: {mime}")
     else:
-        request = svc.files().get_media(fileId=file_id, supportsAllDrives=True)
-    buf = io.BytesIO()
-    downloader = MediaIoBaseDownload(buf, request)
-    done = False
-    while not done:
-        _status, done = downloader.next_chunk()
+        data = _drive(acct, "GET files/{fileId}", download=True,
+                      params={"fileId": file_id, "supportsAllDrives": True})
     with open(dest, "wb") as fh:
-        fh.write(buf.getvalue())
+        fh.write(data)
     return {"account": acct, "downloaded": True, "file_id": file_id,
             "name": meta.get("name"), "mimeType": mime, "local_path": dest,
-            "size": buf.getbuffer().nbytes}
+            "size": len(data)}
 
 
 def share(file_id: str, email: str, role: str = "writer",
@@ -288,14 +260,14 @@ def share(file_id: str, email: str, role: str = "writer",
         raise ValueError(f"email non valida: '{email}'")
     if role not in ("writer", "reader", "commenter"):
         raise ValueError("role deve essere writer | reader | commenter")
-    svc, acct = _service(account)
-    gdrive_root.assert_inside(svc, acct, file_id, "gdrive.share")
-    perm = svc.permissions().create(
-        fileId=file_id, sendNotificationEmail=True, supportsAllDrives=True,
-        body={"type": "user", "role": role, "emailAddress": email},
-        fields="id").execute()
-    meta = svc.files().get(fileId=file_id, fields="id, name, webViewLink",
-                           supportsAllDrives=True).execute()
+    acct = _resolve_account(account)
+    gdrive_root.assert_inside(acct, file_id, "gdrive.share")
+    perm = _drive(acct, "POST files/{fileId}/permissions",
+                  body={"type": "user", "role": role, "emailAddress": email},
+                  params={"fileId": file_id, "sendNotificationEmail": True,
+                          "supportsAllDrives": True, "fields": "id"})
+    meta = _drive(acct, "GET files/{fileId}", params={
+        "fileId": file_id, "fields": "id, name, webViewLink", "supportsAllDrives": True})
     return {"account": acct, "shared": True, "permission_id": perm.get("id"),
             "email": email, "role": role, **_clean(meta)}
 
@@ -307,10 +279,10 @@ def rename(file_id: str, new_name: str, account: Optional[str] = None) -> dict:
     new_name = (new_name or "").strip()
     if not new_name:
         raise ValueError("'new_name' non può essere vuoto")
-    svc, acct = _service(account)
-    gdrive_root.assert_inside(svc, acct, file_id, "gdrive.rename")
-    f = svc.files().update(fileId=file_id, body={"name": new_name},
-                           fields=_FIELDS, supportsAllDrives=True).execute()
+    acct = _resolve_account(account)
+    gdrive_root.assert_inside(acct, file_id, "gdrive.rename")
+    f = _drive(acct, "PATCH files/{fileId}", body={"name": new_name},
+               params={"fileId": file_id, "fields": _FIELDS, "supportsAllDrives": True})
     return {"account": acct, "renamed": True, **_clean(f)}
 
 
@@ -321,17 +293,17 @@ def move(file_id: str, folder_id: str, account: Optional[str] = None) -> dict:
     tool_allowed("gdrive.move")
     if not (folder_id or "").strip():
         raise ValueError("'folder_id' non può essere vuoto")
-    svc, acct = _service(account)
+    acct = _resolve_account(account)
     # Entrambi gli estremi: senza il controllo sulla destinazione uno
     # spostamento porterebbe il file FUORI dal perimetro, che è esfiltrazione
     # per rilocazione — non serve leggere niente per riuscirci.
-    gdrive_root.assert_inside(svc, acct, file_id, "gdrive.move")
-    gdrive_root.assert_inside(svc, acct, folder_id.strip(), "gdrive.move (destinazione)")
-    cur = svc.files().get(fileId=file_id, fields="parents",
-                          supportsAllDrives=True).execute()
+    gdrive_root.assert_inside(acct, file_id, "gdrive.move")
+    gdrive_root.assert_inside(acct, folder_id.strip(), "gdrive.move (destinazione)")
+    cur = _drive(acct, "GET files/{fileId}", params={
+        "fileId": file_id, "fields": "parents", "supportsAllDrives": True})
     prev = ",".join(cur.get("parents") or [])
-    f = svc.files().update(fileId=file_id, addParents=folder_id.strip(),
-                           removeParents=prev or None,
-                           fields=_FIELDS, supportsAllDrives=True).execute()
+    f = _drive(acct, "PATCH files/{fileId}", params={
+        "fileId": file_id, "addParents": folder_id.strip(), "removeParents": prev or None,
+        "fields": _FIELDS, "supportsAllDrives": True})
     return {"account": acct, "moved": True, "from": prev or None,
             "to": folder_id.strip(), **_clean(f)}
