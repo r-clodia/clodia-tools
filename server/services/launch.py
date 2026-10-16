@@ -188,8 +188,17 @@ def with_rlimits(command: Iterable[str],
     return [sys.executable, "-I", "-c", _LIMITER, json.dumps(scelti), *argv]
 
 
-def reap_orphans(tracked: Iterable[int] = ()) -> int:
-    """Raccoglie gli zombie figli di questo processo che NON sono servizi.
+def reap_orphans(tracked: Iterable[int] = (), sessions: Iterable[int] = ()) -> int:
+    """Raccoglie gli zombie orfani DEI SERVIZI, e nessun altro.
+
+    Solo un processo della **sessione di un servizio** (`sessions`: i pid dei
+    servizi avviati, che partono con `start_new_session=True` e ne sono quindi
+    i session leader) è un orfano da raccogliere. Il gateway ha molti altri
+    figli suoi — `subprocess.run` di restic, git, del client IMAP, i backend
+    MCP stdio — e uno di loro appena uscito è uno zombie finché il SUO `wait`
+    non arriva: raccoglierlo prima faceva leggere a `subprocess.run` un
+    `ECHILD`, cioè `returncode = 0` per un backup fallito (review di
+    clodia-tools#370).
 
     Il gateway è PID 1 nel suo container, quindi i nipoti orfani di un
     servizio gli vengono riparentati: senza raccoglierli la tabella dei
@@ -202,6 +211,9 @@ def reap_orphans(tracked: Iterable[int] = ()) -> int:
     `tracked` non è una precauzione: è la condizione di correttezza.
     """
     noti = {int(p) for p in tracked}
+    sessioni = {int(p) for p in sessions}
+    if not sessioni:
+        return 0
     mio = os.getpid()
     raccolti = 0
     try:
@@ -219,7 +231,10 @@ def reap_orphans(tracked: Iterable[int] = ()) -> int:
             # `comm` sta fra parentesi e può contenere spazi: si parte da
             # DOPO l'ultima `)`, se no i campi scalano.
             coda = (entry / "stat").read_text().rpartition(")")[2].split()
-            if len(coda) < 2 or coda[0] != "Z" or int(coda[1]) != mio:
+            # Campi dopo `)`: stato, ppid, pgrp, session.
+            if len(coda) < 4 or coda[0] != "Z" or int(coda[1]) != mio:
+                continue
+            if int(coda[3]) not in sessioni:
                 continue
             if os.waitpid(pid, os.WNOHANG)[0] == pid:
                 raccolti += 1

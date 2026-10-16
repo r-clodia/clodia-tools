@@ -112,6 +112,10 @@ class Supervisor:
         self._isolation: str | None = None
         self._entries: dict[tuple[str, str], _Running] = {}
         self._lock = threading.Lock()
+        #: Session ids of every service started by this process (= their pids,
+        #: they start with `start_new_session=True`): the only sessions whose
+        #: orphans `reap_orphans` may collect. Bounded, oldest dropped.
+        self._sessions: dict[int, None] = {}
 
     # -- ciclo ------------------------------------------------------------
     def reconcile(self) -> None:
@@ -143,7 +147,7 @@ class Supervisor:
             # che nel suo container è PID 1 (clodia-platform#545 §5). Dopo il
             # `_tick`, così i servizi che sono appena usciti li ha già
             # raccolti `Popen.poll()` e non c'è niente da togliergli.
-            launch.reap_orphans(self._live_pids())
+            launch.reap_orphans(self._live_pids(), self._sessions)
 
     def _tick(self, entry: _Running) -> None:
         if entry.proc is not None:
@@ -236,6 +240,9 @@ class Supervisor:
                       service.pack, service.name, entry.last_error)
             return
         entry.proc = proc
+        self._sessions[proc.pid] = None
+        while len(self._sessions) > 1024:
+            self._sessions.pop(next(iter(self._sessions)))
         entry.env = env
         entry.uid = privs[0] if privs else None
         entry.state = "running"

@@ -119,7 +119,8 @@ class RlimitTests(_Base):
         esistente, non preteso.
         """
         _, duro = resource.getrlimit(resource.RLIMIT_NOFILE)
-        if duro == resource.RLIM_INFINITY:
+        illimitato = duro == resource.RLIM_INFINITY
+        if illimitato:
             duro = 4096
         enorme = {"RLIMIT_NOFILE": duro * 1000}
         argv = launch.with_rlimits(
@@ -129,7 +130,8 @@ class RlimitTests(_Base):
         done = subprocess.run(argv, capture_output=True, text=True,
                               timeout=30, check=False)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertLessEqual(int(done.stdout.strip()), duro)
+        if not illimitato:   # with no hard ceiling there is nothing to clamp to
+            self.assertLessEqual(int(done.stdout.strip()), duro)
 
     def test_the_command_still_runs_and_keeps_its_arguments(self):
         argv = launch.with_rlimits([sys.executable, "-c",
@@ -154,10 +156,15 @@ class RlimitTests(_Base):
 # --------------------------------------------------------------------------
 # 2. zombie
 # --------------------------------------------------------------------------
+@unittest.skipUnless(Path("/proc/self/stat").exists(), "needs /proc (Linux)")
 class ReapTests(_Base):
-    def _zombie(self) -> int:
+    def _zombie(self, own_session: bool = True) -> int:
+        """A dead child. `own_session` = it was a service (session leader);
+        otherwise it is one of the gateway's other children."""
         pid = os.fork()
         if pid == 0:  # pragma: no cover - vive il tempo di morire
+            if own_session:
+                os.setsid()
             os._exit(0)
         for _ in range(300):
             if self._stato(pid) == "Z":
@@ -177,8 +184,21 @@ class ReapTests(_Base):
 
     def test_an_orphan_zombie_is_reaped(self):
         pid = self._zombie()
-        self.assertEqual(launch.reap_orphans(), 1)
+        self.assertEqual(launch.reap_orphans((), {pid}), 1)
         self.assertEqual(self._stato(pid), "", "lo zombie è ancora lì")
+
+    def test_another_child_of_the_gateway_is_never_reaped(self):
+        """Review of #370: a `subprocess.run` (restic, git, IMAP) that has
+        just exited is a zombie until its own wait; stealing it made a failed
+        backup read as `returncode = 0`. Not a service session → not ours."""
+        pid = self._zombie(own_session=False)
+        try:
+            self.assertEqual(launch.reap_orphans((), {pid + 999_999}), 0)
+            self.assertEqual(launch.reap_orphans(), 0)
+            self.assertEqual(self._stato(pid), "Z")
+        finally:
+            _, status = os.waitpid(pid, 0)
+        self.assertTrue(os.WIFEXITED(status), "il codice di uscita è andato perso")
 
     def test_a_supervised_child_is_never_reaped_from_under_the_supervisor(self):
         """È la ragione per cui non si fa `waitpid(-1)`: rubare l'uscita di un
@@ -186,7 +206,7 @@ class ReapTests(_Base):
         com'è finito, cioè un servizio «vivo» che non c'è più."""
         pid = self._zombie()
         try:
-            self.assertEqual(launch.reap_orphans({pid}), 0)
+            self.assertEqual(launch.reap_orphans({pid}, {pid}), 0)
             self.assertEqual(self._stato(pid), "Z")
         finally:
             os.waitpid(pid, 0)
@@ -194,6 +214,7 @@ class ReapTests(_Base):
     def test_the_supervisor_reaps_while_it_reconciles(self):
         pid = self._zombie()
         sup = self.supervisor()
+        sup._sessions[pid] = None   # as if it had been one of its services
         sup.reconcile()
         self.assertEqual(self._stato(pid), "", "reconcile non raccoglie gli orfani")
 
