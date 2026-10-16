@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 from pathlib import Path
 
 LOG = logging.getLogger("clodia-tools.state")
@@ -40,6 +41,40 @@ STATE_FILES = (
 #: Suffisso applicato alla copia legacy dopo la migrazione: resta sul volume
 #: condiviso come backup, ma è inerte (il gateway non la legge più).
 MIGRATED_SUFFIX = ".migrated-to-state-dir"
+
+#: Con questa env un processo DICHIARA di essere il proprietario dello stato e
+#: di poter fare la migrazione una-tantum di #80 anche se sembra un test. La
+#: usano i test che la migrazione la verificano: nessun altro.
+MIGRATE_ENV = "CLODIA_TOOLS_MIGRATE_STATE"
+
+
+def _test_runner() -> bool:
+    """True se questo processo è una ESECUZIONE DI TEST, non il gateway.
+
+    Il 14 ott 2026 una run della suite dentro lo scratch di un agente ha
+    migrato tre file di stato del gateway fuori da `/datadir`, rinominando gli
+    originali (clodia-platform#541, #545 §6): `CLODIA_TOOLS_STATE_DIR` puntava
+    a una temp dir mentre `CLODIA_DATA` era ancora quella VERA — in ogni
+    scratch quella variabile è già impostata. La migrazione ha fatto il suo
+    lavoro; il difetto è che a chiederla sia stato un test, e a chiederla è
+    l'IMPORT di `whitelist`, cioè prima che un `setUp` o un assert possano
+    intervenire.
+
+    Si guarda il PUNTO DI INGRESSO, non `"unittest" in sys.modules`: una
+    dipendenza che importa `unittest.mock` non deve impedire la migrazione
+    vera, perché allora il gateway ripartirebbe dallo stato vuoto — cioè
+    esattamente la perdita che #80 esiste per evitare.
+    """
+    if os.environ.get(MIGRATE_ENV):
+        return False
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+    entry = (getattr(spec, "name", "") or "").split(".")[0]
+    if entry in {"unittest", "pytest", "nose"}:
+        return True
+    argv0 = os.path.basename((sys.argv or [""])[0] or "")
+    return argv0 in {"unittest", "pytest", "py.test"}
 
 
 def shared_dir() -> Path:
@@ -75,9 +110,17 @@ def state_path(name: str) -> Path:
     Idempotente: la migrazione scatta solo quando lo stato è isolato e il file
     non esiste ancora nella state dir, quindi al più una volta per file. Non
     crea nulla se il legacy non c'è.
+
+    Il PERCORSO lo restituisce sempre; a essere condizionata è solo la
+    migrazione, che sposta stato vivo e quindi la fa il processo che quello
+    stato lo possiede (vedi `_test_runner`).
     """
     target = state_dir() / name
     if target.exists() or not is_isolated():
+        return target
+    if _test_runner():
+        LOG.debug("stato gateway '%s': migrazione saltata, questo processo è "
+                  "una run di test (clodia-platform#541)", name)
         return target
     _migrate(name, target)
     return target

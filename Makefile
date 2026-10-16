@@ -12,12 +12,30 @@ PY ?= $(shell test -x .venv/bin/python && echo .venv/bin/python || echo python3)
 # workflow dà già a `CLODIA_TOOLS_MCP_URL`, spostata dove vale anche in locale.
 export AGENT_SERVER_URL ?= http://127.0.0.1:9
 
-# The audit trail (clodia-platform#431) writes wherever the gateway state dir
-# is — `/datadir` by default. The suite exercises gates and verbs that emit
-# events, so it gets a throw-away store of its own, never the instance's.
+# Niente di ciò che la suite tocca sta nella datadir VERA della colonia.
+#
+# Il 14 ott 2026 una run della suite dentro lo scratch di un agente ha migrato
+# tre file di stato del gateway fuori da `/datadir` rinominando gli originali
+# (clodia-platform#541, #545 §6): `CLODIA_TOOLS_STATE_DIR` puntava a una temp
+# dir e `CLODIA_DATA` era ancora `/datadir`, perché in ogni scratch di agente
+# quella variabile È già impostata sulla datadir vera.
+#
+# Per questo `:=` e non `?=`: `?=` eredita esattamente il valore che ha causato
+# l'incidente, quindi non sarebbe isolamento ma una speranza. Qui la suite non
+# ha alcun motivo di leggere o scrivere lo stato dell'istanza: per i test che
+# un percorso vivo lo vogliono, c'è una temp dir per test.
 TEST_AUDIT := $(shell mktemp -d 2>/dev/null || echo /tmp/clodia-tools-test-audit)
-export CLODIA_AUDIT_DIR ?= $(TEST_AUDIT)/store
-export CLODIA_AUDIT_KEY_DIR ?= $(TEST_AUDIT)/key
+TEST_SANDBOX := $(shell mktemp -d 2>/dev/null || echo /tmp/clodia-tools-test-sandbox)
+export CLODIA_AUDIT_DIR := $(TEST_AUDIT)/store
+export CLODIA_AUDIT_KEY_DIR := $(TEST_AUDIT)/key
+export CLODIA_DATA := $(TEST_SANDBOX)/data
+export CLODIA_TOOLS_STATE_DIR := $(TEST_SANDBOX)/state
+export CLODIA_TOPICS_ROOT := $(TEST_SANDBOX)/topics
+export CLODIA_SPAWNS_ROOT := $(TEST_SANDBOX)/spawns
+export CLODIA_SECRETS_DIR := $(TEST_SANDBOX)/secrets
+export CLODIA_PKI_CERTS := $(TEST_SANDBOX)/pki/certs
+export CLODIA_PKI_REVOKED := $(TEST_SANDBOX)/pki/revoked.json
+export CLODIA_VAULT_DIR := $(TEST_SANDBOX)/vault
 
 .PHONY: test test-verbose test-one version-check help
 
