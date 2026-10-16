@@ -816,7 +816,9 @@ class RequestContractTests(_Istanza):
         with patch.object(proxy, "call_backend_tool_sync", esplode):
             with self.assertRaises(google_io.TransportError) as e:
                 google_io.call("conto", "drive", "v3", "GET files", params={})
-        self.assertIn("upstream exploded", str(e.exception))
+        # The backend text is not relayed (review of #381): type only.
+        self.assertNotIn("upstream exploded", str(e.exception))
+        self.assertIn("BackendToolError", str(e.exception))
         self.assertNotIn(TOKEN, str(e.exception))
 
     def test_native_position_never_touches_the_pack(self):
@@ -1142,3 +1144,17 @@ class PinnedSuitesRunInPackTests(_Istanza):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class ElectedUrlHostIsTheRawPrefixTests(unittest.TestCase):
+    """Review of #381: the host is read from the raw prefix, not urlsplit."""
+
+    def test_tricky_urls_never_elect_a_host(self):
+        import re as _re
+        for url in ("https://evil.io\\@drive.google.com/z/ROOT",
+                    "https://user@drive.google.com/drive/folders/X",
+                    "https://drive.google.com:443/drive/folders/X",
+                    "https://DRIVE.google.com/drive/folders/X",
+                    "https://drive.google.com.evil.io/drive/folders/X"):
+            m = _re.match(r"https?://([a-z0-9.-]+)/", url)
+            self.assertNotEqual(m.group(1) if m else "", "drive.google.com", url)

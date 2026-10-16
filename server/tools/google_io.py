@@ -301,8 +301,13 @@ def _pack_send(transport: tuple[str, str], token: str,
         text = proxy.call_backend_tool_sync(backend, tool, pack_payload(token, req),
                                             TIMEOUT_S)
     except Exception as e:  # noqa: BLE001 — the transport failed, the call did
+        # The backend's own text is NOT relayed: a pack that echoed its
+        # arguments would put the access token in front of the agent
+        # (review of clodia-tools#381). Logged for the operator by type only.
+        LOG.warning("google transport '%s.%s' failed (%s)", backend, tool,
+                    type(e).__name__)
         raise TransportError(
-            f"google transport '{backend}.{tool}' error: {str(e)[:300]}") from None
+            f"google transport '{backend}.{tool}' error ({type(e).__name__})") from None
     try:
         data = json.loads(text)
         status = data["status"]

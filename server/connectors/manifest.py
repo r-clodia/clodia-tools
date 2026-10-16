@@ -2040,11 +2040,12 @@ class Registry:
         scheme = (uri or "").partition(":")[0].lower()
         url_host = ""
         if elected and scheme in ("http", "https"):
-            try:
-                from urllib.parse import urlsplit
-                url_host = (urlsplit(uri).hostname or "").lower()
-            except ValueError:
-                url_host = ""
+            # The RAW prefix must be exactly `http(s)://<host>/` — no
+            # userinfo, port, backslash or case games: Python's parser and a
+            # browser's disagree on `https://evil.io\@drive.google.com/`
+            # (review of clodia-tools#381).
+            m = re.match(r"https?://([a-z0-9.-]+)/", uri or "")
+            url_host = m.group(1) if m else ""
         for c in sorted(self.connectors, key=lambda c: not c.builtin):
             hosts = frozenset(h.lower() for h in (elected or {}).get(c.id, ())) \
                 if not c.builtin else frozenset()
