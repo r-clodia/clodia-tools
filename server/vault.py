@@ -420,6 +420,19 @@ def materialize_google_oauth(credential: str, dest_dir: Path) -> str:
 
 # ── Deposito (usato da connect_email e dai futuri flussi OAuth da clodia-web) ─
 
+def _forget_google_token(credential: str) -> None:
+    """A Google credential re-saved or removed drops its cached access token
+    (`tools.google_io`), so a re-consent or a removal takes effect at once
+    instead of at the token's expiry (review of clodia-tools#380)."""
+    if not str(credential).startswith(("google_", "gworkspace_", "gmail_")):
+        return
+    try:
+        from .tools import google_io
+        google_io.forget()
+    except Exception:  # noqa: BLE001 — a cache, never a reason to fail a write
+        pass
+
+
 def deposit(credential: str, bundle: dict, *, cred_type: str = "opaque",
             grant_agents: Optional[list[str]] = None,
             actions: Optional[list[str]] = None) -> None:
@@ -428,6 +441,7 @@ def deposit(credential: str, bundle: dict, *, cred_type: str = "opaque",
     Idempotente: sovrascrive il bundle; aggiunge i grant mancanti senza
     duplicare quelli esistenti. Default grant `fetch` a `clodia`.
     """
+    _forget_google_token(credential)
     if grant_agents is None:
         grant_agents = ["clodia"]   # passa [] esplicito per credenziali infra (nessun grant)
     actions = actions or ["fetch"]
@@ -547,6 +561,7 @@ def remove(credential: str) -> bool:
     Idempotente: ritorna True se c'era qualcosa da rimuovere, False altrimenti.
     Usato per il disconnect dei provider (Fase 4).
     """
+    _forget_google_token(credential)
     removed = False
     bf = _store_dir() / f"{credential}.json"
     if bf.is_file():

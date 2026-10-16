@@ -5,6 +5,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+from ._google_fake import ServiceTransport
+
 from . import gdrive_labels as L
 
 FID = "1xxBOdhf4Vz2lgHAsxIBOEfyY9ymJn_NT"
@@ -45,7 +47,7 @@ class LabelTests(unittest.TestCase):
             def files(self):
                 raise RuntimeError("403 insufficient permissions")
         with patch("server.tools.gdrive.gworkspace_accounts", return_value=["davide"]), \
-                patch("server.tools.gdrive._service", return_value=(_Svc(), "davide")):
+                patch("server.tools.google_io._transport", ServiceTransport(_Svc())):
             out = L.labels([URI])
         self.assertIsNone(out[URI]["name"])
         self.assertIn(FID, out[URI]["url"])

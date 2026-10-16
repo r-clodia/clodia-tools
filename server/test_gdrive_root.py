@@ -14,6 +14,7 @@ lo spostamento.
 """
 from __future__ import annotations
 
+import contextlib
 import unittest
 from unittest.mock import patch
 
@@ -87,6 +88,37 @@ class FakeDrive:
         return FakeFiles(self)
 
 
+@contextlib.contextmanager
+def _with(d):
+    """Answer the Google calls of the gateway from the fake `d` (#524: the
+    seam is `google_io`, the fake keeps the discovery-client shape)."""
+    from .tools import gdrive, google_io
+    from .tools._google_fake import ServiceTransport
+    with patch.object(google_io, "_transport", ServiceTransport(d)), \
+            patch.object(gdrive, "gworkspace_accounts", lambda: ["conto"]):
+        yield d
+
+
+def _inside(d, *a):
+    with _with(d):
+        return gr.inside(*a)
+
+
+def _keep_inside(d, *a):
+    with _with(d):
+        return gr.keep_inside(*a)
+
+
+def _writable(d, *a):
+    with _with(d):
+        return gr.assert_writable_parent(*a)
+
+
+def _assert_inside(d, *a):
+    with _with(d):
+        return gr.assert_inside(*a)
+
+
 def _cfg(roots, egress=()):
     from . import whitelist as wl
     return patch.object(wl, "CONFIG", {"gdrive_roots": roots, "agents": {},
@@ -103,29 +135,29 @@ class AncestryTests(Base):
         """La compatibilità storica è un requisito: marte ha un account collegato
         e nessuna radice, e non deve cambiare comportamento."""
         with _cfg({"altro": [ROOT]}):
-            self.assertTrue(gr.inside(FakeDrive(), "conto", "fuori"))
+            self.assertTrue(_inside(FakeDrive(), "conto", "fuori"))
             self.assertFalse(gr.confined("conto"))
 
     def test_a_direct_child_is_inside(self):
         with _cfg({"conto": [ROOT]}):
-            self.assertTrue(gr.inside(FakeDrive(), "conto", "dentro"))
+            self.assertTrue(_inside(FakeDrive(), "conto", "dentro"))
 
     def test_the_root_itself_is_inside(self):
         with _cfg({"conto": [ROOT]}):
-            self.assertTrue(gr.inside(FakeDrive(), "conto", ROOT))
+            self.assertTrue(_inside(FakeDrive(), "conto", ROOT))
 
     def test_a_grandchild_is_inside(self):
         with _cfg({"conto": [ROOT]}):
-            self.assertTrue(gr.inside(FakeDrive(), "conto", "piu_profondo"))
+            self.assertTrue(_inside(FakeDrive(), "conto", "piu_profondo"))
 
     def test_a_file_in_another_folder_is_outside(self):
         with _cfg({"conto": [ROOT]}):
-            self.assertFalse(gr.inside(FakeDrive(), "conto", "fuori"))
+            self.assertFalse(_inside(FakeDrive(), "conto", "fuori"))
 
     def test_a_file_with_no_parents_is_outside(self):
         """La radice di «Il mio Drive» non è la cartella consentita."""
         with _cfg({"conto": [ROOT]}):
-            self.assertFalse(gr.inside(FakeDrive(), "conto", "orfano"))
+            self.assertFalse(_inside(FakeDrive(), "conto", "orfano"))
 
 
 class TheThreeTraps(Base):
@@ -138,14 +170,14 @@ class TheThreeTraps(Base):
         crearla, e non serve nessun altro permesso.
         """
         with _cfg({"conto": [ROOT]}):
-            self.assertFalse(gr.inside(FakeDrive(), "conto", "SHORTCUT"))
+            self.assertFalse(_inside(FakeDrive(), "conto", "SHORTCUT"))
 
     def test_passing_the_target_id_directly_is_also_refused(self):
         """L'altra metà della stessa trappola: aggirare la scorciatoia e chiedere
         direttamente il bersaglio non funziona, perché la risalita del bersaglio
         non raggiunge la radice."""
         with _cfg({"conto": [ROOT]}):
-            self.assertFalse(gr.inside(FakeDrive(), "conto", "fuori"))
+            self.assertFalse(_inside(FakeDrive(), "conto", "fuori"))
 
     def test_an_arbitrary_query_cannot_carry_anything_out(self):
         """La trappola numero due: `gdrive.list` accetta una query Drive libera.
@@ -158,7 +190,7 @@ class TheThreeTraps(Base):
                 {"id": "SHORTCUT", "parents": [ROOT],
                  "mimeType": gr.SHORTCUT_MIME}]
         with _cfg({"conto": [ROOT]}):
-            kept = gr.keep_inside(FakeDrive(), "conto", rows)
+            kept = _keep_inside(FakeDrive(), "conto", rows)
         self.assertEqual([r["id"] for r in kept], ["dentro"])
 
     def test_a_row_that_cannot_prove_it_is_not_a_shortcut_is_verified(self):
@@ -172,7 +204,7 @@ class TheThreeTraps(Base):
         inconcludente = [{"id": "SHORTCUT", "parents": [ROOT]}]   # nessun campo utile
         d = FakeDrive()
         with _cfg({"conto": [ROOT]}):
-            kept = gr.keep_inside(d, "conto", inconcludente)
+            kept = _keep_inside(d, "conto", inconcludente)
         self.assertEqual(kept, [], "una riga inconcludente non va creduta")
         self.assertGreater(d.calls, 0, "deve essere stata verificata all'API")
 
@@ -185,7 +217,7 @@ class TheThreeTraps(Base):
         from .tools import gdrive
         d = FakeDrive()
         with _cfg({"conto": [ROOT]}), \
-                patch.object(gdrive, "_service", return_value=(d, "conto")), \
+                _with(d), \
                 patch.object(gdrive, "tool_allowed", lambda *_a, **_k: None):
             with self.assertRaises(gr.OutsideRoot) as ctx:
                 gdrive.move("dentro", "ALTRA")
@@ -198,16 +230,16 @@ class FailClosedTests(Base):
         """`errore == fuori`. È la sola direzione accettabile: un 500 di Google
         non deve aprire il Drive."""
         with _cfg({"conto": [ROOT]}):
-            self.assertFalse(gr.inside(FakeDrive(broken=["profondo"]),
+            self.assertFalse(_inside(FakeDrive(broken=["profondo"]),
                                        "conto", "piu_profondo"))
 
     def test_a_cycle_terminates_and_denies(self):
         with _cfg({"conto": [ROOT]}):
-            self.assertFalse(gr.inside(FakeDrive(), "conto", "ciclo_a"))
+            self.assertFalse(_inside(FakeDrive(), "conto", "ciclo_a"))
 
     def test_an_unknown_id_is_outside_not_an_open_door(self):
         with _cfg({"conto": [ROOT]}):
-            self.assertFalse(gr.inside(FakeDrive(), "conto", "inesistente"))
+            self.assertFalse(_inside(FakeDrive(), "conto", "inesistente"))
 
     def test_a_malformed_config_does_not_disable_the_check(self):
         """Una configurazione scritta male non deve significare «nessun limite»
@@ -240,7 +272,7 @@ class CostTests(Base):
         la misura si farebbe togliere per lentezza."""
         d = FakeDrive()
         with _cfg({"conto": [ROOT]}):
-            self.assertTrue(gr.inside(d, "conto", "dentro",
+            self.assertTrue(_inside(d, "conto", "dentro",
                           {"id": "dentro", "parents": [ROOT],
                            "mimeType": "text/plain"}))
         self.assertEqual(d.calls, 0)
@@ -248,7 +280,7 @@ class CostTests(Base):
     def test_an_unconfined_account_pays_nothing(self):
         d = FakeDrive()
         with _cfg({}):
-            gr.keep_inside(d, "conto", [{"id": "fuori", "parents": ["ALTRA"],
+            _keep_inside(d, "conto", [{"id": "fuori", "parents": ["ALTRA"],
                                          "mimeType": "text/plain"}])
         self.assertEqual(d.calls, 0)
 
@@ -290,23 +322,23 @@ class WriteDestinationTests(Base):
         scriverebbe nella radice di «Il mio Drive» — fuori dal perimetro."""
         with _cfg({"conto": [ROOT]}):
             self.assertEqual(
-                gr.assert_writable_parent(FakeDrive(), "conto", None, "gdrive.upload"),
+                _writable(FakeDrive(), "conto", None, "gdrive.upload"),
                 ROOT)
 
     def test_with_two_roots_the_destination_must_be_named(self):
         with _cfg({"conto": [ROOT, "SECONDA"]}):
             with self.assertRaises(gr.OutsideRoot):
-                gr.assert_writable_parent(FakeDrive(), "conto", None, "gdrive.upload")
+                _writable(FakeDrive(), "conto", None, "gdrive.upload")
 
     def test_a_destination_outside_is_refused(self):
         with _cfg({"conto": [ROOT]}):
             with self.assertRaises(gr.OutsideRoot):
-                gr.assert_writable_parent(FakeDrive(), "conto", "ALTRA", "gdrive.upload")
+                _writable(FakeDrive(), "conto", "ALTRA", "gdrive.upload")
 
     def test_an_unconfined_account_keeps_the_caller_choice(self):
         with _cfg({}):
             self.assertIsNone(
-                gr.assert_writable_parent(FakeDrive(), "conto", None, "gdrive.upload"))
+                _writable(FakeDrive(), "conto", None, "gdrive.upload"))
 
 
 class RefusalMessageTests(Base):
@@ -316,7 +348,7 @@ class RefusalMessageTests(Base):
         che non ha modo di sapere cosa gli manca."""
         with _cfg({"conto": [ROOT]}):
             try:
-                gr.assert_inside(FakeDrive(), "conto", "fuori", "gdrive.download")
+                _assert_inside(FakeDrive(), "conto", "fuori", "gdrive.download")
             except gr.OutsideRoot as e:
                 msg = str(e)
         self.assertIn("gdrive.download", msg)
@@ -404,7 +436,7 @@ class NativeDocTests(Base):
         from .tools import gdrive
         d = FakeDrive()
         with _cfg({"conto": [ROOT]}), \
-                patch.object(gdrive, "_service", return_value=(d, "conto")), \
+                _with(d), \
                 patch.object(gdrive, "_resolve_account", return_value="conto"):
             dest = gr.adopt("conto", "orfano", "gdocs.create")
         self.assertEqual(dest, ROOT)
@@ -424,7 +456,7 @@ class NativeDocTests(Base):
         from .tools import gdrive
         d = FakeDrive()
         with _cfg({"conto": [ROOT]}), \
-                patch.object(gdrive, "_service", return_value=(d, "conto")), \
+                _with(d), \
                 patch.object(gdrive, "_resolve_account", return_value="conto"):
             with self.assertRaises(gr.OutsideRoot):
                 gr.guard_id("conto", "fuori", "gdocs.read")
@@ -433,7 +465,7 @@ class NativeDocTests(Base):
         from .tools import gdrive
         d = FakeDrive()
         with _cfg({"conto": [ROOT]}), \
-                patch.object(gdrive, "_service", return_value=(d, "conto")), \
+                _with(d), \
                 patch.object(gdrive, "_resolve_account", return_value="conto"):
             gr.guard_id("conto", "dentro", "gdocs.read")      # non solleva
 

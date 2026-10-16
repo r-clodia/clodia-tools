@@ -2911,9 +2911,11 @@ def _drive_parent_of(arguments: dict) -> str:
     """La cartella che contiene il file di `gdrive.update`, o "" se non si sa."""
     try:
         from .tools import gdrive as _gd
-        svc, _acct = _gd._service(arguments.get("account"))
-        f = svc.files().get(fileId=str(arguments.get("file_id") or ""), fields="parents",
-                            supportsAllDrives=True).execute()
+        from .tools import google_io as _gio
+        f = _gio.call(_gd._resolve_account(arguments.get("account")), "drive", "v3",
+                      "GET files/{fileId}", params={
+                          "fileId": str(arguments.get("file_id") or ""),
+                          "fields": "parents", "supportsAllDrives": True})
         return str((f.get("parents") or [""])[0])
     except Exception:  # noqa: BLE001 — ignoto = negato dal verdetto, non un errore qui
         return ""
