@@ -2934,11 +2934,20 @@ def _component_pdp_arguments(spec, name: str, arguments: dict) -> dict:
         svc = _components.service(spec.pack, "pdp_arguments")
     except Exception:  # noqa: BLE001
         svc = None
-    if svc is None:
-        return arguments
     from .connectors import resolved as _conn
     allowed = {m.arg for m in _conn.egress_mappings(name) if m.arg}
     if not allowed:
+        return arguments
+    # Destination arguments the verb's OWN schema does not offer to the caller
+    # are facts the gateway establishes (gdrive.update's parent folder): the
+    # caller's value is never kept, and without an answer from the service
+    # they are "" — unknown, i.e. refused by the verdict, as natively
+    # (review of clodia-tools#383: they used to fall back to the agent's).
+    props = set(((getattr(spec, "tool", None) and spec.tool.inputSchema) or {})
+                .get("properties", {}) or {})
+    owned = {a for a in allowed if a not in props}
+    arguments = {k: v for k, v in arguments.items() if k not in owned}
+    if svc is None:
         return arguments
     try:
         extra = svc.handler(name, dict(arguments)) or {}
@@ -2949,7 +2958,7 @@ def _component_pdp_arguments(spec, name: str, arguments: dict) -> dict:
     if not isinstance(extra, dict):
         raise PermissionError(f"{name}: the destination could not be determined")
     return {**arguments, **{k: str(v if v is not None else "")
-                            for k, v in extra.items() if k in allowed}}
+                            for k, v in extra.items() if k in owned}}
 
 
 def _drive_parent_of(arguments: dict) -> str:

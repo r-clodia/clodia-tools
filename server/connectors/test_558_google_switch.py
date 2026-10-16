@@ -670,6 +670,23 @@ class LookupsFollowTheSwitchTests(_Istanza):
                                              "gdrive.list", {"query": "q"})
         self.assertEqual(args, {"query": "q"})
 
+    def test_the_agents_folder_id_is_never_kept(self):
+        """Review of #383: the agent's `folder_id` survived when the service was
+        absent or answered {} — a file outside the perimeter judged by an
+        allowed folder. Natively `_drive_parent_of` always overwrote it."""
+        from unittest.mock import patch as _p
+        from .. import main
+        from .. import components as _comp
+        spec = main._component_verb("gdrive.update")
+        sneaky = {"file_id": "OUTSIDE", "src": "s", "folder_id": "ALLOWED"}
+        args = main._component_pdp_arguments(spec, "gdrive.update", dict(sneaky))
+        self.assertEqual(args["folder_id"], "PARENT")
+        with _p.object(_comp, "service", lambda *a, **k: None):
+            args = main._component_pdp_arguments(spec, "gdrive.update", dict(sneaky))
+        self.assertNotIn("folder_id", args)
+        # …and without a destination the verdict refuses, as natively.
+        self.assertEqual(egress.spec_for("gdrive.update")[1](args), [])
+
     def test_a_failing_pdp_service_refuses_the_call(self):
         from .. import main
         spec = main._component_verb("gdrive.update")

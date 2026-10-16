@@ -263,6 +263,12 @@ class _NoBytecodeLoader(importlib.machinery.SourceFileLoader):
     def set_data(self, path, data, *, _mode=0o666):  # noqa: D401
         return None
 
+    def get_code(self, fullname):
+        """Always compile from the (hash-verified) source: never read a
+        `.pyc`, e.g. one found under a PYTHONPYCACHEPREFIX (review of #383)."""
+        path = self.get_filename(fullname)
+        return compile(self.get_data(path), path, "exec", dont_inherit=True)
+
 
 class _ComponentFinder:
     """Meta-path finder for `clodia_components.*`: same files the default
