@@ -536,6 +536,17 @@ def _transport_or_refuse(account: str) -> tuple[str, str]:
             "`mail` connector with a `transport` on a backend it has mounted "
             "itself. Install/repair the pack (comms-pack), or set "
             "`connectors: {mail: native}` in profile.yaml.")
+    if vault.has_credential(_gmail_cred(account)) \
+            and not vault.has_credential(_mailbox_cred(account)):
+        # Gmail is a provider of google-pack (#524), not of this IMAP
+        # transport: handing it the instance's OAuth client secret and the
+        # account's refresh token would give the wrong pack the keys to the
+        # whole Google account (review of clodia-tools#378).
+        raise PermissionError(
+            f"l'account '{account}' è Gmail (google_{account}): il trasporto "
+            "IMAP del pack non lo serve. Gmail arriverà con il google-pack "
+            "(clodia-platform#524); fino ad allora usa la posizione `native` "
+            "per la posta, o una casella IMAP.")
     if not (vault.has_credential(_gmail_cred(account))
             or vault.has_credential(_mailbox_cred(account))):
         raise PermissionError(

@@ -464,6 +464,17 @@ class FailClosedTests(_Istanza):
         self.assertIn("legacy", str(e.exception))
         self.assertEqual(self.transport_calls, [])
 
+    def test_a_gmail_account_is_refused_by_the_imap_transport(self):
+        """Review of #378: Gmail belongs to google-pack (#524); the IMAP
+        transport must not receive the OAuth client secret and refresh token."""
+        with patch.object(EM, "known_accounts", return_value={"studio"}), \
+                patch.object(EM.vault, "has_credential",
+                             lambda c: c == "google_studio"):
+            with self.assertRaises(PermissionError) as e:
+                EM._run_cli("studio", ["folders"], want_json=True, direction="inbox")
+        self.assertIn("google-pack", str(e.exception))
+        self.assertEqual(self.transport_calls, [])
+
     def test_the_gateways_secrets_dir_never_leaves(self):
         """Belt and braces behind the legacy refusal."""
         with self.assertRaises(PermissionError):
@@ -555,6 +566,15 @@ class TransportBackendIsInternalTests(_Istanza):
     def test_the_neighbour_is_not_refused_for_it(self):
         from .. import main
         main._check_not_transport("normattiva.cerca")  # no exception
+
+    def test_a_pack_cannot_hide_an_unclaimed_admin_mount(self):
+        """Review of #378: a pack naming `normattiva` (mounted by an admin,
+        owned by no pack) as its transport hid it from every agent."""
+        from .. import main
+        self.scrivi_pack(_comms_pack(providers=[{
+            "id": "imap", "transport": {"backend": "normattiva", "tool": "cerca"}}]))
+        self.assertNotIn("normattiva", resolved.transport_backends())
+        main._check_not_transport("normattiva.cerca")  # still reachable
 
 
 class SyncCallTests(unittest.TestCase):

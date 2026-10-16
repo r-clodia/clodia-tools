@@ -970,8 +970,8 @@ def transport_backends() -> frozenset[str]:
     whatever the switch says: in `native` position the pack's connector is
     refused for collision with the builtin, but its backend may well be
     mounted — and is no less raw for that. A backend is withheld unless it is
-    PROVEN to be somebody else's (another pack's stamp, or a core backend):
-    a pack may hide its own mounts and unclaimed ones, never a neighbour's.
+    a mount the declaring pack itself stamped: a pack may hide its own
+    mounts, never a neighbour's, a core one or an unclaimed admin mount.
     """
     global _TRANSPORTS
     sig = (_signature(_manifest_files()), _mount_signature())
@@ -989,8 +989,10 @@ def transport_backends() -> frozenset[str]:
                     if isinstance(t, Mapping) else ""
                 if not name or name in _CORE_BACKENDS:
                     continue
-                if any(name in mine for other, mine in owners.items()
-                       if other != pack):
+                # Only the pack's OWN stamped mounts: an unclaimed backend
+                # (mounted by an admin, e.g. normattiva) must not be hideable
+                # by any pack that names it (review of clodia-tools#378).
+                if name not in (owners.get(pack) or ()):
                     continue
                 out.add(name)
     result = frozenset(out)
