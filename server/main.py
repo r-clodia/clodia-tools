@@ -1987,14 +1987,14 @@ def _packaged_namespaces() -> frozenset[str]:
 #: them into the pack would either lose them or hand the binding registry to a
 #: pack process (review of clodia-logic#527).
 #:
-#: All of `email.*` too (clodia-platform#523), for a different reason: before
-#: any byte of a mailbox comes back the gateway takes decisions that belong to
-#: the reference monitor — the account's mailbox whitelist, strict ingress and
-#: its audit record (#503), topic attachments in and out with their taint, the
-#: reply recipient. Moving the verbs into a pack would move those decisions
-#: with them. So the pack declares the mail VOCABULARY (the egress/source
-#: mappings the PDP reads) and provides the TRANSPORT (`resolved.
-#: transport_for`), and the verbs stay here.
+#: NOT `email.*` any more (clodia-platform#558, superseding the transport
+#: design of #523). With `connectors: {mail: pack}` the eight verbs LEAVE the
+#: native catalogue: comms-pack's GATEWAY COMPONENT registers them and takes,
+#: inside the reference monitor and per call, the decisions they carry — the
+#: account's mailbox whitelist, strict ingress and its audit record (#503),
+#: topic attachments in and out with their taint, the reply recipient (its
+#: `pdp_arguments` service). The dispatcher runs them through this same
+#: `call_tool` path. On `native` the gateway's `tools/email.py` serves them.
 #:
 #: The four git verbs of `github` too (clodia-platform#525): they are
 #: reference-monitor work — the room from the signed claim, the per-scope
@@ -2017,11 +2017,10 @@ def _packaged_namespaces() -> frozenset[str]:
 _GOOGLE_NATIVE_NAMES: frozenset[str] = frozenset(
     t.name for t in _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS)
 
+_EMAIL_NATIVE_NAMES: frozenset[str] = frozenset(t.name for t in _EMAIL_TOOLS)
+
 _GATEWAY_RETAINED_VERBS = frozenset({
     "telegram.listen", "telegram.unlisten", "telegram.join_link",
-    "email.send", "email.folders", "email.list", "email.read",
-    "email.get_attachment", "email.save_attachment", "email.search",
-    "email.reply",
 }) | _GITHUB_NATIVE_NAMES
 
 
@@ -2619,9 +2618,8 @@ def _native_tool_namespaces() -> list[str]:
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
     # The gateway-retained binding verbs do not keep a packaged namespace
     # native: in `pack` position `telegram` belongs to the pack's backend.
-    # Unless the gateway retains the WHOLE namespace (`email`, #523): there
-    # the pack provides a transport and no verb, nobody else exposes `email`,
-    # and dropping it here would make the gateway's own verbs ungrantable.
+    # Unless the gateway retains the WHOLE namespace (`github`'s git verbs):
+    # dropping it here would make the gateway's own verbs ungrantable.
     def _ns(name: str) -> str:
         return name.split(NS_SEP_DOT, 1)[0]
     not_retained = {_ns(t.name) for t in tools
@@ -2648,6 +2646,10 @@ def runtime_configuration_warnings() -> list[str]:
         str(backend.get("name") or "")
         for backend in (CONFIG.get("mcp_backends") or [])
     )
+    # The namespaces of serving gateway components (#558) are exposed too:
+    # `email.*` on `mail: pack`, `gdrive.*`… on `google: pack`.
+    mounted.update(t.name.split(NS_SEP_DOT, 1)[0] for t in _component_tools()
+                   if NS_SEP_DOT in t.name)
     warnings = []
     for agent, spec in (CONFIG.get("agents") or {}).items():
         for tool in spec.get("allowed_tools") or []:
@@ -2659,7 +2661,13 @@ def runtime_configuration_warnings() -> list[str]:
                     f"agent '{agent}': namespace '{namespace}' in whitelist "
                     "ma non esposto da tool nativi o backend MCP"
                 )
-    for row in email.credential_diagnostics():
+    from .tools import mail_switch as _mail_switch
+    if _mail_switch.in_pack():
+        try:
+            _mail_switch.service("diagnostics")
+        except _mail_switch.ComponentUnavailable as e:
+            warnings.append(f"email: {e}")
+    for row in _mail_switch.credential_diagnostics():
         if row["operational"]:
             continue
         detail = (
@@ -4900,8 +4908,8 @@ def _check_pack_connector_held(name: str) -> None:
     The verbs the gateway RETAINS in a packaged namespace are refused too
     (#523). The gateway serves them, but in `pack` position the builtin
     manifest is released and the mappings the PDP reads for them come from
-    the pack's connector: without it `email.send` would be an unmapped verb,
-    i.e. a send nobody checks."""
+    the pack's connector: without it such a verb would be unmapped, i.e. a
+    call nobody checks."""
     if not (_is_packaged_verb(name)
             or (name in _GATEWAY_RETAINED_VERBS and _is_packaged_namespace(name))):
         return
@@ -5385,9 +5393,16 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             # posta in arrivo: è il suo lavoro). Si risolve qui, al call-site,
             # con una lettura in più che avviene SOLO per questo verbo.
             _eargs = arguments
-            if name == "email.reply" and not (arguments.get("to") or ""):
-                # Off the event loop: the lookup is an IMAP fetch, and with
-                # the pack transport (#523) a call to an MCP backend.
+            if (_cpdp := _component_verb(name)) is not None:
+                # A component verb (#558): the facts the PDP needs and the
+                # call does not carry come from the component's own service
+                # (google-pack: the parent folder of `gdrive.update`;
+                # comms-pack: the recipient of `email.reply`). FIRST: a
+                # component verb never reaches a native lookup below.
+                _eargs = await asyncio.to_thread(
+                    _component_pdp_arguments, _cpdp, name, arguments)
+            elif name == "email.reply" and not (arguments.get("to") or ""):
+                # Off the event loop: the lookup is an IMAP fetch.
                 _eargs = {**arguments,
                           "to": await asyncio.to_thread(_reply_recipient, arguments)}
             elif name == "telegram.send":
@@ -5398,12 +5413,6 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # whitelist (clodia-platform#402). Si rifiuta PRIMA del verdetto,
                 # dicendo l'id giusto quando il canale ne ha uno legato.
                 _telegram_chat_id_or_raise(arguments)
-            elif (_cpdp := _component_verb(name)) is not None:
-                # A component verb (#558): the facts the PDP needs and the
-                # call does not carry come from the component's own service
-                # (google-pack: the parent folder of `gdrive.update`).
-                _eargs = await asyncio.to_thread(
-                    _component_pdp_arguments, _cpdp, name, arguments)
             elif name == "gdrive.update":
                 # La destinazione di un aggiornamento è la CARTELLA del file:
                 # stessa regola di `gdrive.upload` (whitelist + taint), letta da
@@ -5511,7 +5520,10 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
         elif name == "logs.tail":
             result = logs.tail(arguments.get("lines", 100), arguments.get("level", ""),
                                source=arguments.get("source") or "agent-server")
-        elif name == "email.send":
+        elif name == "email.send" and not _is_packaged_verb(name):
+            # `not _is_packaged_verb` on the eight `email.*` branches: on
+            # `mail: pack` (#558) they are comms-pack's gateway component's,
+            # dispatched below like google-pack's.
             # ALLEGATI PER RIFERIMENTO (#104 §8, requisito derivato della riga
             # `messaggero`). Il gateway legge i file dal topic e li allega: il
             # contenuto NON entra nel contesto dell'agente, esattamente come per
@@ -5540,24 +5552,24 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 if _tmpdir:
                     import shutil as _sh
                     _sh.rmtree(_tmpdir, ignore_errors=True)
-        elif name == "email.folders":
+        elif name == "email.folders" and not _is_packaged_verb(name):
             result = await asyncio.to_thread(email.folders,
                                              account=_email_account(arguments))
-        elif name == "email.list":
+        elif name == "email.list" and not _is_packaged_verb(name):
             result = await asyncio.to_thread(
                 email.list_messages,
                 account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
                 limit=arguments.get("limit", 10),
             )
-        elif name == "email.read":
+        elif name == "email.read" and not _is_packaged_verb(name):
             result = await asyncio.to_thread(
                 email.read_message,
                 arguments["email_id"],
                 account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
             )
-        elif name == "email.get_attachment":
+        elif name == "email.get_attachment" and not _is_packaged_verb(name):
             result = await asyncio.to_thread(
                 email.get_attachment,
                 arguments["email_id"],
@@ -5565,7 +5577,7 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 account=_email_account(arguments),
                 folder=arguments.get("folder", "INBOX"),
             )
-        elif name == "email.save_attachment":
+        elif name == "email.save_attachment" and not _is_packaged_verb(name):
             # I byte dell'allegato NON passano dal modello: decodifica server-side
             # e scrittura o nello scratch validato, o DIRETTAMENTE nei file del
             # topic. La seconda è la RICEZIONE per riferimento, simmetrica
@@ -5619,7 +5631,7 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 with open(dest, "wb") as f:
                     f.write(raw)
                 result = {"local_path": dest, "size": len(raw), **meta}
-        elif name == "email.search":
+        elif name == "email.search" and not _is_packaged_verb(name):
             result = await asyncio.to_thread(
                 email.search,
                 arguments["query"],
@@ -5627,7 +5639,7 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 folder=arguments.get("folder", "INBOX"),
                 limit=arguments.get("limit", 20),
             )
-        elif name == "email.reply":
+        elif name == "email.reply" and not _is_packaged_verb(name):
             _own = _agent_attachments(arguments.get("attachments"))
             for _p in _own:
                 await asyncio.to_thread(_note_crossing, _p, kind="attachment")

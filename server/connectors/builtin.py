@@ -195,11 +195,43 @@ FIRST_PARTY_PACKS: frozenset[str] = frozenset(FIRST_PARTY_SOURCES)
 #: `app_` (the OAuth app client) is no connector's prefix at all. The credentials
 #: stay in the gateway vault — no re-consent — and the component that now
 #: implements the verbs reaches them through the host, scoped.
+#:
+#: `mailbox_` follows `mail` for the same reason (#558): `mail.yaml` declares
+#: no provider credential either, the IMAP/SMTP mailboxes stay in the gateway
+#: vault, and comms-pack's gateway component reaches them through the host.
 CORE_CREDENTIALS_FOLLOW: dict[str, str] = {
     "google_": "google",
     "gworkspace_": "google",
     "gmail_": "google",
     "app_google_oauth": "google",
+    "mailbox_": "mail",
+}
+
+
+#: Provider transports a first-party pack declared in an earlier version and
+#: no longer does (#558: the code became the pack's gateway component). Their
+#: backends stay gateway-internal — never listed, an agent's call DENIED —
+#: while the pack's own stamped mount survives an Update, until an admin
+#: unregisters it (`DELETE /tools/mcp/<name>`).
+RETIRED_TRANSPORTS: dict[str, frozenset[str]] = {
+    "comms-pack": frozenset({"mail-transport"}),            # comms-pack 1.4.0
+    "google-pack": frozenset({"google-transport", "gmail-transport"}),  # 1.0.0
+}
+
+
+#: Services of ANOTHER pack's gateway component that a component may look up
+#: through `host.service(pack, name)` (#558): `{caller pack: {(callee pack,
+#: service), …}}`. Code, not datadir, and closed by default: a component calls
+#: no other component unless the pair is listed here.
+#:
+#: comms-pack owns the mail vocabulary and serves `email.*` for every account
+#: on `mail: pack`; a Google account's credential is google-pack's and never
+#: in comms-pack's scope, so comms-pack asks google-pack for exactly two
+#: things — the Google mail accounts (names and addresses, no secret) and one
+#: client run on an account's own XOAUTH2 files, which google-pack writes.
+COMPONENT_SERVICES: dict[str, frozenset[tuple[str, str]]] = {
+    "comms-pack": frozenset({("google-pack", "mail_accounts"),
+                             ("google-pack", "mail_exec")}),
 }
 
 

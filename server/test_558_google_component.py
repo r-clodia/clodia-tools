@@ -225,7 +225,9 @@ class LoadTests(GoogleComponentInstance, unittest.TestCase):
         self.assertEqual(sorted(row["routes"]), ["app", "auth", "connect"])
         self.assertEqual(sorted(row["services"]), sorted([
             "accounts", "credential_changed", "describe_folder", "folder_labels",
-            "mail_run", "pdp_arguments", "perimeter_changed", "test_connection"]))
+            "mail_run", "pdp_arguments", "perimeter_changed", "test_connection",
+            # google-pack >= 2.1.0: Gmail for comms-pack's mail component (#558)
+            "mail_accounts", "mail_exec"]))
 
     def test_the_schemas_are_the_native_ones_verbatim(self):
         from . import main

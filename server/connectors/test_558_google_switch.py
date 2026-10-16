@@ -767,22 +767,25 @@ class GmailRoutingTests(_Istanza):
                                              "email": "studio@gmail.com"}})
         self.assertEqual(self.imap_calls, [])
 
-    def test_an_imap_account_goes_to_the_mail_transport(self):
-        """`google: pack`, `mail: pack`: each account to its own provider."""
-        self.posizione("pack", mail="pack")
-        self.assertEqual(self._folders("info"), 0)
-        self.assertEqual(self._folders("studio"), 0)
-        self.assertEqual([(c["backend"], c["tool"]) for c in self.imap_calls],
-                         [("mail-transport", "run")])
-        self.assertEqual(sorted(self.imap_calls[0]["arguments"]["files"]),
-                         ["secrets/email_config.json"])
-        self.assertEqual(len(self._gmail_runs()), 1)
+    def _refused_natively(self, account: str) -> None:
+        with patch.object(EM.subprocess, "run") as run:
+            with self.assertRaises(EM.NativeDisabled):
+                EM._run_cli(account, ["folders"], want_json=True, direction="inbox")
+        run.assert_not_called()
+
+    def test_on_mail_pack_the_native_client_never_runs(self):
+        """`mail: pack` (#558): comms-pack's component serves `email.*` for
+        every account — Gmail included, through google-pack's services — and
+        the gateway's native client refuses, whatever the `google` switch."""
+        for google in ("pack", "native"):
+            with self.subTest(google=google):
+                self.posizione(google, mail="pack")
+                self._refused_natively("info")
+                self._refused_natively("studio")
+        self.assertEqual(self.imap_calls, [])
+        self.assertEqual(self._gmail_runs(), [])
 
     def test_imap_follows_mail_and_gmail_follows_google(self):
-        self.posizione("native", mail="pack")
-        self.assertEqual(self._folders("studio"), 1)          # in-process
-        self.assertEqual(self._folders("info"), 0)            # comms-pack
-        self.assertEqual(self._gmail_runs(), [])
         self.posizione("pack", mail="native")
         self.assertEqual(self._folders("info"), 1)            # in-process
         self.assertEqual(self._folders("studio"), 0)          # google-pack
@@ -798,13 +801,14 @@ class GmailRoutingTests(_Istanza):
         run.assert_not_called()
         self.assertEqual(self._folders("info"), 1)            # IMAP unaffected
 
-    def test_imap_is_refused_without_its_provider(self):
+    def test_imap_is_refused_without_comms_pack(self):
+        """No comms-pack at all on `mail: pack`: still never the native client."""
         self.posizione("pack", mail="pack")
         self.togli_pack("comms-pack")
         with patch.object(EM.subprocess, "run") as run:
             with self.assertRaises(PermissionError) as e:
                 EM._run_cli("info", ["folders"], want_json=True, direction="inbox")
-        self.assertIn("mail transport provider not available", str(e.exception))
+        self.assertIn("comms-pack", str(e.exception))
         run.assert_not_called()
 
     def test_native_google_never_uses_the_component(self):
@@ -859,7 +863,7 @@ class ForeignPackCannotClaimTests(_Istanza):
         self.assertIsNotNone(resolved.registry().by_id("evil-gmail"))
         with patch.object(EM, "_is_gmail", lambda a: True):
             with self.assertRaises(PermissionError):
-                EM._transport_or_refuse("studio")
+                EM._gmail_runner_or_refuse("studio")
 
     def test_on_native_the_builtins_win_the_collision(self):
         self.posizione("native")

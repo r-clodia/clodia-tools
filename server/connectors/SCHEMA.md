@@ -171,7 +171,10 @@ generic without a manifest that describes it would be rewriting it.
 manifest): `{backend: <mounted MCP backend>, tool: <tool name>}`. `backend`
 follows the id rule, `tool` the argument rule; no other key is accepted.
 
-It exists for a connector whose verbs the gateway keeps (#523, mail): before
+Since #558 mail no longer uses it (comms-pack 2.0.0 is a gateway component);
+it stays for it-pack's images (#525), and a comms-pack 1.4.0 manifest that
+declares one remains valid. The original design, for reference — it existed
+for a connector whose verbs the gateway keeps (#523, mail): before
 any byte of a mailbox comes back the gateway takes decisions that belong to the
 reference monitor — the mailbox whitelist (`inbox:`/`outbox:`), strict ingress
 and its audit record (#503), topic attachments in and out with their taint, the
@@ -605,12 +608,21 @@ host.perimeter.approved_calendars(scope=None) -> list[str] # `gcal:` approvals
 host.perimeter.calendar_allowed(calendar_id, scope=None) -> bool
 host.perimeter.topic_drive_folders(tier, name) -> list[dict]   # topic `meta.drive_folders`
 host.perimeter.in_channel() -> bool             # the call comes from a topic channel
-host.topics.read_file(tier, name, path) -> bytes
+host.perimeter.mailbox_allowed(direction, address, scope=None) -> bool  # inbox:/outbox: (#558, mail)
+host.perimeter.strict_scope() -> str | None     # the room, if strict ingress (#503)
+host.perimeter.address_of(header) -> str        # the PDP's `From:` parser
+host.perimeter.source_vetted(uri, scope=None) -> bool   # e.g. `mailfrom:a@b.it`
+host.perimeter.legacy_mail_accounts() -> dict   # {account: address|None}, names only
+host.topics.read_file(tier, name, path, *, crossing="file") -> bytes   # crossing=None: caller notes it
 host.topics.put_file(tier, name, path, data, *, provenance="untrusted")
 host.note_crossing(data=None, *, path=None, kind="file")
 host.scratch_path(path) -> str
 host.config(key, default=None); host.set_config(key, value)   # owner routes only
 host.agent(); host.channel(); host.principal(); host.log
+host.current_topic() -> (tier, name) | (None, None)   # the room of the signed claim
+host.tool_allowed(verb)                          # the whitelist's answer; raises PermissionError
+host.audit_decision(verb, kind, result, *, reason_class=None)  # raises host.AuditUnavailable
+host.service(pack, name) -> callable | None     # ANOTHER pack's service, granted pairs only
 ```
 
 - **Verbs** join the catalogue next to the native ones and run through the same
@@ -644,11 +656,33 @@ host.agent(); host.channel(); host.principal(); host.log
   service `pdp_arguments(verb, arguments) -> dict` is generic: the dispatcher
   calls it before the egress PDP of a component verb and takes from its answer
   ONLY the arguments a destination mapping of that verb reads (a failing
-  service refuses the call: the destination would be unknown).
+  service refuses the call: the destination would be unknown). A destination
+  argument the verb's own schema does not offer (`gdrive.update`'s
+  `folder_id`, `email.reply`'s `to`/`bcc`) is a fact the gateway establishes:
+  the caller's value is dropped, never kept.
+- **Another pack's services** (#558, mail): `host.service(pack, name)` looks up
+  a service of ANOTHER pack's serving component, only for the pairs
+  `builtin.COMPONENT_SERVICES` grants (code, closed by default; today
+  comms-pack → google-pack's `mail_accounts` and `mail_exec`). Anything else
+  is a `HostError`; a component not serving is None, and the caller fails
+  closed. It lets each pack keep to its own credentials: comms-pack never
+  reaches a Google refresh token, it asks google-pack to run the client.
 - **Perimeter**: read-only facts the gateway holds and the agent-server cannot
   write — the config's `gdrive_roots`, the egress/source lists in force for the
   call, `gcal:` approvals, a topic's `drive_folders`, whether the call comes
-  from a signed channel claim. Read live, per call; nothing in it writes.
+  from a signed channel claim; for mail (#558) whether a mailbox is usable in a
+  direction (`inbox:`/`outbox:`), the strict-ingress room of the call, the
+  `From:` parser and the vetted-source answer, and the NAMES and addresses of
+  the legacy accounts of `secrets/email_config.json` (never the file). Read
+  live, per call; nothing in it writes.
+- **Decisions on record** (#558, mail): `host.audit_decision` writes a
+  `policy.decision` (e.g. the strict-ingress `filter`/`deny`, #503) and raises
+  `host.AuditUnavailable` when the trail cannot be written, so a component
+  whose decision must be recorded before it acts can refuse, as the native
+  code did. `host.tool_allowed(verb)` answers the whitelist for a lookup made
+  on the agent's behalf under another verb's authority (`email.reply` reads the
+  message it answers as `email.read`). `host.current_topic()` is the room of
+  the signed claim, for verbs whose topic defaults to the caller's.
 - **Standby.** A trusted, pinned component whose connectors' namespaces the
   gateway still reserves — the instance switch of that migration on `native`
   — is not imported: status `standby`, no verb, route or service, nothing
@@ -730,13 +764,50 @@ implementation per instance, and the profile says which.
 Absent, unreadable or misspelled, the file means `native`. A migration is
 switched on; it is never suffered.
 
-`mail: pack` (#523) is the same lever with one difference: the verbs do not
-leave. `email.*` are retained by the gateway (like Telegram's binding verbs),
-so on `pack` the builtin `mail.yaml` is released, comms-pack's `mail` connector
-supplies the vocabulary the PDP reads, and its provider's `transport` carries
-the I/O (see `providers[]`). A retained verb whose pack connector is not held
-is refused: without that connector `email.send` would be unmapped, i.e.
-unchecked.
+`mail: pack` (#523, then #558) moves mail to **comms-pack's gateway
+component** (the transport design of #523 is superseded: comms-pack 2.0.0 has
+no `mail-transport`). On `pack` the builtin `mail.yaml` is released,
+comms-pack's `mail` connector supplies the vocabulary the PDP reads, and the
+eight `email.*` verbs leave the native catalogue and dispatch: the component
+registers them, for EVERY account, and takes inside the reference monitor the
+decisions they carry — account resolution, the mailbox whitelist
+(`host.perimeter.mailbox_allowed`), strict ingress with its fail-closed audit
+record (`host.audit_decision`; the refusal text is the gateway's, so
+`main._denial_class` still files it as `sender_not_vetted`), agent attachments
+confined to the caller's scratch, topic attachments in and out with their
+taint, the reply recipient (its `pdp_arguments` service; the caller's `to` is
+dropped). `email.folders` and `email.save_attachment` are listed in
+`unmapped:`.
+
+- **The credential stays.** `mailbox_<acct>` remains in the gateway's vault
+  with the same names and shapes; the component reaches it through
+  `host.credentials("mailbox_")` (`CORE_CREDENTIALS_FOLLOW`: only while `mail`
+  is on `pack`). It runs the bundled client on ONE mailbox's credential, in a
+  private per-call directory, with a minimal environment.
+- **Gmail** stays google-pack's: a Google account's credential is never in
+  comms-pack's scope. comms-pack asks google-pack's component
+  (`host.service("google-pack", "mail_accounts" | "mail_exec")`); google-pack
+  writes the XOAUTH2 files itself. Without google-pack serving (absent,
+  `google: native`, failed) a Google account is refused, never served by the
+  gateway's native client. On `mail: native` Gmail follows `google` as before
+  (the gateway's `email.py` calls google-pack's `mail_run`).
+- **Legacy accounts** (`secrets/email_config.json`) are listed and refused on
+  `pack`; they run on `native` only.
+- **Tools page.** `/tools/email/mailboxes` (GET/POST/DELETE) and the
+  mailboxes card test keep their URLs and the gateway's own authentication; on
+  `pack` they call the component's services (`mailboxes_list`, `mailbox_add`,
+  `mailbox_remove`, `test_mailboxes`), and the gateway withdraws a removed
+  mailbox's `inbox:`/`outbox:` entries itself (`egress.forget_mailbox`). The
+  topic's mailbox button and its option set read `system_mailboxes`
+  (`server/tools/mail_switch.py`).
+- **Fail closed.** No component serving: every `email.*` verb `DENIED`, the
+  routes answer 503, the option set is empty, a configuration warning says
+  why; the native `email._run_cli` refuses (`NativeDisabled`) in that position.
+- **Retired transport.** An Update does not unmount `mail-transport` (the
+  agent-server mounts what is declared, it does not unregister what is not):
+  `builtin.RETIRED_TRANSPORTS` keeps a pack's own stamped mount of a transport
+  it no longer declares gateway-internal (never listed, DENIED) until an admin
+  removes it (`DELETE /tools/mcp/mail-transport`).
 
 `github: pack` and `openai-images: pack` (#525) follow the same two shapes.
 GitHub: the four git verbs (`github.clone/pull/push/pull_request`) are retained
@@ -969,11 +1040,8 @@ connectors:
     providers:
       - id: imap
         label: IMAP/SMTP mailbox
-        # The pack's own MCP backend that carries the IMAP/SMTP I/O for the
-        # gateway's verbs (#523). Never listed to agents.
-        transport:
-          backend: mail-transport
-          tool: run
+        # Since #558 the IMAP/SMTP code is the pack's gateway component
+        # (`components:`), not a transport.
         credential:
           kind: form
           vault_entry: mail_imap

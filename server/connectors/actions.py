@@ -64,11 +64,13 @@ def _mailbox_options() -> list[dict]:
     compares. Keeping both is the whole reason a chosen option is richer than
     the string that was chosen.
     """
-    from ..tools import email as email_tool
+    # From the side in charge of mail (#558): comms-pack's component on
+    # `mail: pack`, and no option at all when it is not serving.
+    from ..tools import mail_switch
     return [{"value": row["account"],
              "label": f"{row['account']} · {row['email']}",
              "values": {"account": row["account"], "address": row["email"]}}
-            for row in email_tool.system_mailboxes()]
+            for row in mail_switch.system_mailboxes()]
 
 
 #: Closed list, like `NORMALISERS`: a pack may point a field at one of these,

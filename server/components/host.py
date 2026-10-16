@@ -6,13 +6,18 @@ the gateway goes through the object it receives:
     host.register_verb(tool, handler, *, offload=True)
     host.register_route(path, methods, handler, *, auth="owner")
     host.register_service(name, fn)
+    host.service(pack, name)  -> another pack's component service (granted pairs)
     host.credentials(prefix)  -> ScopedCredentials
-    host.perimeter            -> read-only perimeter facts (config, lists, topics)
+    host.perimeter            -> read-only perimeter facts (config, lists, topics,
+                                 mailbox whitelist, strict ingress, vetted sources)
     host.topics               -> read_file / put_file with membership checks
     host.note_crossing(data=None, *, path=None, kind="file")
     host.scratch_path(path)   -> str inside the caller's spawn scratch
     host.config(key, default=None) / host.set_config(key, value)
-    host.agent() / host.channel() / host.principal()
+    host.agent() / host.channel() / host.principal() / host.current_topic()
+    host.tool_allowed(verb)   -> the whitelist's answer (raises PermissionError)
+    host.audit_decision(verb, kind, result, *, reason_class=None)
+                              -> a decision record; AuditUnavailable if unwritable
     host.log                  -> logging.Logger
 
 Registration is closed when `register` returns: a component cannot add a verb
@@ -58,6 +63,13 @@ OWNER_REQUEST: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 class HostError(PermissionError):
     """A component asked the host for something it may not have."""
+
+
+class AuditUnavailable(RuntimeError):
+    """The audit trail cannot be written (`host.audit_decision`). A component
+    whose decision must be on record before it acts — strict ingress, #503 —
+    refuses the call on this, as the native code refused on the trail's
+    `AuditWriteError`."""
 
 
 @dataclass(frozen=True)
@@ -176,12 +188,20 @@ class Topics:
     #: (`agent`); `trusted` is the owner's word and not a component's to give.
     PROVENANCES = ("untrusted", "agent")
 
-    def read_file(self, tier: str, name: str, path: str) -> bytes:
+    def read_file(self, tier: str, name: str, path: str, *,
+                  crossing: str | None = "file") -> bytes:
+        """The bytes of a topic file, for a caller that is a member.
+
+        `crossing` is the kind under which the bytes are recorded as leaving
+        (`file`); `None` when the component records them itself under its own
+        kind once they actually leave — `email.send(topic_files=…)` notes them
+        as `attachment` after the agent's own attachments, the native order."""
         from .. import main
         svc = main._topics()
         main._require_topic_member(svc, tier, name)
         data = svc.read_file(tier, name, path)
-        main._note_crossing(data=data, kind="file")
+        if crossing:
+            main._note_crossing(data=data, kind=crossing)
         return data
 
     def put_file(self, tier: str, name: str, path: str, data: bytes, *,
@@ -254,6 +274,47 @@ class Perimeter:
         from ..whitelist import in_channel
         return bool(in_channel())
 
+    # -- mail (#558, comms-pack) --------------------------------------------
+
+    def mailbox_allowed(self, direction: str, address: str,
+                        scope: str | None = None) -> bool:
+        """Is the mailbox `address` usable in `direction` (`inbox` | `outbox`)
+        for the current call (or `scope`)? `egress.mailbox_allowed`: the
+        `inbox:`/`outbox:` entries, global plus the room's, strict ingress
+        included."""
+        from .. import egress
+        return bool(egress.mailbox_allowed(direction, address, scope))
+
+    def strict_scope(self) -> str | None:
+        """The room of the current call IF it is a strict-ingress channel
+        (#503), else None. Read from the signed claim and the gateway config,
+        never from an argument."""
+        from .. import egress
+        scope = egress._scope_of_call()
+        return scope if scope and egress.ingress_strict(scope) else None
+
+    def address_of(self, header: str) -> str:
+        """The address of a `From:`-like header (`Nome <a@b.it>` → `a@b.it`),
+        "" when it does not parse: the PDP's own parser."""
+        from .. import egress
+        return egress.address_of(header or "")
+
+    def source_vetted(self, uri: str, scope: str | None = None) -> bool:
+        """Is `uri` (e.g. `mailfrom:a@b.it`) a vetted source for the current
+        call (or `scope`)? The room's people, or a declared ingress entry —
+        `egress.is_vetted_source`, strict ingress included."""
+        from .. import egress
+        return bool(egress.is_vetted_source(uri, scope))
+
+    def legacy_mail_accounts(self) -> dict[str, str | None]:
+        """`{account: address | None}` of the LEGACY mail accounts of the
+        gateway's `secrets/email_config.json`: names and addresses, never the
+        file or a secret. A mail component lists them and refuses them (they
+        run natively only); goes away with the native mail code."""
+        from ..tools import email as _native_mail
+        return {a: _native_mail._legacy_address(a)
+                for a in sorted(_native_mail._legacy_accounts())}
+
 
 # --------------------------------------------------------------------------
 # config
@@ -291,6 +352,7 @@ class Host:
         self.services: dict[str, ServiceSpec] = {}
         self.topics = Topics()
         self.perimeter = Perimeter()
+        self.AuditUnavailable = AuditUnavailable
         self.log = logging.getLogger(
             f"clodia-tools.component.{component.pack}.{component.id}")
 
@@ -422,6 +484,51 @@ class Host:
             tmp.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")
             os.chmod(tmp, 0o600)
             os.replace(tmp, p)
+
+    def service(self, pack: str, name: str) -> Callable | None:
+        """The service `name` of `pack`'s SERVING gateway component, or None.
+
+        Only the pairs `connectors.builtin.COMPONENT_SERVICES` grants to this
+        component's pack (comms-pack → google-pack's `mail_accounts`,
+        `mail_exec`); anything else is a `HostError`. Looked up per call: a
+        component that stops serving (switch turned back, failure) is gone
+        from the next call on — the caller fails closed on None."""
+        from ..connectors import builtin
+        pair = (str(pack or ""), str(name or ""))
+        if pair not in builtin.COMPONENT_SERVICES.get(self._c.pack, frozenset()):
+            raise HostError(f"component '{self._c.key}' may not call service "
+                            f"'{pair[1]}' of '{pair[0]}'")
+        from . import loader
+        spec = loader.service(*pair)
+        return spec.handler if spec is not None else None
+
+    def current_topic(self) -> tuple[str | None, str | None]:
+        """`(tier, name)` of the room the call comes from (signed `chat`
+        claim, tier canonical), or `(None, None)` outside a room."""
+        from .. import main
+        return main._current_topic()
+
+    def tool_allowed(self, verb: str) -> None:
+        """The whitelist's answer for the calling agent and `verb`: raises
+        PermissionError when it is not granted. For a component that, like
+        the native code, looks something up on the agent's behalf with ANOTHER
+        verb's authority (`email.reply` reads the message it answers as
+        `email.read`)."""
+        from ..whitelist import tool_allowed
+        tool_allowed(str(verb or ""))
+
+    def audit_decision(self, verb: str, kind: str, result: str, *,
+                       reason_class: str | None = None) -> None:
+        """Record a decision of the reference monitor taken by the component
+        (`audit.policy.decision`), e.g. an ingress filter or refusal (#503).
+        `AuditUnavailable` when the trail cannot be written; other failures
+        propagate as they are."""
+        from .. import audit as _audit
+        from ..audit import policy as _apol
+        try:
+            _apol.decision(verb, kind, result, reason_class=reason_class)
+        except _audit.AuditWriteError as e:
+            raise AuditUnavailable(str(e)) from None
 
     def agent(self) -> str:
         from ..whitelist import agent_name
