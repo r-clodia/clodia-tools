@@ -125,8 +125,10 @@ class BuiltinConnectorsTests(unittest.TestCase):
         reg = resolved.registry()
         self.assertEqual(resolved.problems(), ())
         ids = {c.id for c in reg.connectors if c.builtin}
-        self.assertEqual(ids, {"core", "mail", "telegram", "google", "github",
-                               "datastore", "openai-images"})
+        # Google is four connectors, one per verb namespace, one switch (#524).
+        self.assertEqual(ids, {"core", "mail", "telegram", "google",
+                               "google-sheets", "google-docs", "google-calendar",
+                               "github", "datastore", "openai-images"})
 
     def test_only_the_core_file_declares_the_platform_schemes(self):
         """The issue's own words: «Only platform-intrinsic schemes stay in a core

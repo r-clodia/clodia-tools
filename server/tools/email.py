@@ -461,7 +461,7 @@ def _run_cli(account: str, cli_args: list[str], *, want_json: bool,
         raise ValueError(
             f"unknown account '{account}'; available: {sorted(known_accounts())}"
         )
-    if _pack_transport():
+    if _pack_transport(account):
         # clodia-platform#523: the owner moved the mail TRANSPORT into a pack.
         # Everything above and around this line is unchanged — the account
         # check, the mailbox whitelist inside `_secrets_env`, and every
@@ -497,20 +497,46 @@ def _run_cli(account: str, cli_args: list[str], *, want_json: bool,
 
 #: The connector id the instance switch names (`profile.yaml`, `connectors:`).
 MAIL_CONNECTOR = "mail"
+#: The switch Gmail follows (#524): Gmail is google-pack's provider of the mail
+#: vocabulary (`mail-gmail`, `extends: mail`), so it moves with Google.
+GOOGLE_CONNECTOR = "google"
+#: The provider id of Gmail in the mail vocabulary (`resolved.transport_for`).
+GMAIL_PROVIDER = "gmail"
 
 
-def _pack_transport() -> bool:
-    """Is the mail transport, on this instance, the pack's provider?
+def _is_gmail(account: str) -> bool:
+    """The account runs on a Google credential (`google_`/`gmail_`).
+
+    The same test `_secrets_env` uses to pick the credential it materialises,
+    so the routing and the files that travel can never disagree: an account
+    holding both a Google and a mailbox credential is served — and shipped —
+    as Gmail, never as the Google files inside an IMAP call."""
+    return vault.has_credential(_gmail_cred(account))
+
+
+def _pack_transport(account: str | None = None) -> bool:
+    """Is the transport for `account`, on this instance, a pack's provider?
+
+    Each provider follows its own switch (#524): a Gmail account follows
+    `google` (google-pack's Gmail provider), every other account follows
+    `mail` (comms-pack's IMAP provider). Without an account, the `mail`
+    switch — the answer of #523.
 
     Asked per call, not at import: the switch is the owner's lever and it
     takes effect on the next call, like every other `connector_mode` reader.
     """
     from .. import instance_profile
-    return instance_profile.connector_mode(MAIL_CONNECTOR) == "pack"
+    switch = GOOGLE_CONNECTOR if account and _is_gmail(account) else MAIL_CONNECTOR
+    return instance_profile.connector_mode(switch) == "pack"
 
 
 def _transport_or_refuse(account: str) -> tuple[str, str]:
-    """`(backend, tool)` of the pack's mail transport, or a refusal.
+    """`(backend, tool)` of the pack transport for `account`, or a refusal.
+
+    Per provider (#524): a Gmail account (`_is_gmail`) goes to google-pack's
+    `gmail` provider of the mail vocabulary, any other account to the mail
+    connector's own (IMAP) transport. Same argument and answer contract for
+    both (`_run_transport`); what differs is which credential's files travel.
 
     Fail closed, never a fallback to the in-process client: an owner who
     turned the switch to `pack` and silently got the gateway's own client
@@ -524,6 +550,27 @@ def _transport_or_refuse(account: str) -> tuple[str, str]:
     one account out of it is the vault's job, not a transport's.
     """
     from ..connectors import resolved as _connectors
+    if _is_gmail(account):
+        # Gmail is google-pack's provider (#524), never the IMAP transport's:
+        # handing comms-pack the instance's OAuth client and the account's
+        # refresh token would give the wrong pack the keys to the whole Google
+        # account (review of clodia-tools#378). Its own transport receives
+        # the per-call OAuth files `_secrets_env` materialises, as the
+        # in-process client does.
+        try:
+            transport = _connectors.transport_for(MAIL_CONNECTOR, GMAIL_PROVIDER)
+        except Exception as e:  # noqa: BLE001 — an unreadable registry is no transport
+            LOG.error("email: trasporto Gmail del pack non risolvibile (%s)", e)
+            transport = None
+        if transport is None:
+            raise PermissionError(
+                f"Gmail transport provider not available for '{account}': the "
+                "google connector is in `pack` position on this instance, but "
+                "no installed google-pack holds the `mail-gmail` connector "
+                "(`extends: mail`, provider `gmail`) with a `transport` on a "
+                "backend it has mounted itself. Install/repair google-pack, or "
+                "set `connectors: {google: native}` in profile.yaml.")
+        return transport
     try:
         transport = _connectors.transport_for(MAIL_CONNECTOR)
     except Exception as e:  # noqa: BLE001 — an unreadable registry is no transport
@@ -536,19 +583,7 @@ def _transport_or_refuse(account: str) -> tuple[str, str]:
             "`mail` connector with a `transport` on a backend it has mounted "
             "itself. Install/repair the pack (comms-pack), or set "
             "`connectors: {mail: native}` in profile.yaml.")
-    if vault.has_credential(_gmail_cred(account)) \
-            and not vault.has_credential(_mailbox_cred(account)):
-        # Gmail is a provider of google-pack (#524), not of this IMAP
-        # transport: handing it the instance's OAuth client secret and the
-        # account's refresh token would give the wrong pack the keys to the
-        # whole Google account (review of clodia-tools#378).
-        raise PermissionError(
-            f"l'account '{account}' è Gmail (google_{account}): il trasporto "
-            "IMAP del pack non lo serve. Gmail arriverà con il google-pack "
-            "(clodia-platform#524); fino ad allora usa la posizione `native` "
-            "per la posta, o una casella IMAP.")
-    if not (vault.has_credential(_gmail_cred(account))
-            or vault.has_credential(_mailbox_cred(account))):
+    if not vault.has_credential(_mailbox_cred(account)):
         raise PermissionError(
             f"l'account legacy '{account}' (email_config.json) non si usa con il "
             "trasporto del pack: al pack si consegna la credenziale di UNA "

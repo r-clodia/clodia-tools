@@ -193,7 +193,14 @@ def canonical(uri: str) -> str:
     s = _registry().scheme(scheme)
     if s is not None and s.lowercase:
         return u.lower()
-    out = _registry().canonical(u)
+    try:
+        # The pack connector the owner elected in a builtin's place may read
+        # the browser URLs of ITS hosts (#524: google-pack's Drive URLs).
+        from .connectors import builtin as _builtin
+        elected = _builtin.elected_url_hosts()
+    except Exception:  # noqa: BLE001 — in doubt, only the builtins' rules
+        elected = {}
+    out = _registry().canonical(u, elected)
     if out is not None:
         return out
     if u.lower().startswith(("http://", "https://")):

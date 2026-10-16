@@ -998,38 +998,72 @@ def is_declared_read(verb: str) -> bool:
 # provider transports (clodia-platform#523)
 # --------------------------------------------------------------------------
 
-def transport_for(connector_id: str) -> tuple[str, str] | None:
-    """`(backend, tool)` the gateway hands `connector_id`'s I/O to, or None.
+def transport_for(connector_id: str,
+                  provider_id: str | None = None) -> tuple[str, str] | None:
+    """`(backend, tool)` the gateway hands a connector's I/O to, or None.
 
-    Only in `pack` position (`instance_profile.connector_mode`): in `native`
-    the transport is the gateway's own code, and a pack declaration must not
-    be able to redirect it — the pack connector is not even held there, but
-    the position is checked first so that the answer never depends on a
-    collision happening to refuse it.
+    Two ways to ask:
 
-    Only from the pack connector the registry HOLDS for that id (the first of
-    its providers that declares a transport): a refused manifest has no say.
-    And only when the named backend is really that pack's own mount
-    (`backend_owners`, the `pack:` stamp of `register_mcp_core`): the gateway
-    hands the transport the credential of one mailbox, and a manifest naming
-    somebody else's backend would be a way to have it delivered there.
+    - `transport_for("mail")` — the connector `connector_id` itself: the first
+      of its providers that declares a transport (#523, #525);
+    - `transport_for("mail", "gmail")` — provider `provider_id` of the
+      VOCABULARY `connector_id`, whichever connector contributes it: the owner
+      itself or an `extends:` contributor (#524: google-pack's `mail-gmail`
+      adds Gmail to the mail vocabulary comms-pack owns). One vocabulary,
+      several implementations, each with its own transport.
+
+    Only in `pack` position of the switch that governs the connector holding
+    the provider (`builtin.switch_of`: `mail-gmail` follows `google`, not
+    `mail`): in `native` the transport is the gateway's own code, and a pack
+    declaration must not be able to redirect it — the position is checked
+    first so that the answer never depends on a collision happening to refuse
+    the pack's connector.
+
+    Only from a pack connector the registry HOLDS: a refused manifest has no
+    say. Only from the pack that connector is switched TO (`RELEASED_TO`), so
+    a neighbour contributing a provider of the same name to the same
+    vocabulary is never elected. And only when the named backend is really
+    that pack's own mount (`backend_owners`, the `pack:` stamp of
+    `register_mcp_core`): the gateway hands the transport a credential, and a
+    manifest naming somebody else's backend would be a way to have it
+    delivered there.
 
     None means «no usable transport»; the caller fails closed on it.
     """
     from .. import instance_profile
-    if instance_profile.connector_mode(connector_id) != "pack":
+    if provider_id is None and \
+            instance_profile.connector_mode(_builtin.switch_of(connector_id)) != "pack":
+        return None              # native: not even a registry read
+    reg = registry()
+    if provider_id is None:
+        connector = reg.by_id(connector_id)
+        provider = next((p for p in connector.providers if p.transport), None) \
+            if connector is not None else None
+    else:
+        connector, provider = next(
+            ((c, p) for c in reg.connectors
+             if not c.builtin and c.vocabulary == connector_id
+             for p in c.providers if p.id == provider_id and p.transport),
+            (None, None))
+    if connector is None or connector.builtin or provider is None:
         return None
-    connector = registry().by_id(connector_id)
-    if connector is None or connector.builtin:
+    if instance_profile.connector_mode(_builtin.switch_of(connector.id)) != "pack":
         return None
-    provider = next((p for p in connector.providers if p.transport), None)
-    if provider is None:
+    expected = _builtin.RELEASED_TO.get(connector.id)
+    if provider_id is not None and expected is None:
+        # A provider asked for by name is one the gateway routes credentials
+        # of a known kind to (Gmail): only a connector it knows may carry it.
+        return None
+    if expected is not None and expected != connector.pack:
+        LOG.warning("connectors: transport of '%s' declared by pack '%s', but "
+                    "the connector is switched to '%s': not used",
+                    connector.id, connector.pack, expected)
         return None
     backend = provider.transport.backend
     owned = backend_owners().get(connector.pack, frozenset())
     if _norm(backend) not in owned or _norm(backend) in core_backends():
         LOG.warning("connectors: transport of '%s' names backend '%s', which "
-                    "pack '%s' has not mounted: not used", connector_id,
+                    "pack '%s' has not mounted: not used", connector.id,
                     backend, connector.pack)
         return None
     return backend, provider.transport.tool
