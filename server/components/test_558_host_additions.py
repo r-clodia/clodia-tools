@@ -273,7 +273,13 @@ class PdpArgumentsTests(_WithServices):
             handler=lambda n, a: {"to": "dest@y.it", "sender": "forged", "x": 1})
         spec = main._component_verb("fixture.send")
         out = main._component_pdp_arguments(spec, "fixture.send", {"body": "b"})
-        self.assertEqual(out, {"body": "b", "to": "dest@y.it"})
+        # `to` is offered by the verb's own schema: the caller says it, the
+        # service may not rewrite it, and nothing unmapped gets in (review of
+        # #383: the service only fills facts the schema does not offer).
+        self.assertEqual(out, {"body": "b"})
+        out = main._component_pdp_arguments(spec, "fixture.send",
+                                            {"body": "b", "to": "mine@x.it"})
+        self.assertEqual(out, {"body": "b", "to": "mine@x.it"})
 
 
 if __name__ == "__main__":  # pragma: no cover
