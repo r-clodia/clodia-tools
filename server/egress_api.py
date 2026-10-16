@@ -158,9 +158,10 @@ async def _labels(uris: list) -> dict:
     risoluzione aspetta Drive fino a un tetto di pochi secondi e l'event loop
     non deve aspettare con lei. Best-effort: su errore, nessuna etichetta."""
     import asyncio
-    from .tools import gdrive_labels
+    from .tools import google_switch
     try:
-        return await asyncio.to_thread(gdrive_labels.labels, uris)
+        # Native module or google-pack's component, per the switch (#558).
+        return await asyncio.to_thread(google_switch.folder_labels, uris)
     except Exception:  # noqa: BLE001
         return {}
 

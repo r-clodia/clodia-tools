@@ -329,10 +329,14 @@ class GrammarTests(unittest.TestCase):
 
     def test_schema_md_example_parses(self) -> None:
         from ..connectors.test_manifest import _examples
-        (m,) = [m for m in _examples().values() if m.get("components")]
-        comps, problems = parse_components(m, pack=m["name"])
-        self.assertEqual(problems, [])
-        self.assertEqual(len(comps), 1)
+        examples = [m for m in _examples().values() if m.get("components")]
+        self.assertEqual(sorted(m["name"] for m in examples),
+                         ["google-pack", "weather-pack"])
+        for m in examples:
+            with self.subTest(example=m["name"]):
+                comps, problems = parse_components(m, pack=m["name"])
+                self.assertEqual(problems, [])
+                self.assertEqual(len(comps), 1)
 
 
 # --------------------------------------------------------------------------

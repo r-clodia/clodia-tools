@@ -75,6 +75,7 @@ extending nothing, is empty and refused.
 | `verbs` | no | verb → destination and read → source; a verb may appear more than once |
 | `danger_uris` | no | warnings for URIs of a shared scheme (`match` + `text`) |
 | `taint` | no | MCP prefixes of this pack whose answers do not taint a channel |
+| `unmapped` | no | verbs of the namespace that deliberately have NO egress/source mapping (#558); see below |
 | `topic_actions` | no | buttons the connector adds to a topic |
 | `tools_card` | no | what the Tools page shows: `setup_label`, `status_verb`, `test_verb`, `docs_url`, `blurb`, `scope`, `icon` |
 | `services` | no | long-running processes, see #515 |
@@ -236,6 +237,20 @@ verb in the message. Without it a pack could declare `email.send` as a read, or
 map it to a harmless destination, and walk straight through the egress check.
 `check_namespace()` is exported because #517 applies the same rule again when the
 call actually happens — two implementations of it would be one too many.
+
+### `unmapped[]`
+
+A list of exact verb names of the connector's namespace that have no
+destination and no source the PDP reads — `gdrive.list`, `gdocs.append_text`:
+an id inside a perimeter the implementation enforces itself, a query, a
+calendar the component checks against `gcal:`. It changes no PDP answer.
+It exists because a **gateway component's** verb is served only when the
+(pinned) manifest classifies it — an egress or source mapping, a taint prefix,
+or this entry (`components.loader._classified`): an unclassified component
+verb is denied, so «the PDP has nothing to read here» has to be written down in
+the reviewed manifest rather than inferred from an absence. The namespace rule
+applies, a verb may not be both mapped and `unmapped`, and a name is listed
+once.
 
 ### `topic_actions[]`
 
@@ -582,7 +597,14 @@ The only thing a component gets:
 ```python
 host.register_verb(tool: mcp.types.Tool, handler, *, offload=True)
 host.register_route(path, methods, handler, *, auth="owner")   # or "admin"
+host.register_service(name, handler)            # called by the GATEWAY, never an agent
 host.credentials(prefix) -> ScopedCredentials   # list/has/read/read_internal/deposit/remove
+host.perimeter.gdrive_roots() -> dict           # the gateway config's `gdrive_roots` (a copy)
+host.perimeter.egress_uris(scope=None) -> list[str]        # global + room egress list
+host.perimeter.approved_calendars(scope=None) -> list[str] # `gcal:` approvals
+host.perimeter.calendar_allowed(calendar_id, scope=None) -> bool
+host.perimeter.topic_drive_folders(tier, name) -> list[dict]   # topic `meta.drive_folders`
+host.perimeter.in_channel() -> bool             # the call comes from a topic channel
 host.topics.read_file(tier, name, path) -> bytes
 host.topics.put_file(tier, name, path, data, *, provenance="untrusted")
 host.note_crossing(data=None, *, path=None, kind="file")
@@ -614,6 +636,30 @@ host.agent(); host.channel(); host.principal(); host.log
 - **Topics**: membership/clearance checks (`_require_topic_member`), crossing
   notes on reads, `untrusted` writes taint the room; a component cannot label a
   file `trusted`.
+- **Services** (#558, google-pack): named callables the gateway's OWN code
+  calls where it needs the connector — `components.service(pack, name)`, None
+  when the component is not serving (the caller then fails closed). The names
+  are fixed by the gateway code that calls them; no agent reaches them. Same
+  registration rules as verbs (closed after `register`, once per name). The
+  service `pdp_arguments(verb, arguments) -> dict` is generic: the dispatcher
+  calls it before the egress PDP of a component verb and takes from its answer
+  ONLY the arguments a destination mapping of that verb reads (a failing
+  service refuses the call: the destination would be unknown).
+- **Perimeter**: read-only facts the gateway holds and the agent-server cannot
+  write — the config's `gdrive_roots`, the egress/source lists in force for the
+  call, `gcal:` approvals, a topic's `drive_folders`, whether the call comes
+  from a signed channel claim. Read live, per call; nothing in it writes.
+- **Standby.** A trusted, pinned component whose connectors' namespaces the
+  gateway still reserves — the instance switch of that migration on `native`
+  — is not imported: status `standby`, no verb, route or service, nothing
+  denied (the native verbs serve). The first reconcile after the switch moves
+  to `pack` (at boot, since the profile is read at start) loads it; a switch
+  turned back makes a loaded component step aside at once (its verbs are no
+  longer listed or dispatched) and the next reconcile puts it on standby.
+- **No bytecode.** Modules under `clodia_components.*` are loaded by a finder
+  that never writes `__pycache__`: a component importing its modules after
+  `register` (or lazily) would otherwise change the pinned tree and fail its
+  own integrity check at the next reconcile.
 
 ### Endpoints
 
@@ -621,6 +667,21 @@ host.agent(); host.channel(); host.principal(); host.log
 - `POST /internal/components/<pack>/refresh` (human admin or trusted core,
   audited): re-resolve the head of the pack's default branch and reload, after
   a pack Update. `{"allow_downgrade": true}` lowers the floor.
+
+**After a pack Update.** The first time a gateway sees a `target: gateway`
+component in an installed manifest it fetches and pins it by itself (next
+reconcile, at most `CLODIA_COMPONENT_INTERVAL` seconds, default 60). It never
+moves an existing pin by itself: after an Update the owner asks for it, because
+moving code inside the reference monitor is a human decision and the
+agent-server's service role is refused here. The agent-server's Update answer
+names the call (`gateway_components.refresh`); until the webui makes it a
+button, the owner runs it with their own session token:
+
+```sh
+curl -sS -X POST -H "Authorization: Bearer $OWNER_SESSION_TOKEN" \
+     https://<gateway>/internal/components/google-pack/refresh
+# then check: GET /internal/components  →  status "loaded" (or "standby")
+```
 
 ## The gateway's own manifests
 
@@ -694,7 +755,9 @@ stay the gateway's; `generate`/`edit` go to the provider's `transport` with
 client. Both credentials keep their legacy vault entries and types; the generic
 connect route hands them to their legacy handlers in both positions.
 
-`google: pack` (#524) is the mail shape applied to four connectors at once.
+`google: pack` (#524, #558) moves Google to **google-pack's gateway
+component** — the first real component (the transport design of #524 step 3
+is superseded and removed).
 
 - **One switch, four connectors.** `google.yaml` declares `google` (namespace
   `gdrive`: the `gdrive:`/`gsheets:`/`gcal:` vocabulary, the account provider,
@@ -705,21 +768,38 @@ connect route hands them to their legacy handlers in both positions.
   somebody else's switch, and `google-sheets: pack` written alone is
   ignored). `google: pack` releases all four namespaces, and google-pack —
   only google-pack (`RELEASED_TO`) — must hold a connector in each.
-- **The verbs stay.** The 24 `gdrive/gsheets/gdocs/gcalendar` verbs are
-  retained: listed and dispatched by the gateway, with the whole
-  `gdrive_root` perimeter (parent walk, shortcuts, list filtering,
-  adopt-after-create, writable parent, `gcal:` allowlist), the pre-PDP parent
-  lookup, the scratch I/O and the taint. A namespace whose google-pack
-  connector is not held has its verbs `DENIED`.
+- **The verbs move.** On `pack` the 24 `gdrive/gsheets/gdocs/gcalendar` verbs
+  leave the native catalogue and dispatch (like Telegram's); google-pack's
+  component registers them, with the whole `gdrive_root` perimeter (parent
+  walk, shortcuts, list filtering, adopt-after-create, writable parent, `gcal:`
+  allowlist) reading the perimeter through `host.perimeter`, and the dispatcher
+  runs them through the same `call_tool` path (whitelist, deny, unattended
+  block, gates, the egress PDP on google-pack's PINNED mappings — the parent
+  lookup of `gdrive.update` is the component's `pdp_arguments` service —,
+  scratch I/O through the host, taint, audit). Eleven verbs have no mapping and
+  are listed in `unmapped:`. A namespace whose google-pack connector is not
+  held, or with no component serving it, has its verbs `DENIED`; the native
+  `google_io` refuses (`NativeDisabled`) instead of running.
 - **The credential stays.** `google_`, `gworkspace_`, `gmail_` and `app_`
-  remain reserved vault prefixes: consent, the app client, the per-account
-  bundles and the refresh are the gateway's, so the switch needs no
-  re-consent. For the same reason `google` stays a reserved NAMESPACE:
-  releasing it would also release the `google_` prefix to its holder
-  (`vault_entry_problem` lets a namespace use its own stem). google-pack's
-  connectors therefore live in the namespaces the switch releases, and
-  `mail-gmail` — a contributor, which declares no verb and needs a namespace
-  only for the rule — sits in `gdrive`, next to its owner.
+  remain reserved vault prefixes, and the bundles stay where they are, with the
+  same names, shapes and types: the component reaches them through
+  `host.credentials(...)` (`CORE_CREDENTIALS_FOLLOW`, only while the switch is
+  on `pack`). No re-consent. For the same reason `google` stays a reserved
+  NAMESPACE; google-pack's connectors live in the namespaces the switch
+  releases, and `mail-gmail` sits in `gdrive`, next to its owner.
+- **Consent and the Tools card.** The component's routes `app`, `auth`,
+  `connect` (`/tools/google-pack/...`) do the OAuth flow and deposit
+  `google_<acct>` / `app_google_oauth`; on `pack` the gateway's
+  `/tools/google/{app,auth,connect}` forward to them with the component's
+  authentication (human admin or trusted core) and audit, so the Tools page
+  does not change. The `google` card's test is the component's
+  `test_connection` service. The legacy `/tools/gmail/*` and
+  `/tools/gworkspace/*` routes stay the gateway's until their removal.
+- **The gateway's own lookups** ask the component's services on `pack`
+  (`server/tools/google_switch.py`): `accounts` and `describe_folder` (the
+  confinement API), `perimeter_changed`, `folder_labels` (whitelist labels),
+  `credential_changed` (the vault drops cached tokens), `test_connection`.
+  Without the component they fail closed.
 - **Browser URLs.** A pack may not read a shared scheme, yet `gdrive:` must
   keep recognising a Drive URL pasted from the browser. The connector the
   switch elects may canonicalise `http(s)` URLs whose PARSED host the gateway
@@ -728,47 +808,16 @@ connect route hands them to their legacy handlers in both positions.
   gateway, not in the manifest, because a call's destination is
   canonicalised too: a manifest choosing its hosts could turn any URL into an
   approved folder.
-- **`google.request`**, the provider transport of `google`. For every Google
-  API call (`tools/google_io.call`) the gateway, after every check, calls
-  `<backend>.<tool>` of google-pack's `workspace` provider with:
-
-  ```
-  {"access_token": "<short-lived OAuth access token>",
-   "api": "drive|docs|sheets|calendar", "version": "v3|v1|v4|v3",
-   "method": "GET|POST|PUT|PATCH|DELETE",
-   "path": "<method path, path parameters already percent-encoded>",
-   "params": {<query parameters, JSON-typed>},
-   "body": <JSON body, or the metadata part of a multipart upload> | null,
-   "media_b64": "<bytes to upload>" | null, "media_mime": "<type>" | null,
-   "download": true|false}
-  ```
-
-  and the transport sends exactly what the in-process client sends: URL =
-  the API root (`google_io.API_ROOTS`, `UPLOAD_ROOTS` when there is media) +
-  `path`; query = `params` + `alt=media` for a download, else `alt=json`
-  unless DELETE, + `uploadType=multipart` (media and body) or `media` (media
-  alone); booleans as `true`/`false`, a list as a repeated key; `Authorization:
-  Bearer <access_token>`, never carried across a redirect off its host. It
-  answers with the JSON text `{"status": <int>, "json"?: <any>, "bytes_b64"?:
-  "<base64>", "headers"?: {…}}` — `json` for a JSON body (absent = empty),
-  `bytes_b64` for a download and for a non-JSON error body. A non-2xx status
-  becomes the same `HttpError` (status, method, URL, reason) the in-process
-  path raises, a 401 is retried once with a fresh token, anything else is a
-  failed call; `gdrive_root` treats any failure as «outside». No usable
-  transport is a refusal, never the in-process client. The refresh token and
-  the client secret never travel.
 - **Gmail** is google-pack's provider `gmail` of the mail vocabulary
-  (`mail-gmail`, `extends: mail`), with its own transport, found by
-  `resolved.transport_for("mail", "gmail")`. A Gmail account (one with a
+  (`mail-gmail`, `extends: mail`, no transport). A Gmail account (one with a
   `google_`/`gmail_` credential) follows the `google` switch, every other
-  account follows `mail`; each is refused when its provider is missing. The
-  Gmail transport has the mail transport's contract (`{argv, files, timeout}`
-  → `{returncode, stdout, stderr}`), and its `files` are the per-call XOAUTH2
-  files the in-process client reads (`secrets/google_oauth_client.json`,
-  `secrets/email_oauth_tokens.json`, `secrets/email_config.json`, as
-  `vault.materialize_google_oauth` writes them) — so, unlike
-  `google.request`, it does receive that account's refresh token and the app
-  client: the vendored client refreshes its own XOAUTH2 token.
+  account follows `mail`. On `pack`, after every check of the `email.*` verbs,
+  the gateway calls the component's `mail_run` service with the mail
+  transport's contract (`{argv, files, timeout}` → `{returncode, stdout,
+  stderr}`), `files` being the per-call XOAUTH2 files the vault materialises
+  for that one account; the component runs its bundled `email_client.py` in a
+  private per-call directory. No component, no Gmail: refused, never the
+  in-process client.
 
 ---
 
@@ -972,14 +1021,25 @@ connectors:
 
 ### google-pack — Drive, Sheets, Docs and Calendar, Gmail as a second provider of `mail`
 
-The shape #524 switches to (see «The switch»): four connectors, one per verb
-namespace of the gateway's 24 Google verbs, plus `mail-gmail` — a different
-pack, the same mail vocabulary, and not one line of it redefines a scheme or a
-verb. `mail-gmail` sits in the namespace the pack holds after the switch
-(`gdrive`), not in `google`: see «The switch» for why.
+The shape #524/#558 switch to (see «The switch»): four connectors, one per
+verb namespace of the 24 Google verbs, plus `mail-gmail` — a different pack,
+the same mail vocabulary, and not one line of it redefines a scheme or a verb —
+and the gateway component that implements them. `mail-gmail` sits in the
+namespace the pack holds after the switch (`gdrive`), not in `google`: see
+«The switch» for why. (Abridged: the real manifest is
+`catalogs/packs/google-pack/pack.yaml` in clodia-logic.)
 
 ```yaml
 name: google-pack
+first_party: true
+components:
+  - id: google
+    target: gateway
+    source: {repo: r-clodia/clodia-logic,
+             path: catalogs/packs/google-pack/gateway, ref: main}
+    entry: google_component
+    connectors: [google, google-sheets, google-docs, google-calendar]
+    credentials: [google_, gworkspace_, gmail_, app_google_oauth]
 connectors:
   - id: google
     manifest_version: 1
@@ -1026,11 +1086,6 @@ connectors:
     providers:
       - id: workspace
         label: Google account
-        # google-pack's own backend that carries each Google API call of the
-        # gateway's verbs (`google.request`, see «The switch»). Never listed.
-        transport:
-          backend: google-transport
-          tool: request
         credential:
           kind: oauth
           authorize_url: https://accounts.google.com/o/oauth2/v2/auth
@@ -1056,6 +1111,7 @@ connectors:
         scheme: gdrive
         arg: file_id
         template: 'gdrive:file/{value}'
+    unmapped: [gdrive.list, gdrive.search, gdrive.rename]
     topic_actions:
       - id: drive-folder
         label: Link a Drive folder
@@ -1097,6 +1153,7 @@ connectors:
         scheme: gdrive
         arg: document_id
         template: 'gdrive:doc/{value}'
+    unmapped: [gdocs.create, gdocs.append_text, gdocs.replace_text]
 
   # Taint-only: what the PDP knows about the calendar verbs is that a list of
   # events mixes several authors.
@@ -1106,7 +1163,11 @@ connectors:
     label: Google Calendar
     taint:
       - gcalendar.list_events
+    unmapped: [gcalendar.list_calendars, gcalendar.create_event,
+               gcalendar.update_event, gcalendar.delete_event, gcalendar.freebusy]
 
+  # No transport and no credential: the code is the component's (`mail_run`),
+  # the credential the gateway vault's.
   - id: mail-gmail
     manifest_version: 1
     namespace: gdrive
@@ -1115,15 +1176,6 @@ connectors:
     providers:
       - id: gmail
         label: Gmail account
-        transport:
-          backend: google-transport
-          tool: mail
-        credential:
-          kind: oauth
-          authorize_url: https://accounts.google.com/o/oauth2/v2/auth
-          token_url: https://oauth2.googleapis.com/token
-          scopes:
-            - https://www.googleapis.com/auth/gmail.modify
 ```
 
 ### it-pack — GitHub on the platform `https` scheme, and a credential-only connector

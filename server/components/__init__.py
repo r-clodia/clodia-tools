@@ -11,7 +11,9 @@ its perimeter — so the gateway keeps only the mounting mechanism and the rules
     store.py     fetch from the upstream, pin by commit, integrity, no
                  downgrade — in the gateway's own state dir
     guard.py     static import guard (no `server.vault`, `server.main`, …)
-    host.py      the host API, the ONLY thing a component gets
+    host.py      the host API, the ONLY thing a component gets (verbs,
+                 routes, services the gateway calls, scoped credentials,
+                 topics, perimeter facts)
     loader.py    load/unload/reconcile; a failure disables one component
 
 The dispatcher (`server.main`) lists the components' verbs next to the native
@@ -19,7 +21,7 @@ ones and runs them through the same `call_tool` path; `server.components_api`
 mounts their routes under `/tools/<pack>/…` and exposes status and refresh.
 """
 from .loader import (has_verb, problems, reconcile, reconcile_loop, refusal,
-                     route, status, tools, verb)
+                     route, service, state_of, status, tools, verb)
 
 __all__ = ["has_verb", "problems", "reconcile", "reconcile_loop", "refusal",
-           "route", "status", "tools", "verb"]
+           "route", "service", "state_of", "status", "tools", "verb"]

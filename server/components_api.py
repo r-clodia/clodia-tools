@@ -94,6 +94,15 @@ async def component_route(request: Request):
     spec = components.route(pack, path)
     if spec is None:
         return _core_answer(request)
+    return await serve(request, spec)
+
+
+async def serve(request: Request, spec):
+    """Authenticate, check the method, run and audit one component route.
+
+    Also the way a CORE route hands a request to a component (e.g.
+    `/tools/google/auth` in `pack` position, #558): the component's own
+    authentication and audit apply, whatever URL the request came in on."""
     if not _auth_ok(request, spec.auth):
         resp = JSONResponse({"error": "unauthorized"}, status_code=401)
     elif request.method not in spec.methods:

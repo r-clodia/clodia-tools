@@ -10,11 +10,19 @@ longer declared are unloaded and their pins dropped.
 A component that is refused or fails is disabled ALONE: logged CRITICAL, its
 state says why, and every verb of its connectors' namespaces is DENIED with
 that reason (`refusal`). The gateway and the other components carry on.
+
+A component whose connectors the GATEWAY still implements on this instance —
+the switch of a migration on `native` (`connectors: {google: native}`), so
+their namespaces are reserved by native verbs — is pinned but not imported:
+status `standby`, no verb, no route, no service, and nothing denied (the
+native verbs serve). It is loaded at the first reconcile after the owner
+turns the switch to `pack`, and put back on standby when it is turned back.
 """
 from __future__ import annotations
 
 import importlib
 import importlib.machinery
+import importlib.util
 import logging
 import re
 import sys
@@ -25,7 +33,7 @@ from typing import Any, Callable, Mapping
 
 from . import guard, store, trust
 from .grammar import GatewayComponent, parse_components
-from .host import Host, RouteSpec, VerbSpec
+from .host import Host, RouteSpec, ServiceSpec, VerbSpec
 
 LOG = logging.getLogger("clodia-tools.components")
 
@@ -37,12 +45,13 @@ _LOCK = threading.RLock()
 @dataclass
 class State:
     component: GatewayComponent
-    status: str                      # loaded | failed | refused
+    status: str                      # loaded | standby | failed | refused
     reason: str = ""
     commit: str = ""
     tree_sha256: str = ""
     verbs: dict[str, VerbSpec] = field(default_factory=dict)
     routes: dict[str, RouteSpec] = field(default_factory=dict)
+    services: dict[str, ServiceSpec] = field(default_factory=dict)
 
     def describe(self) -> dict:
         c = self.component
@@ -51,7 +60,8 @@ class State:
                 "ref": c.ref, "commit": self.commit,
                 "tree_sha256": self.tree_sha256,
                 "connectors": list(c.connectors),
-                "verbs": sorted(self.verbs), "routes": sorted(self.routes)}
+                "verbs": sorted(self.verbs), "routes": sorted(self.routes),
+                "services": sorted(self.services)}
 
 
 #: `{"<pack>/<id>": State}` of every declared gateway component.
@@ -67,10 +77,22 @@ fetcher_factory: Callable[[], store.Fetcher] = store.GitHubFetcher
 # lookups used by the dispatcher and the routes
 # --------------------------------------------------------------------------
 
+def _serving(st: State) -> bool:
+    """Loaded AND its namespaces are not the gateway's right now. Between a
+    switch moved back to `native` and the next reconcile, the native verbs
+    serve and the component's are neither listed nor dispatched."""
+    if st.status != "loaded":
+        return False
+    try:
+        return not _standby_reason(st.component)
+    except Exception:  # noqa: BLE001 — unknown: the native side keeps them
+        return False
+
+
 def verb(name: str) -> VerbSpec | None:
     for st in list(_STATES.values()):
         spec = st.verbs.get(name)
-        if spec is not None and st.status == "loaded":
+        if spec is not None and _serving(st):
             return spec
     return None
 
@@ -82,7 +104,7 @@ def has_verb(name: str) -> bool:
 def tools() -> list:
     out = []
     for st in list(_STATES.values()):
-        if st.status == "loaded":
+        if _serving(st):
             out += [v.tool for v in st.verbs.values()]
     return out
 
@@ -90,10 +112,31 @@ def tools() -> list:
 def route(pack: str, path: str) -> RouteSpec | None:
     path = path.strip("/")
     for st in list(_STATES.values()):
-        if st.status == "loaded" and st.component.pack == pack:
+        if _serving(st) and st.component.pack == pack:
             spec = st.routes.get(path)
             if spec is not None:
                 return spec
+    return None
+
+
+def service(pack: str, name: str) -> ServiceSpec | None:
+    """The service `name` of `pack`'s serving gateway component, or None.
+
+    The caller is gateway code; None means «the component is not here» and the
+    caller fails closed (refuses, or answers without what the service adds)."""
+    for st in list(_STATES.values()):
+        if _serving(st) and st.component.pack == pack:
+            spec = st.services.get(name)
+            if spec is not None:
+                return spec
+    return None
+
+
+def state_of(pack: str) -> dict | None:
+    """`describe()` of `pack`'s gateway component, or None if it declares none."""
+    for st in list(_STATES.values()):
+        if st.component.pack == pack:
+            return st.describe()
     return None
 
 
@@ -139,6 +182,11 @@ def refusal(name: str) -> str:
             # mounted backend serves (`topic.*`, another pack's MCP tools).
             if _served_elsewhere(name, ns):
                 return ""
+            if st.status == "standby":
+                return (f"gateway component '{st.component.key}' is on standby: the "
+                        "connector switch moved to `pack` and the component loads at "
+                        "the next reconcile (CLODIA_COMPONENT_INTERVAL seconds) or on "
+                        f"POST /internal/components/{st.component.pack}/refresh")
             return (f"gateway component '{st.component.key}' is disabled "
                     f"({st.status}): {st.reason}")
     return ""
@@ -146,11 +194,16 @@ def refusal(name: str) -> str:
 
 def _classified(name: str) -> bool:
     """Defence in depth: the pack's (pinned) manifest says what this verb does —
-    an egress or source mapping, or a taint prefix that covers it."""
+    an egress or source mapping, a taint prefix that covers it, or an explicit
+    `unmapped:` entry (the verb has no destination or source the PDP reads;
+    the component enforces its own perimeter)."""
     from ..connectors import resolved
     if resolved.egress_mappings(name) or resolved.source_mappings(name):
         return True
-    return any(name.startswith(p) for p in resolved.registry().taint_prefixes())
+    reg = resolved.registry()
+    if name in reg.unmapped_verbs():
+        return True
+    return any(name.startswith(p) for p in reg.taint_prefixes())
 
 
 def _served_elsewhere(name: str, ns: str) -> bool:
@@ -198,8 +251,56 @@ def _purge(prefix: str) -> None:
     importlib.invalidate_caches()
 
 
+class _NoBytecodeLoader(importlib.machinery.SourceFileLoader):
+    """Source loader that never writes `__pycache__` next to pinned code.
+
+    `sys.dont_write_bytecode` is only set while the entry module is imported;
+    a component that imports its own modules later — inside `register`, or
+    lazily from a handler — would otherwise drop `.pyc` files into the pinned
+    tree, change its hash and fail `store.verify` at the next reconcile
+    (found by google-pack, #558)."""
+
+    def set_data(self, path, data, *, _mode=0o666):  # noqa: D401
+        return None
+
+
+class _ComponentFinder:
+    """Meta-path finder for `clodia_components.*`: same files the default
+    path finder would find under the package's `__path__`, loaded with
+    `_NoBytecodeLoader`, and never a `.pyc` (a pinned tree has none)."""
+
+    def find_spec(self, fullname, path, target=None):
+        if not fullname.startswith(MODULE_ROOT + ".") or not path:
+            return None
+        import os
+        leaf = fullname.rsplit(".", 1)[1]
+        for entry in path:
+            pkg_init = os.path.join(entry, leaf, "__init__.py")
+            if os.path.isfile(pkg_init):
+                return importlib.util.spec_from_file_location(
+                    fullname, pkg_init, loader=_NoBytecodeLoader(fullname, pkg_init),
+                    submodule_search_locations=[os.path.join(entry, leaf)])
+            src = os.path.join(entry, leaf + ".py")
+            if os.path.isfile(src):
+                return importlib.util.spec_from_file_location(
+                    fullname, src, loader=_NoBytecodeLoader(fullname, src))
+        return None
+
+    def invalidate_caches(self) -> None:
+        return None
+
+
+_FINDER = _ComponentFinder()
+
+
+def _install_finder() -> None:
+    if not any(isinstance(f, _ComponentFinder) for f in sys.meta_path):
+        sys.meta_path.insert(0, _FINDER)
+
+
 def _import(component: GatewayComponent, directory) -> Any:
     pkg = module_name(component)
+    _install_finder()
     _purge(pkg)
     _ensure_parent(MODULE_ROOT)
     _ensure_parent(pkg.rsplit(".", 1)[0])
@@ -232,6 +333,21 @@ def _native_names() -> list[str]:
 def _reserved_namespaces() -> frozenset[str]:
     from ..connectors.manifest import core_namespaces
     return core_namespaces()
+
+
+def _standby_reason(component: GatewayComponent) -> str:
+    """Why `component` must not run now although it is trusted and pinned, or "".
+
+    Its connectors' namespaces are reserved by the gateway: the instance switch
+    of that migration is on `native`, so the native verbs are listed and
+    served, and registering the component's would be refused anyway."""
+    reserved = _reserved_namespaces()
+    taken = sorted(ns for ns in set(component.namespaces.values()) if ns in reserved)
+    if taken:
+        return (f"the gateway implements {taken} natively on this instance (the "
+                "connector switch is on `native`); the component loads when the "
+                "owner turns it to `pack`")
+    return ""
 
 
 def _taken_by(name: str) -> str | None:
@@ -278,7 +394,7 @@ def load(component: GatewayComponent, pin: store.Pin) -> State:
                 component.key, pin.commit[:12], len(host.verbs), len(host.routes))
     return State(component=component, status="loaded", commit=pin.commit,
                  tree_sha256=pin.tree_sha256, verbs=dict(host.verbs),
-                 routes=dict(host.routes))
+                 routes=dict(host.routes), services=dict(host.services))
 
 
 def unload(key: str) -> None:
@@ -377,6 +493,17 @@ def reconcile(*, force: bool = False, refresh_pack: str | None = None,
                     continue
                 unload(key)
                 _STATES[key] = _fail(comp, "failed", reason)
+                continue
+            idle = _standby_reason(comp)
+            if idle:
+                if current is None or current.status != "standby" or \
+                        current.commit != pin.commit or current.reason != idle:
+                    unload(key)
+                    LOG.warning("components: %s pinned at %s, on standby: %s",
+                                key, pin.commit[:12], idle)
+                    _STATES[key] = State(component=comp, status="standby",
+                                         reason=idle, commit=pin.commit,
+                                         tree_sha256=pin.tree_sha256)
                 continue
             if current is not None and current.status == "loaded" and \
                     current.commit == pin.commit and current.component == comp:

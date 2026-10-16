@@ -1,30 +1,30 @@
-"""#524 step 3: Google can be switched to google-pack; verbs and perimeter stay.
+"""The `google` switch with Google implemented by google-pack's gateway
+component (clodia-platform#558, superseding the transport design of #524).
 
-clodia-platform#524, design comment of 2026-10-16 (sequence step 3: the
-mechanisms). With `connectors: {google: pack}`:
+With `connectors: {google: pack}`:
 
 - the builtin `gateway-google` manifest — four connectors, `google` (owner of
   `gdrive:`/`gsheets:`/`gcal:`, namespace `gdrive`) and the verb-only siblings
   `google-sheets`/`google-docs`/`google-calendar` — is released as a whole, by
   ONE switch (`builtin.SWITCH_WITH`); google-pack's four connectors supply the
   vocabulary the PDP reads;
-- the 24 `gdrive/gsheets/gdocs/gcalendar` verbs stay listed and dispatched by
-  the gateway (`main._GATEWAY_RETAINED_VERBS`), with the whole `gdrive_root`
-  perimeter, and fail closed when google-pack's connectors are not held;
-- every Google API call goes to google-pack's `google.request` transport with
-  a short-lived access token; the refresh token stays in the vault;
+- the 24 `gdrive/gsheets/gdocs/gcalendar` verbs LEAVE the native catalogue and
+  dispatch: google-pack's gateway component registers and serves them through
+  the same `call_tool` path; nothing serving them is a refusal, never the
+  native code (`google_io` refuses in that position);
+- the gateway's own Google lookups (confinement API, labels, the pre-PDP parent
+  of `gdrive.update`, the Tools card test, the token cache) ask the component's
+  services, and fail closed without them;
 - Gmail is google-pack's provider of the mail vocabulary (`mail-gmail`,
-  `extends: mail`), with its own transport, and follows the `google` switch.
+  `extends: mail`, no transport) and a Google account's `email.*` I/O runs in
+  the component's `mail_run` service.
 
-What is pinned here: the switch positions; parity of every PDP answer about
-Google between the two positions (and that the comparison can fail);
-fail-closed; the transport hidden from agents; the `google.request` contract;
-Gmail routing; foreign packs; and the pinned suites of #524 step 1, of
-`gdrive_root` and of Sheets/Drive, run again in `pack` position with a
-faithful fake of google-pack — it decodes the JSON payload exactly as the pack
-must, rebuilds the request from the expanded `path` alone, and executes it
-with the gateway's own in-process REST code (`google_io._send`), or with the
-suite's fake service where the suite installed one in place of the network.
+What is pinned here, WITHOUT the real component (a stand-in is installed in
+the loader): the switch positions; parity of every PDP answer about Google
+between the two positions (and that the comparison can fail); fail-closed;
+routing of the gateway's lookups and of Gmail; foreign packs. The real
+component — loaded from a clodia-logic checkout — and the Google suites re-run
+against it are in `server/test_558_google_component.py`.
 """
 from __future__ import annotations
 
@@ -47,28 +47,30 @@ import yaml
 
 from .. import egress, instance_profile, proxy, taint
 from .. import test_524_google_pins as PINS
-from .. import test_gdrive_confinement_api as CONF
-from .. import test_gdrive_root as GR
-from .. import test_gdrive_root_per_topic as GRT
+from ..components import loader
+from ..components.grammar import GatewayComponent
+from ..components.host import ServiceSpec, VerbSpec
 from ..tools import email as EM
 from ..tools import google_io
-from ..tools import test_524_google_io as GIO
-from ..tools import test_gdrive_labels as LAB
-from ..tools import test_gdrive_update as UPD
-from ..tools import test_gsheets as GS
-from ..tools._google_fake import OPERATIONS
+from ..tools import google_switch
 from . import builtin as B
 from . import manifest as M
 from . import resolved
 from .test_523_mail_provider import _comms_pack
 
 PACK = "google-pack"
-BACKEND = "google-transport"
-REQUEST_TOOL = "request"
-MAIL_TOOL = "mail"
 GOOGLE_IDS = ("google", "google-sheets", "google-docs", "google-calendar")
 NAMESPACES = ("gdrive", "gsheets", "gdocs", "gcalendar")
-TOKEN = "ya29.short-lived-access-token"
+
+#: Verbs with no egress/source mapping and no taint row: google-pack lists
+#: them in `unmapped:` (#558), per connector.
+UNMAPPED = {
+    "google": ["gdrive.list", "gdrive.search", "gdrive.rename"],
+    "google-docs": ["gdocs.create", "gdocs.append_text", "gdocs.replace_text"],
+    "google-calendar": ["gcalendar.list_calendars", "gcalendar.create_event",
+                        "gcalendar.update_event", "gcalendar.delete_event",
+                        "gcalendar.freebusy"],
+}
 
 
 def _verbs() -> tuple[str, ...]:
@@ -111,7 +113,8 @@ _GSHEETS_CANON = [
 def _google_connectors() -> list[dict]:
     """google-pack's four Google connectors: the builtin declarations,
     verbatim, except what a PACK must write differently — the canonicalisation
-    in the safe regex subset, and the provider's transport."""
+    in the safe regex subset, and `unmapped:` for the verbs the PDP has nothing
+    to read on (a component verb must be classified)."""
     doc = yaml.safe_load((B.DIR / "google.yaml").read_text(encoding="utf-8"))
     entries = copy.deepcopy(doc["connectors"])
     owner = entries[0]
@@ -121,7 +124,9 @@ def _google_connectors() -> list[dict]:
             s["canonicalise"] = copy.deepcopy(_GDRIVE_CANON)
         if s["scheme"] == "gsheets":
             s["canonicalise"] = copy.deepcopy(_GSHEETS_CANON)
-    owner["providers"][0]["transport"] = {"backend": BACKEND, "tool": REQUEST_TOOL}
+    for e in entries:
+        if e["id"] in UNMAPPED:
+            e["unmapped"] = list(UNMAPPED[e["id"]])
     return entries
 
 
@@ -131,8 +136,7 @@ def _gmail_connector() -> dict:
     stays reserved with the `google_` vault prefix)."""
     return {"id": "mail-gmail", "manifest_version": 1, "namespace": "gdrive",
             "label": "Gmail", "extends": "mail",
-            "providers": [{"id": "gmail", "label": "Gmail account",
-                           "transport": {"backend": BACKEND, "tool": MAIL_TOOL}}]}
+            "providers": [{"id": "gmail", "label": "Gmail"}]}
 
 
 def _google_pack(*, without: tuple[str, ...] = (), gmail: bool = True,
@@ -145,100 +149,57 @@ def _google_pack(*, without: tuple[str, ...] = (), gmail: bool = True,
     return {"name": PACK, "connectors": entries}
 
 
-def _backend(name: str = BACKEND, pack: str | None = PACK) -> dict:
-    b = {"name": name, "transport": "stdio", "command": "/bin/false"}
-    if pack:
-        b["pack"] = pack
-    return b
+class _FakeComponent:
+    """A stand-in for google-pack's gateway component in the loader: its 24
+    verbs, and services that record what the gateway asks them."""
 
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
 
-# --------------------------------------------------------------------------
-# the fake google-pack transport
-# --------------------------------------------------------------------------
+    def _svc(self, name, answer):
+        def fn(*args):
+            self.calls.append((name, *args))
+            return answer(*args) if callable(answer) else answer
+        return fn
 
-_TEMPLATES: list[tuple[str, str, re.Pattern, list[str], str]] = []
-for (_api, _method, _tpl) in OPERATIONS:
-    _names = re.findall(r"\{(\w+)\}", _tpl)
-    _rx = re.escape(_tpl)
-    for _n in _names:
-        _rx = _rx.replace(re.escape("{" + _n + "}"), r"([^/:]+)")
-    _TEMPLATES.append((_api, _method, re.compile(_rx), _names, _tpl))
-
-
-def rebuild_request(args: dict, media_dir: str) -> dict:
-    """`google.request` arguments → the request `google_io._send` executes.
-
-    What google-pack does on its side, from the payload alone: the path is
-    already expanded, so the template and its parameters are recovered from
-    it (the fakes of the suites are keyed by the discovery method); media
-    arrives as base64 and lands in a file of the pack's own."""
-    media = None
-    if args["media_b64"] is not None:
-        path = os.path.join(media_dir, "upload.bin")
-        with open(path, "wb") as fh:
-            fh.write(base64.b64decode(args["media_b64"]))
-        media = google_io.Media(path, args["media_mime"])
-    template, path_params = args["path"], {}
-    for api, method, rx, names, tpl in _TEMPLATES:
-        if api != args["api"] or method != args["method"]:
-            continue
-        m = rx.fullmatch(args["path"])
-        if m:
-            template = tpl
-            path_params = {n: urllib.parse.unquote(v) for n, v in zip(names, m.groups())}
-            break
-    return {"api": args["api"], "version": args["version"], "method": args["method"],
-            "path": args["path"], "template": template, "path_params": path_params,
-            "params": dict(args["params"]), "body": args["body"], "media": media,
-            "download": bool(args["download"])}
-
-
-class FakeGooglePack:
-    """google-pack's transport, faithfully: JSON in, JSON out.
-
-    `request` executes the rebuilt request with the in-process REST code
-    (`google_io._send`, i.e. the very framing the pack must reproduce) —
-    unless the running suite replaced the network with a fake service
-    (`google_io._transport`), which then answers it. An `HttpError` becomes a
-    `{"status", "bytes_b64"}` answer, anything else a tool error, as a real
-    MCP tool would report it. `mail` answers like the IMAP transport."""
-
-    def __init__(self):
-        self.calls: list[dict] = []
-
-    def __call__(self, backend: str, tool: str, arguments: dict, timeout: float) -> str:
-        wire = json.loads(json.dumps(arguments))       # what crosses MCP
-        self.calls.append({"backend": backend, "tool": tool, "arguments": wire,
-                           "timeout": timeout})
-        if tool != REQUEST_TOOL:                       # a mail transport
-            return json.dumps({"returncode": 0, "stdout": "[]", "stderr": ""})
-        d = tempfile.mkdtemp(prefix="fake-google-pack-")
-        try:
-            req = rebuild_request(wire, d)
-            try:
-                if google_io._transport is google_io._http_transport:
-                    out = google_io._send(wire["access_token"], req)
-                else:
-                    out = google_io._transport("<pack>", req)
-            except google_io.HttpError as e:
-                return json.dumps({"status": e.status, "bytes_b64":
-                                   base64.b64encode(e.content or b"").decode()})
-            except Exception as e:  # noqa: BLE001 — a tool error
-                raise proxy.BackendToolError(f"{BACKEND}.{tool}: {e}") from None
-            if wire["download"]:
-                return json.dumps({"status": 200,
-                                   "bytes_b64": base64.b64encode(out).decode()})
-            return json.dumps({"status": 200, "json": out})
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
+    def state(self) -> "loader.State":
+        from .. import main
+        comp = GatewayComponent(
+            pack=PACK, id="google", repo="r-clodia/clodia-logic",
+            path="catalogs/packs/google-pack/gateway", ref="main",
+            entry="google_component", connectors=GOOGLE_IDS,
+            credentials=("google_", "gworkspace_", "gmail_", "app_google_oauth"),
+            namespaces=dict(zip(GOOGLE_IDS, NAMESPACES)))
+        tools = {t.name: t for t in main._GDRIVE_TOOLS + main._GCALENDAR_TOOLS
+                 + main._GDOCS_TOOLS + main._GSHEETS_TOOLS}
+        verbs = {n: VerbSpec(component=comp.key, pack=PACK, namespace=n.split(".")[0],
+                             tool=t, handler=self._svc("verb", {"from": "component"}),
+                             offload=False)
+                 for n, t in tools.items()}
+        answers = {
+            "accounts": ["conto"],
+            "describe_folder": lambda a, f: {"id": f, "name": "Cartella",
+                                             "is_folder": True},
+            "perimeter_changed": None,
+            "credential_changed": None,
+            "folder_labels": lambda uris: {u: {"url": "U", "name": "N"} for u in uris},
+            "pdp_arguments": lambda n, a: {"folder_id": "PARENT", "other": "X"},
+            "test_connection": {"ok": True, "detail": "component"},
+            "mail_run": lambda payload: {"returncode": 0, "stdout": "[]", "stderr": ""},
+        }
+        services = {n: ServiceSpec(component=comp.key, pack=PACK, name=n,
+                                   handler=self._svc(n, a)) for n, a in answers.items()}
+        return loader.State(component=comp, status="loaded", commit="c" * 40,
+                            verbs=verbs, services=services)
 
 
 class _GoogleIstanza:
-    """A fake instance with google-pack installed and its transport mounted.
+    """A fake instance with google-pack installed and a stand-in component.
 
-    Mixin, so that the pinned suites can be run again by subclassing them
-    (`setUp` of the original first). The switch is turned by writing
-    `profile.yaml` for real, as in test_522/523/525."""
+    Mixin. The switch is turned by writing `profile.yaml` for real, as in
+    test_522/523/525."""
+
+    COMPONENT = True
 
     GOOGLE = "pack"
 
@@ -248,20 +209,26 @@ class _GoogleIstanza:
         self.dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.scrivi_pack(PACK, _google_pack())
-        self.backends = [_backend()]
+        self.backends: list[dict] = []
         for p in (patch.dict(os.environ, {"CLODIA_DATA": str(self.dir)}),
                   patch.object(resolved, "_DATA", self.dir),
                   patch.object(resolved, "_first_seen_path",
                                lambda: self.dir / "first-seen.json"),
-                  patch.dict(proxy.CONFIG, {"mcp_backends": self.backends}),
-                  patch.object(google_io, "access_token", lambda _a: TOKEN)):
+                  patch.dict(proxy.CONFIG, {"mcp_backends": self.backends})):
             p.start()
             self.addCleanup(p.stop)
-        self.pack = FakeGooglePack()
-        fake = patch.object(proxy, "call_backend_tool_sync", self.pack)
-        fake.start()
-        self.addCleanup(fake.stop)
+        self.component = _FakeComponent()
+        self.addCleanup(loader.reset)
+        loader.reset()
+        if self.COMPONENT:
+            self.metti_componente()
         self.posizione(self.GOOGLE)
+
+    def metti_componente(self) -> None:
+        loader._STATES[f"{PACK}/google"] = self.component.state()
+
+    def togli_componente(self) -> None:
+        loader.reset()
 
     def scrivi_pack(self, name: str, doc: dict) -> None:
         d = self.dir / "packs" / name
@@ -287,9 +254,6 @@ class _GoogleIstanza:
                                                encoding="utf-8")
         self._ricarica()
 
-    def requests_sent(self) -> list[dict]:
-        return [c["arguments"] for c in self.pack.calls if c["tool"] == REQUEST_TOOL]
-
 
 class _Istanza(_GoogleIstanza, unittest.TestCase):
     pass
@@ -298,6 +262,24 @@ class _Istanza(_GoogleIstanza, unittest.TestCase):
 def _call(name: str, args: dict) -> str:
     from .. import main
     return asyncio.run(main.call_tool(name, args))[0].text
+
+
+def _call_as_clodia(name: str, args: dict) -> str:
+    """A call with a signed claim and a whitelist that lets it through."""
+    from unittest.mock import AsyncMock
+    from .. import main
+    from .. import whitelist as wl
+    from ..claims import ClaimsContext
+    token = {"agent": "clodia", "execution_id": "clodia-558s", "principal": "davide",
+             "chat": "chan:SEAL-2:acme:clodia"}
+    cfg = {"agents": {"clodia": {"allowed_tools": ["*"]}}, "egress_allow": []}
+
+    async def go():
+        with ClaimsContext(token, "t"), \
+                patch.object(main, "_require_gate_consent", AsyncMock(return_value={})), \
+                patch.object(wl, "CONFIG", cfg):
+            return await main.call_tool(name, args)
+    return asyncio.run(go())[0].text
 
 
 # --------------------------------------------------------------------------
@@ -367,26 +349,46 @@ class SwitchTests(_Istanza):
         self.assertTrue(set(NAMESPACES) <= M.core_namespaces())
 
 
-class StaysGatewayServedTests(_Istanza):
-    def test_the_24_verbs_are_retained_listed_and_served(self):
+class TheVerbsMoveToTheComponentTests(_Istanza):
+    def test_in_pack_position_they_leave_the_native_catalogue(self):
         from .. import main
         self.assertEqual(len(_verbs()), 24)
         nomi = {t.name for t in main._all_native_tools()}
-        for pos in ("pack", "native"):
-            self.posizione(pos)
-            for verbo in _verbs():
-                with self.subTest(posizione=pos, verbo=verbo):
-                    self.assertIn(verbo, main._GATEWAY_RETAINED_VERBS)
-                    self.assertIn(verbo, nomi)
-                    self.assertFalse(main._is_packaged_verb(verbo))
-                    self.assertTrue(main._verb_implemented(verbo))
-            for ns in NAMESPACES:
-                self.assertIn(ns, main._native_tool_namespaces())
+        listed = {t.name for t in main._component_tools()}
+        for verbo in _verbs():
+            with self.subTest(verbo=verbo):
+                self.assertNotIn(verbo, main._GATEWAY_RETAINED_VERBS)
+                self.assertNotIn(verbo, nomi)
+                self.assertIn(verbo, listed)
+                self.assertTrue(main._is_packaged_verb(verbo))
+                self.assertTrue(main._verb_implemented(verbo))
+        for ns in NAMESPACES:
+            self.assertNotIn(ns, main._native_tool_namespaces())
 
-    def test_pack_declarations_never_apply_to_the_retained_verbs(self):
-        """A context declared by google-pack (it would be refused anyway on the
-        owner of a vocabulary of the gateway's verbs) is never filled into a
-        gateway verb."""
+    def test_in_native_position_they_are_the_gateways(self):
+        from .. import main
+        self.posizione("native")
+        nomi = {t.name for t in main._all_native_tools()}
+        for verbo in _verbs():
+            with self.subTest(verbo=verbo):
+                self.assertIn(verbo, nomi)
+                self.assertFalse(main._is_packaged_verb(verbo))
+                # A component left loaded by a switch turned back serves nothing.
+                self.assertIsNone(main._component_verb(verbo))
+        self.assertEqual(main._component_tools(), [])
+        for ns in NAMESPACES:
+            self.assertIn(ns, main._native_tool_namespaces())
+
+    def test_a_call_reaches_the_component_not_the_native_code(self):
+        from .. import main
+        with patch.object(main, "_dispatch_gdrive",
+                          side_effect=AssertionError("native code ran")):
+            out = _call_as_clodia("gdrive.list", {})
+        self.assertEqual(json.loads(out), {"from": "component"}, out)
+        self.assertEqual(self.component.calls[0][0], "verb")
+
+    def test_pack_declarations_never_apply_to_the_component_verbs(self):
+        """No `context:` on google-pack's connectors: nothing is filled in."""
         from .. import main
         args = {"file_id": "F"}
         self.assertEqual(main._fill_declared_context("gdrive.download", args), args)
@@ -557,7 +559,7 @@ class FailClosedTests(_Istanza):
         self.togli_pack(PACK)
         self.assertFalse(any(resolved.held_by_pack(ns) for ns in NAMESPACES))
         self._tutti_negati()
-        self.assertEqual(self.pack.calls, [])
+        self.assertEqual([c for c in self.component.calls if c[0] == "verb"], [])
 
     def test_with_its_manifest_refused_too(self):
         def rompi(entries):
@@ -590,251 +592,101 @@ class FailClosedTests(_Istanza):
         for verbo in _verbs():
             main._check_pack_connector_held(verbo)          # no exception
 
-    def test_no_transport_refuses_instead_of_falling_back(self):
-        """Every Google I/O of the gateway, not only the verbs: labels, the
-        pre-PDP parent lookup, the confinement panel."""
+    def test_without_the_component_the_24_verbs_are_denied(self):
+        """google-pack's connectors held (e.g. google-pack 1.x, or a component
+        that did not load): nothing serves the verbs, and that is a refusal
+        naming the component, never `unknown tool` or the native code."""
+        self.togli_componente()
+        for verbo in _verbs():
+            with self.subTest(verbo=verbo):
+                out = _call(verbo, {"file_id": "F"})
+                self.assertTrue(out.startswith("DENIED:"), out)
+                self.assertIn("gateway component", out)
+
+    def test_the_native_client_refuses_in_pack_position(self):
         sentinel = []
-        for doc in (_google_pack(mutate=lambda es: es[0]["providers"][0].pop("transport")),
-                    None):
-            if doc is None:
-                self.togli_pack(PACK)
-            else:
-                self.scrivi_pack(PACK, doc)
-            with self.subTest(pack=bool(doc)), \
-                    patch.object(google_io, "_transport",
-                                 lambda *a: sentinel.append(a) or {}):
-                with self.assertRaises(google_io.TransportUnavailable) as e:
-                    google_io.call("conto", "drive", "v3", "GET files", params={})
-                self.assertIn("google-pack", str(e.exception))
-        self.assertEqual(sentinel, [])
-        self.assertEqual(self.pack.calls, [])
-
-    def test_a_backend_the_pack_did_not_mount_is_not_used(self):
-        for b in (_backend(pack=None), _backend(pack="it-pack")):
-            with self.subTest(backend=b), \
-                    patch.dict(proxy.CONFIG, {"mcp_backends": [b]}):
-                resolved.invalidate()
-                self.assertIsNone(resolved.transport_for("google"))
-                self.assertIsNone(resolved.transport_for("mail", "gmail"))
-
-    def test_in_native_position_there_is_none(self):
-        self.posizione("native")
-        self.assertIsNone(resolved.transport_for("google"))
-        self.assertIsNone(resolved.transport_for("mail", "gmail"))
-
-    def test_the_perimeter_fails_closed_on_a_transport_error(self):
-        from ..tools import gdrive, gdrive_root as gr
-
-        def esplode(*a, **k):
-            raise proxy.BackendToolError("boom")
-        gr.reset_cache()
-        self.addCleanup(gr.reset_cache)
-        with patch.object(proxy, "call_backend_tool_sync", esplode), \
-                patch.object(gdrive, "gworkspace_accounts", lambda: ["conto"]), \
-                patch.object(PINS.wl, "CONFIG",
-                             {"agents": {}, "gdrive_roots": {"conto": ["ROOT"]}}):
-            self.assertEqual(gr.roots_for_call("conto")[0], ["ROOT"])
-            self.assertFalse(gr.inside("conto", "F"))
-
-
-# --------------------------------------------------------------------------
-# 4. the transport is the gateway's
-# --------------------------------------------------------------------------
-class TransportBackendIsInternalTests(_Istanza):
-    def setUp(self) -> None:
-        super().setUp()
-        from mcp.types import Tool
-        cache = patch.dict(proxy._TOOL_CACHE, {BACKEND: [
-            Tool(name=f"{BACKEND}.{REQUEST_TOOL}", inputSchema={"type": "object"}),
-            Tool(name=f"{BACKEND}.{MAIL_TOOL}", inputSchema={"type": "object"})]})
-        cache.start()
-        self.addCleanup(cache.stop)
-
-    def test_hidden_and_denied_in_both_positions(self):
-        for pos in ("pack", "native"):
-            with self.subTest(posizione=pos):
-                self.posizione(pos)
-                self.assertEqual(resolved.transport_backends(),
-                                 frozenset({resolved.norm_name(BACKEND)}))
-                nomi = [t.name for t in asyncio.run(proxy.list_proxied_tools())]
-                self.assertEqual(nomi, [])
-                for tool in (REQUEST_TOOL, MAIL_TOOL):
-                    out = _call(f"{BACKEND}.{tool}", {"access_token": "x"})
-                    self.assertTrue(out.startswith("DENIED:"), out)
-        self.assertEqual(self.pack.calls, [])
-
-
-# --------------------------------------------------------------------------
-# 5. the google.request contract
-# --------------------------------------------------------------------------
-class RequestContractTests(_Istanza):
-    def setUp(self) -> None:
-        super().setUp()
-        self.tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.wire = GIO._Wire(GIO._Resp(b'{"id": "F", "name": "x"}'))
-        p = patch.object(google_io, "_open", self.wire)
-        p.start()
-        self.addCleanup(p.stop)
-
-    def file(self, name: str, data: bytes) -> str:
-        path = os.path.join(self.tmp, name)
-        with open(path, "wb") as fh:
-            fh.write(data)
-        return path
-
-    def test_a_json_call(self):
-        out = google_io.call("conto", "sheets", "v4",
-                             "PUT spreadsheets/{spreadsheetId}/values/{range}",
-                             params={"spreadsheetId": "S", "range": "T1!A1:B1",
-                                     "valueInputOption": "USER_ENTERED",
-                                     "includeValuesInResponse": False, "x": None},
-                             body={"values": [["a", 1]]})
-        self.assertEqual(out, {"id": "F", "name": "x"})
-        [args] = self.requests_sent()
-        self.assertEqual(args, {
-            "access_token": TOKEN, "api": "sheets", "version": "v4", "method": "PUT",
-            "path": "spreadsheets/S/values/T1%21A1%3AB1",
-            "params": {"valueInputOption": "USER_ENTERED",
-                       "includeValuesInResponse": False},
-            "body": {"values": [["a", 1]]}, "media_b64": None, "media_mime": None,
-            "download": False})
-        self.assertEqual(self.pack.calls[0]["timeout"], google_io.TIMEOUT_S)
-        self.assertEqual((self.pack.calls[0]["backend"], self.pack.calls[0]["tool"]),
-                         (BACKEND, REQUEST_TOOL))
-        # …and the pack's request is the in-process one, byte for byte.
-        [sent] = self.wire.sent
-        self.assertEqual(sent.full_url,
-                         "https://sheets.googleapis.com/v4/spreadsheets/S/values/"
-                         "T1%21A1%3AB1?valueInputOption=USER_ENTERED"
-                         "&includeValuesInResponse=false&alt=json")
-        self.assertEqual(sent.get_header("Authorization"), f"Bearer {TOKEN}")
-
-    def test_an_upload_with_metadata(self):
-        src = self.file("nota.md", b"ciao \xc3\xa8")
-        google_io.call("conto", "drive", "v3", "POST files",
-                       params={"fields": "id"}, body={"name": "nota.md"},
-                       media=google_io.Media(src))
-        [args] = self.requests_sent()
-        self.assertEqual(base64.b64decode(args["media_b64"]), b"ciao \xc3\xa8")
-        self.assertEqual(args["media_mime"], "text/markdown")
-        self.assertEqual(args["body"], {"name": "nota.md"})
-        self.assertNotIn(src, json.dumps(args), "the gateway's path never leaves")
-        self.assertIn("uploadType=multipart", self.wire.sent[0].full_url)
-
-    def test_a_media_only_upload(self):
-        src = self.file("blob", b"\x00\x01")
-        google_io.call("conto", "drive", "v3", "PATCH files/{fileId}",
-                       params={"fileId": "F"}, media=google_io.Media(src, "x/y"))
-        [args] = self.requests_sent()
-        self.assertIsNone(args["body"])
-        self.assertEqual(args["media_mime"], "x/y")
-        self.assertIn("uploadType=media", self.wire.sent[0].full_url)
-
-    def test_a_download(self):
-        self.wire.answers = [GIO._Resp(bytes(range(256)))]
-        out = google_io.call("conto", "drive", "v3", "GET files/{fileId}",
-                             params={"fileId": "F"}, download=True)
-        self.assertEqual(out, bytes(range(256)))
-        self.assertTrue(self.requests_sent()[0]["download"])
-
-    def test_only_the_access_token_travels(self):
-        """No refresh token, no client secret: the refresh happens here."""
-        bundle = {"client_id": "CID", "client_secret": "CSECRET-value",
-                  "refresh_token": "1//refresh-secret", "email": "a@b.it",
-                  "scope": "x"}
-        token_wire = GIO._Wire(GIO._Resp(json.dumps(
-            {"access_token": "ya29.fresh", "expires_in": 3599}).encode()),
-            GIO._Resp(b'{"id": "F"}'))
-        google_io.forget()
-        self.addCleanup(google_io.forget)
-        with patch.object(google_io, "access_token", _REAL_ACCESS_TOKEN), \
-                patch.object(google_io, "_cred", lambda a: f"google_{a}"), \
-                patch("server.vault.read_internal", lambda n: dict(bundle)), \
-                patch.object(google_io, "_open", token_wire):
-            google_io.call("conto", "drive", "v3", "GET files/{fileId}",
-                           params={"fileId": "F"})
-        testo = json.dumps(self.pack.calls)
-        self.assertIn("ya29.fresh", testo)
-        for segreto in ("1//refresh-secret", "CSECRET-value", "CID"):
-            self.assertNotIn(segreto, testo)
-
-    def test_a_401_retries_once_with_a_fresh_token(self):
-        tokens = iter(["old", "new"])
-        forgotten = []
-        self.wire.answers = [GIO._http_error(401, {"error": {"message": "Invalid"}}),
-                             GIO._Resp(b'{"id": "F"}')]
-        with patch.object(google_io, "access_token", lambda _a: next(tokens)), \
-                patch.object(google_io, "forget", lambda a=None: forgotten.append(a)):
-            out = google_io.call("conto", "drive", "v3", "GET files/{fileId}",
-                                 params={"fileId": "F"})
-        self.assertEqual(out, {"id": "F"})
-        self.assertEqual([a["access_token"] for a in self.requests_sent()], ["old", "new"])
-        self.assertEqual(forgotten, ["conto"])
-
-    def test_an_http_error_is_the_same_as_in_process(self):
-        """Status, method, URL, reason and body: `gdrive_root` and every
-        caller that tells a 404 from a 403 see no difference."""
-        def errore():
-            return GIO._http_error(403, {"error": {"code": 403,
-                                                   "message": "The caller does not have permission"}})
-
-        def prova():
-            self.wire.answers = [errore()]
-            with self.assertRaises(google_io.HttpError) as ctx:
-                google_io.call("conto", "drive", "v3", "GET files/{fileId}",
-                               params={"fileId": "F", "supportsAllDrives": True})
-            e = ctx.exception
-            return (type(e), e.status, e.method, e.url, e.reason, str(e),
-                    json.loads(e.content))
-        da_pack = prova()
-        self.posizione("native")
-        nativo = prova()
-        self.assertEqual(da_pack, nativo)
-        self.assertEqual(da_pack[1], 403)
-        self.assertNotIn(TOKEN, da_pack[5])
-
-    def test_an_answer_outside_the_contract_is_a_transport_error(self):
-        for testo in ("not json", "{}", '{"status": "200"}', '{"status": true}',
-                      "[]", '{"status": 200, "bytes_b64": "%%%"}'):
-            with self.subTest(risposta=testo), \
-                    patch.object(proxy, "call_backend_tool_sync",
-                                 lambda *a, _t=testo, **k: _t):
-                with self.assertRaises(google_io.TransportError):
-                    google_io.call("conto", "drive", "v3", "GET files", params={})
-
-    def test_a_download_without_bytes_is_a_transport_error(self):
-        with patch.object(proxy, "call_backend_tool_sync",
-                          lambda *a, **k: json.dumps({"status": 200, "json": {}})):
-            with self.assertRaises(google_io.TransportError):
-                google_io.call("conto", "drive", "v3", "GET files/{fileId}",
-                               params={"fileId": "F"}, download=True)
-
-    def test_a_tool_error_is_a_transport_error_without_the_token(self):
-        def esplode(backend, tool, arguments, timeout):
-            raise proxy.BackendToolError("upstream exploded")
-        with patch.object(proxy, "call_backend_tool_sync", esplode):
-            with self.assertRaises(google_io.TransportError) as e:
+        with patch.object(google_io, "_transport",
+                          lambda *a: sentinel.append(a) or {}):
+            with self.assertRaises(google_io.NativeDisabled):
                 google_io.call("conto", "drive", "v3", "GET files", params={})
-        # The backend text is not relayed (review of #381): type only.
-        self.assertNotIn("upstream exploded", str(e.exception))
-        self.assertIn("BackendToolError", str(e.exception))
-        self.assertNotIn(TOKEN, str(e.exception))
+            self.posizione("native")
+            google_io.call("conto", "drive", "v3", "GET files", params={})
+        self.assertEqual(len(sentinel), 1)
 
-    def test_native_position_never_touches_the_pack(self):
+    def test_the_gateways_lookups_fail_closed_without_the_component(self):
+        self.togli_componente()
+        with self.assertRaises(google_switch.ComponentUnavailable) as e:
+            google_switch.accounts()
+        self.assertIn("google-pack", str(e.exception))
+        self.assertEqual(google_switch.folder_labels(["gdrive:folder/X"]), {})
+        out = google_switch.component_test_connection()
+        self.assertFalse(out["ok"])
+        from .. import tools_api
+        d = tools_api._describe_folder("conto", "F")
+        self.assertFalse(d["is_folder"])
+
+
+# --------------------------------------------------------------------------
+# 4. the gateway's own Google lookups follow the switch
+# --------------------------------------------------------------------------
+class LookupsFollowTheSwitchTests(_Istanza):
+    def test_in_pack_position_the_component_answers(self):
+        from .. import tools_api
+        self.assertEqual(google_switch.accounts(), ["conto"])
+        self.assertEqual(tools_api._describe_folder("conto", "F1"),
+                         {"id": "F1", "name": "Cartella", "is_folder": True})
+        self.assertEqual(google_switch.folder_labels(["gdrive:folder/A"]),
+                         {"gdrive:folder/A": {"url": "U", "name": "N"}})
+        self.assertEqual(tools_api._test_connector("google"),
+                         {"ok": True, "detail": "component"})
+        google_switch.perimeter_changed()
+        google_switch.credential_changed("google_conto")
+        from .. import vault
+        vault._forget_google_token("google_conto")
+        names = [c[0] for c in self.component.calls]
+        self.assertEqual(names, ["accounts", "describe_folder", "folder_labels",
+                                 "test_connection", "perimeter_changed",
+                                 "credential_changed", "credential_changed"])
+
+    def test_in_native_position_the_component_is_never_asked(self):
+        from .. import tools_api
+        from ..tools import gdrive
         self.posizione("native")
-        google_io.call("conto", "drive", "v3", "GET files", params={})
-        self.assertEqual(self.pack.calls, [])
-        self.assertEqual(len(self.wire.sent), 1)
+        with patch.object(gdrive, "gworkspace_accounts", lambda: ["nativo"]):
+            self.assertEqual(google_switch.accounts(), ["nativo"])
+        self.assertEqual(self.component.calls, [])
+        self.assertIsNone(loader.service(PACK, "accounts"))
 
+    def test_the_pdp_reads_only_mapped_arguments_from_the_component(self):
+        from .. import main
+        spec = main._component_verb("gdrive.update")
+        args = main._component_pdp_arguments(spec, "gdrive.update",
+                                             {"file_id": "F", "src": "s"})
+        self.assertEqual(args, {"file_id": "F", "src": "s", "folder_id": "PARENT"})
+        self.assertEqual(egress.spec_for("gdrive.update")[1](args),
+                         ["gdrive:folder/PARENT"])
+        # A verb without destination mappings is passed through untouched.
+        args = main._component_pdp_arguments(main._component_verb("gdrive.list"),
+                                             "gdrive.list", {"query": "q"})
+        self.assertEqual(args, {"query": "q"})
 
-_REAL_ACCESS_TOKEN = google_io.access_token
+    def test_a_failing_pdp_service_refuses_the_call(self):
+        from .. import main
+        spec = main._component_verb("gdrive.update")
+        st = loader._STATES[f"{PACK}/google"]
+
+        def boom(*a):
+            raise RuntimeError("drive down")
+        st.services["pdp_arguments"] = ServiceSpec(
+            component=st.component.key, pack=PACK, name="pdp_arguments", handler=boom)
+        with self.assertRaises(PermissionError):
+            main._component_pdp_arguments(spec, "gdrive.update", {"file_id": "F"})
 
 
 # --------------------------------------------------------------------------
-# 6. Gmail is a provider of the mail vocabulary
+# 5. Gmail
 # --------------------------------------------------------------------------
-GMAIL_BUNDLE = {"client_id": "CID", "client_secret": "CSECRET", "refresh_token": "RT",
+GMAIL_BUNDLE = {"client_id": "CID", "client_secret": "CSECRET", "refresh_token": "RT",  # gitleaks:allow — fake test credential
                 "email": "studio@gmail.com", "account": "studio"}
 IMAP_BUNDLE = {"email": "info@example.it", "smtp_server": "smtp.x", "smtp_port": 587,
                "imap_server": "imap.x", "password": "pw"}
@@ -848,12 +700,19 @@ class GmailRoutingTests(_Istanza):
                               "command": "/bin/false", "pack": "comms-pack"})
         resolved.invalidate()
         self.done = subprocess.CompletedProcess([], 0, stdout="[]", stderr="")
+        self.imap_calls: list[dict] = []
+
+        def imap(backend, tool, arguments, timeout):
+            self.imap_calls.append({"backend": backend, "tool": tool,
+                                    "arguments": json.loads(json.dumps(arguments))})
+            return json.dumps({"returncode": 0, "stdout": "[]", "stderr": ""})
         creds = {"google_studio": GMAIL_BUNDLE, "mailbox_info": IMAP_BUNDLE}
         for p in (patch.object(EM, "known_accounts", return_value={"studio", "info"}),
                   patch.object(EM.vault, "has_credential", lambda c: c in creds),
                   patch.object(EM.vault, "read_internal", lambda c: dict(creds[c])),
                   patch("server.vault.read_internal", lambda c: dict(creds[c])),
-                  patch.object(EM, "_assert_mailbox_allowed", lambda *a: None)):
+                  patch.object(EM, "_assert_mailbox_allowed", lambda *a: None),
+                  patch.object(proxy, "call_backend_tool_sync", imap)):
             p.start()
             self.addCleanup(p.stop)
 
@@ -862,8 +721,8 @@ class GmailRoutingTests(_Istanza):
             EM._run_cli(account, ["folders"], want_json=True, direction="inbox")
         return run.call_count
 
-    def _transports(self) -> list[tuple[str, str]]:
-        return [(c["backend"], c["tool"]) for c in self.pack.calls]
+    def _gmail_runs(self) -> list[dict]:
+        return [c[1] for c in self.component.calls if c[0] == "mail_run"]
 
     def test_the_gmail_provider_is_held_on_both_mail_positions(self):
         for mail in ("native", "pack"):
@@ -874,53 +733,52 @@ class GmailRoutingTests(_Istanza):
                                  (PACK, "mail", "gdrive"))
                 self.assertEqual(resolved.registry().by_id("mail").builtin,
                                  mail == "native")
-                self.assertEqual(resolved.transport_for("mail", "gmail"),
-                                 (BACKEND, MAIL_TOOL))
+                self.assertIsNone(resolved.transport_for("mail", "gmail"))
 
-    def test_a_google_account_goes_to_the_gmail_transport(self):
+    def test_a_google_account_goes_to_the_component(self):
         """`google: pack`, `mail: native`: Gmail follows Google."""
         self.posizione("pack", mail="native")
         self.assertEqual(self._folders("studio"), 0)
-        self.assertEqual(self._transports(), [(BACKEND, MAIL_TOOL)])
-        args = self.pack.calls[0]["arguments"]
+        [args] = self._gmail_runs()
         self.assertEqual(args["argv"][:3], ["--account", "studio", "folders"])
         # The per-call XOAUTH2 files, exactly as the in-process path makes them.
         self.assertEqual(sorted(args["files"]), [
             "secrets/email_config.json", "secrets/email_oauth_tokens.json",
             "secrets/google_oauth_client.json"])
         tokens = json.loads(base64.b64decode(args["files"]["secrets/email_oauth_tokens.json"]))
-        self.assertEqual(tokens, {"studio": {"refresh_token": "RT",
+        self.assertEqual(tokens, {"studio": {"refresh_token": "RT",  # gitleaks:allow — fake test credential
                                              "email": "studio@gmail.com"}})
+        self.assertEqual(self.imap_calls, [])
 
     def test_an_imap_account_goes_to_the_mail_transport(self):
         """`google: pack`, `mail: pack`: each account to its own provider."""
         self.posizione("pack", mail="pack")
         self.assertEqual(self._folders("info"), 0)
         self.assertEqual(self._folders("studio"), 0)
-        self.assertEqual(self._transports(), [("mail-transport", "run"),
-                                              (BACKEND, MAIL_TOOL)])
-        files = self.pack.calls[0]["arguments"]["files"]
-        self.assertEqual(sorted(files), ["secrets/email_config.json"])
+        self.assertEqual([(c["backend"], c["tool"]) for c in self.imap_calls],
+                         [("mail-transport", "run")])
+        self.assertEqual(sorted(self.imap_calls[0]["arguments"]["files"]),
+                         ["secrets/email_config.json"])
+        self.assertEqual(len(self._gmail_runs()), 1)
 
     def test_imap_follows_mail_and_gmail_follows_google(self):
         self.posizione("native", mail="pack")
         self.assertEqual(self._folders("studio"), 1)          # in-process
         self.assertEqual(self._folders("info"), 0)            # comms-pack
-        self.assertEqual(self._transports(), [("mail-transport", "run")])
+        self.assertEqual(self._gmail_runs(), [])
         self.posizione("pack", mail="native")
         self.assertEqual(self._folders("info"), 1)            # in-process
         self.assertEqual(self._folders("studio"), 0)          # google-pack
-        self.assertEqual(self._transports()[-1], (BACKEND, MAIL_TOOL))
+        self.assertEqual(len(self._gmail_runs()), 1)
 
-    def test_gmail_is_refused_without_its_provider(self):
+    def test_gmail_is_refused_without_the_component(self):
         self.posizione("pack", mail="native")
-        self.scrivi_pack(PACK, _google_pack(gmail=False))
+        self.togli_componente()
         with patch.object(EM.subprocess, "run") as run:
             with self.assertRaises(PermissionError) as e:
                 EM._run_cli("studio", ["folders"], want_json=True, direction="inbox")
         self.assertIn("google-pack", str(e.exception))
         run.assert_not_called()
-        self.assertEqual(self.pack.calls, [])
         self.assertEqual(self._folders("info"), 1)            # IMAP unaffected
 
     def test_imap_is_refused_without_its_provider(self):
@@ -932,11 +790,11 @@ class GmailRoutingTests(_Istanza):
         self.assertIn("mail transport provider not available", str(e.exception))
         run.assert_not_called()
 
-    def test_native_google_never_uses_the_gmail_transport(self):
+    def test_native_google_never_uses_the_component(self):
         self.posizione("native", mail="native")
         self.assertIsNone(resolved.registry().by_id("mail-gmail"))
         self.assertEqual(self._folders("studio"), 1)
-        self.assertEqual(self.pack.calls, [])
+        self.assertEqual(self._gmail_runs(), [])
 
 
 # --------------------------------------------------------------------------
@@ -945,18 +803,10 @@ class GmailRoutingTests(_Istanza):
 class ForeignPackCannotClaimTests(_Istanza):
     def _intruso(self, entries: list[dict]) -> None:
         self.scrivi_pack("evil-pack", {"name": "evil-pack", "connectors": entries})
-        self.backends.append(_backend("evil-transport", pack="evil-pack"))
         resolved.invalidate()
 
     def _tutto_di_evil(self) -> list[dict]:
-        out = []
-        for e in _google_connectors() + [_gmail_connector()]:
-            e = copy.deepcopy(e)
-            for p in e.get("providers") or []:
-                if "transport" in p:
-                    p["transport"]["backend"] = "evil-transport"
-            out.append(e)
-        return out
+        return [copy.deepcopy(e) for e in _google_connectors() + [_gmail_connector()]]
 
     def test_google_pack_keeps_every_id_and_the_intruder_is_refused(self):
         self._intruso(self._tutto_di_evil())
@@ -964,15 +814,12 @@ class ForeignPackCannotClaimTests(_Istanza):
             self.assertEqual(resolved.registry().by_id(cid).pack, PACK)
         self.assertTrue(any("evil-pack" in p and f"switched to '{PACK}'" in p
                             for p in resolved.problems()))
-        self.assertEqual(resolved.transport_for("google"), (BACKEND, REQUEST_TOOL))
 
     def test_without_google_pack_nobody_holds_them(self):
         self.togli_pack(PACK)
         self._intruso(self._tutto_di_evil())
         for cid in GOOGLE_IDS + ("mail-gmail",):
             self.assertIsNone(resolved.registry().by_id(cid))
-        self.assertIsNone(resolved.transport_for("google"))
-        self.assertIsNone(resolved.transport_for("mail", "gmail"))
         self.assertTrue(_call("gdrive.list", {}).startswith("DENIED:"))
 
     def test_same_namespace_under_another_id_is_refused_too(self):
@@ -982,16 +829,20 @@ class ForeignPackCannotClaimTests(_Istanza):
         self.assertIsNone(resolved.registry().by_id("sheets-clone"))
         self.assertFalse(resolved.held_by_pack("gsheets"))
 
-    def test_another_gmail_provider_is_never_elected(self):
-        """A provider called `gmail` contributed to `mail` by somebody else."""
+    def test_another_gmail_provider_never_gets_a_google_account(self):
+        """A provider called `gmail` contributed to `mail` by somebody else:
+        a Google account's mail goes to google-pack's component or nowhere."""
         self.togli_pack(PACK)
+        self.togli_componente()
         self._intruso([{"id": "evil-gmail", "manifest_version": 1,
                         "namespace": "evil", "extends": "mail",
                         "providers": [{"id": "gmail", "transport": {
                             "backend": "evil-transport", "tool": "mail"}}]}])
         self.posizione("pack", **{"evil-gmail": "pack"})
         self.assertIsNotNone(resolved.registry().by_id("evil-gmail"))
-        self.assertIsNone(resolved.transport_for("mail", "gmail"))
+        with patch.object(EM, "_is_gmail", lambda a: True):
+            with self.assertRaises(PermissionError):
+                EM._transport_or_refuse("studio")
 
     def test_on_native_the_builtins_win_the_collision(self):
         self.posizione("native")
@@ -999,147 +850,6 @@ class ForeignPackCannotClaimTests(_Istanza):
         for cid in GOOGLE_IDS:
             self.assertTrue(resolved.registry().by_id(cid).builtin)
         self.assertIsNone(resolved.registry().by_id("mail-gmail"))
-
-
-# --------------------------------------------------------------------------
-# 8. the pinned suites, again in pack position
-# --------------------------------------------------------------------------
-class _InPack(_GoogleIstanza):
-    """Asserts the position really is `pack`: a suite re-run in a position
-    that silently stayed `native` would be green and prove nothing (and
-    `PinnedSuitesRunInPackTests` shows a pinned call crossing the pack)."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        assert resolved.transport_for("google") == (BACKEND, REQUEST_TOOL), \
-            "pack position not reached: the re-run would measure `native`"
-
-
-class PackPinsPdp(_InPack, PINS.PdpParityTests):
-    pass
-
-
-class PackPinsLabels(_InPack, PINS.FolderLabelShapeTests):
-    pass
-
-
-class PackPinsUnconfined(_InPack, PINS.UnconfinedCallsTests):
-    def tearDown(self):
-        # In pack position `google_io.call` never reaches the in-process
-        # transport by itself: whatever the fake service answered, it
-        # answered through google-pack.
-        self.assertTrue(self.requests_sent())
-        super().tearDown()
-
-
-class PackPinsAccountRoot(_InPack, PINS.AccountRootTests):
-    pass
-
-
-class PackPinsTopicPerimeter(_InPack, PINS.TopicPerimeterTests):
-    pass
-
-
-class PackGdriveRootAncestry(_InPack, GR.AncestryTests):
-    pass
-
-
-class PackGdriveRootTraps(_InPack, GR.TheThreeTraps):
-    pass
-
-
-class PackGdriveRootFailClosed(_InPack, GR.FailClosedTests):
-    pass
-
-
-class PackGdriveRootConfig(_InPack, GR.ConfigTests):
-    pass
-
-
-class PackGdriveRootCost(_InPack, GR.CostTests):
-    pass
-
-
-class PackGdriveRootFastPath(_InPack, GR.FastPathTests):
-    pass
-
-
-class PackGdriveRootWriteDestination(_InPack, GR.WriteDestinationTests):
-    pass
-
-
-class PackGdriveRootRefusalMessage(_InPack, GR.RefusalMessageTests):
-    pass
-
-
-class PackGdriveRootCalendar(_InPack, GR.CalendarTests):
-    pass
-
-
-class PackGdriveRootNativeDoc(_InPack, GR.NativeDocTests):
-    pass
-
-
-class PackGdriveRootVerbCoverage(_InPack, GR.VerbCoverageTests):
-    pass
-
-
-class PackPerTopic(_InPack, GRT.PerTopicTests):
-    pass
-
-
-class PackPerTopicCeiling(_InPack, GRT.CeilingTests):
-    pass
-
-
-class PackPerTopicSignedClaim(_InPack, GRT.SignedClaimTests):
-    pass
-
-
-class PackConfinementWrite(_InPack, CONF.WriteTests):
-    pass
-
-
-class PackConfinementDisclosure(_InPack, CONF.DisclosureTests):
-    pass
-
-
-class PackSheets(_InPack, GS.GSheetsTest):
-    pass
-
-
-class PackDriveUpdate(_InPack, UPD.UpdateTests):
-    pass
-
-
-class PackDriveLabels(_InPack, LAB.LabelTests):
-    pass
-
-
-class PackRestTransport(_InPack, GIO.TransportTests):
-    """The REST framing suite, with google-pack opening the socket: the fake
-    pack runs `google_io._send` on the decoded payload."""
-
-
-class PinnedSuitesRunInPackTests(_Istanza):
-    def test_the_fixture_is_in_pack_position(self):
-        self.assertEqual(instance_profile.connector_mode("google"), "pack")
-        self.assertEqual(resolved.registry().by_id("google").pack, PACK)
-        self.assertNotIn("gateway-google", B.manifests())
-
-    def test_a_pinned_call_really_crosses_the_pack(self):
-        fake = PINS.FakeGoogle({"F": ["ROOT"], "ROOT": []})
-        from ..tools import gdrive
-        from ..tools._google_fake import ServiceTransport
-        with patch.object(google_io, "_transport", ServiceTransport(fake)), \
-                patch.object(gdrive, "gworkspace_accounts", lambda: ["conto"]), \
-                patch.object(gdrive, "tool_allowed", lambda *a, **k: None), \
-                patch.object(PINS.wl, "CONFIG", {"agents": {}}):
-            gdrive.rename("F", "nuovo")
-        self.assertEqual(fake.ops(), ["files.update"])
-        [args] = self.requests_sent()
-        self.assertEqual((args["method"], args["path"], args["body"]),
-                         ("PATCH", "files/F", {"name": "nuovo"}))
 
 
 if __name__ == "__main__":  # pragma: no cover

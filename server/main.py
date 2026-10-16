@@ -2005,14 +2005,15 @@ def _packaged_namespaces() -> frozenset[str]:
 #: declares the `github` connector (credential, mappings, taint, danger) and
 #: mounts the GitHub MCP backend, whose `github.*` tools are its own.
 #:
-#: And the 24 Google verbs (clodia-platform#524): the folder/calendar
-#: perimeter (`gdrive_root`: parent walk, shortcut refusal, list filtering,
-#: adopt-after-create, writable parent, `gcal:` allowlist), the pre-PDP parent
-#: lookup, the scratch I/O and the taint are the reference monitor's, and the
-#: `google_<acct>` credential stays in the gateway's custody. With
-#: `connectors: {google: pack}` google-pack declares the four connectors
-#: (schemes, mappings, taint, topic button, Tools card) and carries the HTTP
-#: of each Google API call (`tools.google_io`, short-lived access token only).
+#: NOT the 24 Google verbs any more (clodia-platform#558, superseding the
+#: transport design of #524). With `connectors: {google: pack}` they LEAVE the
+#: native catalogue like Telegram's did: google-pack's GATEWAY COMPONENT
+#: registers them (`server.components`), with the folder/calendar perimeter,
+#: and the dispatcher runs them through this same `call_tool` path —
+#: whitelist, deny, unattended block, gates, the egress PDP on google-pack's
+#: mappings (and the pre-PDP parent lookup of `gdrive.update`, a component
+#: service), taint, audit. The credential stays in the vault, reached through
+#: the host. On `native` the gateway's own modules serve them, as before.
 _GOOGLE_NATIVE_NAMES: frozenset[str] = frozenset(
     t.name for t in _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS)
 
@@ -2021,7 +2022,7 @@ _GATEWAY_RETAINED_VERBS = frozenset({
     "email.send", "email.folders", "email.list", "email.read",
     "email.get_attachment", "email.save_attachment", "email.search",
     "email.reply",
-}) | _GITHUB_NATIVE_NAMES | _GOOGLE_NATIVE_NAMES
+}) | _GITHUB_NATIVE_NAMES
 
 
 def _is_packaged_verb(name: str) -> bool:
@@ -2917,6 +2918,38 @@ def _copybrain_prefix() -> str:
 def _current_spawn_safe() -> str:
     from .whitelist import current_spawn as _cs
     return _cs() or "-"
+
+
+def _component_pdp_arguments(spec, name: str, arguments: dict) -> dict:
+    """The arguments the egress PDP reads for a COMPONENT verb (#558).
+
+    A component may register the service `pdp_arguments(verb, arguments)` for
+    the facts the call does not carry — google-pack's parent folder of
+    `gdrive.update`, what `_drive_parent_of` reads natively. Only arguments a
+    destination mapping of THIS verb reads are taken from it: the service can
+    tell the PDP where a call goes, never rewrite anything else. A failing
+    service refuses the call (the destination would be unknown)."""
+    try:
+        from . import components as _components
+        svc = _components.service(spec.pack, "pdp_arguments")
+    except Exception:  # noqa: BLE001
+        svc = None
+    if svc is None:
+        return arguments
+    from .connectors import resolved as _conn
+    allowed = {m.arg for m in _conn.egress_mappings(name) if m.arg}
+    if not allowed:
+        return arguments
+    try:
+        extra = svc.handler(name, dict(arguments)) or {}
+    except Exception as e:  # noqa: BLE001
+        raise PermissionError(
+            f"{name}: the destination could not be determined ({type(e).__name__}); "
+            "an unknown destination is refused") from None
+    if not isinstance(extra, dict):
+        raise PermissionError(f"{name}: the destination could not be determined")
+    return {**arguments, **{k: str(v if v is not None else "")
+                            for k, v in extra.items() if k in allowed}}
 
 
 def _drive_parent_of(arguments: dict) -> str:
@@ -4894,13 +4927,28 @@ def _check_not_transport(name: str) -> None:
 
 def _check_component(name: str) -> None:
     """Refuse a verb of a disabled gateway component, or one whose pack
-    connector is not held right now (#558). Unknown state: refused too."""
+    connector is not held right now (#558). Unknown state: refused too.
+
+    And a verb of a namespace moved to a pack that NOTHING serves — no
+    component verb, no mounted backend: the native code stepped aside, and
+    without this the call would end as «unknown tool» instead of saying that
+    the pack's implementation is missing (e.g. google-pack < 2.0.0 on
+    `google: pack`)."""
     try:
         from . import components as _components
         why = _components.refusal(name)
     except Exception as e:  # noqa: BLE001
         why = (f"gateway components unavailable ({type(e).__name__})"
                if _component_verb(name) is not None else "")
+    if not why and _is_packaged_verb(name) and _component_verb(name) is None:
+        try:
+            served = bool(proxy.is_proxied(name))
+        except Exception:  # noqa: BLE001
+            served = False
+        if not served:
+            why = (f"'{name}' is implemented by a pack on this instance, but no "
+                   "gateway component and no mounted backend of that pack serves "
+                   "it (see GET /internal/components)")
     if why:
         raise _PackVerbRefused(why)
 
@@ -5341,6 +5389,12 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # whitelist (clodia-platform#402). Si rifiuta PRIMA del verdetto,
                 # dicendo l'id giusto quando il canale ne ha uno legato.
                 _telegram_chat_id_or_raise(arguments)
+            elif (_cpdp := _component_verb(name)) is not None:
+                # A component verb (#558): the facts the PDP needs and the
+                # call does not carry come from the component's own service
+                # (google-pack: the parent folder of `gdrive.update`).
+                _eargs = await asyncio.to_thread(
+                    _component_pdp_arguments, _cpdp, name, arguments)
             elif name == "gdrive.update":
                 # La destinazione di un aggiornamento è la CARTELLA del file:
                 # stessa regola di `gdrive.upload` (whitelist + taint), letta da
@@ -5609,14 +5663,14 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             # verbi che il gateway implementa passano di qui; gli altri `github.*`
             # scendono fino al ramo `proxy.is_proxied`, che è il loro.
             result = await asyncio.to_thread(_dispatch_github, name, arguments)
-        elif name.startswith("gdrive."):
-            result = await asyncio.to_thread(_dispatch_gdrive, name, arguments)
-        elif name.startswith("gcalendar."):
-            result = await asyncio.to_thread(_dispatch_gcalendar, name, arguments)
-        elif name.startswith("gdocs."):
-            result = await asyncio.to_thread(_dispatch_gdocs, name, arguments)
-        elif name.startswith("gsheets."):
-            result = await asyncio.to_thread(_dispatch_gsheets, name, arguments)
+        elif name.startswith(("gdrive.", "gcalendar.", "gdocs.", "gsheets.")) \
+                and not _is_packaged_verb(name):
+            # `not _is_packaged_verb`: on `google: pack` (#558) these verbs
+            # are google-pack's gateway component's, dispatched below.
+            _gfn = {"gdrive": _dispatch_gdrive, "gcalendar": _dispatch_gcalendar,
+                    "gdocs": _dispatch_gdocs, "gsheets": _dispatch_gsheets}[
+                        name.split(NS_SEP_DOT, 1)[0]]
+            result = await asyncio.to_thread(_gfn, name, arguments)
         elif name.startswith(("egress.", "ingress.")):
             result = _dispatch_egress_admin(name, arguments)
         elif name.startswith("runtime."):
