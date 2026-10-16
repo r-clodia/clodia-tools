@@ -1067,11 +1067,15 @@ def core_namespaces() -> frozenset[str]:
     (#518) without a cycle, and so that a namespace added to the gateway is
     reserved here the same day it exists, without anybody remembering to.
     """
-    from ..main import all_native_verb_names
+    from ..main import _GATEWAY_RETAINED_VERBS, all_native_verb_names
 
+    # The binding verbs the gateway keeps in a packaged namespace (they write
+    # the gateway's own binding registry) do not make the namespace the
+    # gateway's again: otherwise keeping them would refuse the pack connector.
     return frozenset(
         name.split(".", 1)[0] for name in all_native_verb_names()
-        if "." in name) | reserved_namespaces()
+        if "." in name and name not in _GATEWAY_RETAINED_VERBS
+    ) | reserved_namespaces()
 
 
 def check_namespace(namespace: str, verbs: Iterable[str], *,

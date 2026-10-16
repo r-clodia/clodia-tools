@@ -1981,6 +1981,16 @@ def _packaged_namespaces() -> frozenset[str]:
         return frozenset()
 
 
+#: Verbs of a packaged namespace that the GATEWAY keeps serving in `pack`
+#: position. They manage the gateway's own registry of channel bindings (and
+#: the join-by-link tokens of #549), which a pack must never write: moving
+#: them into the pack would either lose them or hand the binding registry to a
+#: pack process (review of clodia-logic#527).
+_GATEWAY_RETAINED_VERBS = frozenset({
+    "telegram.listen", "telegram.unlisten", "telegram.join_link",
+})
+
+
 def _is_packaged_verb(name: str) -> bool:
     """Questo verbo lo implementa un pack, non più il gateway.
 
@@ -1989,6 +1999,8 @@ def _is_packaged_verb(name: str) -> bool:
     servirli, e l'interruttore spegnerebbe la vetrina lasciando acceso il
     negozio.
     """
+    if name in _GATEWAY_RETAINED_VERBS:
+        return False
     ns = name.split(NS_SEP_DOT, 1)[0] if NS_SEP_DOT in name else ""
     return bool(ns) and ns in _packaged_namespaces()
 
@@ -1999,7 +2011,8 @@ def _migrated_away(tools: list[Tool]) -> list[Tool]:
     if not packaged:
         return list(tools)
     return [t for t in tools
-            if t.name.split(NS_SEP_DOT, 1)[0] not in packaged]
+            if t.name in _GATEWAY_RETAINED_VERBS
+            or t.name.split(NS_SEP_DOT, 1)[0] not in packaged]
 
 
 # memory.* — seed memory scrivibile dell'agente (universale, non richiede grant).
@@ -2570,8 +2583,17 @@ def _native_tool_namespaces() -> list[str]:
              + _copybrain.TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
-    ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in _migrated_away(tools)})
+    # The gateway-retained binding verbs do not keep a packaged namespace
+    # native: in `pack` position `telegram` belongs to the pack's backend.
+    ns = sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in _migrated_away(tools)
+                 if t.name not in _GATEWAY_RETAINED_VERBS
+                 or not _is_packaged_namespace(t.name)})
     return ns
+
+
+def _is_packaged_namespace(name: str) -> bool:
+    ns = name.split(NS_SEP_DOT, 1)[0] if NS_SEP_DOT in name else ""
+    return bool(ns) and ns in _packaged_namespaces()
 
 
 def runtime_configuration_warnings() -> list[str]:
@@ -3218,6 +3240,8 @@ def _fill_declared_defaults(name: str, arguments: dict) -> list[str]:
     """
     from .connectors import resolved as _connectors
 
+    if name in _GATEWAY_RETAINED_VERBS:
+        return []          # gateway-kept verb: no pack declaration applies
     hit = _connectors.default_arguments(name)
     if hit is None:
         return []
@@ -3289,6 +3313,8 @@ def _fill_declared_file(name: str, arguments: dict) -> bool:
     """
     from .connectors import resolved as _connectors
 
+    if name in _GATEWAY_RETAINED_VERBS:
+        return False       # gateway-kept verb: no pack declaration applies
     hit = _connectors.file_argument(name)
     if hit is None:
         return False
@@ -4720,6 +4746,10 @@ def _fill_declared_context(name: str, arguments: dict) -> dict:
     nativo sono già tutto, e per un verbo di pack significano una chiamata
     senza contesto, cioè rifiutata dal connettore, non eseguita a caso.
     """
+    if name in _GATEWAY_RETAINED_VERBS:
+        # A pack's declarations never apply to a verb the gateway keeps:
+        # they could only break or bend it (review of clodia-tools#377).
+        return arguments
     try:
         from .connectors import resolved as _conn
         if not _conn.context_arguments(name):
