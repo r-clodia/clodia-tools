@@ -452,6 +452,149 @@ author writes against:
 - status, last error and restart count appear on the Tools page
   (`GET /tools`, `GET /internal/connectors`).
 
+## Components (`components:`, clodia-platform#558)
+
+Owner decision of 2026-10-16: a pack is a **distribution of components**, each
+mounted in the container it belongs to. `connectors:` says what a connector *is*
+(schemes, mappings, taint, cards); `components:` says where its *code* runs.
+
+```yaml
+name: weather-pack
+first_party: true
+connectors:
+  - id: weather
+    manifest_version: 1
+    namespace: weather
+    label: Weather
+    verbs:
+      - verb: weather.fetch_report
+        direction: egress
+        scheme: https
+        arg: url
+        template: '{value}'
+    taint:
+      - weather.
+components:
+  - id: gateway
+    target: gateway
+    source:
+      repo: r-clodia/clodia-logic
+      path: catalogs/packs/weather-pack/gateway
+      ref: main
+    entry: weather_component
+    connectors: [weather]
+    credentials: [weather_]
+  - id: skills
+    target: agent-server
+  - id: card
+    target: webui
+```
+
+Each entry has an `id` (unique in the pack) and a `target`: `gateway`,
+`agent-server` or `webui`. The gateway parses only `target: gateway` entries,
+strictly; the others are left to the container that mounts them.
+
+### `target: gateway`
+
+| Field | Meaning |
+|---|---|
+| `source.repo` | `<owner>/<repository>` on GitHub. No URL, no host, no local path. |
+| `source.path` | Directory of the component inside the repository; relative, no `..`. |
+| `source.ref` | Branch, tag or commit to fetch. A branch is pinned to the commit fetched first and moves only on a refresh (pack Update). |
+| `entry` | Dotted Python module path inside the component; it defines `register(host)`. |
+| `connectors` | Ids of connectors declared by **this** pack whose verbs the component implements. It may register verbs only in their namespaces. |
+| `credentials` | Vault prefixes (ending in `_`) or exact entry names the component may use through `host.credentials(...)`. |
+
+Any other key is refused, and so is the entry alone (never the pack, never the
+other components).
+
+**Trust** (`server/components/trust.py`). A gateway component is code running
+inside the reference monitor, so it is fetched and run only when all hold:
+
+- the gateway knows the pack as first-party (`connectors.builtin.FIRST_PARTY_PACKS`)
+  **and** the manifest says `first_party: true`;
+- `source.repo` belongs to an allowed organisation: gateway config
+  `components.allowed_orgs`, else `CLODIA_COMPONENT_ORGS`, else `r-clodia`;
+- the gateway state dir is isolated from the shared datadir (#80);
+- the resolved commit is reachable from the repository's **default branch**
+  (merged code only);
+- it is not older than the pinned commit (`behind`/`diverged` upstream, or a
+  different repository, is a downgrade): refused unless the owner refreshes
+  with `allow_downgrade`.
+
+Anything else is refused (default deny). Third-party components are not
+supported; `trust.owner_approved` is the hook for a future SYSTEM gate.
+
+**Fetch and pin** (`store.py`). The gateway fetches the component itself, from
+GitHub (a token is not needed for a public repository; for a private
+first-party one it retries with the vault's `github_pat`, which never follows a
+redirect). Only `source.path` is extracted — regular files and directories,
+with size caps — into `<state_dir>/components/<pack>/<id>/<commit>/`, and
+`pins.json` records `{repo, path, ref, entry, commit, tree_sha256, fetched_at,
+previous}`. The tree hash is checked again before every import. Component code
+is never read from `/datadir/plugins` or `/datadir/packs`.
+
+**Load** (`loader.py`). At startup and whenever the installed manifests change
+(the registry's rebuild signature), the entry module is imported as
+`clodia_components.<pack>.<id>.<entry>` and `register(host)` is called. Import
+your own modules relatively (`from . import helper`): the component directory is
+not on `sys.path`. A failing import or `register` disables **that component
+only** — logged CRITICAL, shown by `GET /internal/components`, and every verb in
+its connectors' namespaces answers `DENIED` with the reason.
+
+**Import guard** (`guard.py`). Before the import, every `.py` file of the tree
+is parsed; the load is refused if one imports `server`, `server.vault`,
+`server.state_paths`, `server.whitelist`, `server.gate`, `server.egress` or
+`server.main` — directly, through `from server import …`, or via
+`importlib.import_module`/`__import__` (a dynamic import with a non-literal
+target is refused too). It is a guard against mistakes, not a sandbox: trust
+comes from the rules above.
+
+### The host API (`server/components/host.py`)
+
+The only thing a component gets:
+
+```python
+host.register_verb(tool: mcp.types.Tool, handler, *, offload=True)
+host.register_route(path, methods, handler, *, auth="owner")   # or "admin"
+host.credentials(prefix) -> ScopedCredentials   # list/has/read/read_internal/deposit/remove
+host.topics.read_file(tier, name, path) -> bytes
+host.topics.put_file(tier, name, path, data, *, provenance="untrusted")
+host.note_crossing(data=None, *, path=None, kind="file")
+host.scratch_path(path) -> str
+host.config(key, default=None); host.set_config(key, value)   # owner routes only
+host.agent(); host.channel(); host.principal(); host.log
+```
+
+- **Verbs** join the catalogue next to the native ones and run through the same
+  `call_tool` path: whitelist, deny, unattended block, gates, the egress PDP
+  and taint from this pack's `connectors:` mappings, audit. The dispatcher
+  calls the handler where it calls a native one. A verb is served only while
+  the pack's connector for its namespace is held in the registry; a native verb
+  name or a core namespace is refused at registration. Registration closes
+  when `register` returns.
+- **Routes** are mounted at `/tools/<pack>/<path>`, after every core route.
+  `owner` = a human admin or the trusted core; `admin` also admits the
+  agent-server's signed role. There is no public route.
+- **Credentials**: a prefix must be declared, and must be usable *now*: inside
+  the namespace of one of the component's connectors; or a core prefix
+  (`google_`, `gmail_`, …) released by the connectors switched to this very
+  pack (`builtin.released_to`); or a gateway-infrastructure entry listed in
+  `builtin.CORE_CREDENTIALS_FOLLOW` (e.g. `app_google_oauth`) whose switch is
+  on this pack. Checked again at every call: flipping the switch back revokes
+  the access at once. `read` enforces the calling agent's vault grant;
+  `read_internal` is the component's own infrastructure read.
+- **Topics**: membership/clearance checks (`_require_topic_member`), crossing
+  notes on reads, `untrusted` writes taint the room; a component cannot label a
+  file `trusted`.
+
+### Endpoints
+
+- `GET /internal/components` (admin): status of every gateway component.
+- `POST /internal/components/<pack>/refresh` (admin): re-resolve that pack's refs
+  upstream and reload — what the agent-server calls after a pack Update.
+  `{"allow_downgrade": true}` is accepted from the owner only.
+
 ## The gateway's own manifests
 
 `connectors/builtin_manifests/*.yaml` are manifests the gateway ships with
