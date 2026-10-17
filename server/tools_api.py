@@ -18,6 +18,7 @@ lo scambio è server-side, il deposito va nella vault.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -686,6 +687,13 @@ def register_mcp_core(config, secrets: dict | None = None,
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", str(pack)):
                 raise McpRegisterError(f"nome di pack non valido: {pack!r}")
             backend["pack"] = str(pack)
+        # The hash of the config AS MOUNTED (placeholders, never secret values:
+        # those go to the vault below). The agent-server compares it with the
+        # pack's declared config before a disable records a server to mount
+        # back on enable: only what was reviewed and mounted comes back
+        # (clodia-platform#563). Same normalisation as its `config_hash`.
+        backend["config_sha256"] = hashlib.sha256(
+            json.dumps(spec, sort_keys=True, default=str).encode("utf-8")).hexdigest()
         # PROPRIETÀ, non solo nome (clodia-platform#539 §4). Il dedup per slug
         # SOSTITUIVA la voce esistente e le scriveva sopra il `pack` del nuovo
         # mount: un pack che montasse un server chiamato come quello di un admin
