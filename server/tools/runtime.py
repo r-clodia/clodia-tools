@@ -438,7 +438,10 @@ def mcp_servers() -> dict:
     backends = whitelist.CONFIG.get("mcp_backends") or []
     mounted = []
     for b in backends:
-        row = _pick(b, ("name", "label", "transport"))
+        # `pack`: who mounted it (the stamp of `register_mcp_core`). The
+        # agent-server's disable unmounts only its own pack's backends that
+        # are really mounted (clodia-platform#563); a name alone is not that.
+        row = _pick(b, ("name", "label", "transport", "pack"))
         if mcp_oauth.auth_spec(b):
             row["auth"] = "oauth"
             row["authorized"] = mcp_oauth.authorization_status(b)["authorized"]

@@ -52,5 +52,20 @@ class DisabledPackTests(_Istanza):
         self.assertEqual(resolved.seniority().get("comms-pack"), before)
 
 
+class McpListNamesThePackTests(unittest.TestCase):
+    def test_the_owning_pack_is_listed(self) -> None:
+        from unittest.mock import patch
+        from .. import whitelist
+        from ..tools import runtime
+        cfg = {"mcp_backends": [{"name": "acme", "transport": "stdio", "pack": "acme-pack",
+                                 "command": "secret-cmd"},
+                                {"name": "mine", "transport": "http"}]}
+        with patch.dict(whitelist.CONFIG, cfg):
+            rows = {r["name"]: r for r in runtime.mcp_servers()["mcp_backends"]}
+        self.assertEqual(rows["acme"].get("pack"), "acme-pack")
+        self.assertNotIn("pack", rows["mine"])
+        self.assertNotIn("command", rows["acme"])   # still names only
+
+
 if __name__ == "__main__":
     unittest.main()
