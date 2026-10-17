@@ -103,7 +103,7 @@ def normalize_auth(raw: Any, *, transport: str) -> dict:
     if transport != "http":
         raise ValueError("auth OAuth vale solo per i server http/sse, non per quelli stdio")
     out: dict[str, Any] = {"type": "oauth"}
-    for key in ("scope", "client_name", "redirect_uri"):
+    for key in ("scope", "client_name", "redirect_uri", "authorization_server"):
         val = raw.get(key)
         if val:
             out[key] = str(val)
@@ -203,6 +203,42 @@ def forget(slug: str) -> bool:
     return vault.remove(credential_name(slug))
 
 
+# ── Quale authorization server (clodia-platform#566) ────────────────────────
+
+#: Suffissi di un documento di metadata (RFC 8414 §3, OIDC Discovery §4).
+_METADATA_SUFFIXES = ("/.well-known/oauth-authorization-server",
+                      "/.well-known/openid-configuration")
+
+
+def issuer_of(advertised: str) -> str:
+    """L'issuer dietro una voce di `authorization_servers`.
+
+    RFC 9728 vuole lì l'**issuer** dell'authorization server. Invoicetronic
+    (17 ott 2026) ci scrive invece la URL del suo documento di metadata,
+    `https://mcp.invoicetronic.com/.well-known/oauth-authorization-server`:
+    l'SDK ci costruisce sopra la discovery path-aware, prende 404 ovunque,
+    ripiega su `/register` all'origin — che lì non esiste — e il consenso non
+    parte. Togliere il suffisso ridà l'issuer; la verifica dell'issuer
+    (`validate_metadata_issuer`) resta quella dell'SDK, quindi un server che
+    pubblica metadati con un altro issuer viene ancora rifiutato.
+
+    Copre anche la forma con path inserito (RFC 8414 §3.1):
+    `https://h/.well-known/oauth-authorization-server/tenant` → `https://h/tenant`.
+    """
+    raw = str(advertised or "")
+    parsed = urlparse(raw)
+    path = parsed.path or ""
+    for suffix in _METADATA_SUFFIXES:
+        if path.rstrip("/").endswith(suffix):
+            path = path.rstrip("/")[: -len(suffix)]
+        elif path.startswith(suffix + "/"):
+            path = path[len(suffix):]
+        else:
+            continue
+        return f"{parsed.scheme}://{parsed.netloc}{path}"
+    return raw
+
+
 # ── Il provider ─────────────────────────────────────────────────────────────
 
 class _Provider(OAuthClientProvider):
@@ -215,6 +251,16 @@ class _Provider(OAuthClientProvider):
     che senza browser non può finire — mentre nella vault c'era un refresh
     token buono. Quattro righe qui e il refresh automatico funziona davvero.
     """
+
+    #: `auth.authorization_server` del backend: scavalca ciò che il server
+    #: annuncia, per i server i cui metadati sono rotti in un modo che
+    #: `issuer_of` non sa riparare (clodia-platform#566).
+    authorization_server: str | None = None
+
+    def _select_authorization_server(self, advertised: list[str]) -> str:
+        if self.authorization_server:
+            return self.authorization_server
+        return issuer_of(super()._select_authorization_server(advertised))
 
     async def _initialize(self) -> None:
         await super()._initialize()
@@ -312,8 +358,28 @@ def _discovery_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=10.0, follow_redirects=True)
 
 
+class _PinnedScopeMetadata(OAuthClientMetadata):
+    """Metadati del client il cui `scope`, se dichiarato, non si allarga.
+
+    Al passo 3 del flusso l'SDK (mcp 1.30) RISCRIVE `client_metadata.scope`
+    con la «scope selection strategy» della spec MCP: lo scope del
+    `WWW-Authenticate` o, in mancanza, TUTTI gli `scopes_supported` del
+    protected-resource metadata. Lo scope dichiarato dall'owner nel backend
+    veniva così buttato: `invoicetronic:read` diventava
+    `invoicetronic:read invoicetronic:write` (clodia-platform#566, scoperto dal
+    test). Uno scope scelto per restringere i permessi è una decisione
+    dell'owner, non un suggerimento: qui l'assegnazione viene ignorata. Senza
+    scope dichiarato resta la strategia dell'SDK.
+    """
+
+    def __setattr__(self, name, value):
+        if name == "scope" and getattr(self, "scope", None):
+            return
+        super().__setattr__(name, value)
+
+
 def client_metadata(auth: dict) -> OAuthClientMetadata:
-    return OAuthClientMetadata.model_validate({
+    return _PinnedScopeMetadata.model_validate({
         "client_name": auth.get("client_name") or DEFAULT_CLIENT_NAME,
         "redirect_uris": [redirect_uri(auth)],
         "grant_types": ["authorization_code", "refresh_token"],
@@ -340,13 +406,15 @@ def provider_for(backend: dict, *, handlers: tuple | None = None) -> _Provider |
         raise ValueError(f"backend '{slug}': auth OAuth senza url")
     if handlers is None:
         handlers = (_refuse_redirect(slug), _refuse_callback(slug))
-    return _Provider(
+    provider = _Provider(
         server_url=str(url),
         client_metadata=client_metadata(auth),
         storage=VaultTokenStorage(slug),
         redirect_handler=handlers[0],
         callback_handler=handlers[1],
     )
+    provider.authorization_server = auth.get("authorization_server") or None
+    return provider
 
 
 def _refuse_redirect(slug: str):
