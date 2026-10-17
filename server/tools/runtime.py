@@ -434,7 +434,7 @@ def mcp_servers() -> dict:
     c'è: senza, «montato» si legge come «usabile» e l'agente scopre il contrario
     chiamando un tool che fallisce.
     """
-    from .. import mcp_oauth
+    from .. import mcp_credentials, mcp_oauth
     backends = whitelist.CONFIG.get("mcp_backends") or []
     mounted = []
     for b in backends:
@@ -445,6 +445,17 @@ def mcp_servers() -> dict:
         if mcp_oauth.auth_spec(b):
             row["auth"] = "oauth"
             row["authorized"] = mcp_oauth.authorization_status(b)["authorized"]
+        # Con `auth.methods` (#565): se è connesso e con cosa — mai i valori.
+        metodi = mcp_credentials.public_methods(b)
+        if metodi:
+            attivo = mcp_credentials.active(b)
+            # Stessa forma della card (`connectors_snapshot`).
+            row["auth_methods"] = metodi
+            if any(m["type"] == "oauth" for m in metodi):
+                row["auth"] = "oauth"
+                row["authorized"] = attivo == "oauth"
+            row["auth_active"] = attivo
+            row["connected"] = attivo is not None
         mounted.append(row)
     native = ["fs", "agent", "email", "topic", "runtime"]
     return {"native": native, "mcp_backends": mounted, "count": len(mounted)}
