@@ -343,6 +343,21 @@ def credential_type(credential: str) -> Optional[str]:
     return "" if has_credential(credential) else None
 
 
+def field_names(credential: str) -> set[str]:
+    """I NOMI dei campi non vuoti di un bundle, senza i valori e senza audit.
+
+    Serve a dire se una credenziale è completa (la card di un backend MCP la
+    chiede a ogni render, clodia-platform#565): non è una lettura del segreto,
+    e un evento d'audit a ogni render seppellirebbe le letture vere.
+    """
+    bundle_path = _store_dir() / f"{credential}.json"
+    try:
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    return {k for k, v in bundle.items() if v} if isinstance(bundle, dict) else set()
+
+
 def read_internal(credential: str) -> dict:
     """Lettura interna del gateway, NON mediata da un agente: per le credenziali
     di **infrastruttura del gateway stesso** (es. il client OAuth dell'app,

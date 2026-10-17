@@ -74,6 +74,7 @@ class _Base(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         self.vault = _vault(self)
+        self.vault.field_names = lambda cred: {k for k, v in (self.vault.store.get(cred) or {}).items() if v}
         for mod in (mcp_credentials, tools_api, proxy):
             q = patch.object(mod, "vault", self.vault)
             q.start()
@@ -210,6 +211,14 @@ class ReviewFixTests(_Base):
             await mcp_credentials.connect(b, {"APIKEY": KEY})
         self.assertNotIn("ghp_REALSECRET", str(e.exception))
         self.assertNotIn(KEY, str(e.exception))
+
+    def test_the_injected_header_written_twice_is_not_a_leftover(self):
+        b = self.mount({"url": URL, "headers": {"Invoicetronic-ApiKey": "${APIKEY}"}, "auth": DECL})
+        self.assertNotIn("headers", b)
+
+    def test_secret_names_cannot_escape_the_store(self):
+        with self.assertRaises(tools_api.McpRegisterError):
+            self.mount({"url": URL, "headers": {"K": "${../x}"}}, secrets={"../x": "v"}, name="trav")
 
     async def test_oauth_finish_refused_after_a_credential_connect(self):
         b = self.mount({"url": URL, "auth": DECL})

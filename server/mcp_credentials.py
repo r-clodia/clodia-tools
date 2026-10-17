@@ -236,12 +236,8 @@ def has_credential(backend: dict) -> bool:
     method = credential_method(backend)
     if method is None:
         return True
-    try:
-        bundle = vault.read_internal(cred) or {}
-    except Exception:  # noqa: BLE001 — illeggibile = da riconnettere
-        return False
-    return all(isinstance(bundle.get(f["name"]), str) and bundle.get(f["name"])
-               for f in method.get("fields") or [])
+    presenti = vault.field_names(cred)
+    return all(f["name"] in presenti for f in method.get("fields") or [])
 
 
 def active(backend: dict) -> str | None:

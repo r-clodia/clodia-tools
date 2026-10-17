@@ -691,6 +691,11 @@ def register_mcp_core(config, secrets: dict | None = None,
         try:
             if spec.get("auth") is not None:
                 backend["auth"] = mcp_credentials.normalize(spec["auth"], transport=transport)
+                declared = mcp_credentials.credential_method(backend)
+                if declared is not None:
+                    # Lo stesso header scritto anche fuori da auth.methods: lo
+                    # mette l'iniezione, nel config non deve restare.
+                    backend = mcp_credentials.strip_injected(backend, declared)
             else:
                 implicit = mcp_credentials.implicit_method(
                     backend, transport, provided={k for k, v in secrets_in.items() if v})
@@ -753,11 +758,6 @@ def register_mcp_core(config, secrets: dict | None = None,
                 LOG.info("mcp: backend '%s' del connettore nativo sostituito "
                          "dal mount del pack '%s' (connettore passato al pack)",
                          slug, adesso)
-            elif prima == adesso and (mcp_credentials.fingerprint(precedente)
-                                      != mcp_credentials.fingerprint(backend)):
-                # Stesso proprietario, ma il backend ora punta altrove: la
-                # credenziale e i token restano dell'host di prima (#565).
-                forget_after.append(slug)
             elif prima != adesso:
                 chi_prima = f"il pack '{prima}'" if prima else "un amministratore"
                 chi_ora = f"il pack '{adesso}'" if adesso else "un amministratore"
@@ -766,6 +766,10 @@ def register_mcp_core(config, secrets: dict | None = None,
                     f"{chi_ora} non può sostituirlo. Smontalo prima "
                     f"(mcp.remove), oppure monta il tuo con un altro nome.",
                     status=409)
+            if mcp_credentials.fingerprint(precedente) != mcp_credentials.fingerprint(backend):
+                # Rimount accettato (aggiornamento o adozione) che ora punta
+                # altrove: credenziale e token restano dell'host di prima (#565).
+                forget_after.append(slug)
         # Secrets: placeholders are replaced in the config now, but the vault
         # (infra, no grant) is written only once EVERY server of the request
         # has been accepted — a refusal on a later server must not leave the
@@ -773,6 +777,9 @@ def register_mcp_core(config, secrets: dict | None = None,
         for sname, sval in secrets_in.items():
             if not sval:
                 continue
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", str(sname)):
+                # Il nome finisce nel nome del file del vault: niente `../`.
+                raise McpRegisterError(f"server '{name}': nome di segreto non valido: {sname!r}")
             cred = f"mcp_{slug}_{sname}"
             deposits.append((cred, sval))
             backend = _replace_placeholder(backend, sname, f"${{VAULT:{cred}}}")
