@@ -401,7 +401,9 @@ def _installed_manifests() -> dict[str, dict]:
             # A disabled pack (clodia-platform#563) counts as absent for
             # everything that reads manifests: its connectors are gone (their
             # verbs fail closed, its topic buttons vanish) and its gateway
-            # component is unloaded, its pin kept. Its FILE still counts for
+            # component is unloaded and its pin forgotten (the floor stays):
+            # enabled again, it is pinned anew at the upstream head, as at a
+            # first install. Its FILE still counts for
             # seniority (`_manifest_files`), so enabling it again does not make
             # it the newcomer of a clash it was first in.
             LOG.info("connectors: pack '%s' disabled, ignored", name)
