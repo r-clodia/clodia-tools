@@ -441,7 +441,7 @@ def mcp_servers() -> dict:
         # `pack`: who mounted it (the stamp of `register_mcp_core`). The
         # agent-server's disable unmounts only its own pack's backends that
         # are really mounted (clodia-platform#563); a name alone is not that.
-        row = _pick(b, ("name", "label", "transport", "pack"))
+        row = _pick(b, ("name", "label", "transport", "pack", "config_sha256"))
         if mcp_oauth.auth_spec(b):
             row["auth"] = "oauth"
             row["authorized"] = mcp_oauth.authorization_status(b)["authorized"]

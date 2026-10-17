@@ -66,6 +66,23 @@ class McpListNamesThePackTests(unittest.TestCase):
         self.assertNotIn("pack", rows["mine"])
         self.assertNotIn("command", rows["acme"])   # still names only
 
+    def test_a_mount_records_the_hash_of_its_config(self) -> None:
+        import hashlib
+        import json as _json
+        from unittest.mock import patch
+        from .. import proxy, tools_api, whitelist
+        spec = {"command": "acme-server", "args": ["--x"], "env": {"K": "${K}"}}
+        cfg = {"mcp_backends": []}
+        with patch.object(whitelist, "CONFIG", cfg), \
+             patch.object(whitelist, "save_config", lambda: None), \
+             patch.object(whitelist, "reload_config", lambda: None), \
+             patch.object(proxy, "clear_cache", lambda: None), \
+             patch("server.instance_profile.integrations_check", lambda s: None):
+            tools_api.register_mcp_core({"mcpServers": {"acme": spec}}, pack="acme-pack")
+        (entry,) = [b for b in cfg["mcp_backends"] if b.get("name") == "acme"]
+        self.assertEqual(entry["config_sha256"], hashlib.sha256(
+            _json.dumps(spec, sort_keys=True, default=str).encode("utf-8")).hexdigest())
+
 
 if __name__ == "__main__":
     unittest.main()
