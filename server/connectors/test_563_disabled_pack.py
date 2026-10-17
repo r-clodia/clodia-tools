@@ -1,0 +1,56 @@
+"""clodia-platform#563 — a disabled pack counts as absent.
+
+The agent-server disables a pack by writing `disabled: true` in its installed
+`pack.yaml`. The gateway must then treat it exactly like a removed pack: its
+connectors are gone (verbs fail closed on `pack`, no topic buttons), its
+gateway component is not declared (unloaded at the next reconcile). Its file
+still counts for seniority, so enabling it again does not turn it into the
+newcomer of a clash it was first in.
+"""
+from __future__ import annotations
+
+import json
+import unittest
+
+from . import resolved
+from .test_522_pack_switch import _comms_pack, _Istanza
+
+
+class DisabledPackTests(_Istanza):
+    def _write(self, **extra) -> None:
+        (self.dir / "packs" / "comms-pack" / "pack.yaml").write_text(
+            json.dumps({**_comms_pack(), **extra}), encoding="utf-8")
+        resolved.invalidate()
+
+    def test_a_disabled_pack_is_not_a_manifest(self) -> None:
+        self.assertIn("comms-pack", resolved.manifests())
+        self._write(disabled=True)
+        self.assertNotIn("comms-pack", resolved.manifests())
+        self._write(disabled=False)
+        self.assertIn("comms-pack", resolved.manifests())
+
+    def test_its_connector_is_gone_on_pack(self) -> None:
+        self.posizione("pack")
+        self.assertEqual(resolved.registry().by_id("telegram").pack, "comms-pack")
+        self._write(disabled=True)
+        telegram = resolved.registry().by_id("telegram")
+        self.assertTrue(telegram is None or telegram.pack != "comms-pack",
+                        "a disabled pack must not hold its connector")
+
+    def test_only_a_true_boolean_disables(self) -> None:
+        # A string is not a decision: "false" must not switch a pack off.
+        for v in ("true", "false", 1, "yes"):
+            self._write(disabled=v)
+            self.assertIn("comms-pack", resolved.manifests(), v)
+
+    def test_its_file_keeps_its_seniority(self) -> None:
+        before = resolved.seniority().get("comms-pack")
+        self._write(disabled=True)
+        self.assertIn("comms-pack",
+                      [p.parent.name for p in resolved._manifest_files()])
+        self._write(disabled=False)
+        self.assertEqual(resolved.seniority().get("comms-pack"), before)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -397,6 +397,15 @@ def _installed_manifests() -> dict[str, dict]:
         if not isinstance(loaded, Mapping):
             continue
         name = str(loaded.get("name") or path.parent.name)
+        if loaded.get("disabled") is True:
+            # A disabled pack (clodia-platform#563) counts as absent for
+            # everything that reads manifests: its connectors are gone (their
+            # verbs fail closed, its topic buttons vanish) and its gateway
+            # component is unloaded, its pin kept. Its FILE still counts for
+            # seniority (`_manifest_files`), so enabling it again does not make
+            # it the newcomer of a clash it was first in.
+            LOG.info("connectors: pack '%s' disabled, ignored", name)
+            continue
         out[name] = dict(loaded)
     return out
 
