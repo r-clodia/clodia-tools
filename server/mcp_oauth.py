@@ -111,13 +111,34 @@ def normalize_auth(raw: Any, *, transport: str) -> dict:
     return out
 
 
+def credential_cred_name(slug: str) -> str:
+    """Bundle della credenziale inserita al «Connetti» (clodia-platform#565)."""
+    return f"mcp_cred_{slug}"
+
+
 def auth_spec(backend: dict) -> dict | None:
-    """Lo spec OAuth di un backend montato, o None se usa segreti statici."""
+    """Lo spec OAuth di un backend montato, o None se non fa OAuth.
+
+    Con `auth.methods` (clodia-platform#565) è il metodo `oauth` della lista —
+    ma None se il backend è connesso con la credenziale inserita: allora il
+    provider OAuth non deve nemmeno nascere, l'header lo mette l'iniezione.
+    """
     auth = (backend or {}).get("auth")
     if isinstance(auth, str):
         auth = {"type": auth}
     if not isinstance(auth, dict):
         return None
+    if isinstance(auth.get("methods"), list):
+        oauth = next((m for m in auth["methods"] if isinstance(m, dict)
+                      and str(m.get("type") or "").lower() == "oauth"), None)
+        if oauth is None:
+            return None
+        has_cred = any(isinstance(m, dict) and m.get("type") == "credential"
+                       for m in auth["methods"])
+        slug = str((backend or {}).get("name") or "")
+        if has_cred and vault.has_credential(credential_cred_name(slug)):
+            return None
+        return oauth
     return auth if str(auth.get("type") or "").lower() == "oauth" else None
 
 
@@ -519,6 +540,9 @@ async def begin(backend: dict) -> dict:
     slug = str(backend.get("name") or "")
     auth = auth_spec(backend)
     if not auth:
+        if vault.has_credential(credential_cred_name(slug)):
+            raise ValueError(f"il server MCP '{slug}' è connesso con una credenziale: "
+                             "«Disconnetti» prima di avviare un consenso OAuth")
         raise ValueError(f"il server MCP '{slug}' non è configurato con auth OAuth")
     flow = _Flow(slug)
 
@@ -574,6 +598,10 @@ async def finish(state: str, raw_code: str) -> dict:
         raise ValueError("lo state della URL incollata non è quello del consenso in corso")
     if not code:
         raise ValueError("manca il parametro 'code' nella URL incollata")
+    if vault.has_credential(credential_cred_name(flow.slug)):
+        # Un consenso partito prima di un «Connetti» con credenziale (#565).
+        raise ValueError(f"il server MCP '{flow.slug}' è stato connesso con una "
+                         "credenziale nel frattempo: «Disconnetti» prima del consenso")
     if not flow.code.done():
         flow.code.set_result((code, url_state or state))
     assert flow.task is not None
