@@ -32,6 +32,7 @@ except ImportError:  # mcp >=2 ha rinominato il simbolo
 from mcp.types import Tool
 
 from . import docmd as _docmd
+from . import mcp_credentials
 from . import mcp_oauth
 from . import vault
 from .tools import pack_runtime
@@ -136,7 +137,9 @@ async def session(b: dict, *, oauth_handlers: tuple | None = None):
     guidato dalla card — in una chiamata di tool resta None, e un backend non
     ancora autorizzato fallisce invece di aprire un consenso che nessuno può dare.
     """
-    b = _resolve_secrets(b)
+    # La credenziale inserita al «Connetti» (#565) entra qui come `${VAULT:…}`,
+    # e la risolve la riga dopo come ogni altro segreto del backend.
+    b = _resolve_secrets(mcp_credentials.apply(b))
     transport = b.get("transport", "stdio")
     if transport == "stdio":
         # `runtime_env` e non `os.environ`: i backend stdio sono i server MCP dei

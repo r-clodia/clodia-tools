@@ -34,6 +34,7 @@ from starlette.routing import Route
 
 from . import google_oauth as go
 from . import instance_profile
+from . import mcp_credentials
 from . import mcp_oauth
 from . import proxy
 from . import vault
@@ -435,14 +436,25 @@ def connectors_snapshot() -> list[dict]:
         }
         # Un backend OAuth non ancora autorizzato è montato ma non usabile:
         # stessa distinzione delle dipendenze pip mancanti (#451), stesso posto.
-        if mcp_oauth.auth_spec(b):
-            st = mcp_oauth.authorization_status(b)
-            row["auth"] = "oauth"
-            row["authorized"] = st["authorized"]
-            if not st["authorized"]:
+        # Con `auth.methods` (#565) la card riceve anche i metodi del suo
+        # «Connetti» — tipi, scope, nomi ed etichette dei campi, mai valori — e
+        # con quale è connesso.
+        metodi = mcp_credentials.public_methods(b)
+        if metodi:
+            attivo = mcp_credentials.active(b)
+            row["auth_methods"] = metodi
+            row["auth_active"] = attivo
+            if any(m["type"] == "oauth" for m in metodi):
+                row["auth"] = "oauth"  # forma di #532, che la webui già legge
+                row["authorized"] = attivo == "oauth"
+            if attivo is None:
                 row["connected"] = False
                 row["operational"] = False
-                row["issues"] = [{"error": st["detail"]}]
+                if mcp_oauth.auth_spec(b) and len(metodi) == 1:
+                    detail = mcp_oauth.authorization_status(b)["detail"]
+                else:
+                    detail = "non connesso: serve «Connetti» dalla card"
+                row["issues"] = [{"error": detail}]
         gap = gaps_by_server.get(_slugify(str(b.get("name") or "")))
         if gap:
             row["operational"] = False
@@ -659,26 +671,33 @@ def register_mcp_core(config, secrets: dict | None = None,
         except PermissionError as e:
             raise McpRegisterError(str(e), status=403)
         if spec.get("url"):
+            transport = "http"
             backend = {"name": slug, "label": name, "transport": "http", "url": spec["url"]}
             if spec.get("headers"):
                 backend["headers"] = spec["headers"]
-            if spec.get("auth") is not None:
-                try:
-                    backend["auth"] = mcp_oauth.normalize_auth(spec["auth"], transport="http")
-                except ValueError as e:
-                    raise McpRegisterError(f"server '{name}': {e}")
         elif spec.get("command"):
+            transport = "stdio"
             backend = {"name": slug, "label": name, "transport": "stdio",
                        "command": spec["command"], "args": spec.get("args", [])}
             if spec.get("env"):
                 backend["env"] = spec["env"]
-            if spec.get("auth") is not None:
-                try:
-                    mcp_oauth.normalize_auth(spec["auth"], transport="stdio")
-                except ValueError as e:
-                    raise McpRegisterError(f"server '{name}': {e}")
         else:
             raise McpRegisterError(f"server '{name}': serve 'url' (http) o 'command' (stdio)")
+        # Come si connette (clodia-platform#565): `auth` dichiarato, oppure i
+        # placeholder `${NOME}` rimasti senza segreto — il caso di ogni
+        # `.mcp.json` di pack — diventano un metodo `credential` da riempire
+        # al «Connetti». Nessun segreto chiesto al mount.
+        try:
+            if spec.get("auth") is not None:
+                backend["auth"] = mcp_credentials.normalize(spec["auth"], transport=transport)
+            else:
+                implicit = mcp_credentials.implicit_method(
+                    backend, transport, provided={k for k, v in secrets_in.items() if v})
+                if implicit is not None:
+                    backend = mcp_credentials.strip_injected(backend, implicit)
+                    backend["auth"] = {"methods": [implicit]}
+        except ValueError as e:
+            raise McpRegisterError(f"server '{name}': {e}")
         # Provenienza (review di #354): il backend montato DAL MOUNT DI UN PACK
         # porta il nome del pack, ed è l'unica prova con cui quel pack può
         # usarne il namespace per i propri connettori. Un mount da Tools o da
@@ -776,9 +795,10 @@ def unregister_mcp_core(name: str) -> dict:
     invece sì: restassero nella vault, un remount dello stesso slug — magari
     verso un'altra URL — ripartirebbe con le credenziali del precedente."""
     cfg = whitelist.CONFIG
-    if any(mcp_oauth.auth_spec(b) for b in (cfg.get("mcp_backends") or [])
-           if b.get("name") == name):
-        mcp_oauth.forget(name)
+    # Token OAuth e credenziale inserita al «Connetti» (#565), qualunque sia il
+    # metodo attivo: `forget`/`remove` sono idempotenti.
+    mcp_oauth.forget(name)
+    vault.remove(mcp_credentials.cred_name(name))
     cfg["mcp_backends"] = [b for b in (cfg.get("mcp_backends") or []) if b.get("name") != name]
     whitelist.save_config()
     whitelist.reload_config()
@@ -858,6 +878,42 @@ async def mcp_oauth_complete(request: Request):
         LOG.warning("mcp oauth complete fallito: %s", type(e).__name__)
         return JSONResponse({"error": f"{type(e).__name__}: {str(e)[:200]}"}, status_code=502)
     proxy.clear_cache()  # ora il backend espone tool: la lista cache-ata è vecchia
+    return JSONResponse(res)
+
+
+async def mcp_connect(request: Request):
+    """POST /tools/mcp/{name}/connect {fields: {...}} → credenziale provata e salvata.
+
+    clodia-platform#565. Stesso territorio admin di `oauth/start`. I valori
+    vanno nella vault SOLO se il backend, provato con quei valori, risponde a
+    `list_tools`; la risposta non li contiene mai.
+    """
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    b = _mcp_backend(request.path_params["name"])
+    if b is None:
+        return JSONResponse({"error": "backend non montato"}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    try:
+        res = await mcp_credentials.connect(b, body.get("fields") or {})
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    proxy.clear_cache()
+    return JSONResponse(res)
+
+
+async def mcp_disconnect(request: Request):
+    """POST /tools/mcp/{name}/disconnect → credenziale e token OAuth fuori dalla vault."""
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    b = _mcp_backend(request.path_params["name"])
+    if b is None:
+        return JSONResponse({"error": "backend non montato"}, status_code=404)
+    res = mcp_credentials.disconnect(b)
+    proxy.clear_cache()
     return JSONResponse(res)
 
 
@@ -1918,4 +1974,6 @@ routes = [
     Route("/tools/mcp/{name}", unregister_mcp, methods=["DELETE"]),
     Route("/tools/mcp/{name}/oauth/start", mcp_oauth_start, methods=["POST"]),
     Route("/tools/mcp/{name}/oauth/complete", mcp_oauth_complete, methods=["POST"]),
+    Route("/tools/mcp/{name}/connect", mcp_connect, methods=["POST"]),
+    Route("/tools/mcp/{name}/disconnect", mcp_disconnect, methods=["POST"]),
 ]
