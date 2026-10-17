@@ -34,6 +34,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+from pydantic import PrivateAttr
 from mcp.client.auth import OAuthClientProvider
 from mcp.client.auth.utils import (
     build_oauth_authorization_server_metadata_discovery_urls,
@@ -232,7 +233,7 @@ def issuer_of(advertised: str) -> str:
         if path.rstrip("/").endswith(suffix):
             path = path.rstrip("/")[: -len(suffix)]
         elif path.startswith(suffix + "/"):
-            path = path[len(suffix):]
+            path = path[len(suffix):].rstrip("/")
         else:
             continue
         return f"{parsed.scheme}://{parsed.netloc}{path}"
@@ -259,7 +260,9 @@ class _Provider(OAuthClientProvider):
 
     def _select_authorization_server(self, advertised: list[str]) -> str:
         if self.authorization_server:
-            return self.authorization_server
+            # Vale solo quando il server pubblica il protected-resource
+            # metadata: è l'unico momento in cui l'SDK chiede quale AS usare.
+            return issuer_of(self.authorization_server)
         return issuer_of(super()._select_authorization_server(advertised))
 
     async def _initialize(self) -> None:
@@ -372,14 +375,16 @@ class _PinnedScopeMetadata(OAuthClientMetadata):
     scope dichiarato resta la strategia dell'SDK.
     """
 
+    _declared: bool = PrivateAttr(default=False)
+
     def __setattr__(self, name, value):
-        if name == "scope" and getattr(self, "scope", None):
+        if name == "scope" and self._declared:
             return
         super().__setattr__(name, value)
 
 
 def client_metadata(auth: dict) -> OAuthClientMetadata:
-    return _PinnedScopeMetadata.model_validate({
+    md = _PinnedScopeMetadata.model_validate({
         "client_name": auth.get("client_name") or DEFAULT_CLIENT_NAME,
         "redirect_uris": [redirect_uri(auth)],
         "grant_types": ["authorization_code", "refresh_token"],
@@ -387,6 +392,8 @@ def client_metadata(auth: dict) -> OAuthClientMetadata:
         "scope": auth.get("scope"),
         "token_endpoint_auth_method": "client_secret_post",
     })
+    md._declared = bool(auth.get("scope"))
+    return md
 
 
 def provider_for(backend: dict, *, handlers: tuple | None = None) -> _Provider | None:

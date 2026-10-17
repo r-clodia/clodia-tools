@@ -18,6 +18,7 @@ import unittest
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+from mcp.client.auth.exceptions import OAuthFlowError
 
 from . import mcp_oauth
 from .test_532_mcp_oauth import _call, _vault
@@ -91,6 +92,9 @@ class IssuerOfTests(unittest.TestCase):
         self.assertEqual(mcp_oauth.issuer_of(
             "https://as.example/.well-known/oauth-authorization-server/tenant"),
             "https://as.example/tenant")
+        self.assertEqual(mcp_oauth.issuer_of(
+            "https://as.example/.well-known/oauth-authorization-server/tenant/"),
+            "https://as.example/tenant")
 
     def test_a_proper_issuer_is_untouched(self):
         for issuer in ("https://as.example", "https://as.example/", "https://as.example/t1"):
@@ -126,14 +130,21 @@ class ConsentTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_different_issuer_is_still_refused(self):
         server = _Invoicetronic(issuer="https://evil.example")
         provider = mcp_oauth.provider_for(BACKEND, handlers=self._interactive())
-        with self.assertRaises(Exception):
+        with self.assertRaises(OAuthFlowError) as e:
             await _call(provider, server)
+        self.assertIn("issuer mismatch", str(e.exception))
         self.assertFalse(server.registered)
 
     async def test_explicit_authorization_server_wins(self):
         backend = {**BACKEND, "auth": {**BACKEND["auth"], "authorization_server": ORIGIN}}
         provider = mcp_oauth.provider_for(backend, handlers=self._interactive())
         self.assertEqual(provider._select_authorization_server(["https://other.example"]), ORIGIN)
+
+    async def test_override_given_as_metadata_url_is_normalised_too(self):
+        backend = {**BACKEND, "auth": {**BACKEND["auth"], "authorization_server":
+                                       f"{ORIGIN}/.well-known/oauth-authorization-server"}}
+        provider = mcp_oauth.provider_for(backend, handlers=self._interactive())
+        self.assertEqual(provider._select_authorization_server([]), ORIGIN)
 
 
 class PinnedScopeTests(unittest.TestCase):
@@ -147,7 +158,8 @@ class PinnedScopeTests(unittest.TestCase):
     def test_without_a_declared_scope_the_sdk_chooses(self):
         md = mcp_oauth.client_metadata({"type": "oauth"})
         md.scope = "a b"
-        self.assertEqual(md.scope, "a b")
+        md.scope = "a b admin"  # step-up di un 403 insufficient_scope
+        self.assertEqual(md.scope, "a b admin")
 
 
 if __name__ == "__main__":
