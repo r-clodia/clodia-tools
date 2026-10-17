@@ -15,9 +15,11 @@ Il backend dichiara cosa accetta in `auth.methods`, in ordine di preferenza:
        "inject": {"headers": {"Invoicetronic-ApiKey": "${APIKEY}"}}}
     ]}
 
-`inject` scrive i campi in `headers` o `url` (http) o in `env` (stdio). La
+`inject` scrive i campi in `headers` (http) o in `env` (stdio). Mai nella URL:
+httpx scrive la URL di ogni richiesta nei log a livello INFO, e una URL può
+puntare a un host diverso dal backend (review di #387). La
 forma di prima, `auth: {type: oauth, …}`, resta valida e non cambia forma nel
-config. Un config SENZA `auth` ma con placeholder `${NOME}` in headers/url/env
+config. Un config SENZA `auth` ma con placeholder `${NOME}` in headers/env
 e senza il segreto nella richiesta diventa da sé un metodo `credential`: è il
 caso di un `.mcp.json` di pack, che un segreto non lo porta mai.
 
@@ -48,8 +50,8 @@ _FIELD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 _PH_RE = re.compile(r"\$\{([A-Za-z][A-Za-z0-9_]{0,63})\}")
 #: Placeholder che NON sono credenziali: li risolve il runtime dei pack.
 _RUNTIME_PLACEHOLDERS = {"CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA", "CLAUDE_PROJECT_DIR"}
-#: Dove `inject` può scrivere, per transport.
-_TARGETS = {"http": ("headers", "url"), "stdio": ("env",)}
+#: Dove `inject` può scrivere, per transport. Non la URL: vedi il docstring.
+_TARGETS = {"http": ("headers",), "stdio": ("env",)}
 #: Quanto aspetta il test del «Connetti».
 CONNECT_TIMEOUT_S = 30
 
@@ -60,6 +62,26 @@ class CredentialRequired(mcp_oauth.ReauthorizationRequired):
 
 def cred_name(slug: str) -> str:
     return mcp_oauth.credential_cred_name(slug)
+
+
+#: Slug che un backend non può avere: `mcp_<slug>_<NOME>` dei segreti di
+#: Tools coinciderebbe con `mcp_cred_<x>` / `mcp_oauth_<x>` di un altro backend
+#: (review di #387: il backend `cred` col segreto `invoicetronic` sovrascriveva
+#: la credenziale di invoicetronic).
+RESERVED_SLUGS = {"cred", "oauth"}
+
+
+def fingerprint(backend: dict) -> tuple:
+    """Ciò che, se cambia, rende la credenziale salvata non più dell'owner.
+
+    Origin della URL, comando e argomenti, e dove il metodo la inietta: un
+    Update del pack che punta altrove non eredita la chiave (review di #387).
+    """
+    from urllib.parse import urlparse
+    u = urlparse(str(backend.get("url") or ""))
+    method = credential_method(backend) or {}
+    return (f"{u.scheme}://{u.netloc}", backend.get("command"),
+            tuple(backend.get("args") or ()), repr(sorted((method.get("inject") or {}).items())))
 
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -97,16 +119,14 @@ def _normalize_credential(raw: dict, transport: str) -> dict:
     for target, val in inject.items():
         if target not in allowed:
             raise ValueError(f"inject.{target} non vale per un server {transport} "
-                             f"(ammessi: {', '.join(allowed)})")
-        if target == "url":
-            if not isinstance(val, str) or not val.startswith("https://"):
-                raise ValueError("inject.url deve essere una URL https")
-            out_inject["url"] = val
-        else:
-            if not isinstance(val, dict) or not all(
-                    isinstance(k, str) and isinstance(v, str) for k, v in val.items()):
-                raise ValueError(f"inject.{target} deve essere un oggetto di stringhe")
-            out_inject[target] = dict(val)
+                             f"(ammessi: {', '.join(allowed)}; una credenziale nella URL "
+                             "finirebbe nei log)")
+        if not isinstance(val, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in val.items()):
+            raise ValueError(f"inject.{target} deve essere un oggetto di stringhe")
+        if any("${VAULT:" in v for v in val.values()):
+            raise ValueError(f"inject.{target}: un riferimento al vault non è un campo da inserire")
+        out_inject[target] = dict(val)
     names = {f["name"] for f in fields}
     used = _placeholders(out_inject)
     if used - names:
@@ -142,7 +162,7 @@ def normalize(raw: Any, *, transport: str) -> dict:
 def implicit_method(spec: dict, transport: str, provided: set[str]) -> dict | None:
     """Il metodo `credential` di un config che ha placeholder senza segreto.
 
-    Solo in headers/url (http) o env (stdio), mai negli `args`, e mai i
+    Solo in headers (http) o env (stdio), mai negli `args` né nella URL, e mai i
     placeholder del runtime dei pack (`${CLAUDE_PLUGIN_ROOT}`).
     """
     inject: dict[str, Any] = {}
@@ -152,11 +172,8 @@ def implicit_method(spec: dict, transport: str, provided: set[str]) -> dict | No
         found = _placeholders(val) - _RUNTIME_PLACEHOLDERS - provided
         if not found:
             continue
-        if target == "url":
-            inject["url"] = val
-        else:
-            inject[target] = {k: v for k, v in (val or {}).items()
-                              if _placeholders(v) & found}
+        inject[target] = {k: v for k, v in (val or {}).items()
+                          if _placeholders(v) & found}
         names |= found
     if not names:
         return None
@@ -165,12 +182,23 @@ def implicit_method(spec: dict, transport: str, provided: set[str]) -> dict | No
             "inject": inject}
 
 
+def leftover_placeholders(backend: dict) -> set[str]:
+    """I `${NOME}` rimasti nel backend montato, che nessuno riempirà mai.
+
+    Negli `args`, nella URL, o in headers/env accanto a un `auth` esplicito:
+    montarli darebbe una card verde che manda al vendor il placeholder
+    letterale (review di clodia-web#244).
+    """
+    found: set[str] = set()
+    for key in ("url", "args", "headers", "env"):
+        found |= _placeholders(backend.get(key))
+    return found - _RUNTIME_PLACEHOLDERS
+
+
 def strip_injected(spec: dict, method: dict) -> dict:
     """Il config senza i valori che il metodo `credential` scrive al «Connetti»."""
     out = dict(spec)
     for target, val in method.get("inject", {}).items():
-        if target == "url":
-            continue  # la URL resta: col placeholder dentro non è usabile, ma è la sua forma
         rest = {k: v for k, v in (out.get(target) or {}).items() if k not in val}
         if rest:
             out[target] = rest
@@ -197,7 +225,23 @@ def credential_method(backend: dict) -> dict | None:
 
 
 def has_credential(backend: dict) -> bool:
-    return vault.has_credential(cred_name(str(backend.get("name") or "")))
+    """C'è una credenziale USABILE: il bundle ha ogni campo che il metodo dichiara.
+
+    Un Update del pack che rinomina un campo lascia un bundle vecchio: verde
+    nella card e un placeholder letterale al vendor (review di #387).
+    """
+    cred = cred_name(str(backend.get("name") or ""))
+    if not vault.has_credential(cred):
+        return False
+    method = credential_method(backend)
+    if method is None:
+        return True
+    try:
+        bundle = vault.read_internal(cred) or {}
+    except Exception:  # noqa: BLE001 — illeggibile = da riconnettere
+        return False
+    return all(isinstance(bundle.get(f["name"]), str) and bundle.get(f["name"])
+               for f in method.get("fields") or [])
 
 
 def active(backend: dict) -> str | None:
@@ -236,11 +280,7 @@ def _fill(val: Any, repl) -> Any:
 def _inject(backend: dict, method: dict, repl) -> dict:
     b = dict(backend)
     for target, val in (method.get("inject") or {}).items():
-        filled = _fill(val, repl)
-        if target == "url":
-            b["url"] = filled
-        else:
-            b[target] = {**(b.get(target) or {}), **filled}
+        b[target] = {**(b.get(target) or {}), **_fill(val, repl)}
     return b
 
 
@@ -267,11 +307,25 @@ def apply(backend: dict) -> dict:
 
 # ── «Connetti» / «Disconnetti» ──────────────────────────────────────────────
 
-def _scrub(text: str, values: dict[str, str]) -> str:
-    for v in values.values():
-        if v and len(v) >= 4:
-            text = text.replace(v, "•••")
-    return text
+def _detail(e: BaseException) -> str:
+    """Cosa dire all'owner di un test fallito: il TIPO del guasto e lo status HTTP.
+
+    Mai `str(e)`: il test passa da `proxy.session`, che risolve ogni
+    `${VAULT:…}` del backend, e il testo di un'eccezione di httpx può
+    contenere headers e URL già risolti — anche segreti diversi da quelli
+    appena inseriti (review di #387).
+    """
+    leaf = e
+    while getattr(leaf, "exceptions", None):
+        leaf = leaf.exceptions[0]
+    status = getattr(getattr(leaf, "response", None), "status_code", None)
+    for marker in ("401", "403", "404", "429"):
+        if status is None and marker in type(leaf).__name__:
+            status = int(marker)
+    out = type(leaf).__name__
+    if isinstance(status, int):
+        out += f" (HTTP {status})"
+    return out
 
 
 async def connect(backend: dict, values: dict) -> dict:
@@ -291,7 +345,8 @@ async def connect(backend: dict, values: dict) -> dict:
         val = values.get(name)
         if not isinstance(val, str) or not val.strip():
             raise ValueError(f"manca il campo '{name}'")
-        clean[name] = val.strip()
+        # Il valore com'è: una password IMAP può iniziare o finire con uno spazio.
+        clean[name] = val
     if mcp_oauth.auth_spec(backend) and mcp_oauth.authorization_status(backend)["authorized"]:
         raise ValueError(f"il server MCP '{slug}' è già connesso con OAuth: "
                          "«Disconnetti» prima di usare una credenziale")
@@ -304,7 +359,7 @@ async def connect(backend: dict, values: dict) -> dict:
                 return len((await s.list_tools()).tools)
         n = await asyncio.wait_for(_try(), timeout=CONNECT_TIMEOUT_S)
     except Exception as e:  # noqa: BLE001 — il dettaglio va all'owner, ripulito
-        detail = _scrub(f"{type(e).__name__}: {str(e)[:200]}", clean)
+        detail = _detail(e)
         LOG.info("mcp connect '%s': test fallito (%s), niente salvato", slug, type(e).__name__)
         raise ValueError(f"il server MCP non ha accettato la credenziale: {detail}") from None
     vault.deposit(cred_name(slug), clean, cred_type="mcp_credential", grant_agents=[])

@@ -598,6 +598,10 @@ async def finish(state: str, raw_code: str) -> dict:
         raise ValueError("lo state della URL incollata non è quello del consenso in corso")
     if not code:
         raise ValueError("manca il parametro 'code' nella URL incollata")
+    if vault.has_credential(credential_cred_name(flow.slug)):
+        # Un consenso partito prima di un «Connetti» con credenziale (#565).
+        raise ValueError(f"il server MCP '{flow.slug}' è stato connesso con una "
+                         "credenziale nel frattempo: «Disconnetti» prima del consenso")
     if not flow.code.done():
         flow.code.set_result((code, url_state or state))
     assert flow.task is not None

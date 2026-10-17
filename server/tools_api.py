@@ -660,9 +660,10 @@ def register_mcp_core(config, secrets: dict | None = None,
     # seed, e clodia, se le serve, lo prende in prestito con `copybrain`.
     registered = []
     deposits: list[tuple[str, str]] = []
+    forget_after: list[str] = []
     for name, spec in servers.items():
         slug = _slugify(name)
-        if not slug or slug in _NATIVE_PREFIXES:
+        if not slug or slug in _NATIVE_PREFIXES or slug in mcp_credentials.RESERVED_SLUGS:
             raise McpRegisterError(f"nome backend non valido/riservato: {name!r} → {slug!r}")
         # Feature `integrations` (profilo istanza): off = nessun mount di MCP
         # esterni; fixed = solo la whitelist dell'edizione (i tool del pack).
@@ -752,6 +753,11 @@ def register_mcp_core(config, secrets: dict | None = None,
                 LOG.info("mcp: backend '%s' del connettore nativo sostituito "
                          "dal mount del pack '%s' (connettore passato al pack)",
                          slug, adesso)
+            elif prima == adesso and (mcp_credentials.fingerprint(precedente)
+                                      != mcp_credentials.fingerprint(backend)):
+                # Stesso proprietario, ma il backend ora punta altrove: la
+                # credenziale e i token restano dell'host di prima (#565).
+                forget_after.append(slug)
             elif prima != adesso:
                 chi_prima = f"il pack '{prima}'" if prima else "un amministratore"
                 chi_ora = f"il pack '{adesso}'" if adesso else "un amministratore"
@@ -770,6 +776,13 @@ def register_mcp_core(config, secrets: dict | None = None,
             cred = f"mcp_{slug}_{sname}"
             deposits.append((cred, sval))
             backend = _replace_placeholder(backend, sname, f"${{VAULT:{cred}}}")
+        avanzi = mcp_credentials.leftover_placeholders(backend)
+        if avanzi:
+            raise McpRegisterError(
+                f"server '{name}': placeholder che nessuno riempirà: "
+                f"{', '.join('${' + a + '}' for a in sorted(avanzi))}. Una credenziale va "
+                "negli headers (http) o nell'env (stdio), oppure in un metodo "
+                "'credential' di auth.methods — mai negli args né nella URL.")
         # Dedup sullo stesso confronto del 409: una riga che si normalizza
         # come la nuova È la stessa voce, e lasciarla farebbe dipendere la
         # proprietà da quale delle due viene letta per prima.
@@ -780,6 +793,11 @@ def register_mcp_core(config, secrets: dict | None = None,
 
     for cred, sval in deposits:
         vault.deposit(cred, {"value": sval}, cred_type="mcp_secret", grant_agents=[])
+    for slug in forget_after:
+        vault.remove(mcp_credentials.cred_name(slug))
+        mcp_oauth.forget(slug)
+        LOG.info("mcp: backend '%s' rimontato verso un'altra destinazione: "
+                 "credenziale e token dimenticati, serve un nuovo «Connetti»", slug)
     whitelist.CONFIG["mcp_backends"] = backends
     whitelist.save_config()
     whitelist.reload_config()
@@ -896,6 +914,8 @@ async def mcp_connect(request: Request):
     try:
         body = await request.json()
     except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    if not isinstance(body, dict):
         return JSONResponse({"error": "bad_json"}, status_code=400)
     try:
         res = await mcp_credentials.connect(b, body.get("fields") or {})

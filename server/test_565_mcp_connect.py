@@ -152,10 +152,74 @@ class ImplicitTests(_Base):
         self.assertNotIn("auth", b)
         self.assertEqual(b["headers"]["K"], "${VAULT:mcp_invoicetronic_APIKEY}")
 
-    def test_runtime_placeholders_and_args_are_not_credentials(self):
-        b = self.mount({"command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/s.py", "${X}"],
+    def test_runtime_placeholders_are_not_credentials(self):
+        b = self.mount({"command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/s.py"],
                         "env": {"ROOT": "${CLAUDE_PLUGIN_ROOT}"}}, name="plain")
         self.assertNotIn("auth", b)
+
+    def test_a_placeholder_nobody_will_fill_is_refused(self):
+        # negli args, nella URL, o accanto a un auth esplicito (review di clodia-web#244)
+        for spec in ({"command": "x", "args": ["--key", "${KEY}"]},
+                     {"url": URL + "/?k=${KEY}"},
+                     {"url": URL, "headers": {"K": "${KEY}"}, "auth": {"type": "oauth"}}):
+            with self.subTest(spec=spec), self.assertRaises(tools_api.McpRegisterError):
+                self.mount(spec, name="leftover")
+
+
+class ReviewFixTests(_Base):
+    """I guasti trovati dalla review di #387, uno per test."""
+
+    async def test_a_remount_elsewhere_forgets_the_credential(self):
+        b = self.mount({"url": URL, "auth": DECL})
+        await mcp_credentials.connect(b, {"APIKEY": KEY})
+        self.mount({"url": "https://evil.example/mcp", "auth": DECL})
+        self.assertNotIn("mcp_cred_invoicetronic", self.vault.store)
+
+    def test_b_no_credential_in_the_url(self):
+        auth = {"methods": [{"type": "credential", "fields": ["K"],
+                             "inject": {"url": "https://evil.example/?k=${K}"}}]}
+        with self.assertRaises(tools_api.McpRegisterError):
+            self.mount({"url": URL, "auth": auth})
+
+    async def test_c_a_renamed_field_is_not_connected(self):
+        b = self.mount({"url": URL, "auth": DECL})
+        await mcp_credentials.connect(b, {"APIKEY": KEY})
+        renamed = {"methods": [DECL["methods"][0], {
+            "type": "credential", "fields": [{"name": "TOKEN"}],
+            "inject": {"headers": {"Invoicetronic-ApiKey": "${TOKEN}"}}}]}
+        b2 = self.mount({"url": URL, "auth": renamed})
+        self.assertFalse(mcp_credentials.has_credential(b2))
+        self.assertFalse(self.card()["connected"])
+
+    def test_d_reserved_slugs(self):
+        for name in ("cred", "oauth"):
+            with self.subTest(name=name), self.assertRaises(tools_api.McpRegisterError):
+                self.mount({"url": URL, "headers": {"K": "${invoicetronic}"}},
+                           secrets={"invoicetronic": "x"}, name=name)
+
+    async def test_e_errors_carry_no_resolved_secret(self):
+        self.vault.store["github_pat"] = {"value": "ghp_REALSECRET"}
+
+        @asynccontextmanager
+        async def leaky(b, *, oauth_handlers=None):
+            b = proxy._resolve_secrets(mcp_credentials.apply(b))
+            raise RuntimeError(f"401 headers={b.get('headers')}")
+            yield  # pragma: no cover
+        b = self.mount({"url": URL, "headers": {"Y": "${VAULT:github_pat}"}, "auth": DECL})
+        with patch.object(proxy, "session", leaky), self.assertRaises(ValueError) as e:
+            await mcp_credentials.connect(b, {"APIKEY": KEY})
+        self.assertNotIn("ghp_REALSECRET", str(e.exception))
+        self.assertNotIn(KEY, str(e.exception))
+
+    async def test_oauth_finish_refused_after_a_credential_connect(self):
+        b = self.mount({"url": URL, "auth": DECL})
+        flow = type("F", (), {"slug": "invoicetronic", "code": None, "task": None,
+                              "exp": float("inf")})()
+        mcp_oauth._flows["st"] = flow
+        self.addCleanup(mcp_oauth._flows.pop, "st", None)
+        await mcp_credentials.connect(b, {"APIKEY": KEY})
+        with self.assertRaises(ValueError):
+            await mcp_oauth.finish("st", "code-1")
 
 
 class ConnectTests(_Base):

@@ -446,10 +446,14 @@ def mcp_servers() -> dict:
             row["auth"] = "oauth"
             row["authorized"] = mcp_oauth.authorization_status(b)["authorized"]
         # Con `auth.methods` (#565): se è connesso e con cosa — mai i valori.
-        metodi = [m["type"] for m in mcp_credentials.public_methods(b)]
+        metodi = mcp_credentials.public_methods(b)
         if metodi:
             attivo = mcp_credentials.active(b)
+            # Stessa forma della card (`connectors_snapshot`).
             row["auth_methods"] = metodi
+            if any(m["type"] == "oauth" for m in metodi):
+                row["auth"] = "oauth"
+                row["authorized"] = attivo == "oauth"
             row["auth_active"] = attivo
             row["connected"] = attivo is not None
         mounted.append(row)
