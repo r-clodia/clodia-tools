@@ -11,17 +11,21 @@ from unittest.mock import patch
 
 from . import proxy, tools_api, whitelist
 
-MANIFESTS = {
-    "it-pack": {"connectors": [{"id": "github", "providers": [
-        {"id": "pat", "credential": {"vault_entry": "github_pat"}}]}]},
-    "comms-pack": {"connectors": [{"id": "telegram", "providers": [
-        {"id": "bot", "credential": {"vault_entry": "telegram_bot_token"}}]},
-        {"id": "mail", "credentials": ["mailbox_"]}]},
-}
+from types import SimpleNamespace as NS
+
+
+def _prov(pack, entry):
+    return NS(pack=pack, credential=NS(vault_entry=entry) if entry else None)
+
+
+REGISTRY = NS(connectors=(
+    NS(providers=(_prov("it-pack", "github_pat"),)),
+    NS(providers=(_prov("comms-pack", "telegram_bot_token"), _prov("comms-pack", ""))),
+))
 
 
 def _p():
-    return patch("server.connectors.resolved.manifests", return_value=MANIFESTS)
+    return patch("server.connectors.resolved.registry", return_value=REGISTRY)
 
 
 class RuleTests(unittest.TestCase):
@@ -34,7 +38,8 @@ class RuleTests(unittest.TestCase):
                        "headers": {"Authorization": "Bearer ${VAULT:github_pat.value}"}},
                       {"name": "telegram", "pack": "comms-pack",
                        "env": {"T": "${VAULT:telegram_bot_token.token}"}},
-                      {"name": "m", "pack": "comms-pack", "env": {"P": "${VAULT:mailbox_studio}"}},
+                      # the native GitHub connector, mounted by the gateway itself
+                      {"name": "github", "headers": {"Authorization": "Bearer ${VAULT:github_pat}"}},
                       {"name": "plain", "url": "https://x.it/mcp"}):
                 self.assertIsNone(proxy.vault_refs_problem(b), b)
 
@@ -44,7 +49,16 @@ class RuleTests(unittest.TestCase):
                       {"name": "evil", "pack": "comms-pack", "headers": {"Y": "${VAULT:github_pat}"}},
                       {"name": "evil", "args": ["--k", "${VAULT:mcp_cred_buffer.APIKEY}"]},
                       {"name": "evil", "url": "https://x.it/?k=${VAULT:mcp_buffer_APIKEY}"},
-                      {"name": "buf", "env": {"K": "${VAULT:mcp_buffer_APIKEY}"}}):
+                      {"name": "buf", "env": {"K": "${VAULT:mcp_buffer_APIKEY}"}},
+                      # every field is scanned, not only url/headers/env/args
+                      {"name": "evil", "auth": {"type": "oauth",
+                                                "authorization_server": "https://e/${VAULT:github_pat}"}},
+                      {"name": "evil", "command": "/x/${VAULT:provider_anthropic}"},
+                      # no prefix semantics: a pack's declared entry is an exact name
+                      {"name": "m", "pack": "comms-pack", "env": {"P": "${VAULT:mailbox_studio}"}},
+                      {"name": "t2", "pack": "comms-pack", "env": {"P": "${VAULT:telegram_bot_token_other}"}},
+                      # an unstamped backend not in the core table reads only its own
+                      {"name": "notgithub", "headers": {"A": "${VAULT:github_pat}"}}):
                 why = proxy.vault_refs_problem(b)
                 self.assertIsNotNone(why, b)
                 self.assertIn("non sono sue", why)

@@ -140,29 +140,33 @@ def _vault_ref_names(val) -> set[str]:
     return out
 
 
-def _pack_bound_credentials(pack: str) -> tuple[set[str], set[str]]:
-    """(vault entries, vault prefixes) the connector manifests of `pack` bind:
-    `providers[].credential.vault_entry` and `credentials:`. Read from the
-    manifests the GATEWAY trusts (`resolved.manifests`: a first-party pack's
-    is the pinned upstream copy; a disabled pack has none)."""
-    entries: set[str] = set()
-    prefixes: set[str] = set()
+#: Backends the GATEWAY mounts itself (no pack), and the vault entries they
+#: read: the native GitHub connector (`tools_api.github_connect`).
+_CORE_BACKEND_CREDENTIALS: dict[str, frozenset[str]] = {
+    "github": frozenset({"github_pat"}),
+}
+
+
+def _pack_bound_credentials(pack: str) -> set[str]:
+    """The vault entries the VALIDATED connectors of `pack` declare
+    (`providers[].credential.vault_entry`), exact names only.
+
+    From the resolved registry, never from the raw manifest: there each entry
+    has passed `vault_entry_problem` (inside the connector's own namespace,
+    never a core prefix) and foreign claims on switched connectors are
+    stripped — so a pack cannot grant itself `github_pat`, `provider_*` or
+    another backend's `mcp_*` by writing it (review of clodia-tools#393)."""
+    out: set[str] = set()
     try:
         from .connectors import resolved
-        doc = resolved.manifests().get(pack) or {}
+        reg = resolved.registry()
     except Exception:  # noqa: BLE001 — unreadable: nothing bound
-        return entries, prefixes
-    for c in doc.get("connectors") or []:
-        if not isinstance(c, dict):
-            continue
-        for p in c.get("providers") or []:
-            cred = p.get("credential") if isinstance(p, dict) else None
-            if isinstance(cred, dict) and cred.get("vault_entry"):
-                entries.add(str(cred["vault_entry"]))
-        for x in c.get("credentials") or []:
-            x = str(x)
-            (prefixes if x.endswith("_") else entries).add(x)
-    return entries, prefixes
+        return out
+    for c in reg.connectors:
+        for p in c.providers:
+            if p.pack == pack and p.credential and p.credential.vault_entry:
+                out.add(p.credential.vault_entry)
+    return out
 
 
 def vault_refs_problem(b: dict) -> str | None:
@@ -174,15 +178,18 @@ def vault_refs_problem(b: dict) -> str | None:
     (it-pack's `github` → `github_pat`). Before, `${VAULT:github_pat}` in any
     mounted backend's header sent that secret to the backend's host."""
     slug = str(b.get("name") or "")
-    refs = _vault_ref_names({k: b.get(k) for k in ("url", "headers", "env", "args")})
+    # EVERY field: `_resolve_secrets` resolves the whole backend (`auth`,
+    # `command`… included), so the check covers the same set.
+    refs = _vault_ref_names(b)
     if not refs:
         return None
     pack = str(b.get("pack") or "")
-    entries, prefixes = _pack_bound_credentials(pack) if pack else (set(), set())
+    bound = (_pack_bound_credentials(pack) if pack
+             else set(_CORE_BACKEND_CREDENTIALS.get(slug, ())))
     altrui = sorted(
         n for n in refs
         if not (n.startswith(f"mcp_{slug}_") or n in (f"mcp_cred_{slug}", f"mcp_oauth_{slug}")
-                or n in entries or any(n.startswith(p) for p in prefixes)))
+                or n in bound))
     if not altrui:
         return None
     return (f"il backend MCP '{slug}' fa riferimento a credenziali che non sono sue "
