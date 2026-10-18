@@ -54,6 +54,13 @@ async def _pack(verbo: str, args: dict) -> dict:
     _svc = _components.service("comms-pack", f"{CONNECTOR}_{verbo}")
     if _svc is not None:
         return await asyncio.to_thread(_svc.handler, dict(args))
+    # The relay's other operation, `send` (a reply into the bound group), is
+    # the component's agent VERB: called here as the gateway, it is the same
+    # code the backend ran for it — never through `call_tool`, as before
+    # (this door is `internal_auth`, not an agent's).
+    _verb = _components.verb(f"{CONNECTOR}.{verbo}")
+    if _verb is not None and _verb.pack == "comms-pack":
+        return await asyncio.to_thread(_verb.handler, dict(args))
 
     testo = await proxy.call_proxied(f"{CONNECTOR}.{verbo}", args)
     if str(testo).startswith("ERROR: "):
