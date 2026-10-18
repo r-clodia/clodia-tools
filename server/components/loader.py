@@ -82,10 +82,12 @@ def serving_connectors() -> tuple[tuple[str, str], ...]:
     Never raises."""
     out: set[tuple[str, str]] = set()
     try:
+        reserved = _reserved_namespaces()
         for st in list(_STATES.values()):
             if _serving(st):
                 for cid in st.component.connectors:
-                    out.add((st.component.pack, str(cid)))
+                    if st.component.namespaces.get(cid) not in reserved:
+                        out.add((st.component.pack, str(cid)))
     except Exception:  # noqa: BLE001
         return ()
     return tuple(sorted(out))
@@ -362,8 +364,12 @@ def _standby_reason(component: GatewayComponent) -> str:
     of that migration is on `native`, so the native verbs are listed and
     served, and registering the component's would be refused anyway."""
     reserved = _reserved_namespaces()
-    taken = sorted(ns for ns in set(component.namespaces.values()) if ns in reserved)
-    if taken:
+    mine = set(component.namespaces.values())
+    taken = sorted(ns for ns in mine if ns in reserved)
+    # Standby only when it would serve NOTHING: a component of several
+    # connectors (comms-pack: mail + Telegram) runs for the ones on `pack` and
+    # registers only those (`host.serves`) — one pack, one gateway component.
+    if taken and set(taken) == mine:
         return (f"the gateway implements {taken} natively on this instance (the "
                 "connector switch is on `native`); the component loads when the "
                 "owner turns it to `pack`")
