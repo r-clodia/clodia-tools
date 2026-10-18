@@ -132,8 +132,34 @@ def _via_transport(op: str, prompt: str, *, size: str, quality: str,
     """
     from .. import proxy
     from ..connectors import resolved
+    # it-pack ≥ 0.19.0: the HTTP call is its GATEWAY COMPONENT's service
+    # (#525/#558), which reads the key from the vault itself — the key no
+    # longer travels in the arguments. Before: the MCP transport below.
+    from ..components import loader as _components
+    _svc = _components.service("it-pack", "imagegen_run")
+    if _svc is not None:
+        sargs = {"op": op, "prompt": prompt, "size": size, "quality": quality,
+                 "background": background}
+        if image_bytes is not None:
+            sargs["image_b64"] = base64.b64encode(image_bytes).decode("ascii")
+        try:
+            out = _svc.handler(sargs)
+            png = base64.b64decode((out or {})["png_b64"], validate=True)
+        except Exception as e:  # noqa: BLE001 — never the arguments in the message
+            raise ImageGenError(f"image component: {type(e).__name__}: {str(e)[:200]}") from e
+        if not png:
+            raise ImageGenError("image component: empty image")
+        return png
     transport = resolved.transport_for(CONNECTOR)
     if transport is None:
+        try:
+            st = _components.state_of("it-pack")
+        except Exception:  # noqa: BLE001
+            st = None
+        if st:
+            raise ImageGenError(
+                f"image generation is it-pack's on this instance, but its gateway "
+                f"component is {st.get('status')}: {str(st.get('reason') or '')[:200]}")
         raise ImageGenError(
             "image generation is handed to a pack on this instance "
             "(connectors: {openai-images: pack}) but its transport provider "

@@ -216,6 +216,7 @@ CORE_CREDENTIALS_FOLLOW: dict[str, str] = {
 RETIRED_TRANSPORTS: dict[str, frozenset[str]] = {
     "comms-pack": frozenset({"mail-transport"}),            # comms-pack 1.4.0
     "google-pack": frozenset({"google-transport", "gmail-transport"}),  # 1.0.0
+    "it-pack": frozenset({"imagegen-transport"}),           # it-pack ≤ 0.18.x
 }
 
 
