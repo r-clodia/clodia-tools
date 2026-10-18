@@ -122,6 +122,10 @@ class Storage(abc.ABC):
         il primo deploy, con `write ok` lato container ma `Permission denied`
         provando a scrivere lì dal proprio account."""
 
+    def is_symlink(self, path: str) -> bool:
+        """`path` itself is a symlink. Backends without symlinks: never."""
+        return False
+
     def unlink_symlink(self, path: str) -> None:
         """Rimuove `path` SOLO se è un symlink — mai un file o una directory
         vera. Distinto da `delete()` apposta: `delete()` risolve i symlink

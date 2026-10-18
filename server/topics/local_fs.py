@@ -168,6 +168,20 @@ class LocalFsStorage(Storage):
         p = self._abs(path)
         os.chmod(p, 0o775)
 
+    def is_symlink(self, path: str) -> bool:
+        """`path` itself is a symlink (`lstat`, the link is not followed)."""
+        p = Path(os.path.normpath(self.root / str(path).lstrip("/")))
+        return (p == self.root or self.root in p.parents) and p.is_symlink()
+
+    def within(self, path: str, prefix: str) -> bool:
+        """`path`, resolved through every symlink, is `prefix` or below it
+        (also resolved)? False for anything outside the root, never raises."""
+        try:
+            p, base = self._abs(path), self._abs(prefix)
+        except StorageError:
+            return False
+        return p == base or base in p.parents
+
     def unlink_symlink(self, path: str) -> None:
         """Rimuove `path` SOLO se è un symlink (`os.lstat`, non segue il
         link). Path NON risolto — a differenza di `_abs()`/`delete()`, che

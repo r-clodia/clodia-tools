@@ -1124,24 +1124,24 @@ _TOPIC_TOOLS: list[Tool] = [
     ),
     # ── Cartella condivisa Mac↔container: BIND reale (non uno specchio come
     # Drive), su una radice unica montata una volta sola nel gateway
-    # (`LOCAL_SHARED_ROOT`). Aggancia una sua sottocartella dentro `local/` di
-    # questo topic — da lì in poi è filesystem del topic come un file
-    # caricato a mano, letto/scritto con topic.read_file/write_file.
+    # (`LOCAL_SHARED_ROOT`). Aggancia una sua sottocartella come `shared/` di
+    # questo topic (clodia-platform#571) — da lì in poi è filesystem del topic
+    # come un file caricato a mano, letto/scritto con topic.read_file/write_file.
     Tool(
         name="topic.local_folder_add",
         description=("Aggancia una sottocartella della cartella condivisa "
-                     "Mac↔container a questo topic: appare come "
-                     "local/<mount>/ e ci si legge/scrive con "
-                     "topic.read_file/write_file come un file qualunque. È un "
-                     "BIND reale: scrivere da fuori (Mac) o da dentro (topic) "
-                     "si vede immediatamente dall'altra parte. `mount` "
-                     "omesso → usa il codename del topic (default "
-                     "consigliato: si riconosce a colpo d'occhio su "
-                     "ClodiaShared/ quale topic sia quella cartella)."),
+                     "Mac↔container a questo topic: nel topic appare come "
+                     "shared/ (sul Mac come ClodiaShared/<mount>/) e ci si "
+                     "legge/scrive con topic.read_file/write_file come un file "
+                     "qualunque. È un BIND reale: scrivere da fuori (Mac) o da "
+                     "dentro (topic) si vede immediatamente dall'altra parte. "
+                     "Una sola per topic. `mount` omesso → usa il codename "
+                     "del topic (default consigliato: si riconosce a colpo "
+                     "d'occhio su ClodiaShared/ quale topic sia quella cartella)."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
-            "mount": {"type": "string", "description": "nome del mount E della sottocartella condivisa (default: il codename del topic)"},
+            "mount": {"type": "string", "description": "nome della sottocartella condivisa sul Mac (default: il codename del topic); nel topic è sempre shared/"},
         }, "required": ["tier", "name"]},
     ),
     Tool(
@@ -1152,7 +1152,7 @@ _TOPIC_TOOLS: list[Tool] = [
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
-            "mount": {"type": "string", "description": "nome del mount da sganciare"}},
+            "mount": {"type": "string", "description": "nome della sottocartella condivisa da sganciare, oppure \"shared\""}},
             "required": ["tier", "name", "mount"]},
     ),
     # ── Collegamento fra due topic (clodia-platform#477): ognuno vede l'albero
@@ -4634,7 +4634,7 @@ def _gate_effect_reason(name: str, arguments: dict) -> str:
         if name == "topic.local_folder_add":
             mount = a.get("mount") or a.get("name")
             return (f"aggancia la cartella condivisa Mac↔container `{mount}` "
-                    f"come `local/{mount}/` nel topic "
+                    f"come `shared/` nel topic "
                     f"`{a.get('tier')}/{a.get('name')}` — bind reale, non uno specchio: "
                     f"chi scrive lì dal Mac lo rende visibile a ogni agente del topic.")
         if name == "topic.link_add":
