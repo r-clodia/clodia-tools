@@ -150,8 +150,81 @@ def normalize_repo(url: str) -> str:
     return u
 
 
+#: Repository configuration the gateway does NOT take from the working tree
+#: (clodia-platform#572). The tree is in the agent's scratch and the agent runs
+#: `git commit` there, so `.git/config` and `.git/hooks` are the agent's words:
+#: hooks and `core.fsmonitor` would run code inside the gateway with `GIT_PAT`
+#: in the environment, and a repository-level credential helper would be handed
+#: the token. Command-line `-c` comes after every config file, so these win;
+#: the empty `credential.helper` resets the list before the gateway's own.
+def _hardening() -> list[str]:
+    flags = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+             "-c", "protocol.ext.allow=never", "-c", "credential.helper="]
+    if not ALLOW_LOCAL_REPOS:
+        flags += ["-c", "protocol.file.allow=never"]
+    return flags
+
+
+#: The only keys a working tree's own config may hold when the gateway runs
+#: git on it (#572): what `git clone`/`git init`/`git commit` write, identity
+#: and cosmetics. Anything else — `remote.origin.pushurl`, `url.*.insteadOf`,
+#: `filter.*`, `include.*`, `credential.*`, `http.*`, `gpg.*`, another remote —
+#: could redirect a push, run code or reach the token, and is refused: an
+#: allowlist, because the list of git keys that execute something keeps
+#: growing upstream.
+_SAFE_LOCAL_KEYS = re.compile(
+    r"^(?:core\.(?:repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|"
+    r"precomposeunicode|symlinks|autocrlf|safecrlf|eol|quotepath|checkstat|trustctime)"
+    r"|extensions\.objectformat"
+    r"|remote\.origin\.(?:url|fetch|tagopt|prune)"
+    r"|branch\.[^\s=]+\.(?:remote|merge|rebase)"
+    r"|user\.(?:name|email)|init\.defaultbranch|pull\.(?:rebase|ff)"
+    r"|push\.(?:default|autosetupremote)|fetch\.prune|gc\.auto|index\.version"
+    r"|(?:advice|color)\.[^\s=]+)$")
+
+
+def assert_safe_config(workdir: str) -> None:
+    """Refuse a working tree whose own git config could turn a gateway git
+    command into something else (clodia-platform#572): a key outside
+    `_SAFE_LOCAL_KEYS`, more than one `remote.origin.url` (a push goes to
+    every one of them), or a branch tracking a remote other than `origin`."""
+    out = _run(["config", "--local", "--no-includes", "--list"], cwd=workdir,
+               token=None).stdout
+    urls = 0
+    for line in out.splitlines():
+        key, _, value = line.partition("=")
+        key = key.strip().lower()
+        if not _SAFE_LOCAL_KEYS.match(key):
+            raise GitHubError(
+                f"la configurazione git di {workdir} contiene '{key}', che il "
+                "gateway non accetta da un working tree (potrebbe deviare il "
+                "push, eseguire codice o raggiungere la credenziale). Toglila "
+                f"con `git config --local --unset-all {key}` e riprova.")
+        if key == "remote.origin.url":
+            urls += 1
+        if key.startswith("branch.") and key.endswith(".remote") and value.strip() != "origin":
+            raise GitHubError(
+                f"{key} = '{value.strip()}': un ramo può seguire solo `origin`, "
+                "il repository approvato per questo working tree.")
+    if urls > 1:
+        raise GitHubError(f"{workdir} dichiara più di un `remote.origin.url`: "
+                          "un push andrebbe a ciascuno")
+
+
+def origin_of(workdir: str) -> str:
+    """The `origin` URL of a working tree the gateway is about to act on, after
+    `assert_safe_config`: the repository the perimeter judges is then the one
+    git will actually reach."""
+    _assert_repo(workdir)
+    assert_safe_config(workdir)
+    url = _run(["remote", "get-url", "origin"], cwd=workdir, token=None).stdout.strip()
+    if not url:
+        raise GitHubError(f"nessun origin in {workdir}: clona con github.clone")
+    return url
+
+
 def _run(args: list, cwd: str | None, token: str | None) -> subprocess.CompletedProcess:
-    cmd = ["git"]
+    cmd = ["git"] + _hardening()
     if token:
         host = "https://github.com"
         cmd += ["-c", f"credential.{host}.helper={_CRED_HELPER}"]
@@ -217,8 +290,7 @@ def remote_url(workdir: str) -> str:
     che porta a chiedere.
     """
     try:
-        out = _run(["remote", "get-url", "origin"], cwd=workdir, token=None)
-        return normalize_repo(out.stdout.strip())
+        return normalize_repo(origin_of(workdir))
     except Exception:  # noqa: BLE001
         return ""
 
@@ -285,7 +357,9 @@ def clone(repo: str, dest: str, token: str | None = None,
 
 def pull(workdir: str, token: str | None = None) -> dict:
     _assert_repo(workdir)
-    out = _run(["pull", "--ff-only", "--quiet"], cwd=workdir, token=token)
+    assert_safe_config(workdir)
+    # `origin` named: the tracking configuration does not choose the remote.
+    out = _run(["pull", "--ff-only", "--quiet", "origin"], cwd=workdir, token=token)
     _assert_no_secret_on_disk(workdir, token)
     return {"ok": True, "dir": workdir,
             "head": _run(["rev-parse", "--short", "HEAD"], cwd=workdir, token=None).stdout.strip(),
@@ -300,8 +374,18 @@ def push(workdir: str, token: str | None = None, branch: str | None = None) -> d
     non nel codice.
     """
     _assert_repo(workdir)
+    assert_safe_config(workdir)
     ramo = branch or _run(["rev-parse", "--abbrev-ref", "HEAD"],
                           cwd=workdir, token=None).stdout.strip() or "HEAD"
+    # The branch reaches git's argv: never an option (`--receive-pack=…`),
+    # always a valid branch name.
+    if ramo.startswith("-"):
+        raise GitHubError(f"'{ramo}' non è un nome di ramo valido")
+    if ramo != "HEAD":
+        try:
+            _run(["check-ref-format", "--branch", ramo], cwd=workdir, token=None)
+        except GitHubError:
+            raise GitHubError(f"'{ramo}' non è un nome di ramo valido") from None
     sporco = _run(["status", "--porcelain"], cwd=workdir, token=None).stdout.strip()
     out = _run(["push", "--quiet", "origin", ramo], cwd=workdir, token=token)
     return {"ok": True, "branch": ramo,

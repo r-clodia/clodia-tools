@@ -2284,12 +2284,13 @@ def _dispatch_github(name: str, a: dict):
 
 
 def _origin_of(workdir: str) -> str:
-    import subprocess as _sp
-    r = _sp.run(["git", "-C", workdir, "remote", "get-url", "origin"],
-                capture_output=True, text=True, timeout=30)
-    if r.returncode != 0 or not (r.stdout or "").strip():
-        raise ValueError(f"nessun origin in {workdir}: clona con github.clone")
-    return r.stdout.strip()
+    # After the working tree's own config is checked (#572): the repository
+    # judged is then the one git will reach.
+    from .tools import github_repo as _gh
+    try:
+        return _gh.origin_of(workdir)
+    except _gh.GitHubError as e:
+        raise ValueError(str(e)) from None
 
 
 def _repo_credential(svc, tier: str, tname: str, repo_canonico: str):

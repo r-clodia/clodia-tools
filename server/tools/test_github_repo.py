@@ -328,6 +328,84 @@ class ALongSilentCloneTests(Base):
         self.assertNotIn("ghp_SEGRETISSIMO", str(ctx.exception))
 
 
+class AgentWrittenConfigTests(Base):
+    """The working tree is in the agent's scratch: its `.git/config`, hooks and
+    attributes are the agent's words, and the gateway runs git on it with the
+    token in the environment (clodia-platform#572)."""
+
+    def setUp(self):
+        super().setUp()
+        self.d = self.root / "lavoro"
+        gh.clone(self.url, str(self.d))
+        _git("config", "user.email", "t@example.org", cwd=self.d)
+        _git("config", "user.name", "T", cwd=self.d)
+        (self.d / "nuovo.md").write_text("due\n")
+        _git("add", "-A", cwd=self.d)
+        _git("commit", "-q", "-m", "secondo", cwd=self.d)
+        self.altrove = self.root / "altrove.git"
+        _git("init", "--bare", "-q", str(self.altrove))
+        self.segno = self.root / "eseguito"
+
+    def _rifiuta(self, *config):
+        _git("config", *config, cwd=self.d)
+        for verbo in (lambda: gh.push(str(self.d)), lambda: gh.pull(str(self.d)),
+                      lambda: gh.origin_of(str(self.d))):
+            with self.assertRaises(gh.GitHubError):
+                verbo()
+        self.assertEqual(gh.remote_url(str(self.d)), "")   # PDP: unknown → refused
+        self.assertFalse(self.segno.exists())
+        log = subprocess.run(["git", "-C", str(self.altrove), "log", "--oneline", "--all"],
+                             capture_output=True, text=True).stdout
+        self.assertEqual(log, "")
+
+    def test_a_pushurl_does_not_redirect_the_push(self):
+        self._rifiuta("remote.origin.pushurl", f"file://{self.altrove}")
+
+    def test_push_instead_of_does_not_redirect_the_push(self):
+        self._rifiuta(f"url.file://{self.altrove}.pushInsteadOf", self.url)
+
+    def test_a_second_origin_url_is_refused(self):
+        self._rifiuta("--add", "remote.origin.url", f"file://{self.altrove}")
+
+    def test_a_branch_tracking_another_remote_is_refused(self):
+        self._rifiuta("branch.main.remote", f"file://{self.altrove}")
+
+    def test_a_repository_credential_helper_is_refused(self):
+        self._rifiuta("credential.helper", f"!touch {self.segno}; true")
+
+    def test_includes_filters_and_fsmonitor_are_refused(self):
+        for chiave, valore in (("include.path", str(self.root / "x.cfg")),
+                               ("filter.x.smudge", f"touch {self.segno}"),
+                               ("core.fsmonitor", f"touch {self.segno}"),
+                               ("core.sshCommand", f"touch {self.segno}")):
+            with self.subTest(chiave=chiave):
+                _git("config", chiave, valore, cwd=self.d)
+                with self.assertRaises(gh.GitHubError) as cm:
+                    gh.push(str(self.d))
+                self.assertIn(chiave.lower(), str(cm.exception))
+                _git("config", "--unset-all", chiave, cwd=self.d)
+        self.assertFalse(self.segno.exists())
+
+    def test_hooks_never_run_in_the_gateway(self):
+        hooks = self.d / ".git" / "hooks"
+        for nome in ("pre-push", "post-merge", "reference-transaction"):
+            h = hooks / nome
+            h.write_text(f"#!/bin/sh\ntouch {self.segno}\nexit 0\n")
+            h.chmod(0o755)
+        gh.push(str(self.d))
+        gh.pull(str(self.d))
+        self.assertFalse(self.segno.exists())
+
+    def test_a_branch_that_is_an_option_is_refused(self):
+        for ramo in ("--receive-pack=touch x", "-f", "a..b"):
+            with self.subTest(ramo=ramo), self.assertRaises(gh.GitHubError):
+                gh.push(str(self.d), branch=ramo)
+
+    def test_the_ordinary_tree_still_pushes(self):
+        self.assertTrue(gh.push(str(self.d))["ok"])
+        self.assertEqual(gh.origin_of(str(self.d)), self.url)
+
+
 class PullRequestTests(unittest.TestCase):
     def test_without_a_credential_it_says_who_supplies_it(self):
         """Un rifiuto che non indica la strada insegna solo che il sistema dice
