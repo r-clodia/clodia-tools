@@ -1,224 +1,91 @@
-"""Generazione immagini via OpenAI gpt-image — per la PFP degli agenti (flusso
-owner) e, in prospettiva, come tool MCP per gli agenti.
+"""Image generation for the gateway's `image.generate` and the owner's agent
+avatar flow (`/internal/imagegen`).
 
-La API key NON sta in `secrets/` editata a mano: è una **integrazione** attivata
-dall'owner che la incolla nella sezione Integrazioni → depositata nel **vault**
-come credenziale infra `openai_api_key` (grant vuoto: la legge solo il gateway
-via `read_internal`). Fallback su env `OPENAI_API_KEY` per dev.
+The gateway keeps the decisions — who may call, which topic the PNG lands in
+(`main._dispatch_image`), the owner-only avatar route — and the HTTP call to
+OpenAI is it-pack's GATEWAY COMPONENT's service `imagegen_run`
+(clodia-platform#525/#558), which reads the key `openai_api_key` from the
+vault itself. The in-process client and the MCP transport of it-pack ≤ 0.18
+are gone: without the component there is no image generation, and the error
+says why.
 
-Due modalità (entrambe ritornano i byte PNG):
-  - `generate(prompt)`        → text→image (endpoint /images/generations)
-  - `edit(prompt, image)`     → image→image (endpoint /images/edits, multipart)
+Two operations (both return PNG bytes):
+  - `generate(prompt)`        → text→image
+  - `edit(prompt, image)`     → image→image
 
-Lo **stile** (es. manga/ghibli per le PFP) NON è hardcoded qui: lo applica il
-chiamante (il flusso PFP), così il tool resta generico e riusabile.
+The style (e.g. manga for avatars) is the caller's, not this module's.
 """
 from __future__ import annotations
 
 import base64
-import json
-import os
-import urllib.error
-import urllib.request
 
 from .. import vault
 
-_GEN_URL = "https://api.openai.com/v1/images/generations"
-_EDIT_URL = "https://api.openai.com/v1/images/edits"
-DEFAULT_MODEL = "gpt-image-2"
-CRED = "openai_api_key"  # nome credenziale nel vault (infra, no grant)
+CRED = "openai_api_key"  # vault credential (infra, no grant), read by the component
 
-_TIMEOUT = 300
-
-
-class ImageGenError(RuntimeError):
-    """Errore di configurazione o di chiamata all'API immagini."""
-
-
-def has_key() -> bool:
-    """True se l'integrazione OpenAI è attiva (key nel vault o env)."""
-    if os.environ.get("OPENAI_API_KEY", "").strip():
-        return True
-    return vault.has_credential(CRED)
-
-
-def _api_key() -> str:
-    k = os.environ.get("OPENAI_API_KEY", "").strip()
-    if k:
-        return k
-    try:
-        b = vault.read_internal(CRED)
-    except vault.VaultDenied as e:
-        raise ImageGenError(
-            "OpenAI non collegato: attiva l'integrazione 'Image generation' "
-            "(incolla la API key nella sezione Integrazioni)") from e
-    k = (b.get("api_key") or "").strip()
-    if not k:
-        raise ImageGenError("credenziale 'openai_api_key' priva di api_key")
-    return k
-
-
-def _extract_png(result: dict) -> bytes:
-    data = (result.get("data") or [])
-    if not data:
-        raise ImageGenError("risposta OpenAI senza immagine")
-    d = data[0]
-    b64 = d.get("b64_json")
-    if b64:
-        return base64.b64decode(b64)
-    url = d.get("url")
-    if url:
-        with urllib.request.urlopen(url, timeout=120) as r:
-            return r.read()
-    raise ImageGenError("risposta OpenAI senza b64_json né url")
-
-
-def _post_json(url: str, payload: dict) -> dict:
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": f"Bearer {_api_key()}",
-                 "Content-Type": "application/json"},
-        method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8") if e.fp else str(e)
-        raise ImageGenError(f"OpenAI {e.code}: {body[:240]}") from e
-    except urllib.error.URLError as e:
-        raise ImageGenError(f"OpenAI irraggiungibile: {e}") from e
-
-
-def _multipart(fields: dict, files: dict) -> tuple[bytes, str]:
-    """Encoder multipart/form-data minimale (no dipendenze)."""
-    boundary = "----clodia" + base64.urlsafe_b64encode(os.urandom(12)).decode().rstrip("=")
-    out = bytearray()
-    for k, v in fields.items():
-        out += f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode()
-    for k, (fn, content, ct) in files.items():
-        out += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"; "
-                f"filename=\"{fn}\"\r\nContent-Type: {ct}\r\n\r\n").encode()
-        out += content + b"\r\n"
-    out += f"--{boundary}--\r\n".encode()
-    return bytes(out), boundary
-
-
-#: The connector whose transport `generate`/`edit` use in `pack` position.
+#: The connector whose component serves the calls.
 CONNECTOR = "openai-images"
 
 
-def _in_pack_position() -> bool:
-    """`connectors: {openai-images: pack}` (clodia-platform#525). In doubt,
-    `native`: `connector_mode` never raises and falls back to it itself."""
-    from .. import instance_profile
-    return instance_profile.connector_mode(CONNECTOR) == "pack"
+class ImageGenError(RuntimeError):
+    """Configuration or call error of image generation."""
 
 
-def _via_transport(op: str, prompt: str, *, size: str, quality: str,
+def has_key() -> bool:
+    """True when the OpenAI Images integration has its key in the vault."""
+    return vault.has_credential(CRED)
+
+
+def _via_component(op: str, prompt: str, *, size: str, quality: str,
                    background: str, image_bytes: bytes | None = None) -> bytes:
-    """One image operation through it-pack's provider transport (#525).
+    """One image operation through it-pack's component service (#525/#558).
 
-    The gateway keeps the decisions — who may call, which topic the PNG lands
-    in (`main._dispatch_image`), the owner-only `/internal/imagegen` — and the
-    pack does the HTTP call with the API key of THIS call only. Contract with
-    it-pack: backend/tool from the manifest (`imagegen-transport`/`run`),
-    arguments `{op, prompt, size, quality, background, image_b64?, api_key}`,
-    result `{"png_b64": "<base64>"}`; a failure is a tool error (isError).
-
-    Fail closed: no usable transport (pack connector not held, transport not
-    declared or not the pack's own mount) is an error, never the in-process
-    client — an owner who turned the switch would otherwise be verifying the
-    wrong implementation on real traffic.
-    """
-    from .. import proxy
-    from ..connectors import resolved
-    # it-pack ≥ 0.19.0: the HTTP call is its GATEWAY COMPONENT's service
-    # (#525/#558), which reads the key from the vault itself — the key no
-    # longer travels in the arguments. Before: the MCP transport below.
+    Contract: arguments `{op, prompt, size, quality, background, image_b64?}`,
+    result `{"png_b64": "<base64>"}`. Fail closed: no serving component is an
+    error naming its state, never another client."""
     from ..components import loader as _components
-    _svc = _components.service("it-pack", "imagegen_run")
-    if _svc is not None:
-        sargs = {"op": op, "prompt": prompt, "size": size, "quality": quality,
-                 "background": background}
-        if image_bytes is not None:
-            sargs["image_b64"] = base64.b64encode(image_bytes).decode("ascii")
-        try:
-            out = _svc.handler(sargs)
-            png = base64.b64decode((out or {})["png_b64"], validate=True)
-        except Exception as e:  # noqa: BLE001 — never the arguments in the message
-            raise ImageGenError(f"image component: {type(e).__name__}: {str(e)[:200]}") from e
-        if not png:
-            raise ImageGenError("image component: empty image")
-        return png
-    transport = resolved.transport_for(CONNECTOR)
-    if transport is None:
+    svc = _components.service("it-pack", "imagegen_run")
+    if svc is None:
         try:
             st = _components.state_of("it-pack")
         except Exception:  # noqa: BLE001
             st = None
         if st:
             raise ImageGenError(
-                f"image generation is it-pack's on this instance, but its gateway "
-                f"component is {st.get('status')}: {str(st.get('reason') or '')[:200]}")
+                f"image generation is it-pack's, but its gateway component is "
+                f"{st.get('status')}: {str(st.get('reason') or '')[:200]}")
         raise ImageGenError(
-            "image generation is handed to a pack on this instance "
-            "(connectors: {openai-images: pack}) but its transport provider "
-            "is not available: install/enable it-pack, or switch back to native")
-    backend, tool = transport
-    args = {"op": op, "prompt": prompt, "size": size, "quality": quality,
-            "background": background, "api_key": _api_key()}
+            "image generation is served by it-pack's gateway component "
+            "(it-pack ≥ 0.19.0) with `connectors: {openai-images: pack}`; it is "
+            "not installed, not enabled, or the switch is on `native`, which has "
+            "no implementation any more")
+    sargs = {"op": op, "prompt": prompt, "size": size, "quality": quality,
+             "background": background}
     if image_bytes is not None:
-        args["image_b64"] = base64.b64encode(image_bytes).decode("ascii")
+        sargs["image_b64"] = base64.b64encode(image_bytes).decode("ascii")
     try:
-        text = proxy.call_backend_tool_sync(backend, tool, args, timeout=_TIMEOUT)
-    except proxy.BackendToolError as e:
-        # Never the arguments: they carry the key.
-        raise ImageGenError(f"image transport: {str(e)[:240]}") from e
-    try:
-        out = json.loads(text)
-        png = base64.b64decode(out["png_b64"], validate=True)
-    except Exception as e:  # noqa: BLE001 — any other shape is a failed call
-        raise ImageGenError("image transport: answer without a valid png_b64") from e
+        out = svc.handler(sargs)
+        png = base64.b64decode((out or {})["png_b64"], validate=True)
+    except Exception as e:  # noqa: BLE001 — never the arguments in the message
+        raise ImageGenError(f"image component: {type(e).__name__}: {str(e)[:200]}") from e
     if not png:
-        raise ImageGenError("image transport: empty image")
+        raise ImageGenError("image component: empty image")
     return png
 
 
 def generate(prompt: str, *, size: str = "1024x1024", quality: str = "auto",
-             background: str = "auto", model: str = DEFAULT_MODEL) -> bytes:
-    """text→image. Ritorna i byte PNG."""
+             background: str = "auto") -> bytes:
+    """text→image. Returns the PNG bytes."""
     if not (prompt or "").strip():
         raise ImageGenError("prompt vuoto")
-    if _in_pack_position():
-        return _via_transport("generate", prompt, size=size, quality=quality,
-                              background=background)
-    payload = {"model": model, "prompt": prompt, "n": 1, "size": size,
-               "quality": quality, "background": background}
-    return _extract_png(_post_json(_GEN_URL, payload))
+    return _via_component("generate", prompt, size=size, quality=quality,
+                          background=background)
 
 
 def edit(prompt: str, image_bytes: bytes, *, size: str = "1024x1024",
-         quality: str = "auto", background: str = "auto",
-         model: str = DEFAULT_MODEL) -> bytes:
-    """image→image (restyle dell'immagine fornita secondo il prompt). PNG out."""
+         quality: str = "auto", background: str = "auto") -> bytes:
+    """image→image (restyle of the given image per the prompt). PNG out."""
     if not image_bytes:
         raise ImageGenError("immagine di input vuota")
-    if _in_pack_position():
-        return _via_transport("edit", prompt or "", size=size, quality=quality,
-                              background=background, image_bytes=image_bytes)
-    fields = {"model": model, "prompt": prompt or "", "n": "1", "size": size,
-              "quality": quality, "background": background}
-    body, boundary = _multipart(fields, {"image": ("input.png", image_bytes, "image/png")})
-    req = urllib.request.Request(
-        _EDIT_URL, data=body,
-        headers={"Authorization": f"Bearer {_api_key()}",
-                 "Content-Type": f"multipart/form-data; boundary={boundary}"},
-        method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-            return _extract_png(json.loads(resp.read().decode("utf-8")))
-    except urllib.error.HTTPError as e:
-        b = e.read().decode("utf-8") if e.fp else str(e)
-        raise ImageGenError(f"OpenAI edit {e.code}: {b[:240]}") from e
-    except urllib.error.URLError as e:
-        raise ImageGenError(f"OpenAI irraggiungibile: {e}") from e
+    return _via_component("edit", prompt or "", size=size, quality=quality,
+                          background=background, image_bytes=image_bytes)

@@ -1496,6 +1496,11 @@ async def github_connect(request: Request):
     GitHub. Body: {pat}. pat vuoto → disconnette (rimuove cred + backend).
     Il PAT non transita mai dal modello: il proxy lo risolve via ${VAULT:github_pat}.
 
+    Reached through the generic connector route (`connectors_api._delegate`),
+    no longer at a route of its own (#525). On `native` it still mounts the
+    official backend unstamped, so the backend's own `github.*` tools keep
+    working; the four git verbs need `pack` either way.
+
     In `pack` position (`connectors: {github: pack}`, clodia-platform#525) the
     backend is it-pack's own mount, so this handler deposits the PAT only —
     same entry, same `{"value": pat}` shape, which the pack's mount reads as
@@ -1999,8 +2004,6 @@ routes = [
     Route("/tools/gmail/connect", gmail_connect, methods=["POST"]),
     Route("/tools/gworkspace/auth", gworkspace_auth, methods=["GET"]),
     Route("/tools/gworkspace/connect", gworkspace_connect, methods=["POST"]),
-    Route("/tools/openai/connect", openai_connect, methods=["POST"]),
-    Route("/tools/github/connect", github_connect, methods=["POST"]),
     Route("/tools/telegram/status", telegram_status, methods=["GET"]),
     Route("/tools/telegram/connect", telegram_connect, methods=["POST"]),
     Route("/tools/backup/config", backup_configure, methods=["POST"]),

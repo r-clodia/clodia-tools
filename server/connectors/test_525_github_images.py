@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from types import SimpleNamespace as NS
 import copy
 import json
 import os
@@ -47,8 +48,6 @@ import yaml
 from .. import egress, instance_profile, proxy, taint, tools_api, vault, whitelist
 from .. import test_518_pdp_tables as PDP
 from .. import test_gate_perimeter as GP
-from .. import test_github_dispatch as GD
-from .. import test_push_destination as PD
 from .. import test_repo_whitelist as RW
 from ..tools import image as IMG
 from . import builtin as B
@@ -221,15 +220,19 @@ class GitVerbsFollowTheSwitchTests(_Istanza):
     """The four git verbs follow the `github` switch (clodia-platform#525):
     native on `native`, it-pack's gateway component's on `pack`."""
 
-    def test_native_position_keeps_them_native(self):
+    def test_native_position_has_no_implementation(self):
+        """The native code is gone (#525): on `native` the git verbs are not
+        listed and a call is refused, saying how to get them."""
         from .. import main
         self.posizione("native")
         nomi = {t.name for t in main._all_native_tools()}
         for verbo in GIT_VERBS:
             with self.subTest(verbo=verbo):
-                self.assertIn(verbo, nomi)
+                self.assertNotIn(verbo, nomi)
                 self.assertFalse(main._is_packaged_verb(verbo))
-                self.assertTrue(main._verb_implemented(verbo))
+                with self.assertRaises(main._PackVerbRefused) as cm:
+                    main._check_component(verbo)
+                self.assertIn("github: pack", str(cm.exception))
 
     def test_pack_position_hands_them_to_the_component(self):
         from .. import main
@@ -248,9 +251,7 @@ class GitVerbsFollowTheSwitchTests(_Istanza):
         self.posizione("pack")
         with patch.object(main.proxy, "is_proxied", lambda n: n.startswith("github.")), \
                 patch.object(main.proxy, "call_proxied",
-                             lambda *a, **k: self.fail("proxied")), \
-                patch.object(main, "_dispatch_github",
-                             lambda *a, **k: self.fail("served natively")):
+                             lambda *a, **k: self.fail("proxied")):
             for verbo in GIT_VERBS:
                 with self.subTest(verbo=verbo):
                     with self.assertRaises(main._PackVerbRefused) as cm:
@@ -266,7 +267,8 @@ class GitVerbsFollowTheSwitchTests(_Istanza):
         self.posizione("native")
         self.assertFalse(main._is_packaged_verb("github.list_issues"))
         self.assertIn("github", M.core_namespaces())
-        self.assertIn("github", main._native_tool_namespaces())
+        # Not even on `native`: the gateway implements no github verb any more.
+        self.assertNotIn("github", main._native_tool_namespaces())
 
 
 # --------------------------------------------------------------------------
@@ -435,133 +437,89 @@ class FailClosedTests(_Istanza):
 
 class DeclaredPerimeterTests(_Istanza):
     """The acceptance criterion: a push/PR to a repository outside the scope's
-    egress is refused as today — through the real `_require_approved_repo`,
-    with a perimeter declared, in both positions."""
+    egress is refused as before — through the real `_require_approved_repo`,
+    now reached by it-pack's component via the host API (#525)."""
 
-    def _dispatch(self, verbo: str, repo: str):
+    def _ask(self, repo: str) -> str:
         from .. import main
-        from ..topics.service import TopicService as T
-
-        class Svc:
-            _require_approved_repo = staticmethod(T._require_approved_repo)
-
+        from ..components.host import Perimeter
         with patch.object(whitelist, "CONFIG", {"egress_allow": [APPROVED]}), \
-                patch.object(main, "_current_topic", lambda: ("SEAL-1", "acme")), \
-                patch.object(main, "_topics", lambda: Svc()), \
-                patch.object(main, "_origin_of", lambda d: repo), \
-                patch.object(main, "_safe_scratch_path", lambda p: "/scratch/x"), \
-                patch.object(main, "_repo_credential", lambda *a: None), \
-                patch("server.tools.github_repo.push", lambda *a, **k: {"ok": True}), \
-                patch("server.tools.github_repo.clone", lambda *a, **k: {"ok": True}), \
-                patch("server.tools.github_repo.pull_request",
-                      lambda *a, **k: {"ok": True}):
-            main._check_pack_connector_held(verbo)
-            return main._dispatch_github(verbo, {"repo": repo, "dir": "x",
-                                                 "dest": "x", "head": "h",
-                                                 "title": "t"})
+                patch.object(main, "_current_topic", lambda: ("SEAL-1", "acme")):
+            return Perimeter().require_approved_repo(repo)
 
-    def test_outside_the_perimeter_is_refused_in_both_positions(self):
-        from ..topics.service import TopicError
-        for pos in ("native", "pack"):
-            for verbo in ("github.push", "github.clone", "github.pull_request"):
-                with self.subTest(posizione=pos, verbo=verbo):
-                    self.posizione(pos)
-                    with self.assertRaises(TopicError):
-                        self._dispatch(verbo, OUTSIDE)
+    def test_outside_the_perimeter_is_refused(self):
+        from ..components.host import HostError
+        with self.assertRaises(HostError):
+            self._ask(OUTSIDE)
 
-    def test_inside_the_perimeter_the_push_goes_through(self):
-        for pos in ("native", "pack"):
-            with self.subTest(posizione=pos):
-                self.posizione(pos)
-                self.assertEqual(self._dispatch("github.push", APPROVED), {"ok": True})
+    def test_inside_the_perimeter_the_repository_comes_back_canonical(self):
+        self.assertEqual(self._ask(APPROVED), APPROVED)
 
 
 # --------------------------------------------------------------------------
 # 4. images through the transport
 # --------------------------------------------------------------------------
-class ImageTransportTests(_Istanza):
+class ImageComponentTests(_Istanza):
+    """Image generation through it-pack's gateway component service (#525,
+    #558): the in-process client and the MCP transport are gone."""
+
     def setUp(self):
         super().setUp()
-        for p in (patch.object(IMG, "_api_key", lambda: "sk-test"),
-                  patch.object(IMG, "_post_json", self._no_http),
-                  patch.object(IMG.urllib.request, "urlopen", self._no_http)):
-            p.start()
-            self.addCleanup(p.stop)
+        self.calls: list[dict] = []
+        from ..components import loader
 
-    def _no_http(self, *a, **k):
-        raise AssertionError("the in-process OpenAI client must not run")
+        def run(arguments):
+            self.calls.append(dict(arguments))
+            return {"png_b64": base64.b64encode(
+                b"\x89PNG-" + arguments["op"].encode()).decode()}
+        self.service = NS(handler=run)
+        p = patch.object(loader, "service",
+                         lambda pack, name: self.service
+                         if (pack, name) == ("it-pack", "imagegen_run") else None)
+        p.start()
+        self.addCleanup(p.stop)
 
-    def test_generate_goes_to_the_pack_with_the_contract(self):
+    def test_generate_goes_to_the_component_with_the_contract(self):
         png = IMG.generate("a cat", size="512x512", quality="low",
                            background="transparent")
         self.assertEqual(png, b"\x89PNG-generate")
-        (call,) = self.transport_calls
-        self.assertEqual((call["backend"], call["tool"], call["timeout"]),
-                         (IMG_BACKEND, IMG_TOOL, 300))
-        self.assertEqual(call["arguments"], {
+        self.assertEqual(self.calls, [{
             "op": "generate", "prompt": "a cat", "size": "512x512",
-            "quality": "low", "background": "transparent", "api_key": "sk-test"})
+            "quality": "low", "background": "transparent"}])
 
-    def test_edit_carries_the_image(self):
+    def test_edit_carries_the_image_and_no_key(self):
         self.assertEqual(IMG.edit("restyle", b"RAW"), b"\x89PNG-edit")
-        args = self.transport_calls[0]["arguments"]
+        (args,) = self.calls
         self.assertEqual(args["op"], "edit")
         self.assertEqual(base64.b64decode(args["image_b64"]), b"RAW")
-        self.assertEqual(args["api_key"], "sk-test")
+        self.assertNotIn("api_key", args)
 
-    def test_no_transport_refuses_instead_of_falling_back(self):
-        images = _images_connector()
-        del images["providers"][0]["transport"]
-        self.scrivi_pack(_it_pack(images=images))
-        with self.assertRaises(IMG.ImageGenError) as e:
-            IMG.generate("a cat")
-        self.assertIn("transport provider is not available", str(e.exception))
-        self.assertEqual(self.transport_calls, [])
-
-    def test_without_the_pack_too(self):
-        (self.dir / "packs" / PACK / "pack.yaml").unlink()
-        resolved.invalidate()
-        with self.assertRaises(IMG.ImageGenError):
-            IMG.edit("x", b"RAW")
-        self.assertEqual(self.transport_calls, [])
-
-    def test_a_backend_the_pack_did_not_mount_is_not_used(self):
-        for b in (_backend(IMG_BACKEND, pack=None), _backend(IMG_BACKEND, pack="other")):
-            with self.subTest(backend=b), \
-                    patch.dict(proxy.CONFIG, {"mcp_backends": [_backend("github"), b]}):
-                resolved.invalidate()
-                with self.assertRaises(IMG.ImageGenError):
-                    IMG.generate("a cat")
-        self.assertEqual(self.transport_calls, [])
-
-    def test_a_tool_error_is_a_failed_generation(self):
-        def esplode(*a, **k):
-            raise proxy.BackendToolError("upstream 500")
-        with patch.object(proxy, "call_backend_tool_sync", esplode):
+    def test_no_component_refuses_and_never_reaches_a_backend(self):
+        from ..components import loader
+        with patch.object(loader, "service", lambda *a: None), \
+                patch.object(loader, "state_of", lambda pack: None), \
+                patch.object(proxy, "call_backend_tool_sync",
+                             lambda *a, **k: self.fail("backend reached")):
             with self.assertRaises(IMG.ImageGenError) as e:
                 IMG.generate("a cat")
-        self.assertIn("upstream 500", str(e.exception))
-        self.assertNotIn("sk-test", str(e.exception))
+        self.assertIn("it-pack", str(e.exception))
 
-    def test_an_answer_without_its_shape_is_a_failed_generation(self):
-        for testo in ("not json", "{}", '{"png_b64": "%%%"}', '{"png_b64": ""}', "[]"):
-            with self.subTest(risposta=testo), \
-                    patch.object(proxy, "call_backend_tool_sync",
-                                 lambda *a, _t=testo, **k: _t):
-                with self.assertRaises(IMG.ImageGenError):
+    def test_a_failing_or_malformed_answer_is_a_failed_generation(self):
+        for out in (RuntimeError("upstream 500 sk-test"), {}, {"png_b64": "%%%"},
+                    {"png_b64": ""}, None):
+            def run(arguments, _o=out):
+                if isinstance(_o, Exception):
+                    raise _o
+                return _o
+            self.service = NS(handler=run)
+            with self.subTest(risposta=repr(out)):
+                with self.assertRaises(IMG.ImageGenError) as e:
                     IMG.generate("a cat")
-
-    def test_native_position_keeps_the_in_process_client(self):
-        self.posizione("pack", "native")
-        with patch.object(IMG, "_post_json",
-                          lambda url, payload: {"data": [{"b64_json": base64.b64encode(
-                              b"NATIVE").decode()}]}):
-            self.assertEqual(IMG.generate("a cat"), b"NATIVE")
-        self.assertEqual(self.transport_calls, [])
+                self.assertNotIn("api_key", str(e.exception))
 
     def test_image_generate_keeps_its_gateway_checks(self):
         """Membership and the topic write stay the gateway's: the verb checks
-        the caller is in the topic, then writes the pack's PNG with put_file."""
+        the caller is in the topic, then writes the component's PNG."""
         from .. import main
         scritti = {}
 
@@ -593,7 +551,7 @@ class ImageTransportTests(_Istanza):
             with self.assertRaises(PermissionError):
                 asyncio.run(main._dispatch_image(
                     {"tier": "SEAL-1", "name": "acme", "prompt": "a cat"}))
-        self.assertEqual(self.transport_calls, [])
+        self.assertEqual(self.calls, [])
 
     def test_internal_imagegen_keeps_working(self):
         from starlette.applications import Starlette
@@ -860,30 +818,6 @@ def tools_api_github_connect(body: dict):
 # 7. the pinned suites, again in `pack` position
 # --------------------------------------------------------------------------
 class GatePerimeterInPack(_ItIstanza, GP.DestinationsAlreadyAllowedTests):
-    pass
-
-
-class PushDestinationInPack(_ItIstanza, PD.PushDestinationTests):
-    pass
-
-
-class DispatchOutsideAScopeInPack(_ItIstanza, GD.OutsideAScopeTests):
-    pass
-
-
-class DispatchOriginInPack(_ItIstanza, GD.TheRepositoryOfAPushComesFromTheOriginTests):
-    pass
-
-
-class DispatchCredentialInPack(_ItIstanza, GD.TheCredentialIsScopeLevelTests):
-    pass
-
-
-class DispatchShallowCloneInPack(_ItIstanza, GD.AShallowCloneCanBeAskedForTests):
-    pass
-
-
-class DispatchGateClassInPack(_ItIstanza, GD.GateClassTests):
     pass
 
 

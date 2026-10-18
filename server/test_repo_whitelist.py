@@ -100,13 +100,13 @@ class BackwardCompatibilityTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
-    def test_the_check_runs_where_github_verbs_are_dispatched(self):
+    def test_the_check_runs_where_github_verbs_ask_for_the_repository(self):
         """Da decision-record #40 non c'è più un `remote_enable` che monta un
-        repository: il controllo vive dove `github.clone/pull/push` risolvono
-        davvero il repository, in `_dispatch_github`."""
+        repository: il controllo vive dove `github.clone/pull/push` chiedono il
+        repository al gateway — l'API host del componente di it-pack (#525)."""
         import inspect
-        from . import main as gw_main
-        src = inspect.getsource(gw_main._dispatch_github)
+        from .components.host import Perimeter
+        src = inspect.getsource(Perimeter.require_approved_repo)
         self.assertIn("_require_approved_repo", src)
 
 
