@@ -5401,7 +5401,10 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # component verb never reaches a native lookup below.
                 _eargs = await asyncio.to_thread(
                     _component_pdp_arguments, _cpdp, name, arguments)
-            elif name == "email.reply" and not (arguments.get("to") or ""):
+            elif name == "email.reply":
+                # The reply goes to the ORIGINAL sender, whatever `to` the
+                # caller wrote (the client ignores it): the PDP must judge that
+                # address, never one the caller chose (clodia-platform#559).
                 # Off the event loop: the lookup is an IMAP fetch.
                 _eargs = {**arguments,
                           "to": await asyncio.to_thread(_reply_recipient, arguments)}
