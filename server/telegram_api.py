@@ -121,8 +121,11 @@ def _authorize(request: Request):
 def _verified(request: Request) -> tuple[dict, str]:
     """The (already authorized) caller's claims and token, for a component
     handler that reads the call's identity."""
-    payload, _err = internal_auth.authorize(request, log=LOG)
-    return dict(payload or {}), internal_auth.bearer(request)
+    try:
+        payload, _err = internal_auth.authorize(request, log=LOG)
+        return dict(payload or {}), internal_auth.bearer(request)
+    except Exception:  # noqa: BLE001 — no identity: the handler refuses (fail closed)
+        return {}, ""
 
 
 async def updates(request: Request):
