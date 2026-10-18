@@ -414,6 +414,9 @@ def local_folders(meta: dict) -> list:
     return [f for f in raw if isinstance(f, dict) and f.get("name")] if isinstance(raw, list) else []
 
 
+_SHARED_SLUG = __import__("re").compile(r"[a-z0-9][a-z0-9-]{0,99}")
+
+
 def shared_folder(meta: dict) -> str | None:
     """The subfolder of `LOCAL_SHARED_ROOT` served as this topic's `shared/`
     mount, or None (clodia-platform#571).
@@ -424,7 +427,13 @@ def shared_folder(meta: dict) -> str | None:
     `files/<name>` symlink, which the migration leaves in place for them.
     """
     folders = local_folders(meta)
-    return str(folders[0]["name"]) if folders else None
+    if not folders:
+        return None
+    slug = str(folders[0]["name"])
+    # The slug becomes a path segment under `LOCAL_SHARED_ROOT`. Only what
+    # `_unique_name` can produce is accepted: one segment of `[a-z0-9-]`, so
+    # no `..`, no `/` and no other topic's folder reached by a crafted meta.
+    return slug if _SHARED_SLUG.fullmatch(slug) else None
 
 
 def topic_links(meta: dict) -> list:
@@ -616,7 +625,20 @@ class TopicService:
                 f"`{self.MOUNT_SHARED}/` esiste solo dopo `topic.local_folder_add` "
                 "(🗂️ Cartella Mac nella sidebar del topic). Qui si scrive sotto "
                 f"`{self.MOUNT_LOCAL}/`.")
-        return self.s, f"{LOCAL_SHARED_ROOT}/{slug}"
+        base = f"{LOCAL_SHARED_ROOT}/{slug}"
+        self._confine_shared(base)
+        return self.s, base
+
+    def _confine_shared(self, path: str) -> None:
+        """TopicError unless `path`, resolved through symlinks, stays under
+        `LOCAL_SHARED_ROOT`. The folder is written from the Mac side too, so a
+        symlink there must not lead the `shared/` mount into another topic or
+        into the control plane of the store."""
+        within = getattr(self.s, "within", None)
+        if within is not None and not within(path, LOCAL_SHARED_ROOT):
+            raise TopicError(
+                f"`{self.MOUNT_SHARED}/` punta fuori dalla radice delle cartelle "
+                "condivise: accesso rifiutato.")
 
     def _prov_key(self, meta: dict, mount: str, sub: str) -> str:
         """The provenance-sidecar key of `sub` inside `mount`.
@@ -649,6 +671,42 @@ class TopicService:
         except (StorageError, NotImplementedError, AttributeError) as e:
             LOG.warning("shared folder of %s/%s: files/%s left in place (%s)",
                         tier, name, slug, type(e).__name__)
+
+    def migrate_shared_symlinks(self) -> dict:
+        """Eager pass of `_migrate_shared_symlink` over every topic with a
+        shared folder, run once at gateway start (clodia-platform#571), so the
+        topics created before #571 show `shared/` right after the deploy and
+        not only after their first open. Idempotent: a topic already migrated
+        has no symlink left and costs one `lstat`. One bad topic never stops
+        the pass. Returns counters for the boot log."""
+        seen = migrated = 0
+        for tr in VALID_TIER:
+            try:
+                entries = self.s.list(tr)
+            except Exception:  # noqa: BLE001 — a missing tier dir is normal
+                continue
+            for e in entries:
+                if e.kind != "dir":
+                    continue
+                try:
+                    meta, _ = self._read_meta(tr, e.name)
+                except Exception:  # noqa: BLE001
+                    continue
+                slug = shared_folder(meta)
+                if not slug:
+                    continue
+                seen += 1
+                link = f"{self._dir(tr, e.name)}/files/{slug}"
+                try:
+                    had = self.s.is_symlink(link)
+                except Exception:  # noqa: BLE001
+                    had = False
+                self._migrate_shared_symlink(tr, e.name, meta)
+                if had:
+                    migrated += 1
+                    LOG.info("shared folder of %s/%s: files/%s → shared/",
+                             tr, e.name, slug)
+        return {"with_shared": seen, "migrated": migrated}
 
     def _links(self, tier: str, name: str, meta: dict | None = None) -> list[dict]:
         """I collegamenti ATTIVI di questo topic: quelli dichiarati da entrambi
@@ -815,13 +873,18 @@ class TopicService:
 
         if parts and parts[0] == self.MOUNT_SHARED:
             store, base = self._shared_mount(tier, name, meta)
-            return store, base, "/".join(parts[1:]), self.MOUNT_SHARED
+            sub = "/".join(parts[1:])
+            if sub:
+                self._confine_shared(f"{base}/{sub}")
+            return store, base, sub, self.MOUNT_SHARED
 
         if parts and parts[0] == self.MOUNT_LOCAL:
             sub = "/".join(parts[1:])
             meta, rest = self._shared_alias(tier, name, sub, meta)
             if rest is not None:
                 store, base = self._shared_mount(tier, name, meta)
+                if rest:
+                    self._confine_shared(f"{base}/{rest}")
                 return store, base, rest, self.MOUNT_SHARED
             store, base = self._local_mount(tier, name)
             return store, base, sub, self.MOUNT_LOCAL
@@ -849,6 +912,8 @@ class TopicService:
         meta, rest = self._shared_alias(tier, name, sub, meta)
         if rest is not None:
             store, base = self._shared_mount(tier, name, meta)
+            if rest:
+                self._confine_shared(f"{base}/{rest}")
             return store, base, rest, self.MOUNT_SHARED
         store, base = self._files_backend(tier, name)
         return store, base, sub, self.MOUNT_LOCAL
@@ -1039,6 +1104,10 @@ class TopicService:
         # non un campo del meta: `topic.new` lo riceverebbe da un agente, che se
         # lo concederebbe da sé. Si scrive solo da `accept_channel_cap`.
         meta.pop(CHANNEL_SEAL_ACK, None)
+        # Same reason for the shared folder (clodia-platform#571): it is a bind
+        # on the Mac side, attached only through the gated `local_folder_add`.
+        # Accepted here, an agent could name any folder of the shared root.
+        meta.pop("local_folders", None)
         meta.setdefault("title", name)
         meta.setdefault("type", "progetto")
         # tier = unica classe del topic + livello di privacy per l'enforcement.

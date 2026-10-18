@@ -124,6 +124,15 @@ async def _lifespan(_app):
                          conf.get("name") or "workspace")
         except Exception as e:  # noqa: BLE001 — mai bloccare il boot
             LOG.warning("auto-create workspace (topics:single) fallito: %s", e)
+        # Topics created before clodia-platform#571 still carry the shared
+        # folder as a `files/<slug>` symlink: move them all to `shared/` now,
+        # not lazily on first open. Idempotent; never blocks the boot.
+        try:
+            from .topics_api import _service
+            res = await asyncio.to_thread(_service().migrate_shared_symlinks)
+            LOG.info("shared folders (#571): %s", res)
+        except Exception as e:  # noqa: BLE001 — never block the boot
+            LOG.warning("shared folder migration (#571) failed: %s", e)
         try:
             from . import main as gateway_main
             for warning in gateway_main.runtime_configuration_warnings():

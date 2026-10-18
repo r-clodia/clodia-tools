@@ -175,3 +175,76 @@ class MigrationTests(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConfinementTests(Base):
+    """A meta can never point `shared/` outside its own folder of the shared
+    root (review of clodia-tools#399, B1)."""
+
+    def test_topic_new_drops_local_folders(self):
+        self.mac("victim").mkdir()
+        self.svc.new("SEAL-1", "evil", {"title": "evil",
+                                        "local_folders": [{"name": "victim"}]})
+        meta, _ = self.svc._read_meta("SEAL-1", "evil")
+        self.assertNotIn("local_folders", meta)
+        with self.assertRaises(TopicError):
+            self.svc.read_file("SEAL-1", "evil", "shared/x.txt")
+
+    def test_a_traversal_slug_is_not_a_shared_folder(self):
+        tier, name = self.topic(attach=False)
+        self.svc.new("SEAL-3", "victim", {"title": "victim"})
+        self.svc.put_file("SEAL-3", "victim", "local/segreto.txt", b"s")
+        meta, ver = self.svc._read_meta(tier, name)
+        meta["local_folders"] = [{"name": "../SEAL-3/victim/files"}]
+        self.svc._write_meta(tier, name, meta, base_version=ver)
+        with self.assertRaises(TopicError):
+            self.svc.read_file(tier, name, "shared/segreto.txt")
+        self.assertNotIn("shared", [e["name"] for e in self.svc.list_files(tier, name, "")])
+
+    def test_a_symlink_in_the_shared_folder_cannot_leave_it(self):
+        tier, name = self.topic()
+        self.svc.new("SEAL-3", "victim", {"title": "victim"})
+        self.svc.put_file("SEAL-3", "victim", "local/segreto.txt", b"s")
+        (self.mac("acme") / "esca").symlink_to(self.root / "SEAL-3" / "victim" / "files")
+        with self.assertRaises(TopicError):
+            self.svc.read_file(tier, name, "shared/esca/segreto.txt")
+        with self.assertRaises(TopicError):
+            self.svc.put_file(tier, name, "shared/esca/nuovo.txt", b"x")
+        self.assertFalse((self.root / "SEAL-3" / "victim" / "files" / "nuovo.txt").exists())
+
+    def test_a_shared_folder_that_is_a_symlink_out_is_refused(self):
+        tier, name = self.topic(attach=False)
+        self.svc.new("SEAL-3", "victim", {"title": "victim"})
+        self.mac("trap").symlink_to(self.root / "SEAL-3" / "victim" / "files")
+        meta, ver = self.svc._read_meta(tier, name)
+        meta["local_folders"] = [{"name": "trap"}]
+        self.svc._write_meta(tier, name, meta, base_version=ver)
+        with self.assertRaises(TopicError):
+            self.svc.list_files(tier, name, "shared")
+
+
+class EagerMigrationTests(Base):
+    def test_boot_migrates_every_legacy_topic_without_opening_them(self):
+        self.legacy_topic("acme")
+        self.legacy_topic("beta", tier="SEAL-2")
+        self.topic("nuovo")
+        self.topic("senza", attach=False)
+        res = self.svc.migrate_shared_symlinks()
+        self.assertEqual(res, {"with_shared": 3, "migrated": 2})
+        for tier, name in (("SEAL-1", "acme"), ("SEAL-2", "beta")):
+            link = self.root / tier / name / "files" / name
+            self.assertFalse(link.is_symlink() or link.exists())
+            self.assertTrue(self.mac(name).is_dir())
+
+    def test_the_pass_is_idempotent(self):
+        self.legacy_topic("acme")
+        self.svc.migrate_shared_symlinks()
+        self.assertEqual(self.svc.migrate_shared_symlinks(),
+                         {"with_shared": 1, "migrated": 0})
+
+    def test_a_real_directory_with_the_slug_name_is_left_alone(self):
+        tier, name = self.topic()
+        (self.root / tier / name / "files" / "acme").mkdir(parents=True)
+        (self.root / tier / name / "files" / "acme" / "mio.txt").write_text("m")
+        self.assertEqual(self.svc.migrate_shared_symlinks()["migrated"], 0)
+        self.assertTrue((self.root / tier / name / "files" / "acme" / "mio.txt").exists())
