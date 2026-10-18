@@ -3592,11 +3592,16 @@ def _push_destination(arguments: dict) -> dict:
     più che avviene SOLO per il verbo che ne ha bisogno, al call-site, invece di
     far indovinare il PDP.
     """
-    if arguments.get("repo"):
-        return arguments
+    # The repository is ALWAYS the working tree's origin: `github.push` has no
+    # `repo` argument, and a caller-supplied one must not decide the verdict
+    # or skip the gate (review of clodia-tools#400). Unreadable → "" → unknown
+    # destination, refused.
     from .tools import github_repo as _gh
-    url = _gh.remote_url(str(arguments.get("dir") or ""))
-    return {**arguments, "repo": url} if url else arguments
+    try:
+        workdir = _safe_scratch_path(str(arguments.get("dir") or ""))
+    except Exception:  # noqa: BLE001 — outside the scratch: no destination
+        return {**arguments, "repo": ""}
+    return {**arguments, "repo": _gh.remote_url(workdir)}
 
 
 #: Gate key prefix of a web read from a source not in the ingress lists
@@ -5465,7 +5470,12 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                     # Stessa risoluzione che userà il PDP: due copie della
                     # stessa domanda divergono, e questa settimana è successo
                     # tre volte.
-                    _args_dest = (_push_destination(arguments)
+                    # A component verb resolves through its own service, as
+                    # the PDP does (#525): github.push on `github: pack`.
+                    _gspec = _component_verb(name)
+                    _args_dest = (_component_pdp_arguments(_gspec, name, arguments)
+                                  if _gspec is not None
+                                  else _push_destination(arguments)
                                   if name == "github.push" else arguments)
                     _perimetro_ok = _eg.destinations_already_allowed(name, _args_dest)
                 except Exception:  # noqa: BLE001 — in dubbio si chiede

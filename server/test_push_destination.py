@@ -15,6 +15,11 @@ from . import main
 
 
 class PushDestinationTests(unittest.TestCase):
+    def setUp(self):
+        p = patch.object(main, "_safe_scratch_path", lambda d: d)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_the_repo_is_resolved_from_the_working_tree(self):
         with patch("server.tools.github_repo.remote_url",
                    lambda _d: "https://github.com/r-clodia/clodia-logic"):
@@ -22,20 +27,30 @@ class PushDestinationTests(unittest.TestCase):
         self.assertEqual(out["repo"], "https://github.com/r-clodia/clodia-logic")
         self.assertEqual(out["dir"], "/scratch/x", "gli altri argomenti restano")
 
-    def test_an_explicit_repo_wins_and_costs_no_read(self):
-        def boom(_d):
-            raise AssertionError("non si legge il remote se il repo è già noto")
+    def test_a_caller_repo_never_decides(self):
+        """`github.push` has no `repo` argument: a forged one is replaced by
+        the origin, for the PDP and for the gate's perimeter skip alike
+        (review of clodia-tools#400)."""
+        with patch("server.tools.github_repo.remote_url",
+                   lambda _d: "https://github.com/r-clodia/real"):
+            out = main._push_destination({"dir": "/scratch/x",
+                                          "repo": "https://github.com/r-clodia/approved"})
+        self.assertEqual(out["repo"], "https://github.com/r-clodia/real")
 
-        with patch("server.tools.github_repo.remote_url", boom):
-            out = main._push_destination({"repo": "https://github.com/a/b"})
-        self.assertEqual(out["repo"], "https://github.com/a/b")
-
-    def test_an_unresolvable_remote_leaves_the_arguments_alone(self):
+    def test_an_unresolvable_remote_is_an_unknown_destination(self):
         """Nessuna destinazione inventata: il PDP deve poter dire «non lo so» e
         negare, che per un'uscita è la direzione giusta."""
         with patch("server.tools.github_repo.remote_url", lambda _d: ""):
             out = main._push_destination({"dir": "/scratch/x"})
-        self.assertNotIn("repo", out)
+        self.assertEqual(out["repo"], "")
+
+    def test_a_dir_outside_the_scratch_is_an_unknown_destination(self):
+        def fuori(_d):
+            raise ValueError("fuori dallo scratch")
+        with patch.object(main, "_safe_scratch_path", fuori), \
+                patch("server.tools.github_repo.remote_url",
+                      lambda _d: self.fail("read outside the scratch")):
+            self.assertEqual(main._push_destination({"dir": "/datadir"})["repo"], "")
 
     def test_the_perimeter_sees_the_resolved_destination(self):
         from server import egress
