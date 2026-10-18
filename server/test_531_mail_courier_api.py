@@ -62,10 +62,11 @@ class InRoomTests(unittest.TestCase):
                 patch("server.tools.mail_switch.call", call):
             r = asyncio.run(C.envelopes_route(_Req({
                 "tier": "SEAL-2", "name": "preventivi", "account": "info",
-                "skip": ["k1"], "body": "ignored"})))
+                "skip": ["k1"], "keys_only": True, "body": "ignored"})))
         self.assertEqual(r.status_code, 200)
         self.assertEqual(seen["service"], "courier_envelopes")
-        self.assertEqual(seen["args"], {"account": "info", "skip": ["k1"]})
+        self.assertEqual(seen["args"], {"account": "info", "skip": ["k1"],
+                                        "keys_only": True})
         self.assertEqual(seen["scope"], "SEAL-2/preventivi")
         self.assertEqual(seen["spawn"], "courier-SEAL-2-preventivi")
 

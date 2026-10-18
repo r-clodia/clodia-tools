@@ -147,7 +147,7 @@ async def _room_call(request: Request, service: str, keys: tuple[str, ...]):
 
 async def envelopes_route(request: Request):
     return await _room_call(request, "courier_envelopes",
-                            ("account", "folder", "limit", "skip"))
+                            ("account", "folder", "limit", "skip", "keys_only"))
 
 
 async def attachment_route(request: Request):
