@@ -17,15 +17,8 @@ Then:
 2. **PDP parity**: every public PDP answer about Google is the same with the
    builtin manifest (`native`) and with google-pack's PINNED manifest (`pack`);
    the pins tables of `test_524_google_pins` hold.
-3. **The Google suites, re-run against the component**: the pins of #524
-   (unconfined calls, account-root and topic perimeters, labels), `gdrive_root`
-   (ancestry, the three traps, fail-closed, config, cost, fast path, write
-   destination, refusal messages, calendar, native docs, verb coverage), the
-   per-topic perimeter, Sheets, Drive update, labels, the confinement API, and
-   the REST/wire suite of `google_io` (wire requests byte-identical to the
-   discovery client's). Each suite runs UNCHANGED: its module globals and the
-   `server.tools.<module>` attributes it patches by name are pointed at the
-   component's modules for the duration of the test.
+3. (The native Google suites re-run against the component lived here until
+   the native client was removed, #524: those cases are in clodia-logic now.)
 4. **The call path**: `call_tool` runs a component verb after the whitelist and
    the egress PDP (and `gdrive.update`'s parent lookup is the component's
    service); the gateway's `/tools/google/*` forward to the component's routes;
@@ -114,17 +107,11 @@ class GoogleComponentInstance:
     unchanged against the component."""
 
     GOOGLE = "pack"
-    #: Suite modules whose globals are re-pointed at the component.
-    SUITES: tuple = ()
 
     def setUp(self) -> None:  # noqa: D401
         from . import instance_profile
-        from . import tools as tools_pkg
         from .components import loader
         from .connectors import resolved
-        from .tools import (gcalendar, gdocs, gdrive, gdrive_labels, gdrive_root,
-                            google_io, gsheets)
-        from . import google_oauth
         # Registered FIRST so that it runs LAST, after the environment is
         # restored: the profile and the registry are re-read from the real
         # (test) datadir, not from this instance's `google: pack`.
@@ -160,21 +147,7 @@ class GoogleComponentInstance:
             comp = {m: sys.modules[f"{MODULE_ROOT}.{m}"] for m in MODULES}
             comp["google_oauth"] = sys.modules[f"{MODULE_ROOT}.google_oauth"]
             self.comp = comp
-            native = {google_io: comp["google_io"], gdrive: comp["gdrive"],
-                      gdrive_root: comp["gdrive_root"],
-                      gdrive_labels: comp["gdrive_labels"], gsheets: comp["gsheets"],
-                      gdocs: comp["gdocs"], gcalendar: comp["gcalendar"],
-                      google_oauth: comp["google_oauth"]}
-            # Attributes of `server.tools` (what `from .tools import gdrive`
-            # reads) AND `sys.modules` (what `patch("server.tools.gdrive.x")`
-            # resolves): a suite patching by name patches the component.
-            swaps = [patch.object(tools_pkg, m, comp[m]) for m in MODULES]
-            swaps.append(patch.dict(sys.modules, {f"server.tools.{m}": comp[m]
-                                                  for m in MODULES}))
-            for mod in self.SUITES:
-                for name, value in list(vars(mod).items()):
-                    if isinstance(value, ModuleType) and value in native:
-                        swaps.append(patch.object(mod, name, native[value]))
+            swaps = []
             # The suites stub the native verbs' own whitelist re-check; on the
             # component the dispatcher's check is the only one.
             swaps.append(patch.object(comp["gdrive"], "tool_allowed",
@@ -230,16 +203,13 @@ class LoadTests(GoogleComponentInstance, unittest.TestCase):
             "mail_accounts", "mail_exec"]))
 
     def test_the_schemas_are_the_native_ones_verbatim(self):
+        """The native schemas went with the native code (#524): the component
+        registers exactly the 24 verbs the gateway names."""
         from . import main
         from . import components
-        native = {t.name: t for t in main._GDRIVE_TOOLS + main._GCALENDAR_TOOLS
-                  + main._GDOCS_TOOLS + main._GSHEETS_TOOLS}
-        mine = {t.name: t for t in components.tools()}
-        self.assertEqual(set(mine), set(native))
-        for name, tool in native.items():
-            with self.subTest(verb=name):
-                self.assertEqual(mine[name].description, tool.description)
-                self.assertEqual(mine[name].inputSchema, tool.inputSchema)
+        mine = {t.name for t in components.tools()
+                if t.name.split(".", 1)[0] in ("gdrive", "gcalendar", "gdocs", "gsheets")}
+        self.assertEqual(mine, set(main._GOOGLE_NATIVE_NAMES))
 
     def test_the_natives_step_aside(self):
         from . import main
@@ -331,62 +301,160 @@ class PdpParityTests(GoogleComponentInstance, unittest.TestCase):
 # 3. the Google suites, against the component
 # --------------------------------------------------------------------------
 
-from .tools import google_io as NATIVE_GOOGLE_IO  # noqa: E402
-from . import test_524_google_pins as PINS  # noqa: E402
-from . import test_gdrive_confinement_api as CONF  # noqa: E402
-from . import test_gdrive_root as GR  # noqa: E402
-from . import test_gdrive_root_per_topic as GRT  # noqa: E402
-from .tools import test_524_google_io as GIO  # noqa: E402
-from .tools import test_gdrive_labels as LAB  # noqa: E402
-from .tools import test_gdrive_update as UPD  # noqa: E402
-from .tools import test_gsheets as GS  # noqa: E402
+# A fake Google API for the call-path tests, answering at the component's
+# `google_io` transport (moved here from the removed `test_524_google_pins`).
+ACCT = "conto"
+
+
+class _Request:
+    def __init__(self, fn):
+        self._fn = fn
+
+    def execute(self, **_kw):
+        return self._fn()
+
+
+class _Resource:
+    """`svc.files()`, `svc.spreadsheets().values()`, … — every method call is
+    recorded as `(resource.method, kwargs)` and answered by the owner."""
+
+    _CHILDREN = {"spreadsheets": ("values",)}
+
+    def __init__(self, owner, name):
+        self._o, self._n = owner, name
+
+    def __getattr__(self, method):
+        if method.startswith("_"):
+            raise AttributeError(method)
+        if method in self._CHILDREN.get(self._n, ()):
+            return lambda: _Resource(self._o, f"{self._n}.{method}")
+        op = f"{self._n}.{method}"
+
+        def call(**kw):
+            kw = {k: v for k, v in kw.items() if v is not None}
+            if "media_body" in kw:
+                kw["media_body"] = kw["media_body"].mimetype()
+            self._o.calls.append((op, kw))
+            return _Request(lambda: self._o.answer(op, kw))
+        return call
+
+
+class FakeGoogle:
+    """Drive, Docs, Sheets and Calendar answered from a parents table."""
+
+    def __init__(self, tree, *, shortcuts=(), names=None, mimes=None, rows=None,
+                 calendars=None):
+        self.tree = {k: list(v) for k, v in tree.items()}
+        self.shortcuts = set(shortcuts)
+        self.names = dict(names or {})
+        self.mimes = dict(mimes or {})
+        self.rows = list(rows or [])
+        self.calendars = list(calendars if calendars is not None else [
+            {"id": "cal@x.it", "summary": "Mine", "primary": True, "accessRole": "owner"},
+            {"id": "other@x.it", "summary": "Theirs", "accessRole": "reader"}])
+        self.calls: list[tuple[str, dict]] = []
+
+    def __getattr__(self, resource):
+        if resource.startswith("_"):
+            raise AttributeError(resource)
+        return lambda: _Resource(self, resource)
+
+    def ops(self):
+        return [op for op, _ in self.calls]
+
+    def _file(self, fid):
+        if fid not in self.tree:
+            raise RuntimeError(f"404 File not found: {fid}")
+        out = {"id": fid, "name": self.names.get(fid, f"name-{fid}"),
+               "mimeType": self.mimes.get(fid, "text/plain"),
+               "parents": list(self.tree[fid])}
+        if fid in self.shortcuts:
+            out["shortcutDetails"] = {"targetId": "elsewhere"}
+            out["mimeType"] = gr.SHORTCUT_MIME
+        return out
+
+    def answer(self, op, kw):  # noqa: C901 — one branch per API method
+        if op == "files.get":
+            return self._file(kw["fileId"])
+        if op == "files.list":
+            return {"files": [dict(r) for r in self.rows]}
+        if op == "files.create":
+            body = kw.get("body") or {}
+            return {"id": "NEW", "name": body.get("name"),
+                    "mimeType": body.get("mimeType", "text/plain"),
+                    "parents": body.get("parents", [])}
+        if op == "files.update":
+            f = self._file(kw["fileId"])
+            if (kw.get("body") or {}).get("name"):
+                f["name"] = kw["body"]["name"]
+            if kw.get("addParents"):
+                f["parents"] = [kw["addParents"]]
+            return f
+        if op == "permissions.create":
+            return {"id": "PERM1"}
+        if op == "documents.create":
+            return {"documentId": "DOC1", "title": kw["body"]["title"]}
+        if op == "documents.get":
+            return {"title": "Doc", "body": {"content": [
+                {"endIndex": 1, "sectionBreak": {}},
+                {"endIndex": 6, "paragraph": {"elements": [
+                    {"textRun": {"content": "ciao\n"}}]}}]}}
+        if op == "documents.batchUpdate":
+            return {"replies": [{"replaceAllText": {"occurrencesChanged": 2}}]}
+        if op == "spreadsheets.get":
+            return {"properties": {"title": "Budget"}, "sheets": [
+                {"properties": {"title": "T1", "sheetId": 1, "index": 0,
+                                "gridProperties": {"rowCount": 5, "columnCount": 3}}}]}
+        if op == "spreadsheets.batchUpdate":
+            p = kw["body"]["requests"][0]["addSheet"]["properties"]
+            return {"replies": [{"addSheet": {"properties": {
+                "title": p["title"], "sheetId": 9, "index": p.get("index", 1)}}}]}
+        if op == "spreadsheets.values.get":
+            return {"range": f"{kw['range']}!A1:B2", "values": [["a", "b"], ["1", "2"]]}
+        if op == "spreadsheets.values.append":
+            return {"updates": {"updatedRange": f"{kw['range']}!A6:B6",
+                                "updatedRows": len(kw["body"]["values"])}}
+        if op == "spreadsheets.values.update":
+            return {"updatedRange": kw["range"], "updatedCells": 2}
+        if op == "calendarList.list":
+            return {"items": [dict(c) for c in self.calendars]}
+        if op == "events.list":
+            return {"items": [{"id": "E1", "summary": "Call", "etag": "x",
+                               "start": {"dateTime": "2026-10-20T10:00:00+02:00"},
+                               "end": {"dateTime": "2026-10-20T11:00:00+02:00"}}]}
+        if op == "events.insert":
+            return {"id": "E2", **kw["body"]}
+        if op == "events.get":
+            return {"id": kw["eventId"], "summary": "Old",
+                    "start": {"date": "2026-10-20"}, "end": {"date": "2026-10-21"}}
+        if op == "events.update":
+            return dict(kw["body"])
+        if op == "events.delete":
+            return ""
+        if op == "freebusy.query":
+            return {"calendars": {kw["body"]["items"][0]["id"]: {"busy": [
+                {"start": "2026-10-20T10:00:00Z", "end": "2026-10-20T11:00:00Z"}]}}}
+        raise AssertionError(f"unexpected Google call {op} {kw}")
+
+
+def _install(test, fake) -> None:
+    """Answer every Google call of the COMPONENT from `fake`."""
+    from .tools._google_fake import ServiceTransport
+    comp = test.comp
+    patches = [patch.object(comp["gdrive"], "gworkspace_accounts", lambda: [ACCT]),
+               patch.object(comp["google_io"], "_transport", ServiceTransport(fake))]
+    for p in patches:
+        p.start()
+        test.addCleanup(p.stop)
 
 
 class _OnComponent(GoogleComponentInstance):
-    SUITES = (PINS, CONF, GR, GRT, GIO, LAB, UPD, GS)
-
-    def setUp(self) -> None:
-        super().setUp()
-        # Belt and braces: the suite really talks to the component.
-        from .tools import gdrive
-        assert gdrive is not None
-        assert PINS.gdrive is self.comp["gdrive"], "suite not re-pointed"
+    pass
 
 
-def _suite(base):
-    return NEEDS_LOGIC(type(f"Component{base.__name__}", (_OnComponent, base), {}))
-
-
-ComponentPinsPdp = _suite(PINS.PdpParityTests)
-ComponentPinsLabels = _suite(PINS.FolderLabelShapeTests)
-ComponentPinsUnconfined = _suite(PINS.UnconfinedCallsTests)
-ComponentPinsAccountRoot = _suite(PINS.AccountRootTests)
-ComponentPinsTopicPerimeter = _suite(PINS.TopicPerimeterTests)
-ComponentGdriveRootAncestry = _suite(GR.AncestryTests)
-ComponentGdriveRootTraps = _suite(GR.TheThreeTraps)
-ComponentGdriveRootFailClosed = _suite(GR.FailClosedTests)
-ComponentGdriveRootConfig = _suite(GR.ConfigTests)
-ComponentGdriveRootCost = _suite(GR.CostTests)
-ComponentGdriveRootFastPath = _suite(GR.FastPathTests)
-ComponentGdriveRootWriteDestination = _suite(GR.WriteDestinationTests)
-ComponentGdriveRootRefusalMessage = _suite(GR.RefusalMessageTests)
-ComponentGdriveRootCalendar = _suite(GR.CalendarTests)
-ComponentGdriveRootNativeDoc = _suite(GR.NativeDocTests)
-ComponentGdriveRootVerbCoverage = _suite(GR.VerbCoverageTests)
-ComponentPerTopic = _suite(GRT.PerTopicTests)
-ComponentPerTopicCeiling = _suite(GRT.CeilingTests)
-ComponentPerTopicSignedClaim = _suite(GRT.SignedClaimTests)
-ComponentConfinementWrite = _suite(CONF.WriteTests)
-ComponentConfinementDisclosure = _suite(CONF.DisclosureTests)
-ComponentSheets = _suite(GS.GSheetsTest)
-ComponentDriveUpdate = _suite(UPD.UpdateTests)
-ComponentDriveLabels = _suite(LAB.LabelTests)
-ComponentWireParity = _suite(GIO.WireParityTests)
-ComponentRequest = _suite(GIO.RequestTests)
-ComponentRestTransport = _suite(GIO.TransportTests)
-ComponentToken = _suite(GIO.TokenTests)
-ComponentTokenStaysOnItsHost = _suite(GIO.TokenStaysOnItsHostTests)
-ComponentTokenCacheFollowsTheVault = _suite(GIO.TokenCacheFollowsTheVaultTests)
+# The native Google suites that ran here against the component went with the
+# native Google client (#524); their cases live in clodia-logic now, next to
+# the component they test.
 
 
 # --------------------------------------------------------------------------
@@ -407,9 +475,9 @@ class CallPathTests(_OnComponent, unittest.TestCase):
         e = patch.dict(os.environ, {"CLODIA_EGRESS_ENFORCE": "on"})
         e.start()
         self.addCleanup(e.stop)
-        self.fake = PINS.FakeGoogle({"F1": ["ROOT"], "ROOT": [], "DOC1": ["F1"],
+        self.fake = FakeGoogle({"F1": ["ROOT"], "ROOT": [], "DOC1": ["F1"],
                                      "OUT": ["ELSE"], "ELSE": []})
-        PINS._install(self, self.fake)
+        _install(self, self.fake)
         self.src_dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.src_dir, True)
 
@@ -472,10 +540,10 @@ class CallPathTests(_OnComponent, unittest.TestCase):
         self.assertEqual(self.fake.ops()[0], "files.get")      # the parent lookup
         self.assertIn("files.update", self.fake.ops())
 
-    def test_native_google_io_refuses_in_pack_position(self):
-        self.assertIsNot(NATIVE_GOOGLE_IO, self.comp["google_io"])
-        with self.assertRaises(NATIVE_GOOGLE_IO.NativeDisabled):
-            NATIVE_GOOGLE_IO.call("conto", "drive", "v3", "GET files", params={})
+    def test_there_is_no_native_google_client(self):
+        """#524: the gateway has no Google client; only the component's."""
+        import importlib.util
+        self.assertIsNone(importlib.util.find_spec("server.tools.google_io"))
 
 
 class _Req:
@@ -531,7 +599,7 @@ class RouteAndCustodyTests(_OnComponent, unittest.TestCase):
         self.assertEqual(vault.read_internal("google_Mario_Rossi"), {
             "client_id": "CID", "client_secret": "CSECRET", "refresh_token": "RT",  # gitleaks:allow — fake test credential
             "email": "Mario.Rossi@x.it", "account": "Mario_Rossi",
-            "scope": PINS.go.UNIFIED_SCOPE})
+            "scope": self.comp["google_oauth"].UNIFIED_SCOPE})
         self.assertEqual(vault.credential_type("google_Mario_Rossi"), "oauth2_google")
 
     def test_app_status_and_config(self):
@@ -556,36 +624,6 @@ class RouteAndCustodyTests(_OnComponent, unittest.TestCase):
         from . import tools_api
         out = tools_api._test_connector("google")
         self.assertEqual(out, {"ok": None, "detail": "nessun account Google connesso"})
-
-
-@NEEDS_LOGIC
-class GmailTests(_OnComponent, unittest.TestCase):
-    """`email.*` on a Google account runs the component's Gmail client with
-    the per-call XOAUTH2 files the gateway's vault materialises."""
-
-    def test_folders_runs_the_bundled_client_with_this_calls_files(self):
-        from .tools import email as EM
-        core = sys.modules[f"{MODULE_ROOT}.gmail_core"]
-        probe = Path(self.base) / "probe_client.py"
-        probe.write_text(
-            "import json, os, sys\n"
-            "d = os.environ['CLODIA_SECRETS_DIR']\n"
-            "print(json.dumps({'argv': sys.argv[1:], 'files': sorted(os.listdir(d)),"
-            " 'bytecode': os.environ.get('PYTHONDONTWRITEBYTECODE')}))\n")
-        bundle = {"client_id": "CID", "client_secret": "CS",  # gitleaks:allow
-                  "refresh_token": "RT", "email": "studio@gmail.com"}  # gitleaks:allow — fake test credential
-        with patch.object(core, "CLIENT", probe), \
-                patch.object(EM, "known_accounts", return_value={"studio"}), \
-                patch.object(EM.vault, "has_credential", lambda c: c == "google_studio"), \
-                patch("server.vault.read_internal", lambda c: dict(bundle)), \
-                patch.object(EM, "_assert_mailbox_allowed", lambda *a: None), \
-                patch.object(EM.subprocess, "run") as native_run:
-            out = EM._run_cli("studio", ["folders"], want_json=True, direction="inbox")
-        native_run.assert_not_called()
-        self.assertEqual(out["argv"], ["--account", "studio", "folders"])
-        self.assertEqual(out["files"], ["email_config.json", "email_oauth_tokens.json",
-                                        "google_oauth_client.json"])
-        self.assertEqual(out["bytecode"], "1")
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -56,7 +56,7 @@ class AuthTests(unittest.TestCase):
     def test_a_human_admin_can(self):
         with patch.object(tools_api, "_UI_TOKEN", None), _as_agent("davide"), \
                 patch.object(tools_api, "_is_human_admin", lambda _n: True), \
-                patch("server.tools.gdrive.gworkspace_accounts", lambda: []):
+                patch("server.tools.google_switch.accounts", lambda: []):
             self.assertEqual(_get(_Req("t")).status_code, 200)
 
     def test_a_non_admin_human_cannot(self):
@@ -86,10 +86,19 @@ class UrlTests(unittest.TestCase):
 
 
 def _transport(fake):
-    """Answer the gateway's Google calls from `fake` (#524: through `google_io`)."""
-    from .tools import google_io
-    from .tools._google_fake import ServiceTransport
-    return patch.object(google_io, "_transport", ServiceTransport(fake))
+    """Answer the folder lookup from `fake` — what google-pack's component's
+    `describe_folder` service returns (#524: the gateway has no Drive client)."""
+    def describe(account, folder_id):
+        out = {"id": folder_id}
+        try:
+            meta = fake.files().get(fileId=folder_id).execute()
+            out["name"] = meta.get("name")
+            out["is_folder"] = meta.get("mimeType") == "application/vnd.google-apps.folder"
+        except Exception as e:  # noqa: BLE001
+            out["error"] = f"{type(e).__name__}: {str(e)[:100]}"
+            out["is_folder"] = False
+        return out
+    return patch("server.tools.google_switch.describe_folder", describe)
 
 
 class _Ok:
@@ -117,7 +126,7 @@ class WriteTests(unittest.TestCase):
         self.addCleanup(lambda: [c.stop() for c in self.admin])
 
     def _with_account(self, meta):
-        return (patch("server.tools.gdrive.gworkspace_accounts", lambda: ["conto"]),
+        return (patch("server.tools.google_switch.accounts", lambda: ["conto"]),
                 _transport(_Ok(meta)))
 
     def test_a_folder_is_written_and_echoed_by_name(self):
@@ -148,7 +157,7 @@ class WriteTests(unittest.TestCase):
 
     def test_an_unreachable_id_is_refused_not_written(self):
         called = []
-        with patch("server.tools.gdrive.gworkspace_accounts", lambda: ["conto"]), \
+        with patch("server.tools.google_switch.accounts", lambda: ["conto"]), \
                 _transport(_Boom()), \
                 patch("server.whitelist.set_gdrive_roots",
                       lambda a, f: called.append(f)):
@@ -157,7 +166,7 @@ class WriteTests(unittest.TestCase):
         self.assertEqual(called, [], "niente deve essere scritto")
 
     def test_an_unconnected_account_is_refused(self):
-        with patch("server.tools.gdrive.gworkspace_accounts", lambda: ["altro"]):
+        with patch("server.tools.google_switch.accounts", lambda: ["altro"]):
             r = _post(_Req("t", {"account": "conto", "folders": ["1AbC"]}))
         self.assertEqual(r.status_code, 400)
 
@@ -165,7 +174,7 @@ class WriteTests(unittest.TestCase):
         """È la sola azione qui che CONCEDE: da «vede una cartella» a «vede tutto
         il Drive». L'attrito non è decorativo."""
         called = []
-        with patch("server.tools.gdrive.gworkspace_accounts", lambda: ["conto"]), \
+        with patch("server.tools.google_switch.accounts", lambda: ["conto"]), \
                 patch("server.whitelist.set_gdrive_roots",
                       lambda a, f: called.append(f)):
             r = _post(_Req("t", {"account": "conto", "folders": []}))
@@ -197,7 +206,7 @@ class DisclosureTests(unittest.TestCase):
         posto un'agenda."""
         with patch.object(tools_api, "_UI_TOKEN", None), _as_agent("davide"), \
                 patch.object(tools_api, "_is_human_admin", lambda _n: True), \
-                patch("server.tools.gdrive.gworkspace_accounts", lambda: []):
+                patch("server.tools.google_switch.accounts", lambda: []):
             b = json.loads(_get(_Req("t")).body)
         self.assertIn("gcalendar.*", b["closes_verbs"])
         self.assertIn("gcalendar", b["note"])

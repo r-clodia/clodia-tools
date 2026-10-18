@@ -33,7 +33,6 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import google_oauth as go
 from . import instance_profile
 from . import mcp_credentials
 from . import mcp_oauth
@@ -77,8 +76,6 @@ def _replace_placeholder(obj, name: str, repl: str):
     return obj
 
 _UI_TOKEN = os.environ.get("CLODIA_TOOLS_UI_TOKEN")
-_STATE_TTL = 600
-_states: dict[str, dict] = {}   # state → {account, email, exp}
 
 _ADMIN_ROLES = ("superadmin", "admin")
 
@@ -290,12 +287,6 @@ async def gdrive_confinement_set(request: Request):
     google_switch.perimeter_changed()
     LOG.info("gdrive confinement per %s → %s", account, ids)
     return JSONResponse({"account": account, "confined": True, "folders": described})
-
-
-def _gc_states() -> None:
-    now = time.time()
-    for k in [k for k, v in _states.items() if v["exp"] < now]:
-        _states.pop(k, None)
 
 
 def _connector_guard(cid: str):
@@ -951,10 +942,6 @@ async def mcp_disconnect(request: Request):
     return JSONResponse(res)
 
 
-def _account_from_email(email: str) -> str:
-    return email.split("@")[0].replace(".", "_")
-
-
 async def _google_component_route(request: Request, path: str):
     """`/tools/google/<path>` in `pack` position (#558): the same route of
     google-pack's gateway component (`/tools/google-pack/<path>`), with ITS
@@ -977,6 +964,13 @@ async def _google_component_route(request: Request, path: str):
     return await components_api.serve(request, spec)
 
 
+def _google_native_removed() -> JSONResponse:
+    """`connectors: {google: native}`: no implementation answers any more (#524)."""
+    from .tools import google_switch
+    return JSONResponse({"error": "native_removed", "detail": google_switch.NATIVE_REMOVED},
+                        status_code=409)
+
+
 def _google_in_pack() -> bool:
     from .tools import google_switch
     return google_switch.in_pack()
@@ -989,22 +983,7 @@ async def google_auth(request: Request):
         return g
     if _google_in_pack():
         return await _google_component_route(request, "auth")
-    if not _authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        app = vault.read_internal(go.APP_CREDENTIAL)
-    except vault.VaultDenied:
-        return JSONResponse(
-            {"error": "app_not_configured",
-             "detail": f"manca la credenziale d'app '{go.APP_CREDENTIAL}' nella vault"},
-            status_code=409)
-    _gc_states()
-    state = _secrets.token_urlsafe(24)
-    _states[state] = {"exp": time.time() + _STATE_TTL}
-    url = go.consent_url(app["client_id"], app.get("redirect_uri", go.DEFAULT_REDIRECT),
-                         scope=go.UNIFIED_SCOPE, state=state, prompt="select_account consent")
-    return JSONResponse({"auth_url": url, "state": state,
-                         "redirect_uri": app.get("redirect_uri", go.DEFAULT_REDIRECT)})
+    return _google_native_removed()
 
 
 async def google_connect(request: Request):
@@ -1016,222 +995,7 @@ async def google_connect(request: Request):
         return g
     if _google_in_pack():
         return await _google_component_route(request, "connect")
-    if not _authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "bad_json"}, status_code=400)
-    code = (body.get("code") or "").strip()
-    state = body.get("state") or ""
-    if not code:
-        return JSONResponse({"error": "missing_code"}, status_code=400)
-    st = _states.pop(state, None)
-    if state and st is None:
-        return JSONResponse({"error": "invalid_or_expired_state"}, status_code=400)
-    try:
-        app = vault.read_internal(go.APP_CREDENTIAL)
-    except vault.VaultDenied:
-        return JSONResponse({"error": "app_not_configured"}, status_code=409)
-    if code.startswith("http"):
-        import urllib.parse
-        code = urllib.parse.parse_qs(urllib.parse.urlparse(code).query).get("code", [""])[0]
-    try:
-        res = go.exchange_code(app["client_id"], app["client_secret"], code,
-                               app.get("redirect_uri", go.DEFAULT_REDIRECT))
-    except Exception as e:
-        return JSONResponse({"error": "exchange_failed", "detail": str(e)[:200]}, status_code=502)
-    rt = res.get("refresh_token")
-    if not rt:
-        return JSONResponse(
-            {"error": "no_refresh_token",
-             "detail": "Google non ha restituito un refresh_token. App in Testing? "
-                       "Mettila In production e riprova."}, status_code=400)
-    try:
-        email = go.get_profile_email(res["access_token"])
-    except Exception as e_profile:  # noqa: BLE001
-        try:
-            email = go.get_userinfo_email(res["access_token"])
-        except Exception as e_ui:  # noqa: BLE001
-            return JSONResponse(
-                {"error": "profile_failed",
-                 "detail": f"profilo: {str(e_profile)[:140]} · userinfo: {str(e_ui)[:100]}"},
-                status_code=502)
-    account = _account_from_email(email)
-    vault.deposit(
-        f"google_{account}",
-        {"client_id": app["client_id"], "client_secret": app["client_secret"],
-         "refresh_token": rt, "email": email, "account": account, "scope": go.UNIFIED_SCOPE},
-        cred_type="oauth2_google", grant_agents=["clodia"],
-    )
-    return JSONResponse({"connected": True, "account": account, "email": email})
-
-
-async def gmail_auth(request: Request):
-    g = _connector_guard("gmail")
-    if g is not None:
-        return g
-    if not _authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        app = vault.read_internal(go.APP_CREDENTIAL)
-    except vault.VaultDenied:
-        return JSONResponse(
-            {"error": "app_not_configured",
-             "detail": f"manca la credenziale d'app '{go.APP_CREDENTIAL}' nella vault"},
-            status_code=409)
-    _gc_states()
-    state = _secrets.token_urlsafe(24)
-    _states[state] = {"exp": time.time() + _STATE_TTL}
-    # prompt 'select_account consent' → l'utente SCEGLIE l'account nel widget
-    # Google; l'email reale la ricaviamo dopo, dal profilo. Niente login_hint.
-    url = go.consent_url(app["client_id"], app.get("redirect_uri", go.DEFAULT_REDIRECT),
-                         state=state, prompt="select_account consent")
-    return JSONResponse({"auth_url": url, "state": state,
-                         "redirect_uri": app.get("redirect_uri", go.DEFAULT_REDIRECT)})
-
-
-async def gmail_connect(request: Request):
-    g = _connector_guard("gmail")
-    if g is not None:
-        return g
-    if not _authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "bad_json"}, status_code=400)
-    code = (body.get("code") or "").strip()
-    state = body.get("state") or ""
-    if not code:
-        return JSONResponse({"error": "missing_code"}, status_code=400)
-    # state: solo anti-CSRF (l'account lo sceglie l'utente nel widget Google)
-    st = _states.pop(state, None)
-    if state and st is None:
-        return JSONResponse({"error": "invalid_or_expired_state"}, status_code=400)
-
-    try:
-        app = vault.read_internal(go.APP_CREDENTIAL)
-    except vault.VaultDenied:
-        return JSONResponse({"error": "app_not_configured"}, status_code=409)
-    # se l'utente ha incollato l'intero URL di redirect, estrai il code
-    if code.startswith("http"):
-        import urllib.parse
-        code = urllib.parse.parse_qs(urllib.parse.urlparse(code).query).get("code", [""])[0]
-    try:
-        res = go.exchange_code(app["client_id"], app["client_secret"], code,
-                               app.get("redirect_uri", go.DEFAULT_REDIRECT))
-    except Exception as e:  # errore di rete/HTTP da Google
-        return JSONResponse({"error": "exchange_failed", "detail": str(e)[:200]},
-                            status_code=502)
-    rt = res.get("refresh_token")
-    if not rt:
-        return JSONResponse(
-            {"error": "no_refresh_token",
-             "detail": "Google non ha restituito un refresh_token. App in Testing? "
-                       "Mettila In production e riprova."},
-            status_code=400)
-    # ricava l'email REALE dall'account scelto: prima dal profilo Gmail (API),
-    # poi fallback a userinfo (scope openid/email) se la Gmail API è disabilitata.
-    try:
-        email = go.get_profile_email(res["access_token"])
-    except Exception as e_profile:  # noqa: BLE001
-        try:
-            email = go.get_userinfo_email(res["access_token"])
-        except Exception as e_ui:  # noqa: BLE001
-            return JSONResponse(
-                {"error": "profile_failed",
-                 "detail": f"profilo Gmail: {str(e_profile)[:160]} · userinfo: {str(e_ui)[:120]}"},
-                status_code=502)
-    account = _account_from_email(email)
-
-    vault.deposit(
-        f"gmail_{account}",
-        {"client_id": app["client_id"], "client_secret": app["client_secret"],
-         "refresh_token": rt, "email": email, "account": account},
-        cred_type="oauth2_google", grant_agents=["clodia"],
-    )
-    return JSONResponse({"connected": True, "account": account, "email": email})
-
-
-async def gworkspace_auth(request: Request):
-    g = _connector_guard("google-workspace")
-    if g is not None:
-        return g
-    """Avvia il consenso OAuth per il connettore Google Workspace (Drive ·
-    Docs · Calendar). Stesso flusso di Gmail ma con scope Workspace."""
-    if not _authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        app = vault.read_internal(go.APP_CREDENTIAL)
-    except vault.VaultDenied:
-        return JSONResponse(
-            {"error": "app_not_configured",
-             "detail": f"manca la credenziale d'app '{go.APP_CREDENTIAL}' nella vault"},
-            status_code=409)
-    _gc_states()
-    state = _secrets.token_urlsafe(24)
-    _states[state] = {"exp": time.time() + _STATE_TTL}
-    url = go.consent_url(app["client_id"], app.get("redirect_uri", go.DEFAULT_REDIRECT),
-                         scope=go.WORKSPACE_SCOPE, state=state,
-                         prompt="select_account consent")
-    return JSONResponse({"auth_url": url, "state": state,
-                         "redirect_uri": app.get("redirect_uri", go.DEFAULT_REDIRECT)})
-
-
-async def gworkspace_connect(request: Request):
-    g = _connector_guard("google-workspace")
-    if g is not None:
-        return g
-    if not _authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "bad_json"}, status_code=400)
-    code = (body.get("code") or "").strip()
-    state = body.get("state") or ""
-    if not code:
-        return JSONResponse({"error": "missing_code"}, status_code=400)
-    st = _states.pop(state, None)
-    if state and st is None:
-        return JSONResponse({"error": "invalid_or_expired_state"}, status_code=400)
-    try:
-        app = vault.read_internal(go.APP_CREDENTIAL)
-    except vault.VaultDenied:
-        return JSONResponse({"error": "app_not_configured"}, status_code=409)
-    if code.startswith("http"):
-        import urllib.parse
-        code = urllib.parse.parse_qs(urllib.parse.urlparse(code).query).get("code", [""])[0]
-    try:
-        res = go.exchange_code(app["client_id"], app["client_secret"], code,
-                               app.get("redirect_uri", go.DEFAULT_REDIRECT))
-    except Exception as e:
-        return JSONResponse({"error": "exchange_failed", "detail": str(e)[:200]},
-                            status_code=502)
-    rt = res.get("refresh_token")
-    if not rt:
-        return JSONResponse(
-            {"error": "no_refresh_token",
-             "detail": "Google non ha restituito un refresh_token. App in Testing? "
-                       "Mettila In production e riprova."},
-            status_code=400)
-    # email dall'endpoint userinfo (lo scope Workspace non include l'API Gmail)
-    try:
-        email = go.get_userinfo_email(res["access_token"])
-    except Exception as e:
-        return JSONResponse({"error": "profile_failed", "detail": str(e)[:200]},
-                            status_code=502)
-    account = _account_from_email(email)
-    vault.deposit(
-        f"gworkspace_{account}",
-        {"client_id": app["client_id"], "client_secret": app["client_secret"],
-         "refresh_token": rt, "email": email, "account": account,
-         "scope": go.WORKSPACE_SCOPE},
-        cred_type="oauth2_google", grant_agents=["clodia"],
-    )
-    LOG.info("gworkspace_connect: account %s collegato (Drive·Docs·Calendar)", account)
-    return JSONResponse({"connected": True, "account": account, "email": email})
+    return _google_native_removed()
 
 
 async def openai_connect(request: Request):
@@ -1268,14 +1032,7 @@ async def google_app_status(request: Request):
     """L'app OAuth Google (client_id/secret) è configurata nel vault?"""
     if _google_in_pack():
         return await _google_component_route(request, "app")
-    if not _authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        app = vault.read_internal(go.APP_CREDENTIAL)
-        return JSONResponse({"configured": True,
-                             "redirect_uri": app.get("redirect_uri", go.DEFAULT_REDIRECT)})
-    except vault.VaultDenied:
-        return JSONResponse({"configured": False, "redirect_uri": go.DEFAULT_REDIRECT})
+    return _google_native_removed()
 
 
 async def google_app_config(request: Request):
@@ -1283,32 +1040,7 @@ async def google_app_config(request: Request):
     scaricato da Google Cloud) oppure {client_id, client_secret, redirect_uri}."""
     if _google_in_pack():
         return await _google_component_route(request, "app")
-    if not _authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "bad_json"}, status_code=400)
-    cj = body.get("client_json")
-    if cj:
-        try:
-            data = json.loads(cj) if isinstance(cj, str) else cj
-            node = data.get("installed") or data.get("web") or data
-            uris = node.get("redirect_uris") or []
-            app = {"client_id": node.get("client_id"),
-                   "client_secret": node.get("client_secret"),
-                   "redirect_uri": uris[0] if uris else go.DEFAULT_REDIRECT}
-        except Exception:
-            return JSONResponse({"error": "bad_client_json"}, status_code=400)
-    else:
-        app = {"client_id": (body.get("client_id") or "").strip(),
-               "client_secret": (body.get("client_secret") or "").strip(),
-               "redirect_uri": (body.get("redirect_uri") or "").strip() or go.DEFAULT_REDIRECT}
-    if not app["client_id"] or not app["client_secret"]:
-        return JSONResponse({"error": "client_id e client_secret richiesti"}, status_code=400)
-    vault.deposit(go.APP_CREDENTIAL, app, cred_type="google_app", grant_agents=[])
-    LOG.info("google_app_config: app OAuth depositata (client_id=%s…)", app["client_id"][:12])
-    return JSONResponse({"configured": True, "redirect_uri": app["redirect_uri"]})
+    return _google_native_removed()
 
 
 def _mail_native_removed() -> JSONResponse:
@@ -1612,136 +1344,6 @@ async def backup_restore_test(request: Request):
         return JSONResponse({"error": str(e)[:400]}, status_code=500)
 
 
-# Nome leggibile degli scope del consenso Google, per dire QUALE servizio manca
-# invece di stampare un URL. Chi legge la card ragiona per servizi, non per URI.
-_GOOGLE_SERVIZI = {
-    "https://mail.google.com/": "Gmail",
-    "https://www.googleapis.com/auth/drive": "Drive",
-    "https://www.googleapis.com/auth/documents": "Docs",
-    "https://www.googleapis.com/auth/calendar": "Calendar",
-}
-# id della card → (prefisso della credenziale nel vault, consenso che la card
-# PROMETTE). `google` prova SOLO le credenziali unificate, cioè gli account che
-# la card elenca (list_tools li prende da `credential_diagnostics` con
-# kind=google): provare anche i legacy renderebbe rossa una card per un account
-# che non mostra.
-#
-# Lo scope atteso sta in questa tabella e non accanto al suo uso perché è una
-# proprietà della card, non del connettore nuovo: ogni card va misurata su ciò
-# che ha promesso. Misurare `gworkspace` su UNIFIED_SCOPE l'accuserebbe di non
-# avere Gmail, che non elenca; lasciarla senza scope atteso — com'era — non la
-# misura affatto, e un consenso Workspace senza Drive passa per completo. Una
-# tabella sola e non due mappe sulle stesse chiavi: quelle divergono, e a
-# divergere sarebbe di nuovo lo scope atteso.
-_GOOGLE_CARD = {
-    "google": ("google_", go.UNIFIED_SCOPE),
-    "gworkspace": ("gworkspace_", go.WORKSPACE_SCOPE),
-    "gmail": ("gmail_", go.SCOPE),
-}
-
-
-def _nome_servizio(scope: str) -> str:
-    return _GOOGLE_SERVIZI.get(scope) or scope.rstrip("/").rsplit("/", 1)[-1]
-
-
-def _prova_google(bundle: dict, atteso: str) -> tuple[bool, str]:
-    """Prova UN account Google: refresh del token + una chiamata a `userinfo`.
-
-    Il refresh è il punto dove il guasto vero di questa integrazione si vede —
-    consenso revocato dal proprietario dell'account, oppure refresh token
-    scalzato da un secondo consenso sugli stessi scope — e Google lo dice con
-    `invalid_grant`. La chiamata a `userinfo` aggiunge la sola cosa che il
-    refresh non prova: che l'access token sia poi accettato da un'API, e da
-    quale identità. Nient'altro: `userinfo` è la chiamata più leggera coperta
-    dal consenso, non tocca dati dell'owner e non consuma quota di Drive/Gmail.
-    """
-    import requests as _rq
-
-    r = _rq.post(go.TOKEN_URL, data={
-        "client_id": bundle["client_id"],
-        "client_secret": bundle["client_secret"],
-        "refresh_token": bundle["refresh_token"],
-        "grant_type": "refresh_token",
-    }, timeout=15)
-    if r.status_code != 200:
-        try:
-            err = (r.json() or {}).get("error") or ""
-        except Exception:  # noqa: BLE001 — un 5xx di Google non è JSON
-            err = ""
-        if err == "invalid_grant":
-            # Il rimedio è uno e va detto qui: la webui non ha altro posto dove
-            # scriverlo, e «invalid_grant» da solo non dice cosa fare.
-            return False, ("consenso revocato o refresh token non più valido — "
-                           "riconnetti l'account")
-        return False, f"Google OAuth {r.status_code}{': ' + err if err else ''}"
-    tok = r.json() or {}
-    access = tok.get("access_token") or ""
-    if not access:
-        return False, "Google non ha restituito un access token"
-    ui = _rq.get("https://www.googleapis.com/oauth2/v2/userinfo",
-                 headers={"Authorization": f"Bearer {access}"}, timeout=15)
-    if ui.status_code != 200:
-        return False, f"userinfo {ui.status_code} (token rinfrescato ma non accettato)"
-    email = (ui.json() or {}).get("email") or "account senza email"
-    detail = f"ok ({email})"
-    # Consenso incompleto: la connessione FUNZIONA e una parte della card no.
-    # È «non fa quella cosa», non «non funziona» — la stessa distinzione di
-    # «solo invio» per le caselle. Rosso qui manderebbe a rigenerare un token
-    # sano, e il consenso nuovo scalzerebbe quello vecchio.
-    #
-    # Il confronto si fa solo se Google DICE quali scope ha concesso: RFC 6749
-    # §5.1 rende `scope` opzionale nella risposta proprio quando coincide con
-    # quello richiesto, cioè l'assenza è il caso normale e non «nessuno scope».
-    # Dedurne il contrario nominerebbe tutti e cinque i servizi come fuori dal
-    # consenso su un collegamento sano — e il rimedio che quella riga suggerisce
-    # (riconnetti) fa un consenso nuovo che scalza il refresh token buono: la
-    # prova provocherebbe il guasto che esiste per scoprire.
-    concessi = (tok.get("scope") or "").split()
-    mancanti = [s for s in atteso.split() if s not in concessi] if concessi else []
-    nominabili = [_nome_servizio(s) for s in mancanti if s in _GOOGLE_SERVIZI]
-    if nominabili:
-        detail += f" · fuori dal consenso: {', '.join(nominabili)} (riconnetti per aggiungerli)"
-    return True, detail
-
-
-def _test_google(cid: str) -> dict:
-    """Prova REALE del connettore Google della card /integrations (#284).
-
-    Prima di questa, l'id `google` cadeva nel ramo «test non disponibile» e sulla
-    card compariva il badge «—»: l'integrazione che apre cinque servizi era,
-    insieme alle caselle (chiuse in clodia-platform#176), la sola senza una
-    verifica. E «Connesso» dice che i campi della credenziale ci sono, non che il
-    refresh token sia ancora valido — cioè tace esattamente su ciò che scade.
-    """
-    prefisso, atteso = _GOOGLE_CARD[cid]
-    esiti, ok_tutti = [], True
-    for nome in sorted(vault.store_names()):
-        if not nome.startswith(prefisso):
-            continue
-        account = nome[len(prefisso):]
-        try:
-            b = vault.read_internal(nome)
-        except Exception:  # noqa: BLE001 — mai il motivo interno del vault
-            esiti.append(f"{account}: credenziale illeggibile")
-            ok_tutti = False
-            continue
-        # Un campo che manca si giudica dal vault: chiamare Google con un token
-        # vuoto ritorna un errore del provider al posto del nome del campo, e
-        # manda a cercare il guasto dalla parte dell'account invece che qui.
-        mancanti = [f for f in ("client_id", "client_secret", "refresh_token")
-                    if not b.get(f)]
-        if mancanti:
-            esiti.append(f"{account}: mancano {', '.join(mancanti)} — riconnetti")
-            ok_tutti = False
-            continue
-        ok, detail = _prova_google(b, atteso)
-        esiti.append(f"{account}: {detail}")
-        ok_tutti = ok_tutti and ok
-    if not esiti:
-        return {"ok": None, "detail": "nessun account Google connesso"}
-    return {"ok": ok_tutti, "detail": " · ".join(esiti)}
-
-
 def _test_connector(cid: str) -> dict:
     """Verifica REALE della connessione di un'integrazione (chiamata al provider).
     Ritorna {ok: bool|None, detail}. ok=None → non testabile. Mai il segreto."""
@@ -1784,13 +1386,12 @@ def _test_connector(cid: str) -> dict:
             return ({"ok": True, "detail": "API key valida"} if r.status_code == 200
                     else {"ok": False, "detail": f"OpenAI {r.status_code}"})
 
-        if cid == "google":
+        if cid in ("google", "gworkspace", "gmail"):
             from .tools import google_switch
             if google_switch.in_pack():
                 # #558: the unified card is google-pack's component's.
                 return google_switch.component_test_connection()
-        if cid in _GOOGLE_CARD:
-            return _test_google(cid)
+            return {"ok": False, "detail": google_switch.NATIVE_REMOVED}
 
         if cid == "mailboxes":
             from .tools import mail_switch
@@ -1833,10 +1434,6 @@ routes = [
     Route("/tools/google/app", google_app_config, methods=["POST"]),
     Route("/tools/google/auth", google_auth, methods=["GET"]),
     Route("/tools/google/connect", google_connect, methods=["POST"]),
-    Route("/tools/gmail/auth", gmail_auth, methods=["GET"]),
-    Route("/tools/gmail/connect", gmail_connect, methods=["POST"]),
-    Route("/tools/gworkspace/auth", gworkspace_auth, methods=["GET"]),
-    Route("/tools/gworkspace/connect", gworkspace_connect, methods=["POST"]),
     Route("/tools/telegram/status", telegram_status, methods=["GET"]),
     Route("/tools/backup/config", backup_configure, methods=["POST"]),
     Route("/tools/backup/status", backup_status, methods=["GET"]),
