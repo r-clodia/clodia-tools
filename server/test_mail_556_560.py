@@ -112,6 +112,29 @@ class ReplyRecipientTests(unittest.TestCase):
             c.reply_email({"email": "a@x"}, "7", "ok")
 
 
+class OneRuleForTheRecipientTests(unittest.TestCase):
+    def test_the_pdp_and_the_client_pick_the_same_address(self) -> None:
+        c = _client()
+        for header in ("Ok <ok@vetted.it>, evil@x.com", "evil@x.com, Ok <ok@vetted.it>",
+                       "a@ok.it, b@evil.com", '"Mario" <Mario@X.it>', "ok@vetted.it (evil@x.com)"):
+            sent = {}
+
+            class S:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def send_message(self, msg):
+                    sent["to"] = msg["To"]
+
+            with patch.object(c, "read_email", return_value={"from": header, "subject": "x"}), \
+                 patch.object(c, "connect_smtp", return_value=S()):
+                c.reply_email({"email": "a@x"}, "7", "ok")
+            self.assertEqual(egress.address_of(header), sent["to"].lower(), header)
+
+
 class StrictIngressNonListTests(unittest.TestCase):
     def test_a_non_list_result_reveals_nothing(self) -> None:
         with patch.object(email_tool, "_record_ingress") as rec:

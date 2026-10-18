@@ -70,12 +70,19 @@ def repo_pair(value: str, arguments: dict) -> list[str]:
 
 def address_of(header: str) -> str:
     """`Nome <a@b.it>` → `a@b.it`. A pure function, so the parsing is testable
-    without a mailbox."""
-    h = (header or "").strip()
-    if "<" in h and ">" in h:
-        h = h[h.index("<") + 1:h.index(">")]
-    h = h.strip().strip('"').strip("'").lower()
-    return h if "@" in h else ""
+    without a mailbox.
+
+    The FIRST address of the header, parsed as RFC 5322 (`getaddresses`), and
+    nothing else: it is the same rule the mail client uses to pick the reply
+    recipient, so the PDP judges exactly the address the reply goes to
+    (clodia-platform#559 — «evil@x.com, Ok <ok@vetted.it>» was judged as
+    ok@vetted.it and sent to evil@x.com)."""
+    from email.utils import getaddresses
+    for _name, addr in getaddresses([header or ""]):
+        addr = addr.strip().strip('"').strip("'").lower()
+        if "@" in addr:
+            return addr
+    return ""
 
 
 def email_from(value: str, data: dict) -> list[str]:
