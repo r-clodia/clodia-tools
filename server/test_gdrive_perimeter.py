@@ -51,5 +51,27 @@ class ApprovedFoldersTests(unittest.TestCase):
             self.assertEqual(gr.roots_for("b"), [])
 
 
+class PerimeterMovingVerbsAreGatedTests(unittest.TestCase):
+    """I verbi che spostano il perimetro devono essere gated.
+
+    Test scritto come enumerazione VERIFICATA, non come lista fidata: se domani
+    si aggiunge un verbo che scrive il remote e nessuno lo gata, il perimetro
+    torna scrivibile da un partecipante — cioè il difetto che questo disegno
+    esiste per non avere.
+    """
+
+    def test_setting_or_removing_a_drive_folder_is_gated(self):
+        from . import gate
+        for v in ("topic.drive_folder_add", "topic.drive_folder_remove"):
+            with self.subTest(verb=v):
+                self.assertTrue(gate.is_gated(v), f"{v} sposta il perimetro")
+
+    def test_remove_is_gated_because_removing_the_perimeter_widens_it(self):
+        """La ragione meno ovvia: togliere la cartella fa ricadere sulle radici
+        d'account, che possono essere più larghe o assenti."""
+        from . import gate
+        self.assertTrue(gate.is_gated("topic.drive_folder_remove"))
+
+
 if __name__ == "__main__":
     unittest.main()
