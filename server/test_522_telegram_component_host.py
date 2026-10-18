@@ -98,5 +98,59 @@ class TransportCheckTests(unittest.TestCase):
                 main._check_not_transport("telegram.updates")    # the stale backend's
 
 
+class OneComponentSeveralConnectorsTests(unittest.TestCase):
+    """comms-pack has ONE gateway component (the pin carries the pack's
+    manifest) serving mail and Telegram: it is on standby only when BOTH are
+    native, and registers only what is on `pack`."""
+
+    def _comp(self):
+        return NS(pack="comms-pack", id="comms", key="comms-pack/comms",
+                  connectors=("mail", "telegram"),
+                  namespaces={"mail": "email", "telegram": "telegram"})
+
+    def test_standby_only_when_nothing_is_served(self) -> None:
+        c = self._comp()
+        for reserved, standby in ((frozenset({"email", "telegram"}), True),
+                                  (frozenset({"email"}), False),
+                                  (frozenset(), False)):
+            with patch.object(loader, "_reserved_namespaces", return_value=reserved):
+                self.assertEqual(bool(loader._standby_reason(c)), standby, reserved)
+
+    def test_serves_and_serving_connectors(self) -> None:
+        c = self._comp()
+        h = host.Host.__new__(host.Host)
+        h._c = c
+        h._reserved = lambda: frozenset({"email"})
+        self.assertFalse(h.serves("email"))
+        self.assertTrue(h.serves("telegram"))
+        self.assertFalse(h.serves("github"))
+        st = NS(component=c, status="loaded")
+        with patch.dict(loader._STATES, {"comms-pack/comms": st}, clear=True), \
+             patch.object(loader, "_reserved_namespaces", return_value=frozenset({"email"})):
+            self.assertEqual(loader.serving_connectors(), (("comms-pack", "telegram"),))
+
+
+class SwitchFlipTests(unittest.TestCase):
+    """A switch flip on ONE half: the verbs of the half now native are not
+    served nor listed at once, and the reconcile reloads the component."""
+
+    def test_verbs_of_a_native_half_are_withheld_at_once(self) -> None:
+        comp = NS(pack="comms-pack", id="comms", key="comms-pack/comms",
+                  connectors=("mail", "telegram"),
+                  namespaces={"mail": "email", "telegram": "telegram"})
+        tool = lambda n: NS(name=n)  # noqa: E731
+        st = loader.State(component=comp, status="loaded",
+                          verbs={"email.send": NS(namespace="email", tool=tool("email.send")),
+                                 "telegram.send": NS(namespace="telegram", tool=tool("telegram.send"))},
+                          served=frozenset({"email", "telegram"}))
+        with patch.dict(loader._STATES, {"comms-pack/comms": st}, clear=True), \
+             patch.object(loader, "_reserved_namespaces", return_value=frozenset({"email"})):
+            self.assertIsNone(loader.verb("email.send"))
+            self.assertIsNotNone(loader.verb("telegram.send"))
+            self.assertEqual([t.name for t in loader.tools()], ["telegram.send"])
+            # the reconcile's "unchanged" test fails → the component reloads
+            self.assertNotEqual(st.served, loader._served_now(comp))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -52,6 +52,10 @@ class State:
     verbs: dict[str, VerbSpec] = field(default_factory=dict)
     routes: dict[str, RouteSpec] = field(default_factory=dict)
     services: dict[str, ServiceSpec] = field(default_factory=dict)
+    #: The namespaces the component served when it registered (#522): a switch
+    #: that changes this set reloads it, so a component of several connectors
+    #: registers exactly the halves on `pack`.
+    served: frozenset = frozenset()
 
     def describe(self) -> dict:
         c = self.component
@@ -82,10 +86,12 @@ def serving_connectors() -> tuple[tuple[str, str], ...]:
     Never raises."""
     out: set[tuple[str, str]] = set()
     try:
+        reserved = _reserved_namespaces()
         for st in list(_STATES.values()):
             if _serving(st):
                 for cid in st.component.connectors:
-                    out.add((st.component.pack, str(cid)))
+                    if st.component.namespaces.get(cid) not in reserved:
+                        out.add((st.component.pack, str(cid)))
     except Exception:  # noqa: BLE001
         return ()
     return tuple(sorted(out))
@@ -103,10 +109,21 @@ def _serving(st: State) -> bool:
         return False
 
 
+def _served_now(component: GatewayComponent) -> frozenset:
+    """Its namespaces that are NOT the gateway's on this instance right now."""
+    try:
+        reserved = _reserved_namespaces()
+    except Exception:  # noqa: BLE001 — unknown: serve nothing
+        return frozenset()
+    return frozenset(ns for ns in component.namespaces.values() if ns not in reserved)
+
+
 def verb(name: str) -> VerbSpec | None:
     for st in list(_STATES.values()):
         spec = st.verbs.get(name)
-        if spec is not None and _serving(st):
+        # Per namespace too: between a switch flip and the next reconcile a
+        # verb of a half now native is neither dispatched nor listed (#522).
+        if spec is not None and _serving(st) and spec.namespace in _served_now(st.component):
             return spec
     return None
 
@@ -119,7 +136,8 @@ def tools() -> list:
     out = []
     for st in list(_STATES.values()):
         if _serving(st):
-            out += [v.tool for v in st.verbs.values()]
+            ora = _served_now(st.component)
+            out += [v.tool for v in st.verbs.values() if v.namespace in ora]
     return out
 
 
@@ -362,8 +380,12 @@ def _standby_reason(component: GatewayComponent) -> str:
     of that migration is on `native`, so the native verbs are listed and
     served, and registering the component's would be refused anyway."""
     reserved = _reserved_namespaces()
-    taken = sorted(ns for ns in set(component.namespaces.values()) if ns in reserved)
-    if taken:
+    mine = set(component.namespaces.values())
+    taken = sorted(ns for ns in mine if ns in reserved)
+    # Standby only when it would serve NOTHING: a component of several
+    # connectors (comms-pack: mail + Telegram) runs for the ones on `pack` and
+    # registers only those (`host.serves`) — one pack, one gateway component.
+    if taken and set(taken) == mine:
         return (f"the gateway implements {taken} natively on this instance (the "
                 "connector switch is on `native`); the component loads when the "
                 "owner turns it to `pack`")
@@ -414,7 +436,8 @@ def load(component: GatewayComponent, pin: store.Pin) -> State:
                 component.key, pin.commit[:12], len(host.verbs), len(host.routes))
     return State(component=component, status="loaded", commit=pin.commit,
                  tree_sha256=pin.tree_sha256, verbs=dict(host.verbs),
-                 routes=dict(host.routes), services=dict(host.services))
+                 routes=dict(host.routes), services=dict(host.services),
+                 served=_served_now(component))
 
 
 def unload(key: str) -> None:
@@ -526,7 +549,8 @@ def reconcile(*, force: bool = False, refresh_pack: str | None = None,
                                          tree_sha256=pin.tree_sha256)
                 continue
             if current is not None and current.status == "loaded" and \
-                    current.commit == pin.commit and current.component == comp:
+                    current.commit == pin.commit and current.component == comp \
+                    and current.served == _served_now(comp):
                 current.reason = ""
                 continue
             unload(key)

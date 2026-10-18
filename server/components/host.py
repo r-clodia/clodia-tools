@@ -377,6 +377,14 @@ class Host:
             raise HostError("registration is closed: verbs and routes are "
                             "registered from register(host) only")
 
+    def serves(self, namespace: str) -> bool:
+        """Does this component serve `namespace` on this instance now? False
+        for a namespace that is not its own, or that the gateway implements
+        natively (switch on `native`): a component of several connectors
+        registers only the ones on `pack` (#522)."""
+        ns = str(namespace or "")
+        return ns in set(self._c.namespaces.values()) and ns not in set(self._reserved())
+
     def register_verb(self, tool: Tool, handler: Callable, *,
                       offload: bool = True) -> None:
         self._require_open()
