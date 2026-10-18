@@ -98,7 +98,7 @@ class TrailToEvidenceTests(_Env):
 
         async def go():
             with ClaimsContext(TOKEN, "t"), patch.object(main, "_call_tool_unaudited", inner):
-                return await main.call_tool("email.send", args)
+                return await main.call_tool("web.post", args)
         asyncio.run(go())
         call = self.events("tool.call")[0]
         res = self.events("tool.result")[0]

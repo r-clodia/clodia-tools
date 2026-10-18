@@ -25,7 +25,7 @@ from starlette.testclient import TestClient
 from . import egress as eg
 from . import tools_api
 from . import whitelist as w
-from .tools import email as email_tool
+from .tools import mail_switch
 
 _H = {"Authorization": "Bearer ckt1.finto"}
 
@@ -128,11 +128,11 @@ class RemoveRouteTests(unittest.TestCase):
         self.rimosse: list[str] = []
         p = [
             patch.object(tools_api, "_authorized", lambda _r: True),
-            patch.object(tools_api.vault, "remove",
-                         side_effect=lambda n: (self.rimosse.append(n), True)[1]),
-            patch.object(email_tool.vault, "store_names", return_value=list(_VAULT)),
-            patch.object(email_tool.vault, "read_internal",
-                         side_effect=lambda n: dict(_VAULT[n])),
+            # comms-pack's component removes the credential and reads the
+            # address first (`mailbox_remove`, `mail: pack` — the native mail
+            # code is gone, #523); the gateway withdraws the list entries.
+            patch.object(mail_switch, "in_pack", lambda: True),
+            patch.object(mail_switch, "call", self._component),
             patch.object(w, "CONFIG", self.cfg),
             patch.object(w, "save_config", lambda: None),
         ]
@@ -140,6 +140,14 @@ class RemoveRouteTests(unittest.TestCase):
             x.start()
         self.addCleanup(lambda: [x.stop() for x in reversed(p)])
         self.client = TestClient(Starlette(routes=tools_api.routes))
+
+    def _component(self, service, account):
+        assert service == "mailbox_remove", service
+        cred = f"mailbox_{account}"
+        if cred not in _VAULT:
+            return {"email": None, "removed": False}
+        self.rimosse.append(cred)
+        return {"email": str(_VAULT[cred]["email"]).strip().lower(), "removed": True}
 
     def test_delete_revokes_the_orphan_entries_and_says_where(self):
         r = self.client.delete("/tools/email/mailboxes/studio", headers=_H)
@@ -205,23 +213,5 @@ class RevocaCanonicaTests(unittest.TestCase):
         self.assertEqual(cfg["source_allow"], ["inbox:altra@example.com"])
 
 
-class MailboxAddressTests(unittest.TestCase):
-    def setUp(self):
-        p = [patch.object(email_tool.vault, "store_names", return_value=list(_VAULT)),
-             patch.object(email_tool.vault, "read_internal",
-                          side_effect=lambda n: dict(_VAULT[n]))]
-        for x in p:
-            x.start()
-        self.addCleanup(lambda: [x.stop() for x in reversed(p)])
-
-    def test_address_is_normalized(self):
-        self.assertEqual(email_tool.mailbox_address("studio"), "studio@example.com")
-
-    def test_missing_mailbox_has_no_address(self):
-        """`None`, non il nome dell'account: un nome non è un indirizzo, e
-        scambiarli qui significa revocare una voce che non c'entra."""
-        self.assertIsNone(email_tool.mailbox_address("ignota"))
-
-
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     unittest.main()

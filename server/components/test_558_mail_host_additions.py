@@ -179,16 +179,28 @@ class PerimeterMailTests(unittest.TestCase):
         self.assertEqual(per.address_of("???"), "")
 
     def test_legacy_accounts_names_and_addresses_only(self) -> None:
-        from ..tools import email as EM
+        import os
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / "email_config.json"
             f.write_text(json.dumps({"accounts": {
                 "demo": {"email": "A@B.IT", "password": "SEGRETO"},  # gitleaks:allow
                 "vuoto": {"password": "x"}}}), encoding="utf-8")
-            with patch.object(EM, "_legacy_config_file", lambda: f):
+            with patch.dict(os.environ, {"CLODIA_SECRETS_DIR": d}):
                 out = _host(COMMS).perimeter.legacy_mail_accounts()
         self.assertEqual(out, {"demo": "a@b.it", "vuoto": None})
         self.assertNotIn("SEGRETO", json.dumps(out))
+
+
+    def test_the_flat_legacy_format_is_the_demo_account(self) -> None:
+        """The oldest `email_config.json` has no `accounts` key: one bundle,
+        read as account `demo` (as the removed native reader did, #523)."""
+        import os
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "email_config.json").write_text(json.dumps(
+                {"email": "Solo@B.it", "password": "x"}), encoding="utf-8")
+            with patch.dict(os.environ, {"CLODIA_SECRETS_DIR": d}):
+                out = _host(COMMS).perimeter.legacy_mail_accounts()
+        self.assertEqual(out, {"demo": "solo@b.it"})
 
 
 class TopicsCrossingTests(unittest.TestCase):

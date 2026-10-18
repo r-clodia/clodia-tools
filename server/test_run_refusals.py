@@ -38,7 +38,7 @@ class _InTurno:
         return False
 
 
-def _nega(verbo: str = "email.send", *, chat: str | None = "chat-42",
+def _nega(verbo: str = "web.post", *, chat: str | None = "chat-42",
           esplode: bool = False):
     """Fa negare `verbo` dal dispatch e riferisce (testo, note partite).
 
@@ -77,9 +77,9 @@ class IlRifiutoArrivaAlRunRecordTests(unittest.TestCase):
 
     def test_la_nota_NOMINA_il_verbo(self):
         """«l'agente non ha dichiarato l'esito» è vero e non azionabile;
-        `email.send (whitelist)` lo è. Il nome è tutto il valore della nota."""
-        _, note = _nega("email.send")
-        self.assertEqual(note[0]["verb"], "email.send")
+        `web.post (whitelist)` lo è. Il nome è tutto il valore della nota."""
+        _, note = _nega("web.post")
+        self.assertEqual(note[0]["verb"], "web.post")
 
     def test_la_nota_porta_la_CLASSE_del_motivo_non_il_messaggio(self):
         """I messaggi di diniego contengono nomi di agente, di file e indirizzi.
@@ -118,17 +118,17 @@ class LaFormaDellaNotaTests(unittest.TestCase):
 
     def test_la_rotta_e_quella_interna(self):
         with patch.object(runtime, "_post", return_value={"ok": True}) as p:
-            runtime.note_run_refusal(chat_id="c1", verb="email.send",
+            runtime.note_run_refusal(chat_id="c1", verb="web.post",
                                      why="denied_tools")
         self.assertEqual(p.call_args[0][0], "/clodia/jobs/refusal/internal")
         self.assertEqual(p.call_args[0][1], {
-            "chat_id": "c1", "verb": "email.send", "why": "denied_tools"})
+            "chat_id": "c1", "verb": "web.post", "why": "denied_tools"})
 
     def test_il_timeout_e_piu_stretto_di_quello_generale(self):
         """Chi attraversa questa riga sta già aspettando un `DENIED:`: un
         agent-server lento non deve aggiungere secondi a un verbo già negato."""
         with patch.object(runtime, "_post", return_value={"ok": True}) as p:
-            runtime.note_run_refusal(chat_id="c1", verb="email.send")
+            runtime.note_run_refusal(chat_id="c1", verb="web.post")
         stretto = p.call_args[1]["timeout"]
         self.assertLess(stretto.read, runtime._TIMEOUT.read)
         self.assertLess(stretto.connect, runtime._TIMEOUT.connect)
@@ -136,11 +136,11 @@ class LaFormaDellaNotaTests(unittest.TestCase):
     def test_il_ritorno_dice_se_la_nota_e_partita(self):
         with patch.object(runtime, "note_run_refusal", return_value={"ok": True}):
             with _InTurno():
-                self.assertTrue(M._note_run_refusal("email.send", "whitelist"))
+                self.assertTrue(M._note_run_refusal("web.post", "whitelist"))
         with patch.object(runtime, "note_run_refusal",
                           side_effect=RuntimeError("giù")):
             with _InTurno():
-                self.assertFalse(M._note_run_refusal("email.send", "whitelist"))
+                self.assertFalse(M._note_run_refusal("web.post", "whitelist"))
 
 
 if __name__ == "__main__":

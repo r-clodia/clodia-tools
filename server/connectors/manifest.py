@@ -1095,8 +1095,8 @@ def core_namespaces() -> frozenset[str]:
     (#518) without a cycle, and so that a namespace added to the gateway is
     reserved here the same day it exists, without anybody remembering to.
     """
-    from ..main import (_GATEWAY_RETAINED_VERBS, _packaged_namespaces,
-                        all_native_verb_names)
+    from ..main import (_GATEWAY_RETAINED_VERBS, _RETIRED_NATIVE_VERBS,
+                        _packaged_namespaces, all_native_verb_names)
 
     # The verbs the gateway keeps in a packaged namespace (Telegram's binding
     # verbs, which write the gateway's own binding registry; GitHub's git
@@ -1105,11 +1105,17 @@ def core_namespaces() -> frozenset[str]:
     # packaged, though: in `native` position dropping them would leave the
     # namespace claimable by any pack while the gateway serves it.
     packaged = _packaged_namespaces()
+    # Verbs whose native implementation is gone (#522/#523/#525) still name a
+    # namespace the gateway owns while their switch is on `native`: nothing
+    # serves them there, and nothing else may (a pack's `email` backend would
+    # otherwise answer `email.send` behind the switch's back).
+    retired = {name.split(".", 1)[0] for name in _RETIRED_NATIVE_VERBS
+               if "." in name} - set(packaged)
     return frozenset(
         name.split(".", 1)[0] for name in all_native_verb_names()
         if "." in name and not (name in _GATEWAY_RETAINED_VERBS
                                 and name.split(".", 1)[0] in packaged)
-    ) | reserved_namespaces()
+    ) | reserved_namespaces() | retired
 
 
 def check_namespace(namespace: str, verbs: Iterable[str], *,

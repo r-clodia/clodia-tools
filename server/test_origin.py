@@ -107,7 +107,9 @@ class TheRuleTests(Base):
         invece di continuare a passare per il motivo sbagliato.
         """
         from . import main as m
-        nativi = set(m.all_native_verb_names())
+        # The `email.*` verbs are comms-pack's component's since #523: real
+        # verbs of the gateway's catalogue, not native ones.
+        nativi = set(m.all_native_verb_names()) | set(m._EMAIL_VERB_NAMES)
         for verbo in ("fs.list_dir", "email.send", "email.read", "topic.open"):
             with self.subTest(verbo=verbo):
                 self.assertIn(verbo, nativi, f"'{verbo}' non è un verbo del gateway")

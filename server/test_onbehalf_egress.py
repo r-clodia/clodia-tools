@@ -59,6 +59,25 @@ class _Persona:
         return False
 
 
+def _comms_component(spediti: list):
+    """`email.send` served the way it is now — by comms-pack's gateway
+    component (#523: the native mail code is gone) — with a handler that only
+    records. Everything before the handler (whitelist, origin, gates, the
+    egress PDP on the mail mapping) runs as in production."""
+    from types import SimpleNamespace as NS
+    from mcp.types import Tool
+    spec = NS(pack="comms-pack", component="comms-pack/comms", offload=False,
+              tool=Tool(name="email.send", description="",
+                        inputSchema={"type": "object", "properties": {
+                            "to": {}, "cc": {}, "subject": {}, "body": {}}}),
+              handler=lambda a: spediti.append(a) or {"sent": True})
+    return (patch.object(M, "_component_verb",
+                         lambda n: spec if n == "email.send" else None),
+            patch.object(M, "_component_pdp_arguments", lambda _s, _n, a: a),
+            patch.object(M, "_check_component", lambda n: None),
+            patch.object(M, "_check_pack_connector_held", lambda n: None))
+
+
 def _send(to, *, ruolo="user", destinazioni=(), on_behalf=True, modo="on"):
     """Prova a spedire una mail come una persona, e riferisce cosa è successo.
 
@@ -76,21 +95,22 @@ def _send(to, *, ruolo="user", destinazioni=(), on_behalf=True, modo="on"):
         gate.append((key, kw.get("reason") or ""))
         raise PermissionError(f"GATE {key}")
 
-    with _Persona(ruolo=ruolo, on_behalf=on_behalf), \
+    import contextlib
+    with contextlib.ExitStack() as _stack, \
+            _Persona(ruolo=ruolo, on_behalf=on_behalf), \
             patch.object(M, "agent_name", lambda: "clodia"), \
             patch.object(M, "_unattended_denial", lambda _n: None), \
             patch.object(M.origin, "evaluate", return_value={"action": "allow"}), \
             patch.object(M, "_require_gate_consent", _gate_consent), \
             patch.object(M, "_cross_topic_gate_key", lambda *a: None), \
             patch.object(M, "_topic_attachments", lambda *a: ([], None)), \
-            patch.object(M, "_email_account", lambda _a: "casella"), \
             patch.object(egress, "mode", lambda: modo), \
             patch.object(egress, "effective_uris",
                          lambda _d="egress", *a, **kw: list(destinazioni)), \
-            patch.object(M.email, "send",
-                         lambda *a, **kw: spediti.append(a) or {"sent": True}), \
             patch.object(M._taint, "note_verb"), \
             patch.object(M._tlm, "record"):
+        for _p in _comms_component(spediti):
+            _stack.enter_context(_p)
         out = asyncio.run(M.call_tool(
             "email.send", {"to": to, "subject": "s", "body": "b"}))
     return out[0].text, bool(spediti), gate

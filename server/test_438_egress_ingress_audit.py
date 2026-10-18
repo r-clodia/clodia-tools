@@ -69,6 +69,41 @@ class _Env(unittest.TestCase):
         return asyncio.run(go())
 
 
+def _mail_component(send):
+    """`email.send` served the way it is now — by comms-pack's gateway
+    component (#523: the native mail code is gone) — with the component's own
+    attachment handling (confined through `host.scratch_path`, hashed through
+    `host.note_crossing`, as `verbs.py` does), then `send`. The audit record
+    under test is the gateway's."""
+    import stat as _stat
+    from types import SimpleNamespace as NS
+    from mcp.types import Tool
+
+    def handler(a):
+        own = []
+        for raw in a.get("attachments") or []:
+            try:
+                rp = main._safe_scratch_path(str(raw))
+            except ValueError:
+                raise ValueError(f"attachment outside your scratch: '{raw}'") from None
+            if not _stat.S_ISREG(os.stat(rp).st_mode):
+                raise ValueError(f"attachment is not a regular file: '{raw}'")
+            own.append(rp)
+        for p in own:
+            main._note_crossing(p, kind="attachment")
+        return send(a)
+    spec = NS(pack="comms-pack", component="comms-pack/comms", offload=True,
+              tool=Tool(name="email.send", description="", inputSchema={
+                  "type": "object", "properties": {
+                      "to": {}, "cc": {}, "subject": {}, "body": {}, "attachments": {}}}),
+              handler=handler)
+    return {"component": (main, "_component_verb",
+                          lambda n: spec if n == "email.send" else None),
+            "pdp": (main, "_component_pdp_arguments", lambda _s, _n, a: a),
+            "check": (main, "_check_component", lambda n: None),
+            "held": (main, "_check_pack_connector_held", lambda n: None)}
+
+
 class EgressTests(_Env):
     def scratch(self) -> Path:
         d = self.base / "spawns" / "clodia-320"
@@ -85,8 +120,7 @@ class EgressTests(_Env):
             "email.send", {"to": "mario.rossi@example.com", "subject": "s", "body": "b",
                            "attachments": [str(att)]},
             verdict=_allow("mailto:mario.rossi@example.com"),
-            send=(main.email, "send", lambda *a, **k: {"ok": True}),
-            account=(main, "_email_account", lambda a: "studio"))
+            **_mail_component(lambda a: {"ok": True}))
         self.assertFalse(out[0].text.startswith(("DENIED", "ERROR")), out[0].text)
         (ev,) = self.events("flow.egress")
         self.assertEqual(ev["tool"]["destination"], ["mailto:mario.rossi@example.com"])
@@ -103,8 +137,7 @@ class EgressTests(_Env):
             "email.send", {"to": "x@example.com", "subject": "s", "body": "b",
                            "attachments": attachments},
             verdict=_allow("mailto:x@example.com"),
-            send=(main.email, "send", lambda *a, **k: {"ok": True}),
-            account=(main, "_email_account", lambda a: "studio"))
+            **_mail_component(lambda a: {"ok": True}))
         self.assertFalse(out[0].text.startswith(("DENIED", "ERROR")), out[0].text)
         (ev,) = self.events("flow.egress")
         return ev["result"]["files"]
@@ -128,8 +161,7 @@ class EgressTests(_Env):
             "email.send", {"to": "x@example.com", "subject": "s", "body": "b",
                            "attachments": attachments},
             verdict=_allow("mailto:x@example.com"),
-            send=(main.email, "send", lambda *a, **k: {"ok": True}),
-            account=(main, "_email_account", lambda a: "studio")))
+            **_mail_component(lambda a: {"ok": True})))
         self.assertEqual(self.events("flow.egress"), [])
         return out[0].text
 
@@ -166,7 +198,7 @@ class EgressTests(_Env):
         out = self.run_call(
             "email.send", {"to": "x@example.com", "subject": "s", "body": "b"},
             verdict=_allow("mailto:x@example.com", refused=True),
-            send=(main.email, "send", lambda *a, **k: {"ok": True}))
+            **_mail_component(lambda a: {"ok": True}))
         self.assertTrue(out[0].text.startswith("DENIED"))
         self.assertEqual(self.events("flow.egress"), [])
 
@@ -175,8 +207,7 @@ class EgressTests(_Env):
             raise RuntimeError("smtp down")
         self.run_call("email.send", {"to": "x@example.com", "subject": "s", "body": "b"},
                       verdict=_allow("mailto:x@example.com"),
-                      send=(main.email, "send", boom),
-                      account=(main, "_email_account", lambda a: "studio"))
+                      **_mail_component(boom))
         self.assertEqual(self.events("flow.egress"), [])
 
 

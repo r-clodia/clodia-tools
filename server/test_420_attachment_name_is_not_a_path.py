@@ -17,6 +17,10 @@ Difetti distinti, entrambi provati qui:
    sull'espressione. La cartella esiste, contiene il file, e risulta vuota.
    È questo — non il `/` in sé — a rendere la perdita silenziosa: gli altri due
    allegati con `/` ma senza spazi erano infatti ritrovabili nella sottocartella.
+
+The sanitising of the name (defect 1) is comms-pack's component's since #523
+and tested there (`safe_attachment_name`); what stays here is the topic
+storage half (defect 2).
 """
 from __future__ import annotations
 
@@ -25,82 +29,12 @@ import unittest
 
 from .topics.local_fs import LocalFsStorage
 from .topics.service import TopicError, TopicService
-from .tools import email as email_tool
 
 #: I due nomi che hanno perso il file, dal canale #preventivi-tomato.
 PERSI = [
     "Aggiornamento preventivo Voucher Startup Social Tech / StopListe.eml",
     "NDA bilaterale Tomato / Luxury Esmeralda Real Estate — versione aggiornata.eml",
 ]
-
-
-class SafeAttachmentNameTests(unittest.TestCase):
-    """Il sanificatore, da solo."""
-
-    def test_the_separator_stops_being_a_separator(self):
-        for nome in PERSI:
-            safe = email_tool.safe_attachment_name(nome)
-            self.assertNotIn("/", safe)
-            self.assertTrue(safe.endswith(".eml"), safe)
-
-    def test_no_segment_is_left_with_edge_spaces(self):
-        safe = email_tool.safe_attachment_name(PERSI[1])
-        self.assertEqual(safe, safe.strip())
-        self.assertEqual(safe, "NDA bilaterale Tomato - Luxury Esmeralda Real "
-                               "Estate — versione aggiornata.eml")
-
-    def test_backslash_newline_and_leading_dot_are_handled_too(self):
-        # Sono le altre tre forme che `put_file` rifiuta o nasconde: backslash
-        # (errore secco), whitespace esotico da subject MIME, dotfile (invisibile
-        # al navigator, che salta le voci che cominciano per punto).
-        self.assertEqual(email_tool.safe_attachment_name("a\\b.pdf"), "a-b.pdf")
-        self.assertEqual(email_tool.safe_attachment_name("Oggetto\n lungo.eml"),
-                         "Oggetto lungo.eml")
-        self.assertEqual(email_tool.safe_attachment_name(".hidden.pdf"), "hidden.pdf")
-
-    def test_a_name_that_sanitizes_to_nothing_still_has_a_name(self):
-        # Meglio un file da rinominare che una `TopicError` su un allegato che
-        # esiste: qui l'alternativa al fallback è perdere il contenuto.
-        self.assertEqual(email_tool.safe_attachment_name("///"), "allegato")
-        self.assertEqual(email_tool.safe_attachment_name(""), "allegato")
-
-
-class AttachmentLandsAsOneFileTests(unittest.TestCase):
-    """Il giro vero: nome sanificato → `put_file` → il file si RILEGGE."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.svc = TopicService(LocalFsStorage(self.tmp.name))
-        self.svc.new("SEAL-1", "ch", {"title": "ch", "owner": "davide",
-                                      "participants": ["davide", "messaggero"]})
-
-    def _archivia(self, nome: str) -> dict:
-        """Replica il ramo tier+name di `email.save_attachment`."""
-        fn = email_tool.safe_attachment_name(nome)
-        return self.svc.put_file("SEAL-1", "ch", fn, b"%PDF allegato",
-                                 "untrusted", by="messaggero")
-
-    def test_the_attachment_is_a_file_in_local_not_a_folder(self):
-        for nome in PERSI:
-            r = self._archivia(nome)
-            voci = {f["name"]: f for f in self.svc.list_files("SEAL-1", "ch", "local")}
-            self.assertIn(r["name"], voci, f"{nome} non compare in local/")
-            self.assertEqual(voci[r["name"]]["kind"], "file")
-            self.assertEqual([v for v in voci.values() if v["kind"] == "dir"], [],
-                             "nessuna cartella doveva nascere dal nome dell'allegato")
-
-    def test_the_path_reported_to_the_caller_reads_back(self):
-        # È la proprietà che mancava: il verbo dichiarava successo e il path
-        # dichiarato non restituiva byte.
-        r = self._archivia(PERSI[1])
-        self.assertEqual(self.svc.read_file("SEAL-1", "ch", r["path"]), b"%PDF allegato")
-
-    def test_provenance_survives_the_rename(self):
-        r = self._archivia(PERSI[0])
-        voce = [f for f in self.svc.list_files("SEAL-1", "ch", "local")
-                if f["name"] == r["name"]][0]
-        self.assertEqual(voce["provenance"], "untrusted")
 
 
 class UnreadablePathIsRefusedTests(unittest.TestCase):

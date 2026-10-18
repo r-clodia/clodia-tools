@@ -17,7 +17,7 @@ from . import rag_collections
 from . import taint as _taint
 from . import telemetry as _tlm
 from . import transfer_channel
-from .tools import email, fs, logs, runtime
+from .tools import fs, logs, runtime
 from .tools import datastore_sql, web_fetch, web_post
 
 #: `LOG` era usato in cinque punti di questo modulo e **definito in nessuno**.
@@ -68,167 +68,19 @@ def _topics() -> TopicService:
 
 
 
-_EMAIL_TOOLS: list[Tool] = [
-    Tool(
-        name="email.send",
-        description=(
-            "Send an email. Specify the sender mailbox via `account` (the account "
-            "name, e.g. as shown by email.folders or your instructions). "
-            "Plain-text body, optional CC and local file attachments."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "to": {"type": "string", "description": "recipient email address"},
-                "subject": {"type": "string"},
-                "body": {"type": "string"},
-                "account": {
-                    "type": "string",
-                    "description": "sender mailbox account name (required if you have more than one)",
-                },
-                "cc": {"type": "string", "description": "optional CC address"},
-                "attachments": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "optional local file paths to attach",
-                },
-                "topic_files": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": ("allegati PER RIFERIMENTO: path di file del topic "
-                                    "(es. 'files/contratto.pdf'). Il gateway li legge e "
-                                    "li allega senza che il contenuto entri nel tuo "
-                                    "contesto — non serve scaricarli prima, e non "
-                                    "consumano token."),
-                },
-                "tier": {"type": "string", "description": ("tier del topic per topic_files. "
-                          "OPZIONALE: senza, si usa il topic del canale in cui stai "
-                          "lavorando")},
-                "name": {"type": "string", "description": "nome del topic (opzionale, vedi tier)"},
-            },
-            "required": ["to", "subject", "body"],
-        },
-    ),
-    Tool(
-        name="email.folders",
-        description="List the IMAP folders of an account (pass the account name in `account`).",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "account": {"type": "string",
-                            "description": "account name to inspect"},
-            },
-        },
-    ),
-    Tool(
-        name="email.list",
-        description="List messages of a folder (default INBOX) for a configured account.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "account": {"type": "string"},
-                "folder": {"type": "string", "description": "IMAP folder, default INBOX"},
-                "limit": {"type": "integer", "description": "max messages, default 10"},
-            },
-        },
-    ),
-    Tool(
-        name="email.read",
-        description="Read a single message by its IMAP id from a folder (default INBOX).",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "email_id": {"type": "string", "description": "IMAP message id"},
-                "account": {"type": "string"},
-                "folder": {"type": "string", "description": "IMAP folder, default INBOX"},
-            },
-            "required": ["email_id"],
-        },
-    ),
-    Tool(
-        name="email.get_attachment",
-        description=("Contenuto di un allegato di un messaggio, in base64 (per nome file). "
-                     "SOLO per allegati piccoli/testuali: per PDF, immagini e binari usa "
-                     "email.save_attachment (il base64 non passa dal modello). "
-                     "Usa email.read per scoprire i nomi degli allegati."),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "email_id": {"type": "string", "description": "IMAP message id"},
-                "filename": {"type": "string", "description": "nome esatto dell'allegato (da email.read)"},
-                "account": {"type": "string"},
-                "folder": {"type": "string", "description": "IMAP folder, default INBOX"},
-            },
-            "required": ["email_id", "filename"],
-        },
-    ),
-    Tool(
-        name="email.save_attachment",
-        description=("Scarica un allegato senza che i byte passino dal contesto del "
-                     "modello — usa QUESTO per PDF, immagini e binari. Due "
-                     "destinazioni, ne serve una: `tier`+`name` per archiviarlo "
-                     "DIRETTAMENTE nei file di un topic (il gateway lo scrive, "
-                     "provenienza `untrusted` e il canale risulta contaminato: non "
-                     "serve topic.put), oppure `dest` per un path nel tuo scratch se "
-                     "devi lavorarlo. Usa email.read per scoprire i nomi degli "
-                     "allegati."),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "email_id": {"type": "string", "description": "IMAP message id"},
-                "filename": {"type": "string", "description": "nome esatto dell'allegato (da email.read)"},
-                "dest": {"type": "string", "description": ("path assoluto nel tuo "
-                          "scratch. Alternativa a tier+name: se devi solo archiviare "
-                          "l'allegato, usa tier+name e i byte non passano da te")},
-                "tier": {"type": "string", "description": ("tier del topic in cui archiviare. "
-                          "OPZIONALE: senza `dest` e senza tier/name l'allegato va nel "
-                          "topic del canale in cui stai lavorando")},
-                "name": {"type": "string", "description": "nome del topic (opzionale, vedi tier)"},
-                "account": {"type": "string"},
-                "folder": {"type": "string", "description": "IMAP folder, default INBOX"},
-            },
-            # `dest` non è più obbligatorio: serve UNA delle due destinazioni, e il
-            # dispatch lo verifica con un errore che dice quali sono. Uno schema che
-            # imponesse entrambe costringerebbe a passare un path finto per
-            # archiviare in un topic.
-            "required": ["email_id", "filename"],
-        },
-    ),
-    Tool(
-        name="email.search",
-        description="Search messages with an IMAP query (e.g. FROM \"x@y.it\") in a folder.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "IMAP search query"},
-                "account": {"type": "string"},
-                "folder": {"type": "string", "description": "IMAP folder, default INBOX"},
-                "limit": {"type": "integer", "description": "max results, default 20"},
-            },
-            "required": ["query"],
-        },
-    ),
-    Tool(
-        name="email.reply",
-        description="Reply to a message keeping the thread (plain-text body, optional CC and local attachments).",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "email_id": {"type": "string", "description": "id of the message to reply to"},
-                "body": {"type": "string"},
-                "account": {"type": "string"},
-                "folder": {"type": "string", "description": "IMAP folder, default INBOX"},
-                "cc": {"type": "string", "description": "optional CC address"},
-                "attachments": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "optional local file paths to attach",
-                },
-            },
-            "required": ["email_id", "body"],
-        },
-    ),
-]
+#: The eight `email.*` verbs. Their native implementation is gone
+#: (clodia-platform#523): comms-pack's gateway component serves them on
+#: `connectors: {mail: pack}`. The names stay for the refusal on `native`.
+_EMAIL_VERB_NAMES: frozenset[str] = frozenset({
+    "email.send",
+    "email.folders",
+    "email.list",
+    "email.read",
+    "email.get_attachment",
+    "email.save_attachment",
+    "email.search",
+    "email.reply",
+})
 
 
 # agent.spawn RIMOSSO (29 giu 2026): creava chat via POST /clodia/chats, endpoint
@@ -1917,7 +1769,8 @@ def _packaged_namespaces() -> frozenset[str]:
 #: account's mailbox whitelist, strict ingress and its audit record (#503),
 #: topic attachments in and out with their taint, the reply recipient (its
 #: `pdp_arguments` service). The dispatcher runs them through this same
-#: `call_tool` path. On `native` the gateway's `tools/email.py` serves them.
+#: `call_tool` path. On `native` nothing serves them: the native mail code is
+#: gone (#523).
 #:
 #: NOT the four git verbs of `github` any more (clodia-platform#525). With
 #: `connectors: {github: pack}` they leave the native catalogue: it-pack's
@@ -1943,7 +1796,14 @@ def _packaged_namespaces() -> frozenset[str]:
 _GOOGLE_NATIVE_NAMES: frozenset[str] = frozenset(
     t.name for t in _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS)
 
-_EMAIL_NATIVE_NAMES: frozenset[str] = frozenset(t.name for t in _EMAIL_TOOLS)
+_EMAIL_NATIVE_NAMES: frozenset[str] = _EMAIL_VERB_NAMES
+
+#: Verbs the gateway no longer implements but whose namespace it keeps
+#: reserved while the switch is on `native` (`manifest.core_namespaces`).
+_RETIRED_NATIVE_VERBS: frozenset[str] = _EMAIL_VERB_NAMES | _GITHUB_NATIVE_NAMES | frozenset({
+    "telegram.inbox", "telegram.lease_acquire", "telegram.poll", "telegram.send",
+    "telegram.send_file", "telegram.lease_release", "telegram.roster",
+    "telegram.status"})
 
 _GATEWAY_RETAINED_VERBS = frozenset({
     "telegram.listen", "telegram.unlisten", "telegram.join_link",
@@ -2415,7 +2275,7 @@ def _native_tool_namespaces() -> list[str]:
     quindi l'omissione può essere deliberata. Va deciso, non uniformato di
     soppiatto: clodia-platform#140.
     """
-    tools = (_FS_TOOLS + _WEB_TOOLS + _DATASTORE_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
+    tools = (_FS_TOOLS + _WEB_TOOLS + _DATASTORE_TOOLS + _LOGS_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
              + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS
              + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
              + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS
@@ -2500,12 +2360,14 @@ def runtime_configuration_warnings() -> list[str]:
     # The native GitHub git verbs and image client are gone (#525): on
     # `native` those features are simply not served, and the boot says so.
     for cid, what in (("github", "i verbi git github.clone/pull/push/pull_request"),
-                      ("openai-images", "la generazione immagini")):
+                      ("openai-images", "la generazione immagini"),
+                      ("mail", "i verbi email.*"),
+                      ("telegram", "i verbi Telegram degli agenti")):
         if instance_profile.connector_mode(cid) != "pack":
             warnings.append(
                 f"connettore '{cid}' su `native`: {what} non hanno più "
                 f"un'implementazione nativa — servono `connectors: {{{cid}: pack}}` "
-                "nel profilo e it-pack ≥ 0.20.0")
+                "nel profilo e il pack che lo serve")
     return warnings
 
 
@@ -2981,34 +2843,6 @@ def _agent_tool_reachable(name: str, agent: str | None,
     return _tool_allowed(name, allowed)
 
 
-def _email_account(arguments: dict) -> str:
-    """Account per una chiamata email.*: quello richiesto esplicitamente,
-    altrimenti l'UNICO account esistente. Con zero o più account solleva un
-    errore azionabile: nessun fallback verso mailbox inesistenti. Chi può
-    davvero usare la casella lo decide la whitelist `inbox:`/`outbox:` al
-    momento della chiamata (`email._secrets_env`), non questa funzione."""
-    agent = agent_name()
-    accounts = email.available_accounts(agent)
-    acct = (arguments.get("account") or "").strip()
-    if acct:
-        if acct in accounts:
-            return acct
-        raise ValueError(
-            f"email: account '{acct}' non esistente. "
-            f"Passa il parametro 'account' con uno di questi valori: {accounts}"
-        )
-    if len(accounts) == 1:
-        return accounts[0]
-    if not accounts:
-        raise ValueError(
-            "email: nessun account configurato. Configura una mailbox da "
-            "Integrazioni → Email."
-        )
-    raise ValueError(
-        "email: il parametro 'account' è obbligatorio quando sono disponibili "
-        f"più mailbox. Valori accettati: {accounts}"
-    )
-
 
 # Nessun namespace è più universale. `memory` lo era: concesso a ogni agente senza
 # comparire nella sua scheda, quindi invisibile leggendo la configurazione e
@@ -3079,7 +2913,7 @@ def _all_native_tools() -> list:
     Resta fuori `_native_tool_namespaces`, che omette `settings` — una divergenza
     preesistente che non si sana con un refactor (vedi la nota là).
     """
-    native = list(_FS_TOOLS + _WEB_TOOLS + _DATASTORE_TOOLS + _LOGS_TOOLS + _EMAIL_TOOLS
+    native = list(_FS_TOOLS + _WEB_TOOLS + _DATASTORE_TOOLS + _LOGS_TOOLS
                   + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS
                   + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS
                   + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
@@ -3348,27 +3182,6 @@ def _gate_notify_principal(agent: str, gate_key: str, principal: str | None) -> 
     except Exception:  # noqa: BLE001 — notifica best-effort, mai bloccante
         pass
     return False
-
-
-def _reply_recipient(arguments: dict) -> str:
-    """Destinatario reale di un `email.reply`, letto dal messaggio originale.
-
-    Stringa vuota se non risolvibile → `egress.check` la tratta come
-    destinazione ignota e nega. È la direzione d'errore giusta: «l'attaccante
-    scrive, l'agente risponde con i dati» è il percorso dell'injection, e non
-    sapere a chi si sta rispondendo non è una buona ragione per procedere.
-    """
-    try:
-        msg = email.read_message(
-            str(arguments.get("email_id") or ""),
-            account=_email_account(arguments),
-            folder=arguments.get("folder") or "INBOX")
-    except Exception as e:  # noqa: BLE001 — non risolvibile ≠ consentito
-        LOG.warning("egress: destinatario di email.reply non risolvibile (%s)", e)
-        return ""
-    from . import egress as _eg
-    src = msg.get("from") or (msg.get("message") or {}).get("from") or ""
-    return _eg.address_of(str(src))
 
 
 #: Gate key prefix of a web read from a source not in the ingress lists
@@ -4779,9 +4592,13 @@ def _audit_ingress_unsafe(verb: str, a: dict, result: object, vetted) -> None:
                 input={"hash": _audit.keep(raw)})
 
 
+#: The marker of a strict-ingress refusal (#503) in a refusal message; the
+#: mail component writes it (it was `tools/email.py`'s, removed with #523).
+MITTENTE_NON_VAGLIATO = "mittente non vagliato"
+
+
 def _denial_class(msg: str) -> str:
     """The CLASS of a refusal, never its message (which names files and people)."""
-    from .tools.email import MITTENTE_NON_VAGLIATO
     return ("egress" if "uscita non consentita" in msg
             # Ingresso stretto (#503): la classe è il motivo, non il verbo —
             # read, get_attachment, save_attachment e reply rifiutano per lo
@@ -4948,6 +4765,16 @@ def _check_component(name: str) -> None:
             why = (f"'{name}' is implemented by a pack on this instance, but no "
                    "gateway component and no mounted backend of that pack serves "
                    "it (see GET /internal/components)")
+    if (not why and name in _EMAIL_VERB_NAMES and _is_packaged_verb(name)
+            and _component_verb(name) is None):
+        # Only comms-pack's component serves mail (#523): a mounted backend
+        # exposing `email.*` is never a fallback.
+        why = (f"'{name}' is served on `mail: pack` by comms-pack's gateway "
+               "component, which is not serving it now (see GET /internal/components)")
+    if not why and name in _EMAIL_VERB_NAMES and not _is_packaged_verb(name):
+        why = (f"'{name}' has no native implementation any more "
+               "(clodia-platform#523): it is served by comms-pack's gateway "
+               "component with `connectors: {mail: pack}` in the instance profile")
     if (not why and name.startswith("telegram.") and name not in _GATEWAY_RETAINED_VERBS
             and _is_packaged_verb(name) and _component_verb(name) is None):
         # Same rule as GitHub's: only comms-pack's component serves Telegram
@@ -5419,11 +5246,11 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                     _telegram_chat_id_or_raise(arguments)
             elif name == "email.reply":
                 # The reply goes to the ORIGINAL sender, whatever `to` the
-                # caller wrote (the client ignores it): the PDP must judge that
-                # address, never one the caller chose (clodia-platform#559).
-                # Off the event loop: the lookup is an IMAP fetch.
-                _eargs = {**arguments,
-                          "to": await asyncio.to_thread(_reply_recipient, arguments)}
+                # caller wrote (clodia-platform#559): only comms-pack's
+                # component can read it (`pdp_arguments`, above). Reaching here
+                # means no component serves the verb: the destination is
+                # unknown, hence refused (#523, no native lookup any more).
+                _eargs = {**arguments, "to": ""}
             elif name == "telegram.send":
                 # Un `chat_id` che non è una chat Telegram (il TITOLO del gruppo,
                 # «Clodia Sviluppo») diventava `tg:Clodia Sviluppo`, che nessuna
@@ -5540,138 +5367,6 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
         elif name == "logs.tail":
             result = logs.tail(arguments.get("lines", 100), arguments.get("level", ""),
                                source=arguments.get("source") or "agent-server")
-        elif name == "email.send" and not _is_packaged_verb(name):
-            # `not _is_packaged_verb` on the eight `email.*` branches: on
-            # `mail: pack` (#558) they are comms-pack's gateway component's,
-            # dispatched below like google-pack's.
-            # ALLEGATI PER RIFERIMENTO (#104 §8, requisito derivato della riga
-            # `messaggero`). Il gateway legge i file dal topic e li allega: il
-            # contenuto NON entra nel contesto dell'agente, esattamente come per
-            # i segreti. È ciò che permette di togliere a un postino i verbi di
-            # lettura dei file del topic senza togliergli il mestiere — e non
-            # brucia token su un PDF.
-            _own = _agent_attachments(arguments.get("attachments"))
-            _extra, _tmpdir = _topic_attachments(arguments, _ag or "")
-            for _p in _own:
-                await asyncio.to_thread(_note_crossing, _p, kind="attachment")
-            for _p in _extra:
-                await asyncio.to_thread(_note_crossing, _p, kind="attachment",
-                                        trusted=True)
-            try:
-                # Off the event loop (#553): SMTP/IMAP are seconds of network.
-                result = await asyncio.to_thread(
-                    email.send,
-                    arguments["to"],
-                    arguments["subject"],
-                    arguments["body"],
-                    account=_email_account(arguments),
-                    cc=arguments.get("cc"),
-                    attachments=_own + _extra,
-                )
-            finally:
-                if _tmpdir:
-                    import shutil as _sh
-                    _sh.rmtree(_tmpdir, ignore_errors=True)
-        elif name == "email.folders" and not _is_packaged_verb(name):
-            result = await asyncio.to_thread(email.folders,
-                                             account=_email_account(arguments))
-        elif name == "email.list" and not _is_packaged_verb(name):
-            result = await asyncio.to_thread(
-                email.list_messages,
-                account=_email_account(arguments),
-                folder=arguments.get("folder", "INBOX"),
-                limit=arguments.get("limit", 10),
-            )
-        elif name == "email.read" and not _is_packaged_verb(name):
-            result = await asyncio.to_thread(
-                email.read_message,
-                arguments["email_id"],
-                account=_email_account(arguments),
-                folder=arguments.get("folder", "INBOX"),
-            )
-        elif name == "email.get_attachment" and not _is_packaged_verb(name):
-            result = await asyncio.to_thread(
-                email.get_attachment,
-                arguments["email_id"],
-                arguments["filename"],
-                account=_email_account(arguments),
-                folder=arguments.get("folder", "INBOX"),
-            )
-        elif name == "email.save_attachment" and not _is_packaged_verb(name):
-            # I byte dell'allegato NON passano dal modello: decodifica server-side
-            # e scrittura o nello scratch validato, o DIRETTAMENTE nei file del
-            # topic. La seconda è la RICEZIONE per riferimento, simmetrica
-            # all'invio (`email.send(topic_files=…)`): esisteva il modo di
-            # spedire un file senza vederlo, non quello di archiviarne uno.
-            #
-            # Serve perché il flusso documentato era `save_attachment` →
-            # `topic.put`, e a un postino `topic.put` è negato (§8 di #104): un
-            # allegato in arrivo non era archiviabile da chi la posta la riceve.
-            _dest_arg = (arguments.get("dest") or "").strip()
-            # Senza `dest` si archivia nel topic: quello indicato, o QUELLO IN CUI
-            # SI STA LAVORANDO. Il default è ciò che rende il verbo usabile da un
-            # agente che non ha modo di scoprire dove si trova.
-            _tier, _tname = (None, None) if _dest_arg else _topic_of(arguments)
-            if not (_dest_arg or (_tier and _tname)):
-                raise ValueError(
-                    "non sono riuscito a ricavare il topic dal canale: passa "
-                    "`tier`+`name`, oppure `dest` per scrivere nel tuo scratch")
-            raw, meta = await asyncio.to_thread(
-                email.get_attachment_bytes,
-                arguments["email_id"],
-                arguments["filename"],
-                account=_email_account(arguments),
-                folder=arguments.get("folder", "INBOX"),
-            )
-            if _tier and _tname:
-                svc = _topics()
-                _require_topic_member(svc, _tier, _tname)
-                # Il nome dell'allegato è un NOME, non un path: lo sceglie il
-                # mittente. Passarlo as-is faceva interpretare un `/` come
-                # separatore di directory e l'allegato finiva in una cartella che
-                # nessuno aveva chiesto — o spariva del tutto — mentre il verbo
-                # rispondeva successo (clodia-platform#420).
-                fn = email.safe_attachment_name(arguments["filename"])
-                # Provenienza `untrusted` d'ufficio: un file introdotto da un verbo
-                # non ha nessuno da interrogare (#104 §3), e la posta in arrivo è
-                # la definizione di sorgente non controllata.
-                r = await asyncio.to_thread(svc.put_file, _tier, _tname, fn, raw,
-                                            "untrusted", by=_ag or "")
-                # E CONTAMINA il canale: è contenuto di terzi che entra adesso.
-                # Senza questo l'archiviazione sarebbe un modo di far entrare un
-                # PDF ostile senza lasciare traccia nel flag.
-                _taint.mark(f"{_tier}/{_tname}", "file", fn, _ag or "")
-                LOG.info("email: allegato '%s' archiviato in %s/%s (untrusted)",
-                         fn, _tier, _tname)
-                result = {"topic_path": r["path"], "provenance": r["provenance"],
-                          "size": len(raw), "tainted": True, **meta}
-            else:
-                dest = _safe_scratch_path(_dest_arg)
-                _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-                with open(dest, "wb") as f:
-                    f.write(raw)
-                result = {"local_path": dest, "size": len(raw), **meta}
-        elif name == "email.search" and not _is_packaged_verb(name):
-            result = await asyncio.to_thread(
-                email.search,
-                arguments["query"],
-                account=_email_account(arguments),
-                folder=arguments.get("folder", "INBOX"),
-                limit=arguments.get("limit", 20),
-            )
-        elif name == "email.reply" and not _is_packaged_verb(name):
-            _own = _agent_attachments(arguments.get("attachments"))
-            for _p in _own:
-                await asyncio.to_thread(_note_crossing, _p, kind="attachment")
-            result = await asyncio.to_thread(
-                email.reply,
-                arguments["email_id"],
-                arguments["body"],
-                account=_email_account(arguments),
-                folder=arguments.get("folder", "INBOX"),
-                cc=arguments.get("cc"),
-                attachments=_own,
-            )
         elif name.startswith("topic."):
             # offload su thread: _dispatch_topic tocca lo storage e (suggest_team/
             # participants) fa httpx SINCRONO all'agent-server. Se girasse
