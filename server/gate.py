@@ -129,6 +129,12 @@ _PREFIX_CLASS = {
     # È `outward` per definizione: una destinazione nuova è esattamente il
     # momento in cui qualcosa lascia la stanza.
     "egress:": GATE_OUTWARD,
+    # `ingress:web:<site>|<chat>` (clodia-platform#569): reading a site that is
+    # not a source of this room. WALLS, like `topic.ingress_add`: what a room
+    # reads is its OWNER's decision — and «Approva sempre» makes the site a
+    # trusted source of the room. Unclassified, an admin decided and the owner
+    # could not answer (review of clodia-tools#391).
+    "ingress:web:": GATE_WALLS,
 }
 
 
@@ -407,7 +413,7 @@ def _consent_scope(verb: str) -> str:
     """How long a consent lasts, in the words of #425 §1.3 `authorization.scope`."""
     if verb.startswith(COPYBRAIN_PREFIX) or verb == "crosstopic":
         return "spawn"
-    if verb.startswith("web-source:"):
+    if verb.startswith("ingress:web:"):
         # clodia-platform#569: this spawn, this channel, until the capability
         # expires — not one call.
         return "spawn-channel"

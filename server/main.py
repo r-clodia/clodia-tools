@@ -3570,8 +3570,12 @@ def _push_destination(arguments: dict) -> dict:
 
 
 #: Gate key prefix of a web read from a source not in the ingress lists
-#: (clodia-platform#569): `web-source:<scheme>://<host>/`.
-WEB_SOURCE_GATE = "web-source:"
+#: (clodia-platform#569): `ingress:web:<scheme>://<host>/|<chat>`. In the
+#: `ingress:` family on purpose: it is a gate on a SOURCE, so the card offers
+#: «Approva sempre» (the site goes into the channel's ingress list) besides
+#: «Approva ora» and «Nega». The `|<chat>` suffix scopes the consent to the
+#: channel; it is not part of the address that is remembered.
+WEB_SOURCE_GATE = "ingress:web:"
 
 #: Verbs that load a URL the agent names.
 _WEB_READ_VERBS = frozenset({"web.fetch", "web.download"})
@@ -3591,11 +3595,22 @@ def _web_origin(url: object) -> str:
     if scheme not in ("http", "https") or not host:
         return ""
     if ":" in host:
+        import ipaddress as _ip
+        try:
+            _ip.IPv6Address(host)
+        except ValueError:
+            return ""
         host = f"[{host}]"
     else:
         try:
             host = host.encode("idna").decode("ascii")
         except UnicodeError:
+            return ""
+        # Only what a host name can be: a `|` (the key's separator) or any
+        # other character would let the remembered site differ from the one
+        # the card showed (review of clodia-tools#391).
+        import re as _re
+        if not _re.fullmatch(r"[a-z0-9.-]+", host):
             return ""
     try:
         port_n = p.port
@@ -3666,10 +3681,11 @@ async def _require_web_source(verb: str, arguments: dict, agent: str) -> None:
     await _require_gate_consent(
         agent, gate_key, consume=False,
         reason=(f"pagina richiesta: {src or origin}. Il sito non è fra le fonti "
-                "approvate del canale né fra quelle globali. Approvando, l'agente lo "
-                "legge per un tempo limitato; il contenuto è di terzi e il canale "
-                "risulterà contaminato. Per una fonte stabile va aggiunta agli "
-                "ingress del canale."),
+                "approvate del canale né fra quelle globali. «Approva ora»: l'agente "
+                "lo legge per un tempo limitato e il contenuto, di terzi, contamina "
+                "la conversazione. «Approva sempre»: il sito diventa una fonte "
+                "fidata di questo canale — non verrà più chiesto, e ciò che arriva "
+                "da lì non contaminerà più la conversazione."),
         allow_delegation=False)
 
 

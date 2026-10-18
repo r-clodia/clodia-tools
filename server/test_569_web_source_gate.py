@@ -77,7 +77,7 @@ class WebSourceGateTests(_Base):
         out = self.call("https://www.MyFitCoach.app/en?x=1", vetted=False)
         self.assertFalse(out.startswith(("DENIED", "ERROR")), out)
         ((agent, key), kw), = [(c.args, c.kwargs) for c in _web_gates(self.gate)]
-        self.assertTrue(key.startswith("web-source:https://www.myfitcoach.app/|"), key)
+        self.assertTrue(key.startswith("ingress:web:https://www.myfitcoach.app/|"), key)
         self.assertFalse(kw["consume"])            # the site, for the gate's validity
         self.assertFalse(kw["allow_delegation"])
         self.fetch.assert_called_once()
@@ -126,8 +126,39 @@ class OriginTests(unittest.TestCase):
         self.assertEqual(main._web_origin("http://[2001:db8::1]:8080/"), "http://[2001:db8::1]:8080/")
         self.assertEqual(main._web_origin("https://pаypal.com/"), "https://xn--pypal-4ve.com/")
         self.assertEqual(main._web_origin("ftp://x.it/"), "")
+        self.assertEqual(main._web_origin("https://evil.com|good.com/"), "")
+        self.assertEqual(main._web_origin("https://a_b.it/"), "")
+
+    def test_the_owner_decides(self) -> None:
+        from . import gate
+        self.assertEqual(gate.gate_class("ingress:web:https://x.it/|chan:SEAL-1:t:c"),
+                         gate.GATE_WALLS)
         self.assertEqual(main._web_origin("https://user:pw@x.it/"), "https://x.it/")
         self.assertEqual(main._web_origin("not a url"), "")
+
+
+
+
+class ApproveAlwaysTests(unittest.TestCase):
+    """«Approva sempre» on a web-source gate puts the SITE (not the `|chat`
+    suffix) into the channel's INGRESS list."""
+
+    def test_the_site_goes_into_the_channel_ingress_list(self) -> None:
+        import asyncio as _aio
+        import json as _json
+        from . import gate_api
+
+        class Req:
+            async def json(self):
+                return {"verb": "ingress:web:https://www.myfitcoach.app/|chan:SEAL-1:t:clodia",
+                        "direction": "egress", "scope": "SEAL-1/t"}
+
+        with patch.object(gate_api, "_authorize", return_value=("davide", None)), \
+             patch.object(egress, "scope_allow", return_value={"ok": True}) as sa:
+            r = _aio.run(gate_api.remember(Req()))
+        self.assertEqual(r.status_code, 200)
+        sa.assert_called_once_with("ingress", "SEAL-1/t", "https://www.myfitcoach.app/")
+        self.assertTrue(_json.loads(r.body)["remembered"])
 
 
 if __name__ == "__main__":
