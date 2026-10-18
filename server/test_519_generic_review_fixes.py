@@ -159,15 +159,16 @@ class GithubParityTests(unittest.TestCase):
         return _connect_client().post("/internal/tools/connectors/github/connect",
                                       json=body, headers=_H)
 
-    def test_the_pat_is_stored_as_the_proxy_reads_it_and_the_backend_mounted(self):
+    def test_the_pat_is_stored_as_the_proxy_reads_it_and_nothing_is_mounted(self):
+        """The backend is it-pack's own mount: the core no longer mounts one
+        (#525, native connector retired)."""
         with _Vault() as v:
             r = self._post({"token": "ghp_x"})
             self.assertEqual(r.status_code, 200, r.text)
             self.assertNotIn("ghp_x", r.text)
             self.assertEqual(v.store["github_pat"], ({"value": "ghp_x"},
                                                      "mcp_secret"))
-        self.assertEqual([b["name"] for b in self.cfg["mcp_backends"]],
-                         ["github"])
+        self.assertEqual(self.cfg["mcp_backends"], [])
         self.assertTrue(r.json()["connected"])
         self.assertEqual(r.json()["vault_entry"], "github_pat")
 

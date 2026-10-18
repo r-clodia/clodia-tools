@@ -1492,11 +1492,12 @@ GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
 
 
 async def github_connect(request: Request):
-    """Deposita il PAT GitHub nel vault e registra/rimuove il backend MCP ufficiale
-    GitHub. Body: {pat}. pat vuoto → disconnette (rimuove cred + backend).
+    """Deposita il PAT GitHub nel vault. Body: {pat}. pat vuoto → disconnette.
     Il PAT non transita mai dal modello: il proxy lo risolve via ${VAULT:github_pat}.
+    Reached through the generic connector route (`connectors_api._delegate`),
+    no longer at a route of its own.
 
-    In `pack` position (`connectors: {github: pack}`, clodia-platform#525) the
+    The native connector is retired (clodia-platform#525): the
     backend is it-pack's own mount, so this handler deposits the PAT only —
     same entry, same `{"value": pat}` shape, which the pack's mount reads as
     `${VAULT:github_pat.value}` — and keeps the grant to clodia. It mounts
@@ -1522,27 +1523,18 @@ async def github_connect(request: Request):
             instance_profile.integrations_check("github")
         except PermissionError as e:
             return JSONResponse({"error": str(e)}, status_code=403)
-    in_pack = instance_profile.connector_mode("github") == "pack"
-    if in_pack:
-        backends = [b for b in (whitelist.CONFIG.get("mcp_backends") or [])
-                    if not (b.get("name") == "github" and not b.get("pack"))]
-    else:
-        backends = [b for b in (whitelist.CONFIG.get("mcp_backends") or [])
-                    if b.get("name") != "github"]
+    # The backend is it-pack's own mount (the native connector is retired,
+    # #525): only the native leftover — an unstamped `github` entry — goes,
+    # which would otherwise keep the pack's connector refused for a clash.
+    backends = [b for b in (whitelist.CONFIG.get("mcp_backends") or [])
+                if not (b.get("name") == "github" and not b.get("pack"))]
     if not pat:
         vault.remove("github_pat")
         whitelist.CONFIG["mcp_backends"] = backends
         whitelist.save_config(); whitelist.reload_config(); proxy.clear_cache()
-        LOG.info("github_connect: disconnesso (cred%s rimossi)",
-                 "" if in_pack else " + backend")
+        LOG.info("github_connect: disconnesso (credenziale rimossa)")
         return JSONResponse({"connected": False})
     vault.deposit("github_pat", {"value": pat}, cred_type="mcp_secret", grant_agents=[])
-    if not in_pack:
-        backends.append({
-            "name": "github", "label": "GitHub", "transport": "http",
-            "url": GITHUB_MCP_URL,
-            "headers": {"Authorization": "Bearer ${VAULT:github_pat}"},
-        })
     whitelist.CONFIG["mcp_backends"] = backends
     # I verbi che il collegamento concede a clodia, per NOME. Prima qui c'era
     # `github.*`, e una wildcard sul namespace di un backend esterno concede
@@ -1568,9 +1560,8 @@ async def github_connect(request: Request):
         if v not in ct:
             ct.append(v)
     whitelist.save_config(); whitelist.reload_config(); proxy.clear_cache()
-    LOG.info("github_connect: PAT depositato%s (len=%d)",
-             " (backend: quello del pack)" if in_pack
-             else " + backend github registrato", len(pat))
+    LOG.info("github_connect: PAT depositato (backend: quello del pack, len=%d)",
+             len(pat))
     return JSONResponse({"connected": True})
 
 
@@ -1999,8 +1990,6 @@ routes = [
     Route("/tools/gmail/connect", gmail_connect, methods=["POST"]),
     Route("/tools/gworkspace/auth", gworkspace_auth, methods=["GET"]),
     Route("/tools/gworkspace/connect", gworkspace_connect, methods=["POST"]),
-    Route("/tools/openai/connect", openai_connect, methods=["POST"]),
-    Route("/tools/github/connect", github_connect, methods=["POST"]),
     Route("/tools/telegram/status", telegram_status, methods=["GET"]),
     Route("/tools/telegram/connect", telegram_connect, methods=["POST"]),
     Route("/tools/backup/config", backup_configure, methods=["POST"]),
