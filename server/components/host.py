@@ -346,11 +346,38 @@ class Perimeter:
     def legacy_mail_accounts(self) -> dict[str, str | None]:
         """`{account: address | None}` of the LEGACY mail accounts of the
         gateway's `secrets/email_config.json`: names and addresses, never the
-        file or a secret. A mail component lists them and refuses them (they
-        run natively only); goes away with the native mail code."""
-        from ..tools import email as _native_mail
-        return {a: _native_mail._legacy_address(a)
-                for a in sorted(_native_mail._legacy_accounts())}
+        file or a secret. A mail component lists them and refuses them: they
+        ran natively only, and the native mail code is gone (#523)."""
+        return {a: addr for a, addr in sorted(_legacy_mail_config().items())}
+
+
+def _legacy_mail_config() -> dict[str, str | None]:
+    """`{account: address | None}` of the gateway's legacy
+    `secrets/email_config.json` (the native mail code's file, kept readable so
+    that a component can name and refuse those accounts). Names and addresses
+    only. `{}` when absent or unreadable."""
+    from pathlib import Path
+    secrets_dir = os.environ.get("CLODIA_SECRETS_DIR")
+    if not secrets_dir:
+        workspace = os.environ.get("CLODIA_WORKSPACE_ROOT")
+        secrets_dir = (f"{workspace}/secrets" if workspace
+                       else str(Path(__file__).resolve().parents[4] / "secrets"))
+    try:
+        data = json.loads((Path(secrets_dir) / "email_config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or not data:
+        return {}
+    if "accounts" in data:
+        accounts = data.get("accounts") or {}
+        bundles = accounts if isinstance(accounts, dict) else {}
+    else:
+        bundles = {"demo": data}
+
+    def _addr(b) -> str | None:
+        a = str((b or {}).get("email") or "").strip().lower() if isinstance(b, dict) else ""
+        return a or None
+    return {str(name): _addr(b) for name, b in bundles.items()}
 
 
 # --------------------------------------------------------------------------

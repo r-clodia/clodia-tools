@@ -192,7 +192,8 @@ class TheSwitchMovesTheConnectorTests(_Istanza):
         with patch.object(main.proxy, "is_proxied", lambda _n: False):
             self.assertFalse(main._verb_implemented("telegram.send"))
             self.assertFalse(main._verb_implemented("telegram.roster"))
-            self.assertTrue(main._verb_implemented("email.send"))
+            # Not even mail's: its native code is gone too (#523).
+            self.assertFalse(main._verb_implemented("email.send"))
 
     def test_on_pack_without_the_pack_installed_nobody_answers(self):
         """L'interruttore non INVENTA un connettore: se il pack che lo dichiara

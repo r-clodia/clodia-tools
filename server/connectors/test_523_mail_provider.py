@@ -36,7 +36,6 @@ from unittest.mock import patch
 import yaml
 
 from .. import egress, instance_profile, proxy, taint
-from ..tools import email as EM
 from . import builtin as B
 from . import manifest as M
 from . import resolved
@@ -133,23 +132,9 @@ class _MailIstanza:
         the same vendored client, the same answer shape."""
         self.transport_calls.append({"backend": backend, "tool": tool,
                                      "arguments": arguments, "timeout": timeout})
-        d = tempfile.mkdtemp(prefix="fake-mail-transport-")
-        try:
-            for rel, b64 in (arguments.get("files") or {}).items():
-                dest = Path(d) / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(base64.b64decode(b64))
-            argv = [a.replace("{dir}", d) for a in arguments["argv"]]
-            env = dict(os.environ)
-            env["CLODIA_SECRETS_DIR"] = str(Path(d) / "secrets")
-            r = subprocess.run([sys.executable, EM._EMAIL_SCRIPT, *argv],
-                               capture_output=True, text=True,
-                               timeout=arguments.get("timeout") or timeout,
-                               env=env)
-            return json.dumps({"returncode": r.returncode, "stdout": r.stdout,
-                               "stderr": r.stderr})
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
+        # The mail transport is retired (comms-pack ≥ 2.0.0) and the native
+        # client it used to run is gone (#523): nothing may reach it.
+        raise AssertionError("the retired mail transport was called")
 
 
 class _Istanza(_MailIstanza, unittest.TestCase):

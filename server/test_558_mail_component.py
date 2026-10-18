@@ -5,7 +5,7 @@ Needs a clodia-logic checkout: `CLODIA_LOGIC_SRC=<path> make test` (skipped
 otherwise). The code under test is `catalogs/packs/comms-pack/` (and, for
 Gmail, `catalogs/packs/google-pack/`) of that checkout, served by a fake
 GitHub fetcher as the upstream tarball: the gateway pins it, verifies it, scans
-its imports, imports it as `clodia_components.comms_pack.mail` and calls
+its imports, imports it as `clodia_components.comms_pack.comms` and calls
 `register(host)` — the production path of `server.components`, nothing
 short-circuited. The datadir holds the same `pack.yaml`s, the profile says
 `connectors: {mail: pack, google: pack}`.
@@ -18,14 +18,8 @@ Then:
 2. **PDP parity**: every public PDP answer about mail is the same with the
    builtin manifest (`native`) and with comms-pack's PINNED manifest (`pack`);
    the PDP tables of #518 hold; every component verb is classified.
-3. **The mail suites, re-run against the component**: strict ingress (#503,
-   including the refusal class of `main._denial_class`), attachments confined
-   to the scratch (#461), attachment names (#420), `.eml` attachments (#400,
-   on the component's bundled client), send/reply direction (#428),
-   `test_email_tool`, accounts visibility, the mailbox routes (#411) and the
-   topic's mailbox button. Each suite runs UNCHANGED: its module globals that
-   name the gateway's `tools/email.py` (and `vendor/email_client.py`) are
-   pointed at the component's modules for the duration of the test.
+3. (The native mail suites re-run against the component lived here until the
+   native mail code was removed, #523: those cases are in clodia-logic now.)
 4. **The call path**: `call_tool` runs a component verb after the whitelist
    and the egress PDP; `email.reply`'s recipient is the component's
    (`pdp_arguments`) and the caller's `to` is never kept; topic attachments in
@@ -67,7 +61,7 @@ COMMS = "comms-pack"
 GOOGLE = "google-pack"
 KEY = "comms-pack/mail"
 COMMIT = "b" * 40
-MAIL_ROOT = "clodia_components.comms_pack.mail"
+MAIL_ROOT = "clodia_components.comms_pack.comms"
 GOOGLE_ROOT = "clodia_components.google_pack.google"
 EMAIL_VERBS = ("email.send", "email.folders", "email.list", "email.read",
                "email.get_attachment", "email.save_attachment", "email.search",
@@ -126,15 +120,11 @@ class MailComponentInstance:
 
     MAIL = "pack"
     GOOGLE = "pack"
-    #: Suite modules whose globals are re-pointed at the component.
-    SUITES: tuple = ()
 
     def setUp(self) -> None:  # noqa: D401
         from . import main
         from .components import loader
         from .connectors import resolved
-        from .tools import email as native_mail
-        from vendor import email_client as native_client
         # Registered FIRST so that it runs LAST, after the environment is
         # restored: the profile and the registry are re-read from the real
         # (test) datadir, not from this instance's `mail: pack`.
@@ -153,16 +143,16 @@ class MailComponentInstance:
             "CLODIA_VAULT_DIR": str(tmp / "vault"),
             "CLODIA_AUDIT_DIR": str(tmp / "audit"),
             "CLODIA_AUDIT_KEY_DIR": str(tmp / "auditkey"),
+            # No legacy `email_config.json` of the machine running the tests
+            # leaks in (read by `host.legacy_mail_accounts`).
+            "CLODIA_SECRETS_DIR": str(tmp / "no-secrets"),
         })
         env.start()
         self.addCleanup(env.stop)
         for p in (patch.object(resolved, "_DATA", data),
                   patch.object(resolved, "_first_seen_path",
                                lambda: tmp / "state" / "first-seen.json"),
-                  patch.object(loader, "fetcher_factory", _Fetcher),
-                  # No legacy file of the machine running the tests leaks in.
-                  patch.object(native_mail, "_legacy_config_file",
-                               lambda: tmp / "no-legacy.json")):
+                  patch.object(loader, "fetcher_factory", _Fetcher)):
             p.start()
             self.addCleanup(p.stop)
         self.addCleanup(loader.reset)
@@ -175,20 +165,7 @@ class MailComponentInstance:
             verbs = sys.modules[f"{MAIL_ROOT}.verbs"]
             client = importlib.import_module(f"{MAIL_ROOT}.email_client")
             self.mail, self.verbs, self.comp_client = mail, verbs, client
-            native = {native_mail: mail, native_client: client}
-            swaps = [patch.object(main, "email", mail)]
-            for mod in self.SUITES:
-                for name, value in list(vars(mod).items()):
-                    if isinstance(value, ModuleType) and value in native:
-                        swaps.append(patch.object(mod, name, native[value]))
-            # A suite that patches `main._email_account`/`main.agent_name`
-            # (#461, test_email_tool) reaches the component's: `main`'s name
-            # holds the component's function, the component looks it up there.
-            own_account = verbs._email_account
-            swaps += [patch.object(main, "_email_account", own_account),
-                      patch.object(verbs, "_email_account",
-                                   lambda a: main._email_account(a)),
-                      patch.object(mail, "agent_name", lambda: main.agent_name())]
+            swaps = []
             for p in swaps:
                 p.start()
                 self.addCleanup(p.stop)
@@ -266,13 +243,11 @@ class LoadTests(MailComponentInstance, unittest.TestCase):
     def test_the_schemas_are_the_native_ones_verbatim(self):
         from . import main
         from . import components
-        native = {t.name: t for t in main._EMAIL_TOOLS}
-        mine = {t.name: t for t in components.tools() if t.name.startswith("email.")}
-        self.assertEqual(set(mine), set(native))
-        for name, tool in native.items():
-            with self.subTest(verb=name):
-                self.assertEqual(mine[name].description, tool.description)
-                self.assertEqual(mine[name].inputSchema, tool.inputSchema)
+        # The native schemas are gone with the native code (#523): what stays
+        # is that the component registers exactly the eight verbs the gateway
+        # names (and refuses on `native`).
+        mine = {t.name for t in components.tools() if t.name.startswith("email.")}
+        self.assertEqual(mine, set(main._EMAIL_VERB_NAMES))
 
     def test_the_natives_step_aside(self):
         from . import main
@@ -288,14 +263,14 @@ class LoadTests(MailComponentInstance, unittest.TestCase):
 
     def test_the_import_guard_finds_nothing(self):
         from .components import guard, store
-        pin = store.pin_of(COMMS, "mail")
+        pin = store.pin_of(COMMS, "comms")
         self.assertEqual(guard.scan_tree(pin.dir), [])
         self.assertEqual(store.verify(pin), "")
 
     def test_the_component_never_imports_the_gateway(self):
         import ast
         from .components import store
-        pin = store.pin_of(COMMS, "mail")
+        pin = store.pin_of(COMMS, "comms")
         for path in pin.dir.rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
@@ -312,13 +287,13 @@ class LoadTests(MailComponentInstance, unittest.TestCase):
         from . import main
         from . import components
         self.position("native")
-        row = self.state()
-        self.assertEqual(row["status"], "standby")
-        self.assertEqual((row["verbs"], row["services"]), ([], []))
+        # comms-pack's one component also carries Telegram (2.1.1): on
+        # `mail: native` it may stay loaded for that half, but serves no mail.
         for verb in EMAIL_VERBS:
             self.assertIsNone(main._component_verb(verb))
             self.assertEqual(components.refusal(verb), "")
-            self.assertIn(verb, {t.name for t in main._all_native_tools()})
+            # No native implementation any more (#523): not listed natively.
+            self.assertNotIn(verb, {t.name for t in main._all_native_tools()})
         self.position("pack")
         self.assertEqual(self.state()["status"], "loaded")
 
@@ -336,19 +311,9 @@ class LoadTests(MailComponentInstance, unittest.TestCase):
         with self.assertRaises(HostError):
             host.credentials("mailbox_")
 
-    def test_the_native_client_refuses_in_pack_position(self):
-        from .tools import email as native_mail
-        with patch.object(native_mail.subprocess, "run") as run, \
-                patch.object(native_mail, "known_accounts", return_value={"studio"}):
-            with self.assertRaises(native_mail.NativeDisabled):
-                native_mail._run_cli("studio", ["folders"], want_json=True,
-                                     direction="inbox")
-        run.assert_not_called()
-
     def test_the_refusal_phrase_is_the_gateways(self):
-        from .tools import email as native_mail
-        self.assertEqual(self.mail.MITTENTE_NON_VAGLIATO,
-                         native_mail.MITTENTE_NON_VAGLIATO)
+        from . import main
+        self.assertEqual(self.mail.MITTENTE_NON_VAGLIATO, main.MITTENTE_NON_VAGLIATO)
 
 
 # --------------------------------------------------------------------------
@@ -407,97 +372,14 @@ PackPdpTaint = _pdp(T518.TaintTests)
 # 3. the mail suites, against the component
 # --------------------------------------------------------------------------
 
-from . import test_400_rfc822_attachment as T400  # noqa: E402
-from . import test_411_mailbox_remove_cleanup as T411  # noqa: E402
-from . import test_420_attachment_name_is_not_a_path as T420  # noqa: E402
-from . import test_461_attachments_confined as T461  # noqa: E402
-from . import test_503_strict_ingress as T503  # noqa: E402
-from . import test_email_accounts_visibility as TAV  # noqa: E402
-from . import test_email_tool as TET  # noqa: E402
-from . import test_mailbox_link as TML  # noqa: E402
-from .tools import test_email_send_direction as T428  # noqa: E402
-
-
 class _OnComponent(MailComponentInstance):
-    SUITES = (T400, T411, T420, T461, T503, TAV, TET, TML, T428)
-
-    def setUp(self) -> None:
-        super().setUp()
-        # Belt and braces: the suite really talks to the component.
-        assert T503.EM is self.mail, "suite not re-pointed"
-        assert TET.email is self.mail, "TET not re-pointed"
-        assert T400.email_client is self.comp_client, "T400 not re-pointed"
+    pass
 
 
-def _suite(base, **extra):
-    return NEEDS_LOGIC(type(f"Component{base.__name__}", (_OnComponent, base), extra))
-
-
-Component503Flag = _suite(T503.FlagTests)
-Component503ListAndSearch = _suite(T503.ListAndSearchTests)
-Component503Read = _suite(T503.ReadTests)
-Component503AttachmentAndReply = _suite(T503.AttachmentAndReplyTests)
-Component503DenialClass = _suite(T503.DenialClassTests)
-
-
-@NEEDS_LOGIC
-class Component503LegacyAccount(_OnComponent, T503.LegacyAccountTests):
-    """Legacy accounts keep the address check of #503 in `pack` position, and
-    are then REFUSED: they run natively only (two tests differ, on purpose)."""
-
-    def test_a_legacy_mailbox_in_the_list_still_works(self):
-        with self.in_room(), patch.object(T503.EM, "_legacy_address",
-                                          lambda a: "acme@example.it"):
-            with self.assertRaises(PermissionError) as e:
-                with T503.EM._secrets_env("demo", "inbox"):
-                    pass
-        self.assertIn("legacy", str(e.exception))
-        self.assertIn("mail: pack", str(e.exception))
-
-    def test_the_legacy_address_is_read_from_both_shapes(self):
-        """Read by the GATEWAY from its own file (`host.perimeter`), both
-        shapes; the component only sees names and addresses."""
-        from .tools import email as native_mail
-        with tempfile.TemporaryDirectory() as d:
-            f = Path(d) / "email_config.json"
-            f.write_text(json.dumps({"accounts": {"demo": {"email": "A@B.IT"}}}),
-                         encoding="utf-8")
-            with patch.object(native_mail, "_legacy_config_file", lambda: f), \
-                    patch.object(T503.EM, "_legacy_address",
-                                 self.mail.__dict__["_legacy_address"]):
-                self.assertEqual(T503.EM._legacy_address("demo"), "a@b.it")
-            f.write_text(json.dumps({"email": "solo@b.it"}), encoding="utf-8")
-            with patch.object(native_mail, "_legacy_config_file", lambda: f):
-                self.assertEqual(T503.EM._legacy_address("demo"), "solo@b.it")
-                self.assertIsNone(T503.EM._legacy_address("altro"))
-
-
-Component461AttachmentsConfined = _suite(T461.AttachmentsConfinedTests)
-Component420SafeAttachmentName = _suite(T420.SafeAttachmentNameTests)
-Component428Direction = _suite(T428.DirectionTests)
-ComponentEmailAttachmentTool = _suite(TET.EmailAttachmentToolTest)
-ComponentEmailAccountSelection = _suite(TET.EmailAccountSelectionTest)
-ComponentEmailVaultMaterialization = _suite(TET.EmailVaultMaterializationTest)
-ComponentRuntimeConfigurationDiagnostics = _suite(TET.RuntimeConfigurationDiagnosticsTest)
-ComponentWhatExists = _suite(TAV.WhatExistsTests)
-ComponentWhatTheToolAnswers = _suite(TAV.WhatTheToolAnswersTests)
-ComponentSendOnly = _suite(TAV.SendOnlyIsAShapeNotAFaultTests)
-Component411RemoveRoute = _suite(T411.RemoveRouteTests)
-Component411MailboxAddress = _suite(T411.MailboxAddressTests)
-
-
-def _all_test_classes(mod):
-    return [v for v in vars(mod).values()
-            if isinstance(v, type) and issubclass(v, unittest.TestCase)
-            and v.__module__ == mod.__name__ and any(
-                n.startswith("test") for n in vars(v))]
-
-
-for _cls in _all_test_classes(TML):
-    globals()[f"ComponentMailboxLink{_cls.__name__}"] = _suite(_cls)
-for _cls in _all_test_classes(T400):
-    globals()[f"Component400{_cls.__name__}"] = _suite(_cls)
-del _cls
+# The native mail suites that ran here against the component went with the
+# native mail code (#523); their cases now live in clodia-logic
+# (`test_558_mail_component.py`, `test_523_mail_security_moved.py`), next to
+# the component they test.
 
 
 # --------------------------------------------------------------------------
@@ -691,11 +573,11 @@ class TopicAttachmentTests(_CallPath, unittest.TestCase):
 class LegacyTests(_CallPath, unittest.TestCase):
     def setUp(self) -> None:
         super().setUp()
-        from .tools import email as native_mail
-        f = self.base / "email_config.json"
-        f.write_text(json.dumps({"accounts": {"demo": {
+        d = self.base / "legacy-secrets"
+        d.mkdir()
+        (d / "email_config.json").write_text(json.dumps({"accounts": {"demo": {
             "email": "studio@example.it", "password": "x"}}}), encoding="utf-8")
-        p = patch.object(native_mail, "_legacy_config_file", lambda: f)
+        p = patch.dict(os.environ, {"CLODIA_SECRETS_DIR": str(d)})
         p.start()
         self.addCleanup(p.stop)
 
@@ -958,7 +840,7 @@ class EndToEndSendTests(_OnComponent, unittest.TestCase):
     def test_no_bytecode_lands_next_to_the_pinned_component(self):
         from .components import store
         self.mail.send("dest@example.org", "s", "b", account="studio")
-        pin = store.pin_of(COMMS, "mail")
+        pin = store.pin_of(COMMS, "comms")
         self.assertEqual(list(pin.dir.rglob("__pycache__")), [])
         self.assertEqual(store.verify(pin), "")
 

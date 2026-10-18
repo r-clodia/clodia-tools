@@ -24,7 +24,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from . import topics_api
-from .tools import email as email_tool
+from .tools import mail_switch
 from .topics.local_fs import LocalFsStorage
 from .topics.service import TopicService
 from .test_519_generic_actions import come_agent_server
@@ -63,13 +63,12 @@ class Base(unittest.TestCase):
         self._p = [
             patch.object(topics_api, "_svc", self.svc),
             patch.object(topics_api, "_authorize", come_agent_server),
-            patch.object(email_tool.vault, "store_names", return_value=list(_VAULT)),
-            patch.object(email_tool.vault, "read_internal",
-                         side_effect=lambda n: dict(_VAULT[n])),
-            # Il legacy `secrets/email_config.json` non deve entrare nell'elenco
-            # e non deve nemmeno dipendere dal filesystem della macchina di chi
-            # esegue i test.
-            patch.object(email_tool, "_legacy_accounts", return_value=set()),
+            # What comms-pack's component answers on `mail: pack` (#523: the
+            # native mail code is gone): the operational mailboxes of the vault.
+            patch.object(mail_switch, "system_mailboxes", return_value=[
+                {"account": "alias", "email": "team@example.com", "send_only": True},
+                {"account": "studio", "email": "studio@example.com", "send_only": False},
+            ]),
         ]
         for p in self._p:
             p.start()

@@ -87,7 +87,7 @@ class BootWarningTests(unittest.TestCase):
         gap = {"pack": "business-pack", "missing": ["Pillow>=10.0"],
                "mcp_servers": ["image_captions"]}
         with patch("server.whitelist.CONFIG", {"agents": {}, "mcp_backends": []}), \
-             patch.object(main.email, "credential_diagnostics", return_value=[]), \
+             patch("server.tools.mail_switch.credential_diagnostics", return_value=[]), \
              patch.object(main.instance_profile, "connector_mode",
                           lambda cid: "pack" if cid in ("github", "openai-images") else "native"), \
              patch("server.tools.pack_runtime.missing_requirements", return_value=[gap]):
@@ -100,7 +100,7 @@ class BootWarningTests(unittest.TestCase):
 
     def test_nessun_warning_quando_i_pack_sono_a_posto(self) -> None:
         with patch("server.whitelist.CONFIG", {"agents": {}, "mcp_backends": []}), \
-             patch.object(main.email, "credential_diagnostics", return_value=[]), \
+             patch("server.tools.mail_switch.credential_diagnostics", return_value=[]), \
              patch.object(main.instance_profile, "connector_mode",
                           lambda cid: "pack" if cid in ("github", "openai-images") else "native"), \
              patch("server.tools.pack_runtime.missing_requirements", return_value=[]):
@@ -110,7 +110,7 @@ class BootWarningTests(unittest.TestCase):
         """#525: on `native` the git verbs and image generation have no
         implementation any more; the boot says which switch to turn."""
         with patch("server.whitelist.CONFIG", {"agents": {}, "mcp_backends": []}), \
-             patch.object(main.email, "credential_diagnostics", return_value=[]), \
+             patch("server.tools.mail_switch.credential_diagnostics", return_value=[]), \
              patch.object(main.instance_profile, "connector_mode", return_value="native"), \
              patch("server.tools.pack_runtime.missing_requirements", return_value=[]):
             warnings = main.runtime_configuration_warnings()

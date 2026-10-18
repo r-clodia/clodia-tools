@@ -40,7 +40,7 @@ from . import mcp_oauth
 from . import proxy
 from . import vault
 from . import whitelist
-from .tools import email as email_tool
+from .tools import credential_diag as email_tool
 
 # Nomi backend: lowercase slug, niente collisione coi prefissi nativi.
 _NATIVE_PREFIXES = {"fs", "email", "agent", "topic", "runtime"}
@@ -349,7 +349,9 @@ def connectors_snapshot() -> list[dict]:
             mailbox_issue = [{"account": "-", "missing": [],
                               "error": "component_unavailable"}]
     else:
-        mailbox_rows = [row for row in email_diagnostics if row["kind"] == "mailbox"]
+        # `native`: no mail implementation any more (#523) — nothing operational.
+        mailbox_rows = []
+        mailbox_issue = [{"account": "-", "missing": [], "error": "native_removed"}]
     mailbox_accounts = sorted(row["account"] for row in mailbox_rows if row["operational"])
     connectors.append({
         "id": "mailboxes",
@@ -1309,6 +1311,12 @@ async def google_app_config(request: Request):
     return JSONResponse({"configured": True, "redirect_uri": app["redirect_uri"]})
 
 
+def _mail_native_removed() -> JSONResponse:
+    """`connectors: {mail: native}`: no implementation answers any more (#523)."""
+    from .tools import mail_switch
+    return JSONResponse({"error": mail_switch.NATIVE_REMOVED}, status_code=409)
+
+
 def _mail_component_unavailable(e: Exception) -> JSONResponse:
     return JSONResponse({"error": "component_unavailable", "detail": str(e)},
                         status_code=503)
@@ -1328,18 +1336,7 @@ async def email_mailboxes(request: Request):
                 mail_switch.call, "mailboxes_list"))
         except mail_switch.ComponentUnavailable as e:
             return _mail_component_unavailable(e)
-    rows = [
-        row for row in email_tool.credential_diagnostics()
-        if row["kind"] == "mailbox"
-    ]
-    return JSONResponse({
-        "mailboxes": sorted(row["account"] for row in rows if row["operational"]),
-        "statuses": [
-            {"account": row["account"], "operational": row["operational"],
-             "missing": row["missing"], "error": row["error"]}
-            for row in rows
-        ],
-    })
+    return _mail_native_removed()
 
 
 async def email_mailbox_add(request: Request):
@@ -1367,32 +1364,7 @@ async def email_mailbox_add(request: Request):
         except mail_switch.ComponentUnavailable as e:
             return _mail_component_unavailable(e)
         return JSONResponse(out["body"], status_code=int(out["status"]))
-    account = (b.get("account") or "").strip().lower()
-    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,40}", account or ""):
-        return JSONResponse({"error": "account non valido (a-z0-9_-)"}, status_code=400)
-    # L'IMAP è OPZIONALE: esistono indirizzi che sono alias con SMTP e nessuna
-    # casella dietro. Richiederlo li rendeva impossibili da configurare, e chi
-    # provava lo stesso otteneva una casella dichiarata «non operativa» —
-    # nascosta agli agenti come se fosse rotta, mentre spedire funzionava.
-    required = ("email", "password", "smtp_server")
-    if any(not (b.get(k) or "").strip() for k in required):
-        return JSONResponse({"error": f"campi richiesti: {', '.join(required)}"}, status_code=400)
-    cfg = {
-        "email": b["email"].strip(),
-        "password": b["password"],
-        "smtp_server": b["smtp_server"].strip(),
-        "smtp_port": int(b.get("smtp_port") or 587),
-    }
-    if (b.get("imap_server") or "").strip():
-        cfg["imap_server"] = b["imap_server"].strip()
-        cfg["imap_port"] = int(b.get("imap_port") or 993)
-    for opt in ("display_name", "sent_folder", "smtp_user"):
-        if (b.get(opt) or "").strip():
-            cfg[opt] = b[opt].strip()
-    vault.deposit(f"mailbox_{account}", cfg, cred_type="mailbox",
-                  grant_agents=["clodia", "ophelia"])
-    LOG.info("email_mailbox_add: casella '%s' depositata (%s)", account, cfg["email"])
-    return JSONResponse({"account": account, "connected": True})
+    return _mail_native_removed()
 
 
 async def email_mailbox_remove(request: Request):
@@ -1422,8 +1394,7 @@ async def email_mailbox_remove(request: Request):
             return _mail_component_unavailable(e)
         indirizzo, removed = info.get("email"), bool(info.get("removed"))
     else:
-        indirizzo = email_tool.mailbox_address(account)
-        removed = vault.remove(f"mailbox_{account}")
+        return _mail_native_removed()
     from . import egress as eg
     pulizia = eg.forget_mailbox(indirizzo or "")
     if pulizia["scopes"] or pulizia["global"]:
@@ -1641,117 +1612,6 @@ async def backup_restore_test(request: Request):
         return JSONResponse({"error": str(e)[:400]}, status_code=500)
 
 
-def _prova_smtp(b: dict, account: str) -> str:
-    """Login SMTP, per le caselle che sanno solo spedire. Ritorna l'esito in
-    parole, mai il segreto né il messaggio grezzo del server."""
-    import smtplib
-    porta = int(b.get("smtp_port") or 587)
-    utente = b.get("smtp_user") or b.get("email") or account
-    pwd = b.get("password") or b.get("app_password") or ""
-    try:
-        # 465 è SMTPS implicito, 587 è STARTTLS: distinguerli qui evita un
-        # «connessione rifiutata» che sembra un host sbagliato e invece è una
-        # porta usata col protocollo dell'altra.
-        if porta == 465:
-            s = smtplib.SMTP_SSL(b.get("smtp_server"), porta, timeout=15,
-                                 context=ssl.create_default_context())
-        else:
-            s = smtplib.SMTP(b.get("smtp_server"), porta, timeout=15)
-            s.starttls(context=ssl.create_default_context())
-        try:
-            s.login(utente, pwd)
-            return "ok"
-        finally:
-            try:
-                s.quit()
-            except Exception:  # noqa: BLE001
-                pass
-    except smtplib.SMTPAuthenticationError:
-        # Il rimedio dipende da COSA si è usato come utente, e i due casi
-        # portano da parti opposte: rigenerare una password, o scoprire che
-        # l'utenza non è l'indirizzo. I relay (SMTP2GO, Mailgun, SendGrid, Brevo)
-        # autenticano con un utente dedicato; dirlo qui evita di far reimpostare
-        # una password che era giusta.
-        if not (b.get("smtp_user") or "").strip():
-            return ("autenticazione SMTP rifiutata usando l'indirizzo come utente. "
-                    "Se il server è un relay (smtp2go, mailgun, sendgrid, brevo…) "
-                    "l'utenza NON è l'indirizzo: compila «utente SMTP» con quella "
-                    "del relay")
-        return "autenticazione SMTP rifiutata (password sbagliata per l'utente indicato)"
-    except Exception as e:  # noqa: BLE001
-        return type(e).__name__
-
-
-def _test_mailboxes() -> dict:
-    """Prova un login IMAP VERO per ogni casella configurata.
-
-    Fino a ieri le mailbox cadevano nel ramo «test non disponibile», e l'unico
-    segnale su una casella era la parola «operativa» — che vuol dire *i campi ci
-    sono*, non *il login funziona*. Una parola che promette più di quanto
-    verifica manda a cercare il guasto dalla parte sbagliata: è successo con
-    `team` (clodia-platform#176), dichiarata operativa e con la password
-    rifiutata dal server IMAP, e il difetto è stato cercato nella visibilità
-    dell'account per mezz'ora.
-
-    Le altre integrazioni (GitHub, Telegram, OpenAI) avevano già una prova reale.
-    Questa colma l'unica che ne era priva — e quindi l'unica che poteva mentire.
-
-    Il segreto non esce: si ritorna l'esito per account, mai il bundle.
-    """
-    import imaplib
-
-    esiti, ok_tutti = [], True
-    for nome in sorted(vault.store_names()):
-        if not nome.startswith("mailbox_"):
-            continue
-        account = nome[len("mailbox_"):]
-        try:
-            b = vault.read_internal(nome)
-        except Exception:  # noqa: BLE001
-            esiti.append(f"{account}: credenziale illeggibile")
-            ok_tutti = False
-            continue
-        pwd = b.get("password") or b.get("app_password") or ""
-        if not pwd:
-            esiti.append(f"{account}: manca la password")
-            ok_tutti = False
-            continue
-        # Una casella di SOLO INVIO si prova sull'SMTP. Provarla sull'IMAP la
-        # dichiarerebbe guasta per sempre: è la differenza fra «non funziona» e
-        # «non fa quella cosa», e confonderle manda a cercare una password
-        # sbagliata dove manca invece un servizio.
-        server = (b.get("imap_server") or "").strip()
-        if not server:
-            esiti.append(f"{account}: {_prova_smtp(b, account)} (solo invio)")
-            if "ok" not in esiti[-1]:
-                ok_tutti = False
-            continue
-        try:
-            imap = imaplib.IMAP4_SSL(server, int(b.get("imap_port") or 993), timeout=15,
-                                    ssl_context=ssl.create_default_context())
-            try:
-                imap.login(b.get("email") or account, pwd)
-                esiti.append(f"{account}: ok")
-            finally:
-                try:
-                    imap.logout()
-                except Exception:  # noqa: BLE001
-                    pass
-        except imaplib.IMAP4.error:
-            # Il messaggio del server IMAP non si riporta: su alcuni provider
-            # contiene l'utenza. Il rimedio è lo stesso in ogni caso.
-            esiti.append(f"{account}: autenticazione IMAP rifiutata (password "
-                         "sbagliata, oppure l'indirizzo è un alias di solo "
-                         "invio: in quel caso togli il server IMAP)")
-            ok_tutti = False
-        except Exception as e:  # noqa: BLE001 — host irraggiungibile, TLS, timeout
-            esiti.append(f"{account}: {type(e).__name__}")
-            ok_tutti = False
-    if not esiti:
-        return {"ok": None, "detail": "nessuna casella configurata"}
-    return {"ok": ok_tutti, "detail": " · ".join(esiti)}
-
-
 # Nome leggibile degli scope del consenso Google, per dire QUALE servizio manca
 # invece di stampare un URL. Chi legge la card ragiona per servizi, non per URI.
 _GOOGLE_SERVIZI = {
@@ -1937,7 +1797,7 @@ def _test_connector(cid: str) -> dict:
             if mail_switch.in_pack():
                 # #558: the mailboxes card is comms-pack's component's.
                 return mail_switch.component_test_mailboxes()
-            return _test_mailboxes()
+            return {"ok": False, "detail": mail_switch.NATIVE_REMOVED}
 
         if cid == "topic-storage":
             return {"ok": True, "detail": "storage locale sempre disponibile"}

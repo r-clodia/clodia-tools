@@ -35,7 +35,6 @@ from .. import instance_profile, proxy
 from ..components import loader, trust
 from ..components.grammar import GatewayComponent
 from ..components.host import ServiceSpec, VerbSpec
-from ..tools import email as EM
 from ..tools import mail_switch
 from . import builtin as B
 from . import resolved
@@ -44,6 +43,31 @@ PACK = "comms-pack"
 EMAIL_VERBS = ("email.send", "email.folders", "email.list", "email.read",
                "email.get_attachment", "email.save_attachment", "email.search",
                "email.reply")
+#: The eight verbs as comms-pack's component registers them: the properties
+#: matter (the PDP keeps a caller argument only if the schema offers it), the
+#: descriptions do not. The gateway's own copy went with the native code (#523).
+_PROPS = {
+    "email.send": ("to", "subject", "body", "account", "cc", "attachments",
+                   "topic_files", "tier", "name"),
+    "email.folders": ("account",),
+    "email.list": ("account", "folder", "limit"),
+    "email.read": ("email_id", "account", "folder"),
+    "email.get_attachment": ("email_id", "filename", "account", "folder"),
+    "email.save_attachment": ("email_id", "filename", "dest", "tier", "name",
+                              "account", "folder"),
+    "email.search": ("query", "account", "folder", "limit"),
+    "email.reply": ("email_id", "body", "account", "folder", "cc", "attachments"),
+}
+
+
+def _tool(name: str):
+    from mcp.types import Tool
+    return Tool(name=name, description=name, inputSchema={
+        "type": "object", "properties": {p: {} for p in _PROPS[name]}})
+
+
+_EMAIL_TOOLS = [_tool(n) for n in _PROPS]
+
 #: Verbs with no egress/source mapping and no taint row (`unmapped:`).
 UNMAPPED = ["email.folders", "email.save_attachment"]
 
@@ -93,7 +117,7 @@ class _FakeComponent:
         verbs = {t.name: VerbSpec(component=comp.key, pack=PACK, namespace="email",
                                   tool=t, handler=self._fn(t.name, {"from": "component"}),
                                   offload=False)
-                 for t in main._EMAIL_TOOLS}
+                 for t in _EMAIL_TOOLS}
         answers = {
             "pdp_arguments": lambda verb, a: (
                 {"to": self.recipient, "cc": "ignored@x.it"}
@@ -225,21 +249,25 @@ class TheVerbsMoveToTheComponentTests(_Istanza):
         self.assertNotIn("email", M.core_namespaces())
         self.assertEqual(main._EMAIL_NATIVE_NAMES, frozenset(EMAIL_VERBS))
 
-    def test_on_native_they_are_the_gateways(self):
+    def test_on_native_nothing_serves_them(self):
+        """The native mail code is gone (#523): on `native` the verbs are not
+        listed and a call says which switch to turn."""
         from .. import main
         from . import manifest as M
         self.posizione("native")
         natives = {t.name for t in main._all_native_tools()}
         for verb in EMAIL_VERBS:
-            self.assertIn(verb, natives)
+            self.assertNotIn(verb, natives)
             self.assertFalse(main._is_packaged_verb(verb))
+            # Refused either way: by the stale component's own state here, by
+            # the missing native implementation when no component is pinned.
+            with self.assertRaises(main._PackVerbRefused):
+                main._check_component(verb)
         self.assertIn("email", M.core_namespaces())
 
     def test_a_call_runs_the_components_handler_not_the_native(self):
-        with patch.object(EM, "_run_cli") as native:
-            out = _call("email.folders", {"account": "studio"})
+        out = _call("email.folders", {"account": "studio"})
         self.assertEqual(json.loads(out), {"from": "component"})
-        native.assert_not_called()
         self.assertEqual(self.component.calls[-1][0], "email.folders")
 
     def test_the_egress_pdp_judges_before_the_handler(self):
@@ -291,7 +319,7 @@ class FailClosedTests(_Istanza):
     COMPONENT = False
 
     def test_every_email_verb_is_denied(self):
-        with patch.object(EM, "_run_cli") as native:
+        if True:
             for verb in EMAIL_VERBS:
                 with self.subTest(verb=verb):
                     out = _call(verb, {"to": "x@y.it", "subject": "s", "body": "b",
@@ -299,14 +327,6 @@ class FailClosedTests(_Istanza):
                                 egress=["mailto:x@y.it"])
                     self.assertTrue(out.startswith("DENIED"), out)
                     self.assertIn("gateway component", out)
-        native.assert_not_called()
-
-    def test_the_native_client_refuses(self):
-        with patch.object(EM, "known_accounts", return_value={"studio"}), \
-                patch.object(EM.subprocess, "run") as run:
-            with self.assertRaises(EM.NativeDisabled):
-                EM._run_cli("studio", ["folders"], want_json=True, direction="inbox")
-        run.assert_not_called()
 
     def test_the_mailbox_routes_answer_503(self):
         from .. import tools_api
@@ -334,9 +354,8 @@ class FailClosedTests(_Istanza):
         nativa = [{"credential": "mailbox_nativa", "account": "nativa",
                    "kind": "mailbox", "operational": True, "send_only": False,
                    "missing": [], "error": None}]
-        with patch.object(EM, "system_mailboxes",
-                          side_effect=AssertionError("native")), \
-                patch.object(EM, "credential_diagnostics", return_value=nativa):
+        with patch("server.tools.credential_diag.credential_diagnostics",
+                   return_value=nativa):
             self.assertEqual(mail_switch.system_mailboxes(), [])
             self.assertEqual(mail_switch.credential_diagnostics(), [])
             self.assertEqual(actions._mailbox_options(), [])
@@ -384,9 +403,10 @@ class LookupsFollowTheSwitchTests(_Istanza):
         self.assertIn(("mailbox_remove", "studio"), self.component.calls)
 
     def test_native_position_never_asks_the_component(self):
+        """Nothing answers on `native` any more (#523): empty, and the
+        component is not asked."""
         self.posizione("native")
-        with patch.object(EM, "system_mailboxes", return_value=[{"account": "n"}]):
-            self.assertEqual(mail_switch.system_mailboxes(), [{"account": "n"}])
+        self.assertEqual(mail_switch.system_mailboxes(), [])
         self.assertEqual(self.component.calls, [])
 
 

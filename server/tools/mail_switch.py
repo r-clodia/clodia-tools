@@ -2,18 +2,14 @@
 
 The instance switch `connectors: {mail: native|pack}` (`profile.yaml`):
 
-* `native` (default) — the gateway's own `tools/email.py` (with the vendored
-  `vendor/email_client.py`) serves the eight `email.*` verbs, and the mailbox
-  routes of `tools_api` manage `mailbox_<acct>` directly, as before. A Gmail
-  account follows the `google` switch there (google-pack's `mail_run` on
-  `google: pack`);
+* `native` (default) — NOTHING serves mail any more: the gateway's own
+  `tools/email.py` and the vendored client were removed (clodia-platform#523).
+  The verbs are refused naming the switch, the mailbox routes answer 409, the
+  listings are empty;
 * `pack` — comms-pack's GATEWAY COMPONENT does (`catalogs/packs/comms-pack/
   gateway` in r-clodia/clodia-logic, fetched, pinned and loaded by
   `server.components`): it registers the eight verbs, which the dispatcher runs
-  through the normal `call_tool` path, and answers the services below. The
-  native module does not run at all: `email._run_cli` refuses in that position
-  (`NativeDisabled`), so a native path reached by mistake fails instead of
-  using the vault's credential behind the owner's back.
+  through the normal `call_tool` path, and answers the services below.
 
 This module is the one place where gateway code that STAYS — the mailbox
 routes and the Tools card (`tools_api`), the topic's mailbox button and its
@@ -34,6 +30,11 @@ LOG = logging.getLogger("clodia-tools.mail-switch")
 #: The connector id of the switch, and the pack it hands mail to.
 CONNECTOR = "mail"
 PACK = "comms-pack"
+
+
+NATIVE_REMOVED = ("mail has no native implementation any more "
+                  "(clodia-platform#523): set `connectors: {mail: pack}` in the "
+                  "instance profile and install comms-pack ≥ 2.0.0")
 
 
 class ComponentUnavailable(PermissionError):
@@ -65,8 +66,7 @@ def service(name: str):
     if spec is None:
         raise ComponentUnavailable(
             f"mail is in `pack` position on this instance, but {why_unavailable()}. "
-            "See GET /internal/components; or set `connectors: {mail: native}` "
-            "in profile.yaml.")
+            "See GET /internal/components.")
     return spec.handler
 
 
@@ -86,8 +86,7 @@ def credential_diagnostics() -> list[dict]:
             return [dict(r) for r in call("diagnostics")]
         except ComponentUnavailable:
             return []
-    from . import email
-    return email.credential_diagnostics()
+    return []          # `native`: no mail implementation any more (#523)
 
 
 def system_mailboxes() -> list[dict]:
@@ -99,13 +98,11 @@ def system_mailboxes() -> list[dict]:
             return [dict(r) for r in call("system_mailboxes")]
         except ComponentUnavailable:
             return []
-    from . import email
-    return email.system_mailboxes()
+    return []          # `native`: no mail implementation any more (#523)
 
 
 def component_test_mailboxes() -> dict:
-    """`{ok, detail}` of the mailboxes Tools card in `pack` position (the
-    native test stays in `tools_api._test_mailboxes`)."""
+    """`{ok, detail}` of the mailboxes Tools card."""
     try:
         return dict(call("test_mailboxes"))
     except ComponentUnavailable as e:

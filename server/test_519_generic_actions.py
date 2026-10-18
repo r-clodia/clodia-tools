@@ -64,7 +64,7 @@ class _Topic:
 
     def __enter__(self):
         from . import egress as eg
-        from .tools import email as email_tool
+        from .tools import mail_switch
         from .tools import telegram_bindings as tb
 
         def _allow(direction, scope, uri):
@@ -91,7 +91,7 @@ class _Topic:
                              email in u for u in self.liste.get(
                                  ("ingress" if direction == "inbox" else "egress",
                                   scope or self.scope), []))),
-            patch.object(email_tool, "system_mailboxes", lambda: list(CASELLE)),
+            patch.object(mail_switch, "system_mailboxes", lambda: list(CASELLE)),
             patch.object(tb, "load", lambda: dict(self.bindings)),
             patch.object(tb, "get", lambda c: self.bindings.get(str(c))),
             patch.object(tb, "set_binding",

@@ -146,7 +146,7 @@ class ToolCallAuditTests(unittest.TestCase):
             ran.append(name)
             return [TextContent(type="text", text="ok")]
         with patch.object(audit.store(), "append", side_effect=OSError("disk full")):
-            out = self.call("email.send", {}, inner=inner)
+            out = self.call("web.post", {}, inner=inner)
         self.assertTrue(out[0].text.startswith("DENIED: audit trail"))
         self.assertEqual(ran, [])
 

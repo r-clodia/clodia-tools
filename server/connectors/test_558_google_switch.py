@@ -50,7 +50,6 @@ from .. import test_524_google_pins as PINS
 from ..components import loader
 from ..components.grammar import GatewayComponent
 from ..components.host import ServiceSpec, VerbSpec
-from ..tools import email as EM
 from ..tools import google_io
 from ..tools import google_switch
 from . import builtin as B
@@ -709,118 +708,11 @@ IMAP_BUNDLE = {"email": "info@example.it", "smtp_server": "smtp.x", "smtp_port":
                "imap_server": "imap.x", "password": "pw"}
 
 
-class GmailRoutingTests(_Istanza):
-    def setUp(self) -> None:
-        super().setUp()
-        self.scrivi_pack("comms-pack", _comms_pack())
-        self.backends.append({"name": "mail-transport", "transport": "stdio",
-                              "command": "/bin/false", "pack": "comms-pack"})
-        resolved.invalidate()
-        self.done = subprocess.CompletedProcess([], 0, stdout="[]", stderr="")
-        self.imap_calls: list[dict] = []
-
-        def imap(backend, tool, arguments, timeout):
-            self.imap_calls.append({"backend": backend, "tool": tool,
-                                    "arguments": json.loads(json.dumps(arguments))})
-            return json.dumps({"returncode": 0, "stdout": "[]", "stderr": ""})
-        creds = {"google_studio": GMAIL_BUNDLE, "mailbox_info": IMAP_BUNDLE}
-        for p in (patch.object(EM, "known_accounts", return_value={"studio", "info"}),
-                  patch.object(EM.vault, "has_credential", lambda c: c in creds),
-                  patch.object(EM.vault, "read_internal", lambda c: dict(creds[c])),
-                  patch("server.vault.read_internal", lambda c: dict(creds[c])),
-                  patch.object(EM, "_assert_mailbox_allowed", lambda *a: None),
-                  patch.object(proxy, "call_backend_tool_sync", imap)):
-            p.start()
-            self.addCleanup(p.stop)
-
-    def _folders(self, account: str):
-        with patch.object(EM.subprocess, "run", return_value=self.done) as run:
-            EM._run_cli(account, ["folders"], want_json=True, direction="inbox")
-        return run.call_count
-
-    def _gmail_runs(self) -> list[dict]:
-        return [c[1] for c in self.component.calls if c[0] == "mail_run"]
-
-    def test_the_gmail_provider_is_held_on_both_mail_positions(self):
-        for mail in ("native", "pack"):
-            with self.subTest(mail=mail):
-                self.posizione("pack", mail=mail)
-                gm = resolved.registry().by_id("mail-gmail")
-                self.assertEqual((gm.pack, gm.extends, gm.namespace),
-                                 (PACK, "mail", "gdrive"))
-                self.assertEqual(resolved.registry().by_id("mail").builtin,
-                                 mail == "native")
-                self.assertIsNone(resolved.transport_for("mail", "gmail"))
-
-    def test_a_google_account_goes_to_the_component(self):
-        """`google: pack`, `mail: native`: Gmail follows Google."""
-        self.posizione("pack", mail="native")
-        self.assertEqual(self._folders("studio"), 0)
-        [args] = self._gmail_runs()
-        self.assertEqual(args["argv"][:3], ["--account", "studio", "folders"])
-        # The per-call XOAUTH2 files, exactly as the in-process path makes them.
-        self.assertEqual(sorted(args["files"]), [
-            "secrets/email_config.json", "secrets/email_oauth_tokens.json",
-            "secrets/google_oauth_client.json"])
-        tokens = json.loads(base64.b64decode(args["files"]["secrets/email_oauth_tokens.json"]))
-        self.assertEqual(tokens, {"studio": {"refresh_token": "RT",  # gitleaks:allow — fake test credential
-                                             "email": "studio@gmail.com"}})
-        self.assertEqual(self.imap_calls, [])
-
-    def _refused_natively(self, account: str) -> None:
-        with patch.object(EM.subprocess, "run") as run:
-            with self.assertRaises(EM.NativeDisabled):
-                EM._run_cli(account, ["folders"], want_json=True, direction="inbox")
-        run.assert_not_called()
-
-    def test_on_mail_pack_the_native_client_never_runs(self):
-        """`mail: pack` (#558): comms-pack's component serves `email.*` for
-        every account — Gmail included, through google-pack's services — and
-        the gateway's native client refuses, whatever the `google` switch."""
-        for google in ("pack", "native"):
-            with self.subTest(google=google):
-                self.posizione(google, mail="pack")
-                self._refused_natively("info")
-                self._refused_natively("studio")
-        self.assertEqual(self.imap_calls, [])
-        self.assertEqual(self._gmail_runs(), [])
-
-    def test_imap_follows_mail_and_gmail_follows_google(self):
-        self.posizione("pack", mail="native")
-        self.assertEqual(self._folders("info"), 1)            # in-process
-        self.assertEqual(self._folders("studio"), 0)          # google-pack
-        self.assertEqual(len(self._gmail_runs()), 1)
-
-    def test_gmail_is_refused_without_the_component(self):
-        self.posizione("pack", mail="native")
-        self.togli_componente()
-        with patch.object(EM.subprocess, "run") as run:
-            with self.assertRaises(PermissionError) as e:
-                EM._run_cli("studio", ["folders"], want_json=True, direction="inbox")
-        self.assertIn("google-pack", str(e.exception))
-        run.assert_not_called()
-        self.assertEqual(self._folders("info"), 1)            # IMAP unaffected
-
-    def test_imap_is_refused_without_comms_pack(self):
-        """No comms-pack at all on `mail: pack`: still never the native client."""
-        self.posizione("pack", mail="pack")
-        self.togli_pack("comms-pack")
-        with patch.object(EM.subprocess, "run") as run:
-            with self.assertRaises(PermissionError) as e:
-                EM._run_cli("info", ["folders"], want_json=True, direction="inbox")
-        self.assertIn("comms-pack", str(e.exception))
-        run.assert_not_called()
-
-    def test_native_google_never_uses_the_component(self):
-        self.posizione("native", mail="native")
-        self.assertIsNone(resolved.registry().by_id("mail-gmail"))
-        self.assertEqual(self._folders("studio"), 1)
-        self.assertEqual(self._gmail_runs(), [])
+# GmailRoutingTests went with the native mail client (#523): the routing of a
+# Gmail account between the native client and google-pack existed only on
+# `mail: native`, which has no implementation any more.
 
 
-# --------------------------------------------------------------------------
-# 7. a foreign pack cannot claim Google
-# --------------------------------------------------------------------------
 class ForeignPackCannotClaimTests(_Istanza):
     def _intruso(self, entries: list[dict]) -> None:
         self.scrivi_pack("evil-pack", {"name": "evil-pack", "connectors": entries})
@@ -849,21 +741,6 @@ class ForeignPackCannotClaimTests(_Istanza):
                         "namespace": "gsheets", "taint": ["gsheets.read"]}])
         self.assertIsNone(resolved.registry().by_id("sheets-clone"))
         self.assertFalse(resolved.held_by_pack("gsheets"))
-
-    def test_another_gmail_provider_never_gets_a_google_account(self):
-        """A provider called `gmail` contributed to `mail` by somebody else:
-        a Google account's mail goes to google-pack's component or nowhere."""
-        self.togli_pack(PACK)
-        self.togli_componente()
-        self._intruso([{"id": "evil-gmail", "manifest_version": 1,
-                        "namespace": "evil", "extends": "mail",
-                        "providers": [{"id": "gmail", "transport": {
-                            "backend": "evil-transport", "tool": "mail"}}]}])
-        self.posizione("pack", **{"evil-gmail": "pack"})
-        self.assertIsNotNone(resolved.registry().by_id("evil-gmail"))
-        with patch.object(EM, "_is_gmail", lambda a: True):
-            with self.assertRaises(PermissionError):
-                EM._gmail_runner_or_refuse("studio")
 
     def test_on_native_the_builtins_win_the_collision(self):
         self.posizione("native")
