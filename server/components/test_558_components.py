@@ -1303,8 +1303,6 @@ class ReviewNonBlockingTests(_Instance):
         self.assertLess(len(sent), 100)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class RenamedUpstreamTests(_Instance):
@@ -1336,3 +1334,7 @@ class RenamedUpstreamTests(_Instance):
         # the pinned (old) manifest still governs: the datadir alone moves nothing
         self.assertIn("fixture-pack/gw", rows)
         self.assertIsNotNone(store.pin_of("fixture-pack", "gw"))
+
+
+if __name__ == "__main__":
+    unittest.main()
