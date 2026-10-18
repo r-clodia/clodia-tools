@@ -2360,12 +2360,14 @@ def runtime_configuration_warnings() -> list[str]:
     # The native GitHub git verbs and image client are gone (#525): on
     # `native` those features are simply not served, and the boot says so.
     for cid, what in (("github", "i verbi git github.clone/pull/push/pull_request"),
-                      ("openai-images", "la generazione immagini")):
+                      ("openai-images", "la generazione immagini"),
+                      ("mail", "i verbi email.*"),
+                      ("telegram", "i verbi Telegram degli agenti")):
         if instance_profile.connector_mode(cid) != "pack":
             warnings.append(
                 f"connettore '{cid}' su `native`: {what} non hanno più "
                 f"un'implementazione nativa — servono `connectors: {{{cid}: pack}}` "
-                "nel profilo e it-pack ≥ 0.20.0")
+                "nel profilo e il pack che lo serve")
     return warnings
 
 
@@ -4763,6 +4765,12 @@ def _check_component(name: str) -> None:
             why = (f"'{name}' is implemented by a pack on this instance, but no "
                    "gateway component and no mounted backend of that pack serves "
                    "it (see GET /internal/components)")
+    if (not why and name in _EMAIL_VERB_NAMES and _is_packaged_verb(name)
+            and _component_verb(name) is None):
+        # Only comms-pack's component serves mail (#523): a mounted backend
+        # exposing `email.*` is never a fallback.
+        why = (f"'{name}' is served on `mail: pack` by comms-pack's gateway "
+               "component, which is not serving it now (see GET /internal/components)")
     if not why and name in _EMAIL_VERB_NAMES and not _is_packaged_verb(name):
         why = (f"'{name}' has no native implementation any more "
                "(clodia-platform#523): it is served by comms-pack's gateway "
