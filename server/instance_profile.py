@@ -209,8 +209,13 @@ def connector_mode(cid: str) -> str:
 
     Fail-safe verso `native` per costruzione: un profilo assente, illeggibile o
     con un valore che questo lettore non capisce ricade sul profilo FULL, dove
-    `connectors` è vuoto. Il comportamento di sempre non si perde mai per un
-    errore di configurazione; si perde solo su richiesta esplicita.
+    `connectors` è vuoto.
+
+    Eccezione dal gateway 2.118.0 (clodia-platform#525): `github` (i quattro
+    verbi git) e `openai-images` non hanno più un'implementazione nativa. Su
+    `native` quelle funzioni NON sono servite — i verbi rispondono DENIED
+    nominando lo switch, la generazione immagini fallisce nominando il
+    componente, e il boot lo segnala (`runtime_configuration_warnings`).
     """
     try:
         val = (load().get("connectors") or {}).get(cid)

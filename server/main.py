@@ -2604,6 +2604,15 @@ def runtime_configuration_warnings() -> list[str]:
             f"({', '.join(gap['missing'])}) — server MCP interessati: {servers}. "
             "Reinstallale con packs.install_pip (finiscono nel venv persistente)"
         )
+    # The native GitHub git verbs and image client are gone (#525): on
+    # `native` those features are simply not served, and the boot says so.
+    for cid, what in (("github", "i verbi git github.clone/pull/push/pull_request"),
+                      ("openai-images", "la generazione immagini")):
+        if instance_profile.connector_mode(cid) != "pack":
+            warnings.append(
+                f"connettore '{cid}' su `native`: {what} non hanno più "
+                f"un'implementazione nativa — servono `connectors: {{{cid}: pack}}` "
+                "nel profilo e it-pack ≥ 0.20.0")
     return warnings
 
 

@@ -754,16 +754,16 @@ class ConnectTests(_ItIstanza, _Config):
             self.assertEqual(whitelist.CONFIG["mcp_backends"],
                              [_backend("github"), _backend(IMG_BACKEND)])
 
-    def test_native_position_mounts_nothing_any_more(self):
-        """The native connector is retired (#525): the core never mounts the
-        official backend itself, in either position."""
+    def test_native_position_still_mounts_the_core_backend(self):
         self.posizione("native", "native")
         whitelist.CONFIG["mcp_backends"][:] = []
         with _MemVault() as v:
             r = tools_api_github_connect({"pat": "ghp_x"})
             self.assertEqual(r.status_code, 200)
             self.assertEqual(v.store["github_pat"], ({"value": "ghp_x"}, "mcp_secret"))
-        self.assertEqual(whitelist.CONFIG["mcp_backends"], [])
+        (b,) = whitelist.CONFIG["mcp_backends"]
+        self.assertEqual((b["name"], b.get("pack"), b["url"]),
+                         ("github", None, tools_api.GITHUB_MCP_URL))
 
     def test_the_generic_route_adopts_the_legacy_github_entry(self):
         """The declared field is `value`; the entry keeps type `mcp_secret`,

@@ -88,6 +88,8 @@ class BootWarningTests(unittest.TestCase):
                "mcp_servers": ["image_captions"]}
         with patch("server.whitelist.CONFIG", {"agents": {}, "mcp_backends": []}), \
              patch.object(main.email, "credential_diagnostics", return_value=[]), \
+             patch.object(main.instance_profile, "connector_mode",
+                          lambda cid: "pack" if cid in ("github", "openai-images") else "native"), \
              patch("server.tools.pack_runtime.missing_requirements", return_value=[gap]):
             warnings = main.runtime_configuration_warnings()
 
@@ -99,8 +101,22 @@ class BootWarningTests(unittest.TestCase):
     def test_nessun_warning_quando_i_pack_sono_a_posto(self) -> None:
         with patch("server.whitelist.CONFIG", {"agents": {}, "mcp_backends": []}), \
              patch.object(main.email, "credential_diagnostics", return_value=[]), \
+             patch.object(main.instance_profile, "connector_mode",
+                          lambda cid: "pack" if cid in ("github", "openai-images") else "native"), \
              patch("server.tools.pack_runtime.missing_requirements", return_value=[]):
             self.assertEqual([], main.runtime_configuration_warnings())
+
+    def test_native_github_and_images_are_named_at_boot(self) -> None:
+        """#525: on `native` the git verbs and image generation have no
+        implementation any more; the boot says which switch to turn."""
+        with patch("server.whitelist.CONFIG", {"agents": {}, "mcp_backends": []}), \
+             patch.object(main.email, "credential_diagnostics", return_value=[]), \
+             patch.object(main.instance_profile, "connector_mode", return_value="native"), \
+             patch("server.tools.pack_runtime.missing_requirements", return_value=[]):
+            warnings = main.runtime_configuration_warnings()
+        self.assertEqual(2, len(warnings))
+        self.assertIn("github: pack", warnings[0])
+        self.assertIn("openai-images: pack", warnings[1])
 
 
 class ConnectorSnapshotTests(unittest.TestCase):
