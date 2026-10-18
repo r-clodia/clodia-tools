@@ -256,6 +256,34 @@ def elected_url_hosts() -> dict[str, frozenset[str]]:
             if cid in packaged}
 
 
+def released_vault_entries(pack: str) -> set[str]:
+    """The vault entries of the builtin connectors switched to `pack`
+    (`RELEASED_TO`, switch on `pack`), from the gateway's OWN declarations —
+    the credential a first-party pack's backend may read even before its own
+    connector has replaced the builtin in the registry (an adoption, #568).
+    Never raises: in doubt, nothing."""
+    packaged = _packaged()
+    out: set[str] = set()
+    if not packaged or not pack:
+        return out
+    try:
+        docs = _all()
+    except Exception:  # noqa: BLE001
+        return out
+    for doc in docs.values():
+        for entry in doc.get("connectors") or []:
+            if not isinstance(entry, dict):
+                continue
+            cid = str(entry.get("id") or "")
+            if cid not in packaged or RELEASED_TO.get(cid) != pack:
+                continue
+            for p in entry.get("providers") or []:
+                cred = p.get("credential") if isinstance(p, dict) else None
+                if isinstance(cred, dict) and cred.get("vault_entry"):
+                    out.add(str(cred["vault_entry"]))
+    return out
+
+
 def expected_claims() -> dict[str, str]:
     """`{connector id or namespace: pack}` for the connectors switched to a pack.
 

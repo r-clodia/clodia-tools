@@ -784,6 +784,14 @@ def register_mcp_core(config, secrets: dict | None = None,
             cred = f"mcp_{slug}_{sname}"
             deposits.append((cred, sval))
             backend = _replace_placeholder(backend, sname, f"${{VAULT:{cred}}}")
+        # A backend reads only its own vault entries, or those its pack's
+        # connectors bind (clodia-platform#568): refused at mount, naming them —
+        # after ownership (409 wins) and after `${NAME}` became the backend's own
+        # `${VAULT:mcp_<slug>_NAME}`.
+        from .proxy import vault_refs_problem as _vrp
+        _why = _vrp(backend)
+        if _why:
+            raise McpRegisterError(_why, status=403)
         avanzi = mcp_credentials.leftover_placeholders(backend)
         if avanzi:
             raise McpRegisterError(
