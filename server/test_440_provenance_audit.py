@@ -123,6 +123,7 @@ class ProvenanceTests(unittest.TestCase):
         raw = "".join(p.read_text() for p in self.root.glob("events-*.jsonl"))
         self.assertNotIn("ict risk", raw)
 
+    @patch.object(main, "_require_web_source", AsyncMock())  # #569 gate: not this test's subject
     def test_a_web_source_ref_carries_no_credentials_or_query(self) -> None:
         self.call("web.fetch", {"url": "https://bob:hunter2@api.example.com/v1/doc?sig=ABC#x"},
                   fetch=(main.web_fetch, "fetch", lambda a, agent="": {"ok": 1}))
