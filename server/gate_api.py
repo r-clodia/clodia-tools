@@ -117,6 +117,10 @@ async def revoke_instance(request: Request):
     if not agent or not instance or instance == "-":
         return JSONResponse({"error": "agent/instance richiesti"}, status_code=400)
     revoked = gate.revoke_instance(agent, instance, gate.COPYBRAIN_PREFIX)
+    # The web-source consents of #569 are this spawn's too: they end with it,
+    # not when the capability lapses.
+    revoked = list(revoked or []) + list(
+        gate.revoke_instance(agent, instance, "web-source:") or [])
     if revoked:
         LOG.info("COPYBRAIN revocato a fine spawn %s@%s: %s (da %s)", agent, instance,
                  revoked, principal)

@@ -407,6 +407,10 @@ def _consent_scope(verb: str) -> str:
     """How long a consent lasts, in the words of #425 §1.3 `authorization.scope`."""
     if verb.startswith(COPYBRAIN_PREFIX) or verb == "crosstopic":
         return "spawn"
+    if verb.startswith("web-source:"):
+        # clodia-platform#569: this spawn, this channel, until the capability
+        # expires — not one call.
+        return "spawn-channel"
     return "one-shot"
 
 

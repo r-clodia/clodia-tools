@@ -192,6 +192,7 @@ class IngressTests(_Env):
         self.assertTrue(ev["input"]["hash"].startswith("sha256:"))
         self.assertNotIn("third-party", self.raw())
 
+    @patch.object(main, "_require_web_source", AsyncMock())  # #569 gate: not this test's subject
     def test_a_web_source_never_carries_credentials_query_or_fragment(self) -> None:
         self.run_call("web.fetch",
                       {"url": "https://alice:s3cr3t@Docs.Example.com:8443/a/B?token=XYZ&x=1#frag"},

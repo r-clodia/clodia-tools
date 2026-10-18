@@ -3569,6 +3569,110 @@ def _push_destination(arguments: dict) -> dict:
     return {**arguments, "repo": url} if url else arguments
 
 
+#: Gate key prefix of a web read from a source not in the ingress lists
+#: (clodia-platform#569): `web-source:<scheme>://<host>/`.
+WEB_SOURCE_GATE = "web-source:"
+
+#: Verbs that load a URL the agent names.
+_WEB_READ_VERBS = frozenset({"web.fetch", "web.download"})
+
+
+def _web_origin(url: object) -> str:
+    """`https://www.x.it/a/b?q` → `https://www.x.it/`: the SITE, which is what
+    a person can judge and what a redirect inside it stays within.
+
+    The host in its ASCII (punycode) form — a look-alike Unicode host shows
+    as what it is, `xn--…` — IPv6 kept in brackets, the port dropped only
+    when it is the scheme's own default."""
+    from urllib.parse import urlsplit as _us
+    p = _us(str(url or "").strip())
+    scheme = (p.scheme or "").lower()
+    host = (p.hostname or "").lower()
+    if scheme not in ("http", "https") or not host:
+        return ""
+    if ":" in host:
+        host = f"[{host}]"
+    else:
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError:
+            return ""
+    try:
+        port_n = p.port
+    except ValueError:
+        return ""
+    default = 443 if scheme == "https" else 80
+    port = f":{port_n}" if port_n and port_n != default else ""
+    return f"{scheme}://{host}{port}/"
+
+
+async def _require_web_source(verb: str, arguments: dict, agent: str) -> None:
+    """A URL outside the channel's and the global ingress lists is not loaded
+    before a person says so (clodia-platform#569, owner requirement of
+    2026-10-18).
+
+    In the lists → nothing to ask. Otherwise a gate on the SITE, time-boxed
+    (`consume=False`): approved, the agent reads that site for the gate's
+    validity — a redirect `/` → `/en` does not ask twice. The approval does
+    NOT make the site a trusted source: what is read still taints the
+    channel, and adding it to the lists stays an explicit, gated act
+    (`ingress.allow`). No delegation; an unattended session is refused.
+    """
+    from . import egress as _eg
+    from . import observe as _obs
+    # The URL is validated BEFORE anyone is asked: a person must not be
+    # prompted for something that would be refused anyway.
+    web_fetch._safe_url(str(arguments.get("url") or ""))
+    src = _source_url(arguments.get("url"))
+    if src and _eg.is_vetted_source(src):
+        return
+    origin = _web_origin(arguments.get("url"))
+    if not origin:
+        raise PermissionError(f"{verb}: URL non valido, nessuna lettura")
+    # The consent is scoped to THIS channel (and, in `_require_gate_consent`,
+    # to this spawn): an approval in one room does not open the site in
+    # another — the rule of `is_vetted_source` (review of clodia-tools#390).
+    gate_key = f"{WEB_SOURCE_GATE}{origin}|{current_chat() or '-'}"
+    _skip = _obs.skipping()
+    _already = False
+    try:
+        from . import gate as _gate_mod
+        from .whitelist import current_spawn as _cs
+        _already = _gate_mod.active(agent, _cs() or "-", gate_key)
+    except Exception:  # noqa: BLE001
+        _already = False
+    if _already:
+        return
+    try:
+        from .audit import policy as _apol
+        await asyncio.to_thread(
+            _apol.decision, verb, "ingress",
+            ("would_deny" if _skip else "deny") if is_unattended() else "gate",
+            reason_class="source_not_listed", rule=None, mode=None)
+    except Exception as _e:  # noqa: BLE001 — the record never changes the verdict…
+        from . import audit as _audit_mod
+        if isinstance(_e, _audit_mod.AuditWriteError):
+            # …except the fail-closed refusal the owner asked for (as egress).
+            raise PermissionError("audit trail non disponibile: la lettura non si "
+                                  "può registrare, quindi non si fa")
+        LOG.error("audit: ingress decision of %s not recorded (%s)", verb, type(_e).__name__)
+    if is_unattended():
+        if _skip:
+            _obs.note("deny", verb, agent, detail=f"ingress:{origin}")
+            return
+        raise PermissionError(
+            f"{verb}: {origin} non è fra le fonti approvate (canale o globali) e la "
+            "sessione non è presidiata: nessuno può approvarla, quindi non si legge")
+    await _require_gate_consent(
+        agent, gate_key, consume=False,
+        reason=(f"pagina richiesta: {src or origin}. Il sito non è fra le fonti "
+                "approvate del canale né fra quelle globali. Approvando, l'agente lo "
+                "legge per un tempo limitato; il contenuto è di terzi e il canale "
+                "risulterà contaminato. Per una fonte stabile va aggiunta agli "
+                "ingress del canale."),
+        allow_delegation=False)
+
+
 async def _require_gate_consent(
     agent: str, gate_key: str, *, consume: bool, reason: str = "",
     allow_delegation: bool = True, arguments: dict | None = None,
@@ -3586,7 +3690,8 @@ async def _require_gate_consent(
         _obs.note("gate", gate_key, agent, detail=reason[:120])
         return None
     inst = "-"
-    if gate_key == "crosstopic" or gate_key.startswith(_copybrain_prefix()):
+    if gate_key == "crosstopic" or gate_key.startswith(_copybrain_prefix()) \
+            or gate_key.startswith(WEB_SOURCE_GATE):
         # Il grant `crosstopic` vale per lo SPAWN che l'ha chiesto, non per il
         # seed (decisione di Davide, 23 set 2026): senza questo, un consenso
         # dato a `clodia-1` varrebbe per ogni altro spawn di `clodia`, cioè per
@@ -3664,6 +3769,10 @@ async def _require_gate_consent(
                          else (f"di **assumere i verbi di @{gate_key[len(_copybrain_prefix()):]}** "
                                f"per lo spawn {inst}, fino alla sua fine (copybrain)")
                          if gate_key.startswith(_copybrain_prefix())
+                         else (f"di **leggere il sito "
+                               f"{gate_key[len(WEB_SOURCE_GATE):].split('|', 1)[0]}** "
+                               f"in questo canale, per lo spawn {inst}")
+                         if gate_key.startswith(WEB_SOURCE_GATE)
                          else (f"di accedere al topic {gate_key.split(':', 1)[1]}"
                                if gate_key.startswith("topic-access:")
                                else f"di usare `{gate_key}`"))
@@ -5501,6 +5610,10 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # L'approvazione È l'«ultimo unlock» della definizione: il flag si
                 # azzera, e si ri-arma da sé se entra contenuto nuovo.
                 _taint.clear(current_chat(), by=current_principal() or "human")
+        if name in _WEB_READ_VERBS:
+            # Before ANY request: a site outside the ingress lists is not
+            # touched until a person approves it (#569).
+            await _require_web_source(name, arguments, _ag or "")
         if name == "fs.list_dir":
             result = fs.list_dir(arguments["path"])
         elif name == "web.fetch":
