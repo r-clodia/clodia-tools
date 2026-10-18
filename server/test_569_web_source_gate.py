@@ -77,7 +77,7 @@ class WebSourceGateTests(_Base):
         out = self.call("https://www.MyFitCoach.app/en?x=1", vetted=False)
         self.assertFalse(out.startswith(("DENIED", "ERROR")), out)
         ((agent, key), kw), = [(c.args, c.kwargs) for c in _web_gates(self.gate)]
-        self.assertEqual(key, "web-source:https://www.myfitcoach.app/")
+        self.assertTrue(key.startswith("web-source:https://www.myfitcoach.app/|"), key)
         self.assertFalse(kw["consume"])            # the site, for the gate's validity
         self.assertFalse(kw["allow_delegation"])
         self.fetch.assert_called_once()
@@ -93,6 +93,22 @@ class WebSourceGateTests(_Base):
             self.assertTrue(out.startswith(("DENIED", "ERROR")), out)
         self.fetch.assert_not_called()
 
+    def test_the_consent_is_per_channel(self) -> None:
+        keys = []
+        for chat in ("chan:SEAL-1:a:clodia", "chan:SEAL-1:b:clodia"):
+            self.gate.reset_mock()
+            with patch.object(main, "current_chat", return_value=chat):
+                self.call("https://x.it/p", vetted=False)
+            keys += [c.args[1] for c in _web_gates(self.gate)]
+        self.assertEqual(len(set(keys)), 2, keys)
+
+    def test_an_invalid_url_asks_nobody(self) -> None:
+        for url in ("ftp://x.it/f", "file:///etc/passwd", "https://u:p@x.it/"):
+            out = self.call(url, vetted=False)
+            self.assertTrue(out.startswith(("DENIED", "ERROR")), out)
+        self.assertEqual(_web_gates(self.gate), [])
+        self.fetch.assert_not_called()
+
     def test_unattended_is_refused_without_a_gate(self) -> None:
         out = self.call("https://evil.example/", vetted=False, unattended=True)
         self.assertTrue(out.startswith(("DENIED", "ERROR")), out)
@@ -106,6 +122,10 @@ class OriginTests(unittest.TestCase):
         self.assertEqual(main._web_origin("https://www.x.it/a/b?q=1#f"), "https://www.x.it/")
         self.assertEqual(main._web_origin("HTTP://X.it:8080/p"), "http://x.it:8080/")
         self.assertEqual(main._web_origin("https://x.it:443/"), "https://x.it/")
+        self.assertEqual(main._web_origin("https://x.it:80/"), "https://x.it:80/")
+        self.assertEqual(main._web_origin("http://[2001:db8::1]:8080/"), "http://[2001:db8::1]:8080/")
+        self.assertEqual(main._web_origin("https://pаypal.com/"), "https://xn--pypal-4ve.com/")
+        self.assertEqual(main._web_origin("ftp://x.it/"), "")
         self.assertEqual(main._web_origin("https://user:pw@x.it/"), "https://x.it/")
         self.assertEqual(main._web_origin("not a url"), "")
 
