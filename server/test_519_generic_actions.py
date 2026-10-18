@@ -338,3 +338,53 @@ class ConnectTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+TELEGRAM_PACK = {"name": "comms-pack", "connectors": [{
+    "id": "telegram", "manifest_version": 1, "namespace": "telegram",
+    "label": "Telegram",
+    "providers": [{"id": "bot", "label": "Bot", "credential": {
+        "kind": "form", "vault_entry": "telegram_bot_token",
+        "fields": [{"name": "token", "secret": True}]}}]}]}
+
+
+class TelegramEntryAdoptionTests(unittest.TestCase):
+    """#522: the entry the removed native handler wrote (type `api_key`) is
+    adopted by comms-pack's connector, so the bot can still be rotated or
+    disconnected from the Tools page. Any other foreign type stays refused."""
+
+    def setUp(self) -> None:
+        from . import instance_profile, tools_api
+        resolved.invalidate()
+        self.addCleanup(resolved.invalidate)
+        self.tipo = "api_key"
+        self.depositi: list[tuple] = []
+        for p in (patch.object(tools_api, "_authorized", lambda request: True),
+                  patch.object(instance_profile, "connector_mode",
+                               lambda cid: "pack" if cid == "telegram" else "native"),
+                  patch.object(instance_profile, "packaged_connectors",
+                               lambda: frozenset({"telegram"})),
+                  patch.object(resolved, "manifests",
+                               lambda: {"comms-pack": TELEGRAM_PACK}),
+                  patch.object(vault, "credential_type", lambda e: self.tipo),
+                  patch.object(vault, "deposit",
+                               lambda e, b, **k: self.depositi.append((e, b, k))),
+                  patch.object(vault, "remove", lambda e: None)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.c = TestClient(Starlette(routes=connectors_api.routes))
+
+    def test_the_old_native_entry_is_rotated(self) -> None:
+        r = self.c.post("/internal/tools/connectors/telegram/connect",
+                        json={"token": "123:NEW"}, headers=_H)
+        self.assertEqual(r.status_code, 200, r.text)
+        (entry, bundle, kw), = self.depositi
+        self.assertEqual((entry, bundle), ("telegram_bot_token", {"token": "123:NEW"}))
+        self.assertEqual(kw.get("cred_type"), "connector:telegram")
+
+    def test_another_foreign_type_is_still_refused(self) -> None:
+        self.tipo = "mcp_secret"
+        r = self.c.post("/internal/tools/connectors/telegram/connect",
+                        json={"token": "123:NEW"}, headers=_H)
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertEqual(self.depositi, [])
