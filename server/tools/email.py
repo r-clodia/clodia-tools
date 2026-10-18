@@ -316,8 +316,14 @@ def _filter_by_sender(rows: object, scope: str, verb: str) -> tuple[list, int]:
     viene tolto esce solo il NUMERO — un oggetto o un indirizzo sarebbero il
     contenuto che stiamo rifiutando, fatto passare dalla porta di servizio.
     """
+    if rows is None:
+        return [], 0
     if not isinstance(rows, list):
-        return ([] if rows is None else rows), 0
+        # Not a list (e.g. `{"raw": …}` when the client's output did not
+        # parse): nothing here can be vetted, so nothing passes on a strict
+        # channel (clodia-platform#560). Counted as one hidden result.
+        _record_ingress(verb, "filter")
+        return [], 1
     tenuti = [r for r in rows
               if isinstance(r, dict) and _sender_vetted(str(r.get("from") or ""), scope)]
     tolti = len(rows) - len(tenuti)
