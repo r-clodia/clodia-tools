@@ -88,6 +88,12 @@ class FetchRefused(PermissionError):
     """The fetch is possible but not allowed (downgrade, provenance, bad tree)."""
 
 
+class ComponentGone(FetchRefused):
+    """The pack's UPSTREAM no longer declares this component (removed or
+    renamed, e.g. comms-pack 2.1.1 `mail` → `comms`). Authoritative only on a
+    refresh, which reads the first-party head."""
+
+
 class Fetcher(Protocol):
     def resolve(self, repo: str, ref: str) -> str: ...
     def default_branch(self, repo: str) -> str: ...
@@ -606,7 +612,7 @@ def ensure(component: GatewayComponent, fetcher: Fetcher, *,
         comps, probs = parse_components(doc, pack=component.pack)
         pinned = next((c for c in comps if c.id == component.id), None)
         if pinned is None:
-            raise FetchRefused(
+            raise ComponentGone(
                 f"upstream {prefix}pack.yaml at {commit[:12]} declares no gateway "
                 f"component '{component.id}'" + (f" ({'; '.join(probs)})" if probs else ""))
         why = trust.refusal(pinned, doc)

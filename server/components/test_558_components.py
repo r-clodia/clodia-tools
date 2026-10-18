@@ -1303,5 +1303,38 @@ class ReviewNonBlockingTests(_Instance):
         self.assertLess(len(sent), 100)
 
 
+
+
+class RenamedUpstreamTests(_Instance):
+    """#522: comms-pack 2.1.1 renamed its gateway component (`mail` → `comms`).
+    The old pin kept the old manifest and, with it, the old component: on a
+    refresh, an upstream that no longer declares a component releases its pin
+    (the floor stays) and what the pack declares now is pinned and loaded."""
+
+    def test_a_component_renamed_upstream_is_replaced_on_refresh(self) -> None:
+        rows = self.reconcile()
+        self.assertEqual(rows["fixture-pack/gw"]["status"], "loaded")
+        renamed = fixture_manifest()
+        renamed["components"][0]["id"] = "gw2"
+        self.fetcher.push(fixture_tree("v2", manifest=renamed))
+        self.manifests["fixture-pack"] = renamed          # the Update's datadir copy
+        rows = self.reconcile(refresh_pack="fixture-pack")
+        self.assertNotIn("fixture-pack/gw", rows)
+        self.assertEqual(rows["fixture-pack/gw2"]["status"], "loaded")
+        self.assertIsNone(store.pin_of("fixture-pack", "gw"))
+        self.assertEqual(store.pin_of("fixture-pack", "gw2").commit, self.fetcher.commits[-1])
+
+    def test_without_a_refresh_nothing_is_released(self) -> None:
+        self.reconcile()
+        renamed = fixture_manifest()
+        renamed["components"][0]["id"] = "gw2"
+        self.fetcher.push(fixture_tree("v2", manifest=renamed))
+        self.manifests["fixture-pack"] = renamed
+        rows = self.reconcile()
+        # the pinned (old) manifest still governs: the datadir alone moves nothing
+        self.assertIn("fixture-pack/gw", rows)
+        self.assertIsNotNone(store.pin_of("fixture-pack", "gw"))
+
+
 if __name__ == "__main__":
     unittest.main()

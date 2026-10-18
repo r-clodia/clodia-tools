@@ -494,6 +494,7 @@ def reconcile(*, force: bool = False, refresh_pack: str | None = None,
         sig = _signature()
         if not force and refresh_pack is None and sig and sig == _SIGNATURE:
             return status()
+        gone = False
         try:
             declared, probs = _declared()
         except Exception as e:  # noqa: BLE001 — keep what runs, try again later
@@ -526,6 +527,19 @@ def reconcile(*, force: bool = False, refresh_pack: str | None = None,
                 comp = store.pinned_component(pin)
             except Exception as e:  # noqa: BLE001
                 reason = f"fetch: {type(e).__name__}: {e}"
+                if refresh and isinstance(e, store.ComponentGone):
+                    # The first-party head says this component is no more:
+                    # its pin goes (the FLOOR stays), so the pack's manifest
+                    # is read again and what it declares now is pinned — from
+                    # upstream, verified — at the next pass (#522: comms-pack
+                    # 2.1.1 renamed `mail` → `comms`; keeping the old pin
+                    # kept the old manifest, and with it the old component).
+                    LOG.warning("components: %s no longer declared upstream: "
+                                "unloaded, pin released (%s)", key, reason)
+                    unload(key)
+                    store.forget(comp.pack, comp.id)
+                    gone = True
+                    continue
                 if current is not None and current.status == "loaded" and \
                         current.component.source() == comp.source():
                     # Same declaration, upstream unreachable or refusing a move:
@@ -556,6 +570,11 @@ def reconcile(*, force: bool = False, refresh_pack: str | None = None,
             unload(key)
             _STATES[key] = load(comp, pin)
         _SIGNATURE = sig
+        if gone:
+            # A pin was released: read the pack's manifest again and pin what
+            # it declares now, in this same call (the lock is re-entrant).
+            _SIGNATURE = None
+            return reconcile(force=True)
         return status()
 
 
