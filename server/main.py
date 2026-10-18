@@ -2024,14 +2024,16 @@ def _packaged_namespaces() -> frozenset[str]:
 #: `pdp_arguments` service). The dispatcher runs them through this same
 #: `call_tool` path. On `native` the gateway's `tools/email.py` serves them.
 #:
-#: The four git verbs of `github` too (clodia-platform#525): they are
-#: reference-monitor work — the room from the signed claim, the per-scope
-#: repository perimeter, the repository read from the gateway-written origin
-#: (never the caller), the scope-then-platform credential, the per-spawn
-#: scratch they run git in, the PDP/gate inputs of `_push_destination`. A pack
-#: process must not reach the spawn's scratch, so they stay here; it-pack
-#: declares the `github` connector (credential, mappings, taint, danger) and
-#: mounts the GitHub MCP backend, whose `github.*` tools are its own.
+#: NOT the four git verbs of `github` any more (clodia-platform#525). With
+#: `connectors: {github: pack}` they leave the native catalogue: it-pack's
+#: GATEWAY COMPONENT registers them and runs git in-process, and the
+#: reference-monitor facts stay the gateway's, reached through the host — the
+#: room from the signed claim (`host.current_topic`), the per-scope repository
+#: perimeter (`host.perimeter.require_approved_repo`), the scope-then-platform
+#: credential (`host.git_credential`), the per-spawn scratch
+#: (`host.scratch_path`). The push destination the PDP judges comes from the
+#: component's `pdp_arguments` service (the origin it reads, never the
+#: caller's). On `native` the gateway's own `_dispatch_github` serves them.
 #:
 #: NOT the 24 Google verbs any more (clodia-platform#558, superseding the
 #: transport design of #524). With `connectors: {google: pack}` they LEAVE the
@@ -2049,7 +2051,7 @@ _EMAIL_NATIVE_NAMES: frozenset[str] = frozenset(t.name for t in _EMAIL_TOOLS)
 
 _GATEWAY_RETAINED_VERBS = frozenset({
     "telegram.listen", "telegram.unlisten", "telegram.join_link",
-}) | _GITHUB_NATIVE_NAMES
+})
 
 
 def _is_packaged_verb(name: str) -> bool:
@@ -3590,11 +3592,16 @@ def _push_destination(arguments: dict) -> dict:
     più che avviene SOLO per il verbo che ne ha bisogno, al call-site, invece di
     far indovinare il PDP.
     """
-    if arguments.get("repo"):
-        return arguments
+    # The repository is ALWAYS the working tree's origin: `github.push` has no
+    # `repo` argument, and a caller-supplied one must not decide the verdict
+    # or skip the gate (review of clodia-tools#400). Unreadable → "" → unknown
+    # destination, refused.
     from .tools import github_repo as _gh
-    url = _gh.remote_url(str(arguments.get("dir") or ""))
-    return {**arguments, "repo": url} if url else arguments
+    try:
+        workdir = _safe_scratch_path(str(arguments.get("dir") or ""))
+    except Exception:  # noqa: BLE001 — outside the scratch: no destination
+        return {**arguments, "repo": ""}
+    return {**arguments, "repo": _gh.remote_url(workdir)}
 
 
 #: Gate key prefix of a web read from a source not in the ingress lists
@@ -5174,6 +5181,14 @@ def _check_component(name: str) -> None:
             why = (f"'{name}' is implemented by a pack on this instance, but no "
                    "gateway component and no mounted backend of that pack serves "
                    "it (see GET /internal/components)")
+    if (not why and name in _GITHUB_NATIVE_NAMES and _is_packaged_verb(name)
+            and _component_verb(name) is None):
+        # The GitHub MCP backend shares the namespace, so `served` above is
+        # true for it: without this the git verb would be proxied to a backend
+        # that has no such tool (#525). Only it-pack's component serves it.
+        why = (f"'{name}' is served on `github: pack` by it-pack's gateway "
+               "component (it-pack ≥ 0.20.0), which is not serving it now "
+               "(see GET /internal/components)")
     if why:
         raise _PackVerbRefused(why)
 
@@ -5455,7 +5470,12 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                     # Stessa risoluzione che userà il PDP: due copie della
                     # stessa domanda divergono, e questa settimana è successo
                     # tre volte.
-                    _args_dest = (_push_destination(arguments)
+                    # A component verb resolves through its own service, as
+                    # the PDP does (#525): github.push on `github: pack`.
+                    _gspec = _component_verb(name)
+                    _args_dest = (_component_pdp_arguments(_gspec, name, arguments)
+                                  if _gspec is not None
+                                  else _push_destination(arguments)
                                   if name == "github.push" else arguments)
                     _perimetro_ok = _eg.destinations_already_allowed(name, _args_dest)
                 except Exception:  # noqa: BLE001 — in dubbio si chiede
@@ -5901,11 +5921,13 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             result = await asyncio.to_thread(_dispatch_telegram, name, arguments)
         elif name.startswith("memory."):
             result = _dispatch_memory(name, arguments)
-        elif name in _GITHUB_NATIVE_NAMES:
+        elif name in _GITHUB_NATIVE_NAMES and not _is_packaged_verb(name):
             # NON `startswith("github.")`: il namespace è condiviso col backend
             # MCP montato con lo stesso nome (vedi `_GITHUB_NATIVE_NAMES`). Solo i
             # verbi che il gateway implementa passano di qui; gli altri `github.*`
-            # scendono fino al ramo `proxy.is_proxied`, che è il loro.
+            # scendono fino al ramo `proxy.is_proxied`, che è il loro. On
+            # `github: pack` the four are it-pack's component's (#525),
+            # dispatched below.
             result = await asyncio.to_thread(_dispatch_github, name, arguments)
         elif name.startswith(("gdrive.", "gcalendar.", "gdocs.", "gsheets.")) \
                 and not _is_packaged_verb(name):
