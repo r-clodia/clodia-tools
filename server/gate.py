@@ -135,6 +135,10 @@ _PREFIX_CLASS = {
     # trusted source of the room. Unclassified, an admin decided and the owner
     # could not answer (review of clodia-tools#391).
     "ingress:web:": GATE_WALLS,
+    # `native:<tool>|<chat>` (clodia-platform#570): a native runtime tool that
+    # brings unvetted content into the room from outside the gateway. The
+    # room's owner decides, as for a new source.
+    "native:": GATE_WALLS,
 }
 
 
@@ -413,7 +417,7 @@ def _consent_scope(verb: str) -> str:
     """How long a consent lasts, in the words of #425 §1.3 `authorization.scope`."""
     if verb.startswith(COPYBRAIN_PREFIX) or verb == "crosstopic":
         return "spawn"
-    if verb.startswith("ingress:web:"):
+    if verb.startswith(("ingress:web:", "native:")):
         # clodia-platform#569: this spawn, this channel, until the capability
         # expires — not one call.
         return "spawn-channel"
