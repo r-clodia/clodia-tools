@@ -147,6 +147,23 @@ _CORE_BACKEND_CREDENTIALS: dict[str, frozenset[str]] = {
 }
 
 
+def _core_bound(b: dict, slug: str) -> set[str]:
+    """The entries an UNSTAMPED backend may read: only the gateway's own
+    mount, recognised by name AND by its official URL — an admin mount named
+    `github` towards another host gets nothing (review of clodia-tools#393)."""
+    entries = _CORE_BACKEND_CREDENTIALS.get(slug)
+    if not entries:
+        return set()
+    try:
+        from .tools_api import GITHUB_MCP_URL
+    except Exception:  # noqa: BLE001
+        return set()
+    official = {"github": GITHUB_MCP_URL}.get(slug)
+    if not official or str(b.get("url") or "").rstrip("/") != official.rstrip("/"):
+        return set()
+    return set(entries)
+
+
 def _pack_bound_credentials(pack: str) -> set[str]:
     """The vault entries the VALIDATED connectors of `pack` declare
     (`providers[].credential.vault_entry`), exact names only.
@@ -166,6 +183,14 @@ def _pack_bound_credentials(pack: str) -> set[str]:
         for p in c.providers:
             if p.pack == pack and p.credential and p.credential.vault_entry:
                 out.add(p.credential.vault_entry)
+    # A builtin connector the owner switched to THIS pack: its credential, from
+    # the gateway's own declaration (the pack's connector may not have replaced
+    # the builtin yet — the adoption of the legacy mount).
+    try:
+        from .connectors import builtin as _bi
+        out |= _bi.released_vault_entries(pack)
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 
@@ -184,8 +209,7 @@ def vault_refs_problem(b: dict) -> str | None:
     if not refs:
         return None
     pack = str(b.get("pack") or "")
-    bound = (_pack_bound_credentials(pack) if pack
-             else set(_CORE_BACKEND_CREDENTIALS.get(slug, ())))
+    bound = (_pack_bound_credentials(pack) if pack else _core_bound(b, slug))
     altrui = sorted(
         n for n in refs
         if not (n.startswith(f"mcp_{slug}_") or n in (f"mcp_cred_{slug}", f"mcp_oauth_{slug}")
