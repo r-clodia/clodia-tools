@@ -36,7 +36,8 @@ def _nativo() -> bool:
         return True
 
 
-async def _pack(verbo: str, args: dict) -> dict:
+async def _pack(verbo: str, args: dict, *, claims: dict | None = None,
+                token: str | None = None) -> dict:
     """Chiama il verbo del backend del pack e ne ritorna il JSON.
 
     Non passa da `call_tool`: questa è già una porta privilegiata
@@ -60,7 +61,14 @@ async def _pack(verbo: str, args: dict) -> dict:
     # (this door is `internal_auth`, not an agent's).
     _verb = _components.verb(f"{CONNECTOR}.{verbo}")
     if _verb is not None and _verb.pack == "comms-pack":
-        return await asyncio.to_thread(_verb.handler, dict(args))
+        # The handler asks the call's identity (`host.agent()`): it is the
+        # authorized internal caller's, set from its verified token as on any
+        # internal route — never invented (review of clodia-tools#397).
+        def _run():
+            from .claims import ClaimsContext
+            with ClaimsContext(dict(claims or {}), token or ""):
+                return _verb.handler(dict(args))
+        return await asyncio.to_thread(_run)
 
     testo = await proxy.call_proxied(f"{CONNECTOR}.{verbo}", args)
     if str(testo).startswith("ERROR: "):
@@ -110,6 +118,13 @@ def _authorize(request: Request):
     return (str(payload.get("agent")) if payload else None), err
 
 
+def _verified(request: Request) -> tuple[dict, str]:
+    """The (already authorized) caller's claims and token, for a component
+    handler that reads the call's identity."""
+    payload, _err = internal_auth.authorize(request, log=LOG)
+    return dict(payload or {}), internal_auth.bearer(request)
+
+
 async def updates(request: Request):
     """POST /internal/telegram/updates {chat_id} → drena la coda di quella chat."""
     _agent, err = _authorize(request)
@@ -150,7 +165,8 @@ async def send(request: Request):
             args = {"chat_id": chat_id, "text": text}
             if body.get("thread_id") is not None:
                 args["thread_id"] = body["thread_id"]
-            return JSONResponse(await _pack("send", args))
+            _claims, _tok = _verified(request)
+            return JSONResponse(await _pack("send", args, claims=_claims, token=_tok))
         return JSONResponse(tg.send_internal(chat_id, text, thread_id=body.get("thread_id")))
     except Exception as e:  # noqa: BLE001
         LOG.warning("telegram send errore: %s", e)

@@ -49,15 +49,24 @@ class RelayUsesTheComponentTests(unittest.TestCase):
         self.assertEqual(out["count"], 0)
 
     def test_the_relay_send_uses_the_component_verb(self) -> None:
+        from . import whitelist
         sent = []
-        spec = NS(pack="comms-pack", handler=lambda a: sent.append(a) or {"ok": True})
+
+        def handler(a):
+            # like the real component: it asks the call's identity
+            sent.append((whitelist.agent_name(), a))
+            return {"ok": True}
+
+        spec = NS(pack="comms-pack", handler=handler)
+        claims = {"agent": "clodia", "execution_id": "relay"}
         with patch.object(loader, "service", return_value=None), \
              patch.object(loader, "verb", return_value=spec) as v, \
              patch.object(telegram_api.proxy, "call_proxied") as proxied:
-            out = asyncio.run(telegram_api._pack("send", {"chat_id": "-100", "text": "ciao"}))
+            out = asyncio.run(telegram_api._pack("send", {"chat_id": "-100", "text": "ciao"},
+                                                 claims=claims, token="t"))
         v.assert_called_once_with("telegram.send")
         proxied.assert_not_called()
-        self.assertEqual(sent, [{"chat_id": "-100", "text": "ciao"}])
+        self.assertEqual(sent, [("clodia", {"chat_id": "-100", "text": "ciao"})])
         self.assertTrue(out["ok"])
 
     def test_without_the_component_the_backend_is_used(self) -> None:
