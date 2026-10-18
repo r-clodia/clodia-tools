@@ -1853,6 +1853,18 @@ def _dispatch_settings(name: str, arguments: dict, agent: str | None):
     raise ValueError(f"unknown settings tool: {name}")
 
 
+def _dispatch_egress_admin(name: str, a: dict):
+    from . import egress as eg
+    ns, verb = name.split(NS_SEP_DOT, 1)
+    if verb == "allow":
+        return eg.allow(ns, a["uri"])
+    if verb == "revoke":
+        return eg.revoke(ns, a["uri"])
+    if verb == "list":
+        return eg.listing(ns)
+    raise ValueError(f"unknown {ns} verb: {name}")
+
+
 def _telegram_bot_username() -> str:
     """The bot's @username: as stored with its credential, else as
     comms-pack's component knows it (`telegram_status`, which asks `getMe`
@@ -5004,7 +5016,7 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # google-pack's component can read (`pdp_arguments`, above).
                 # Reaching here means no component serves the verb: unknown
                 # destination, refused (#524, no native lookup any more).
-                _eargs = {**arguments, "folder_id": ""}
+                _eargs = {**arguments, "folder_id": "", "parent_id": ""}
             # In una sessione non presidiata il modo `gate` non ha senso: la
             # richiesta resterebbe appesa fino al timeout. Si nega.
             from . import observe as _obs2
