@@ -284,7 +284,7 @@ class LaPortaDegliUpdateEUnaSolaTests(unittest.IsolatedAsyncioTestCase):
         self.chiamate: list = []
 
     def _pack(self, risposte: dict):
-        async def fake(verbo, args):
+        async def fake(verbo, args, **_kw):
             self.chiamate.append((verbo, args))
             return risposte.get(verbo, {})
         return patch.object(telegram_api, "_pack", fake)
