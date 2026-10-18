@@ -53,6 +53,7 @@ RESERVED_ROUTE_PATHS = frozenset({"test"})
 _ROUTE_PATH = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}(/[a-z0-9][a-z0-9_-]{0,39}){0,4}$")
 _VERB = re.compile(r"^[a-z][a-z0-9_]{0,31}\.[A-Za-z0-9_.]{1,63}$")
 _CONFIG_KEY = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+_STATE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _SERVICE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 
 #: Set by the route dispatcher while an OWNER-authenticated route runs: the
@@ -471,6 +472,25 @@ class Host:
     def scratch_path(self, path: str) -> str:
         from .. import main
         return main._safe_scratch_path(path)
+
+    def state_path(self, name: str) -> str:
+        """A file of THIS component's private state (offsets, queues, leases):
+        `<gateway state>/components/state/<pack>/<id>/<name>`, created 0700.
+
+        On the gateway's own volume — not readable by the agent-server — and
+        separate per component. `name` is one plain file name, no directories
+        (clodia-platform#522: Telegram's state moved in with its code)."""
+        n = str(name or "")
+        if not _STATE_NAME.fullmatch(n):
+            raise HostError(f"invalid state file name '{name}'")
+        from . import store
+        d = store.root() / "state" / self._c.pack / self._c.id
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass
+        return str(d / n)
 
     def config(self, key: str, default: Any = None) -> Any:
         conf = (_load_config().get(self._c.pack) or {}).get(self._c.id) or {}
