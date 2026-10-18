@@ -91,7 +91,7 @@ class BootWarningTests(unittest.TestCase):
              patch("server.tools.mail_switch.service", return_value=lambda *a: []), \
              patch.object(main.instance_profile, "connector_mode",
                           lambda cid: "pack" if cid in ("github", "openai-images", "mail",
-                                                      "telegram") else "native"), \
+                                                      "telegram", "google") else "native"), \
              patch("server.tools.pack_runtime.missing_requirements", return_value=[gap]):
             warnings = main.runtime_configuration_warnings()
 
@@ -106,7 +106,7 @@ class BootWarningTests(unittest.TestCase):
              patch("server.tools.mail_switch.service", return_value=lambda *a: []), \
              patch.object(main.instance_profile, "connector_mode",
                           lambda cid: "pack" if cid in ("github", "openai-images", "mail",
-                                                      "telegram") else "native"), \
+                                                      "telegram", "google") else "native"), \
              patch("server.tools.pack_runtime.missing_requirements", return_value=[]):
             self.assertEqual([], main.runtime_configuration_warnings())
 
@@ -119,8 +119,8 @@ class BootWarningTests(unittest.TestCase):
              patch.object(main.instance_profile, "connector_mode", return_value="native"), \
              patch("server.tools.pack_runtime.missing_requirements", return_value=[]):
             warnings = main.runtime_configuration_warnings()
-        self.assertEqual(4, len(warnings))
-        for i, cid in enumerate(("github", "openai-images", "mail", "telegram")):
+        self.assertEqual(5, len(warnings))
+        for i, cid in enumerate(("github", "openai-images", "mail", "google", "telegram")):
             self.assertIn(f"{cid}: pack", warnings[i])
 
 

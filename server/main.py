@@ -1451,188 +1451,17 @@ _SETTINGS_TOOLS: list[Tool] = [
 
 # gdrive.* — export/import file fra i topic e Drive, riusando le credenziali
 # Workspace nel vault. Trasferimento via scratch (come topic.fetch/put).
-_GDRIVE_TOOLS: list[Tool] = [
-    Tool(name="gdrive.list",
-         description=("Elenca file/cartelle di Google Drive. folder_id per il contenuto di "
-                      "una cartella; query per una query Drive (es. \"name contains 'x'\")."),
-         inputSchema={"type": "object", "properties": {
-             "folder_id": {"type": "string"}, "query": {"type": "string"},
-             "limit": {"type": "integer"}, "account": {"type": "string"}}}),
-    Tool(name="gdrive.search",
-         description="Cerca file/cartelle Drive per nome (match parziale).",
-         inputSchema={"type": "object", "properties": {
-             "name": {"type": "string"}, "limit": {"type": "integer"},
-             "account": {"type": "string"}}, "required": ["name"]}),
-    Tool(name="gdrive.mkdir",
-         description="Crea una cartella Drive (riusa una omonima nello stesso parent se esiste).",
-         inputSchema={"type": "object", "properties": {
-             "name": {"type": "string"}, "parent_id": {"type": "string"},
-             "account": {"type": "string"}}, "required": ["name"]}),
-    Tool(name="gdrive.upload",
-         description=("Carica un file su Drive. src = path di un file nello scratch dell'agent "
-                      "(prepara con topic.fetch). name = nome su Drive; folder_id = cartella."),
-         inputSchema={"type": "object", "properties": {
-             "src": {"type": "string"}, "name": {"type": "string"},
-             "folder_id": {"type": "string"}, "account": {"type": "string"}},
-             "required": ["src"]}),
-    Tool(name="gdrive.update",
-         description=("Sostituisce il CONTENUTO di un file Drive ESISTENTE con src (path nello "
-                      "scratch): stesso file, stesso id, stesso link, stesse condivisioni, e "
-                      "Drive tiene la revisione precedente. Usalo per correggere un documento "
-                      "già trasmesso invece di caricarne una copia. Su un Google Doc/Sheet/"
-                      "Slides nativo il file (es. .docx, .xlsx, .pptx, .md, .txt) viene "
-                      "convertito nel documento."),
-         inputSchema={"type": "object", "properties": {
-             "file_id": {"type": "string"}, "src": {"type": "string"},
-             "account": {"type": "string"}}, "required": ["file_id", "src"]}),
-    Tool(name="gdrive.download",
-         description=("Scarica un file Drive in dest (path scratch dell'agent; poi usa topic.put "
-                      "per metterlo nel topic). I Google-doc nativi sono esportati (PDF/xlsx)."),
-         inputSchema={"type": "object", "properties": {
-             "file_id": {"type": "string"}, "dest": {"type": "string"},
-             "account": {"type": "string"}}, "required": ["file_id", "dest"]}),
-    Tool(name="gdrive.share",
-         description="Condivide un file/cartella Drive con un'email. role: writer (editor, default)|reader|commenter.",
-         inputSchema={"type": "object", "properties": {
-             "file_id": {"type": "string"}, "email": {"type": "string"},
-             "role": {"type": "string"}, "account": {"type": "string"}},
-             "required": ["file_id", "email"]}),
-    Tool(name="gdrive.rename",
-         description="Rinomina un file/cartella Drive (anche sui Shared Drive).",
-         inputSchema={"type": "object", "properties": {
-             "file_id": {"type": "string"}, "new_name": {"type": "string"},
-             "account": {"type": "string"}},
-             "required": ["file_id", "new_name"]}),
-    Tool(name="gdrive.move",
-         description=("Sposta un file/cartella in un'altra cartella Drive "
-                      "(folder_id di destinazione; anche sui Shared Drive)."),
-         inputSchema={"type": "object", "properties": {
-             "file_id": {"type": "string"}, "folder_id": {"type": "string"},
-             "account": {"type": "string"}},
-             "required": ["file_id", "folder_id"]}),
-]
 
 # gcalendar.* — Google Calendar sulla stessa credenziale Workspace (scope calendar
 # già incluso). Orari ISO8601/RFC3339 (es. 2026-07-22T15:00:00+02:00).
-_GCALENDAR_TOOLS: list[Tool] = [
-    Tool(name="gcalendar.list_calendars",
-         description="Elenca i calendari accessibili con l'account Workspace.",
-         inputSchema={"type": "object", "properties": {"account": {"type": "string"}}}),
-    Tool(name="gcalendar.list_events",
-         description=("Elenca eventi di un calendario in una finestra temporale. "
-                      "time_min/time_max ISO8601; query = testo libero opzionale."),
-         inputSchema={"type": "object", "properties": {
-             "calendar_id": {"type": "string", "description": "default 'primary'"},
-             "time_min": {"type": "string"}, "time_max": {"type": "string"},
-             "query": {"type": "string"}, "limit": {"type": "integer"},
-             "account": {"type": "string"}}}),
-    Tool(name="gcalendar.create_event",
-         description=("Crea un evento. start/end ISO8601 (dateTime) o date (YYYY-MM-DD "
-                      "se all_day=true). attendees = lista di email."),
-         inputSchema={"type": "object", "properties": {
-             "summary": {"type": "string"}, "start": {"type": "string"},
-             "end": {"type": "string"}, "calendar_id": {"type": "string"},
-             "description": {"type": "string"}, "location": {"type": "string"},
-             "attendees": {"type": "array", "items": {"type": "string"}},
-             "all_day": {"type": "boolean"}, "account": {"type": "string"}},
-             "required": ["summary", "start", "end"]}),
-    Tool(name="gcalendar.update_event",
-         description="Modifica un evento esistente (solo i campi passati).",
-         inputSchema={"type": "object", "properties": {
-             "event_id": {"type": "string"}, "calendar_id": {"type": "string"},
-             "summary": {"type": "string"}, "start": {"type": "string"},
-             "end": {"type": "string"}, "description": {"type": "string"},
-             "location": {"type": "string"}, "account": {"type": "string"}},
-             "required": ["event_id"]}),
-    Tool(name="gcalendar.delete_event",
-         description="Elimina un evento dal calendario.",
-         inputSchema={"type": "object", "properties": {
-             "event_id": {"type": "string"}, "calendar_id": {"type": "string"},
-             "account": {"type": "string"}}, "required": ["event_id"]}),
-    Tool(name="gcalendar.freebusy",
-         description="Ritorna gli intervalli occupati (busy) in una finestra temporale.",
-         inputSchema={"type": "object", "properties": {
-             "time_min": {"type": "string"}, "time_max": {"type": "string"},
-             "calendar_id": {"type": "string"}, "account": {"type": "string"}},
-             "required": ["time_min", "time_max"]}),
-]
 
 # gdocs.* — Google Docs sulla stessa credenziale Workspace (scope documents).
-_GDOCS_TOOLS: list[Tool] = [
-    Tool(name="gdocs.create",
-         description="Crea un Google Doc (opz. con testo iniziale). Ritorna id + url.",
-         inputSchema={"type": "object", "properties": {
-             "title": {"type": "string"}, "text": {"type": "string"},
-             "account": {"type": "string"}}, "required": ["title"]}),
-    Tool(name="gdocs.read",
-         description="Legge il testo di un Google Doc (estratto plain-text).",
-         inputSchema={"type": "object", "properties": {
-             "document_id": {"type": "string"}, "account": {"type": "string"}},
-             "required": ["document_id"]}),
-    Tool(name="gdocs.append_text",
-         description="Aggiunge testo in fondo a un Google Doc.",
-         inputSchema={"type": "object", "properties": {
-             "document_id": {"type": "string"}, "text": {"type": "string"},
-             "account": {"type": "string"}}, "required": ["document_id", "text"]}),
-    Tool(name="gdocs.replace_text",
-         description="Sostituisce tutte le occorrenze di `find` con `replace` nel Doc.",
-         inputSchema={"type": "object", "properties": {
-             "document_id": {"type": "string"}, "find": {"type": "string"},
-             "replace": {"type": "string"}, "match_case": {"type": "boolean"},
-             "account": {"type": "string"}},
-             "required": ["document_id", "find", "replace"]}),
-]
 
 # gsheets.* — Google Sheets on the same Workspace credential. The Sheets API
 # accepts the `auth/drive` scope the connector already requests, so this needed
 # no new consent (clodia-platform#118). Every verb is INCREMENTAL: before this,
 # acting on a spreadsheet meant gdrive.download + gdrive.upload, which replaces
 # the file and destroys the tabs the agent did not author.
-_GSHEETS_TOOLS: list[Tool] = [
-    Tool(name="gsheets.list_tabs",
-         description=("Tab di un Google Sheet: titolo, id, posizione e dimensioni. "
-                      "Da chiamare prima di leggere o scrivere, per sapere i nomi."),
-         inputSchema={"type": "object", "properties": {
-             "spreadsheet_id": {"type": "string"}, "account": {"type": "string"}},
-             "required": ["spreadsheet_id"]}),
-    Tool(name="gsheets.read",
-         description=("Legge i valori di un range A1 (es. 'Foglio1!A1:D20') oppure di "
-                      "un'intera tab. Senza range né tab legge la PRIMA tab. "
-                      "formulas=true restituisce il TESTO delle formule invece del "
-                      "valore calcolato: usalo se devi riprodurre il foglio, "
-                      "altrimenti una formula ti torna come numero."),
-         inputSchema={"type": "object", "properties": {
-             "spreadsheet_id": {"type": "string"}, "range": {"type": "string"},
-             "tab": {"type": "string"}, "formulas": {"type": "boolean"},
-             "account": {"type": "string"}},
-             "required": ["spreadsheet_id"]}),
-    Tool(name="gsheets.add_tab",
-         description=("Aggiunge una tab a un Google Sheet ESISTENTE lasciando intatte "
-                      "le altre (mutazione, non riscrittura del file). Errore "
-                      "azionabile se il titolo è già in uso."),
-         inputSchema={"type": "object", "properties": {
-             "spreadsheet_id": {"type": "string"}, "title": {"type": "string"},
-             "index": {"type": "integer"}, "account": {"type": "string"}},
-             "required": ["spreadsheet_id", "title"]}),
-    Tool(name="gsheets.append_rows",
-         description=("Aggiunge righe DOPO l'ultima riga popolata di una tab: non "
-                      "sovrascrive nulla. È la scrittura da preferire. I valori "
-                      "entrano come se digitati (le formule restano formule)."),
-         inputSchema={"type": "object", "properties": {
-             "spreadsheet_id": {"type": "string"}, "tab": {"type": "string"},
-             "rows": {"type": "array", "items": {"type": "array"}},
-             "account": {"type": "string"}},
-             "required": ["spreadsheet_id", "tab", "rows"]}),
-    Tool(name="gsheets.write_range",
-         description=("Scrive in un range A1 esplicito SOVRASCRIVENDO le celle "
-                      "esistenti. Nessun default e nessuna scorciatoia su tab intera: "
-                      "per aggiungere dati usa append_rows."),
-         inputSchema={"type": "object", "properties": {
-             "spreadsheet_id": {"type": "string"}, "range": {"type": "string"},
-             "values": {"type": "array", "items": {"type": "array"}},
-             "account": {"type": "string"}},
-             "required": ["spreadsheet_id", "range", "values"]}),
-]
 
 # egress.*/ingress.* — amministrazione delle due whitelist (clodia-platform#128).
 # `allow` è GATED: allarga un permesso, e il dialog dice cosa costa. `revoke` e
@@ -1793,14 +1622,43 @@ def _packaged_namespaces() -> frozenset[str]:
 #: mappings (and the pre-PDP parent lookup of `gdrive.update`, a component
 #: service), taint, audit. The credential stays in the vault, reached through
 #: the host. On `native` the gateway's own modules serve them, as before.
-_GOOGLE_NATIVE_NAMES: frozenset[str] = frozenset(
-    t.name for t in _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS)
+#: The 24 Google verbs. Their native implementation is gone
+#: (clodia-platform#524): google-pack's gateway component serves them on
+#: `connectors: {google: pack}`. The names stay for the refusal on `native`
+#: and the namespace reservation (`_RETIRED_NATIVE_VERBS`).
+_GOOGLE_NATIVE_NAMES: frozenset[str] = frozenset({
+    "gdrive.list",
+    "gdrive.search",
+    "gdrive.mkdir",
+    "gdrive.upload",
+    "gdrive.update",
+    "gdrive.download",
+    "gdrive.share",
+    "gdrive.rename",
+    "gdrive.move",
+    "gcalendar.list_calendars",
+    "gcalendar.list_events",
+    "gcalendar.create_event",
+    "gcalendar.update_event",
+    "gcalendar.delete_event",
+    "gcalendar.freebusy",
+    "gdocs.create",
+    "gdocs.read",
+    "gdocs.append_text",
+    "gdocs.replace_text",
+    "gsheets.list_tabs",
+    "gsheets.read",
+    "gsheets.add_tab",
+    "gsheets.append_rows",
+    "gsheets.write_range",
+})
 
 _EMAIL_NATIVE_NAMES: frozenset[str] = _EMAIL_VERB_NAMES
 
 #: Verbs the gateway no longer implements but whose namespace it keeps
 #: reserved while the switch is on `native` (`manifest.core_namespaces`).
-_RETIRED_NATIVE_VERBS: frozenset[str] = _EMAIL_VERB_NAMES | _GITHUB_NATIVE_NAMES | frozenset({
+_RETIRED_NATIVE_VERBS: frozenset[str] = (_EMAIL_VERB_NAMES | _GITHUB_NATIVE_NAMES
+                                         | _GOOGLE_NATIVE_NAMES) | frozenset({
     "telegram.inbox", "telegram.lease_acquire", "telegram.poll", "telegram.send",
     "telegram.send_file", "telegram.lease_release", "telegram.roster",
     "telegram.status"})
@@ -1995,117 +1853,6 @@ def _dispatch_settings(name: str, arguments: dict, agent: str | None):
     raise ValueError(f"unknown settings tool: {name}")
 
 
-def _dispatch_gdrive(name: str, a: dict):
-    from .tools import gdrive as gd
-    verb = name.split(NS_SEP_DOT, 1)[1]
-    if verb == "list":
-        return gd.list_files(folder_id=a.get("folder_id"), query=a.get("query"),
-                             limit=a.get("limit", 50), account=a.get("account"))
-    if verb == "search":
-        return gd.search(a["name"], limit=a.get("limit", 20), account=a.get("account"))
-    if verb == "mkdir":
-        return gd.mkdir(a["name"], parent_id=a.get("parent_id"), account=a.get("account"))
-    if verb == "upload":
-        src = _safe_scratch_path(a["src"])  # i byte vengono dallo scratch, mai dal modello
-        _note_crossing(src, kind="upload")
-        return gd.upload(src, name=a.get("name"), folder_id=a.get("folder_id"),
-                         account=a.get("account"))
-    if verb == "update":
-        src = _safe_scratch_path(a["src"])  # i byte vengono dallo scratch, mai dal modello
-        _note_crossing(src, kind="upload")
-        return gd.update(a["file_id"], src, account=a.get("account"))
-    if verb == "download":
-        dest = _safe_scratch_path(a["dest"])
-        _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-        return gd.download(a["file_id"], dest, account=a.get("account"))
-    if verb == "share":
-        return gd.share(a["file_id"], a["email"], role=a.get("role", "writer"),
-                        account=a.get("account"))
-    if verb == "rename":
-        return gd.rename(a["file_id"], a["new_name"], account=a.get("account"))
-    if verb == "move":
-        return gd.move(a["file_id"], a["folder_id"], account=a.get("account"))
-    raise ValueError(f"unknown gdrive verb: {name}")
-
-
-def _dispatch_gcalendar(name: str, a: dict):
-    from .tools import gcalendar as gc
-    verb = name.split(NS_SEP_DOT, 1)[1]
-    if verb == "list_calendars":
-        return gc.list_calendars(account=a.get("account"))
-    if verb == "list_events":
-        return gc.list_events(calendar_id=a.get("calendar_id", "primary"),
-                              time_min=a.get("time_min"), time_max=a.get("time_max"),
-                              query=a.get("query"), limit=a.get("limit", 25),
-                              account=a.get("account"))
-    if verb == "create_event":
-        return gc.create_event(a["summary"], a["start"], a["end"],
-                               calendar_id=a.get("calendar_id", "primary"),
-                               description=a.get("description"), location=a.get("location"),
-                               attendees=a.get("attendees"), all_day=a.get("all_day", False),
-                               account=a.get("account"))
-    if verb == "update_event":
-        return gc.update_event(a["event_id"], calendar_id=a.get("calendar_id", "primary"),
-                               summary=a.get("summary"), start=a.get("start"),
-                               end=a.get("end"), description=a.get("description"),
-                               location=a.get("location"), account=a.get("account"))
-    if verb == "delete_event":
-        return gc.delete_event(a["event_id"], calendar_id=a.get("calendar_id", "primary"),
-                               account=a.get("account"))
-    if verb == "freebusy":
-        return gc.freebusy(a["time_min"], a["time_max"],
-                           calendar_id=a.get("calendar_id", "primary"),
-                           account=a.get("account"))
-    raise ValueError(f"unknown gcalendar verb: {name}")
-
-
-def _dispatch_gdocs(name: str, a: dict):
-    from .tools import gdocs as gdo
-    verb = name.split(NS_SEP_DOT, 1)[1]
-    if verb == "create":
-        return gdo.create(a["title"], text=a.get("text"), account=a.get("account"))
-    if verb == "read":
-        return gdo.read(a["document_id"], account=a.get("account"))
-    if verb == "append_text":
-        return gdo.append_text(a["document_id"], a["text"], account=a.get("account"))
-    if verb == "replace_text":
-        return gdo.replace_text(a["document_id"], a["find"], a["replace"],
-                                match_case=a.get("match_case", True), account=a.get("account"))
-    raise ValueError(f"unknown gdocs verb: {name}")
-
-
-def _dispatch_egress_admin(name: str, a: dict):
-    from . import egress as eg
-    ns, verb = name.split(NS_SEP_DOT, 1)
-    if verb == "allow":
-        return eg.allow(ns, a["uri"])
-    if verb == "revoke":
-        return eg.revoke(ns, a["uri"])
-    if verb == "list":
-        return eg.listing(ns)
-    raise ValueError(f"unknown {ns} verb: {name}")
-
-
-def _dispatch_gsheets(name: str, a: dict):
-    from .tools import gsheets as gsh
-    verb = name.split(NS_SEP_DOT, 1)[1]
-    if verb == "list_tabs":
-        return gsh.list_tabs(a["spreadsheet_id"], account=a.get("account"))
-    if verb == "read":
-        return gsh.read(a["spreadsheet_id"], range=a.get("range"), tab=a.get("tab"),
-                        formulas=bool(a.get("formulas")), account=a.get("account"))
-    if verb == "add_tab":
-        return gsh.add_tab(a["spreadsheet_id"], a["title"], index=a.get("index"),
-                           account=a.get("account"))
-    if verb == "append_rows":
-        return gsh.append_rows(a["spreadsheet_id"], a["tab"], a["rows"],
-                               account=a.get("account"))
-    if verb == "write_range":
-        return gsh.write_range(a["spreadsheet_id"], a["range"], a["values"],
-                               account=a.get("account"))
-    raise ValueError(f"unknown gsheets verb: {name}")
-
-
 def _telegram_bot_username() -> str:
     """The bot's @username: as stored with its credential, else as
     comms-pack's component knows it (`telegram_status`, which asks `getMe`
@@ -2276,8 +2023,7 @@ def _native_tool_namespaces() -> list[str]:
     soppiatto: clodia-platform#140.
     """
     tools = (_FS_TOOLS + _WEB_TOOLS + _DATASTORE_TOOLS + _LOGS_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
-             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS + _GDRIVE_TOOLS
-             + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
+             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS
              + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS
              + _PACKS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS
              + _copybrain.TOOLS + _NATIVE_CONSENT_TOOLS)
@@ -2362,6 +2108,7 @@ def runtime_configuration_warnings() -> list[str]:
     for cid, what in (("github", "i verbi git github.clone/pull/push/pull_request"),
                       ("openai-images", "la generazione immagini"),
                       ("mail", "i verbi email.*"),
+                      ("google", "i verbi gdrive/gcalendar/gdocs/gsheets"),
                       ("telegram", "i verbi Telegram degli agenti")):
         if instance_profile.connector_mode(cid) != "pack":
             warnings.append(
@@ -2611,7 +2358,7 @@ def _component_pdp_arguments(spec, name: str, arguments: dict) -> dict:
 
     A component may register the service `pdp_arguments(verb, arguments)` for
     the facts the call does not carry — google-pack's parent folder of
-    `gdrive.update`, what `_drive_parent_of` reads natively. Only arguments a
+    `gdrive.update`. Only arguments a
     destination mapping of THIS verb reads are taken from it: the service can
     tell the PDP where a call goes, never rewrite anything else. A failing
     service refuses the call (the destination would be unknown)."""
@@ -2645,20 +2392,6 @@ def _component_pdp_arguments(spec, name: str, arguments: dict) -> dict:
         raise PermissionError(f"{name}: the destination could not be determined")
     return {**arguments, **{k: str(v if v is not None else "")
                             for k, v in extra.items() if k in owned}}
-
-
-def _drive_parent_of(arguments: dict) -> str:
-    """La cartella che contiene il file di `gdrive.update`, o "" se non si sa."""
-    try:
-        from .tools import gdrive as _gd
-        from .tools import google_io as _gio
-        f = _gio.call(_gd._resolve_account(arguments.get("account")), "drive", "v3",
-                      "GET files/{fileId}", params={
-                          "fileId": str(arguments.get("file_id") or ""),
-                          "fields": "parents", "supportsAllDrives": True})
-        return str((f.get("parents") or [""])[0])
-    except Exception:  # noqa: BLE001 — ignoto = negato dal verdetto, non un errore qui
-        return ""
 
 
 def _telegram_chat_id_or_raise(arguments: dict) -> None:
@@ -2916,7 +2649,6 @@ def _all_native_tools() -> list:
     native = list(_FS_TOOLS + _WEB_TOOLS + _DATASTORE_TOOLS + _LOGS_TOOLS
                   + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS
                   + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS
-                  + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
                   + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS + _PACKS_TOOLS
                   + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS
                   + _copybrain.TOOLS + _NATIVE_CONSENT_TOOLS)
@@ -4765,6 +4497,14 @@ def _check_component(name: str) -> None:
             why = (f"'{name}' is implemented by a pack on this instance, but no "
                    "gateway component and no mounted backend of that pack serves "
                    "it (see GET /internal/components)")
+    if (not why and name in _GOOGLE_NATIVE_NAMES and _is_packaged_verb(name)
+            and _component_verb(name) is None):
+        why = (f"'{name}' is served on `google: pack` by google-pack's gateway "
+               "component, which is not serving it now (see GET /internal/components)")
+    if not why and name in _GOOGLE_NATIVE_NAMES and not _is_packaged_verb(name):
+        why = (f"'{name}' has no native implementation any more "
+               "(clodia-platform#524): it is served by google-pack's gateway "
+               "component with `connectors: {google: pack}` in the instance profile")
     if (not why and name in _EMAIL_VERB_NAMES and _is_packaged_verb(name)
             and _component_verb(name) is None):
         # Only comms-pack's component serves mail (#523): a mounted backend
@@ -5260,12 +5000,11 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # dicendo l'id giusto quando il canale ne ha uno legato.
                 _telegram_chat_id_or_raise(arguments)
             elif name == "gdrive.update":
-                # La destinazione di un aggiornamento è la CARTELLA del file:
-                # stessa regola di `gdrive.upload` (whitelist + taint), letta da
-                # Drive perché negli argomenti c'è solo l'id del file. Non
-                # risolvibile → destinazione ignota → negato.
-                _eargs = {**arguments,
-                          "folder_id": await asyncio.to_thread(_drive_parent_of, arguments)}
+                # Its destination is the file's parent folder, which only
+                # google-pack's component can read (`pdp_arguments`, above).
+                # Reaching here means no component serves the verb: unknown
+                # destination, refused (#524, no native lookup any more).
+                _eargs = {**arguments, "folder_id": ""}
             # In una sessione non presidiata il modo `gate` non ha senso: la
             # richiesta resterebbe appesa fino al timeout. Si nega.
             from . import observe as _obs2
@@ -5388,14 +5127,6 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             result = await asyncio.to_thread(_dispatch_telegram, name, arguments)
         elif name.startswith("memory."):
             result = _dispatch_memory(name, arguments)
-        elif name.startswith(("gdrive.", "gcalendar.", "gdocs.", "gsheets.")) \
-                and not _is_packaged_verb(name):
-            # `not _is_packaged_verb`: on `google: pack` (#558) these verbs
-            # are google-pack's gateway component's, dispatched below.
-            _gfn = {"gdrive": _dispatch_gdrive, "gcalendar": _dispatch_gcalendar,
-                    "gdocs": _dispatch_gdocs, "gsheets": _dispatch_gsheets}[
-                        name.split(NS_SEP_DOT, 1)[0]]
-            result = await asyncio.to_thread(_gfn, name, arguments)
         elif name.startswith(("egress.", "ingress.")):
             result = _dispatch_egress_admin(name, arguments)
         elif name.startswith("runtime."):

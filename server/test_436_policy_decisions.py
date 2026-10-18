@@ -58,9 +58,30 @@ class _Env(unittest.TestCase):
         async def go():
             with ClaimsContext(token, "t"), \
                     patch.object(egress, "check", return_value=verdict), \
-                    patch.object(main, "_require_gate_consent", AsyncMock(return_value={})):
+                    patch.object(main, "_require_gate_consent", AsyncMock(return_value={})), \
+                    _google_component(verb):
                 return await main.call_tool(verb, {"parent_id": "abc", "name": "n"})
         return asyncio.run(go())
+
+
+def _google_component(verb: str):
+    """`verb` served the way it is now — by google-pack's gateway component
+    (#524: the native Google code is gone) — with a handler that answers
+    without Drive. What is under test is the gateway's decision record."""
+    import contextlib
+    from types import SimpleNamespace as NS
+    from mcp.types import Tool
+    spec = NS(pack="google-pack", component="google-pack/google", offload=False,
+              tool=Tool(name=verb, description="", inputSchema={
+                  "type": "object", "properties": {"parent_id": {}, "name": {}}}),
+              handler=lambda a: {"id": "new"})
+    stack = contextlib.ExitStack()
+    for p in (patch.object(main, "_component_verb", lambda n: spec if n == verb else None),
+              patch.object(main, "_component_pdp_arguments", lambda _s, _n, a: a),
+              patch.object(main, "_check_component", lambda n: None),
+              patch.object(main, "_check_pack_connector_held", lambda n: None)):
+        stack.enter_context(p)
+    return stack
 
 
 class EgressDecisionTests(_Env):

@@ -46,16 +46,147 @@ from unittest.mock import patch
 import yaml
 
 from .. import egress, instance_profile, proxy, taint
-from .. import test_524_google_pins as PINS
 from ..components import loader
 from ..components.grammar import GatewayComponent
 from ..components.host import ServiceSpec, VerbSpec
-from ..tools import google_io
 from ..tools import google_switch
 from . import builtin as B
 from . import manifest as M
 from . import resolved
 from .test_523_mail_provider import _comms_pack
+
+# The PDP tables of #524, moved here from the removed `test_524_google_pins`
+# (the native Google client's pins): what the PDP answers about Google is the
+# gateway's and stays pinned.
+ARGS = {"folder_id": "F", "parent_id": "P", "email": "X@Y.it", "file_id": "FI",
+        "document_id": "D", "spreadsheet_id": "S", "calendar_id": "c@x.it"}
+
+_DRIVE_DESTS = ("drive", ["mailto:x@y.it", "gdrive:folder/F", "gdrive:folder/P"])
+
+#: verb → (spec_for(verb) applied to ARGS, source_uri(verb, ARGS), taints(verb))
+PDP = {
+    "gdrive.list":              (None, None, False),
+    "gdrive.search":            (None, None, False),
+    "gdrive.mkdir":             (_DRIVE_DESTS, None, False),
+    "gdrive.upload":            (_DRIVE_DESTS, None, False),
+    "gdrive.update":            (_DRIVE_DESTS, None, False),
+    "gdrive.download":          (None, "gdrive:file/FI", True),
+    "gdrive.share":             (_DRIVE_DESTS, None, False),
+    "gdrive.rename":            (None, None, False),
+    "gdrive.move":              (_DRIVE_DESTS, None, False),
+    "gcalendar.list_calendars": (None, None, False),
+    "gcalendar.list_events":    (None, None, True),
+    "gcalendar.create_event":   (None, None, False),
+    "gcalendar.update_event":   (None, None, False),
+    "gcalendar.delete_event":   (None, None, False),
+    "gcalendar.freebusy":       (None, None, False),
+    "gdocs.create":             (None, None, False),
+    "gdocs.read":               (None, "gdrive:doc/D", True),
+    "gdocs.append_text":        (None, None, False),
+    "gdocs.replace_text":       (None, None, False),
+    "gsheets.list_tabs":        (None, "gsheets:S", True),
+    "gsheets.read":             (None, "gsheets:S", True),
+    "gsheets.add_tab":          (("gsheets", ["gsheets:S"]), None, False),
+    "gsheets.append_rows":      (("gsheets", ["gsheets:S"]), None, False),
+    "gsheets.write_range":      (("gsheets", ["gsheets:S"]), None, False),
+}
+
+#: Declared reads (`direction: source`) — the verbs whose source can be vetted.
+DECLARED_READS = {"gdrive.download", "gdocs.read", "gsheets.list_tabs",
+                  "gsheets.read"}
+
+#: raw URI → canonical form, for what a human pastes into a list.
+CANONICAL = [
+    ("https://drive.google.com/drive/folders/ABC", "gdrive:folder/ABC"),
+    ("https://drive.google.com/drive/u/1/folders/ABC?usp=sharing", "gdrive:folder/ABC"),
+    ("https://docs.google.com/document/d/D1/edit?tab=t.0", "gdrive:doc/D1"),
+    ("https://drive.google.com/file/d/F1/view?usp=drive_link", "gdrive:file/F1"),
+    ("https://docs.google.com/spreadsheets/d/S1/edit#gid=0", "gsheets:S1"),
+    ("gdrive://ABC", "gdrive:folder/ABC"),
+    ("gdrive://folder/ABC/", "gdrive:folder/ABC"),
+    ("gsheets://S1/", "gsheets:S1"),
+    ("gdrive:file/F", "gdrive:file/F"),
+    ("gdrive:doc/D", "gdrive:doc/D"),
+    ("gcal:a@b.it", "gcal:a@b.it"),
+    ("gcal:primary", "gcal:primary"),
+    ("gcal:*@tomato.blue", "gcal:*@tomato.blue"),
+    # Oddity carried across on purpose: the scheme is lowercased, the
+    # calendar id is not (matching is case-insensitive in `_matches`).
+    ("GCAL:A@B.IT", "gcal:A@B.IT"),
+]
+
+#: (direction, uri) → canonical uri returned, or None when refused.
+GRANTABLE = [
+    ("egress", "gdrive:folder/ABC", "gdrive:folder/ABC"),
+    ("egress", "gdrive:file/F", "gdrive:file/F"),
+    ("egress", "gdrive:doc/D", "gdrive:doc/D"),
+    ("egress", "gsheets:S1", "gsheets:S1"),
+    ("egress", "gcal:a@b.it", "gcal:a@b.it"),
+    ("egress", "gcal:primary", "gcal:primary"),
+    ("egress", "gcal:*@x.it", "gcal:*@x.it"),
+    ("egress", "https://drive.google.com/drive/folders/ABC", "gdrive:folder/ABC"),
+    ("egress", "https://docs.google.com/spreadsheets/d/S1/edit", "gsheets:S1"),
+    ("ingress", "gdrive:folder/ABC", "gdrive:folder/ABC"),
+    ("ingress", "gdrive:file/F", "gdrive:file/F"),
+    ("ingress", "gdrive:doc/D", "gdrive:doc/D"),
+    ("ingress", "gsheets:S1", "gsheets:S1"),
+    ("ingress", "https://drive.google.com/drive/folders/ABC", "gdrive:folder/ABC"),
+    ("ingress", "https://docs.google.com/spreadsheets/d/S1/edit", "gsheets:S1"),
+    # Oddity carried across: the `gdrive` forms are documentation for the
+    # widget, not a filter — an unknown segment is still grantable.
+    ("egress", "gdrive:bogus/x", "gdrive:bogus/x"),
+    ("ingress", "gdrive:bogus/x", "gdrive:bogus/x"),
+    # Refused.
+    ("egress", "gcal:*", None),
+    ("egress", "gcal:", None),
+    ("egress", "gdrive:folder/", None),
+    ("egress", "gsheets:", None),
+    ("ingress", "gdrive:folder/", None),
+    ("ingress", "gsheets:", None),
+    ("ingress", "gcal:a@b.it", None),       # authority over a resource, not a source
+    ("ingress", "gcal:primary", None),
+    ("ingress", "gcal:*@x.it", None),
+]
+
+
+#: The 24 verbs as google-pack's component registers them: the properties
+#: matter (the PDP keeps a caller argument only if the schema offers it — e.g.
+#: `gdrive.update` has no `folder_id`), the descriptions do not. The gateway's
+#: own schemas went with the native code (#524).
+_GOOGLE_PROPS = {
+    'gdrive.list': ('folder_id', 'query', 'limit', 'account'),
+    'gdrive.search': ('name', 'limit', 'account'),
+    'gdrive.mkdir': ('name', 'parent_id', 'account'),
+    'gdrive.upload': ('src', 'name', 'folder_id', 'account'),
+    'gdrive.update': ('file_id', 'src', 'account'),
+    'gdrive.download': ('file_id', 'dest', 'account'),
+    'gdrive.share': ('file_id', 'email', 'role', 'account'),
+    'gdrive.rename': ('file_id', 'new_name', 'account'),
+    'gdrive.move': ('file_id', 'folder_id', 'account'),
+    'gcalendar.list_calendars': ('account',),
+    'gcalendar.list_events': ('calendar_id', 'time_min', 'time_max', 'query', 'limit', 'account'),
+    'gcalendar.create_event': ('summary', 'start', 'end', 'calendar_id', 'description', 'location', 'attendees', 'all_day', 'account'),
+    'gcalendar.update_event': ('event_id', 'calendar_id', 'summary', 'start', 'end', 'description', 'location', 'account'),
+    'gcalendar.delete_event': ('event_id', 'calendar_id', 'account'),
+    'gcalendar.freebusy': ('time_min', 'time_max', 'calendar_id', 'account'),
+    'gdocs.create': ('title', 'text', 'account'),
+    'gdocs.read': ('document_id', 'account'),
+    'gdocs.append_text': ('document_id', 'text', 'account'),
+    'gdocs.replace_text': ('document_id', 'find', 'replace', 'match_case', 'account'),
+    'gsheets.list_tabs': ('spreadsheet_id', 'account'),
+    'gsheets.read': ('spreadsheet_id', 'range', 'tab', 'formulas', 'account'),
+    'gsheets.add_tab': ('spreadsheet_id', 'title', 'index', 'account'),
+    'gsheets.append_rows': ('spreadsheet_id', 'tab', 'rows', 'account'),
+    'gsheets.write_range': ('spreadsheet_id', 'range', 'values', 'account'),
+}
+
+
+def _google_tools():
+    from mcp.types import Tool
+    return [Tool(name=n, description=n, inputSchema={
+        "type": "object", "properties": {p: {} for p in ps}})
+        for n, ps in _GOOGLE_PROPS.items()]
+
 
 PACK = "google-pack"
 GOOGLE_IDS = ("google", "google-sheets", "google-docs", "google-calendar")
@@ -169,8 +300,7 @@ class _FakeComponent:
             entry="google_component", connectors=GOOGLE_IDS,
             credentials=("google_", "gworkspace_", "gmail_", "app_google_oauth"),
             namespaces=dict(zip(GOOGLE_IDS, NAMESPACES)))
-        tools = {t.name: t for t in main._GDRIVE_TOOLS + main._GCALENDAR_TOOLS
-                 + main._GDOCS_TOOLS + main._GSHEETS_TOOLS}
+        tools = {t.name: t for t in _google_tools()}
         verbs = {n: VerbSpec(component=comp.key, pack=PACK, namespace=n.split(".")[0],
                              tool=t, handler=self._svc("verb", {"from": "component"}),
                              offload=False)
@@ -364,25 +494,24 @@ class TheVerbsMoveToTheComponentTests(_Istanza):
         for ns in NAMESPACES:
             self.assertNotIn(ns, main._native_tool_namespaces())
 
-    def test_in_native_position_they_are_the_gateways(self):
+    def test_in_native_position_nothing_serves_them(self):
+        """The native Google code is gone (#524): on `native` the verbs are not
+        listed, no component serves them, a call is refused."""
         from .. import main
         self.posizione("native")
         nomi = {t.name for t in main._all_native_tools()}
         for verbo in _verbs():
             with self.subTest(verbo=verbo):
-                self.assertIn(verbo, nomi)
+                self.assertNotIn(verbo, nomi)
                 self.assertFalse(main._is_packaged_verb(verbo))
-                # A component left loaded by a switch turned back serves nothing.
                 self.assertIsNone(main._component_verb(verbo))
+                with self.assertRaises(main._PackVerbRefused):
+                    main._check_component(verbo)
         self.assertEqual(main._component_tools(), [])
-        for ns in NAMESPACES:
-            self.assertIn(ns, main._native_tool_namespaces())
 
     def test_a_call_reaches_the_component_not_the_native_code(self):
         from .. import main
-        with patch.object(main, "_dispatch_gdrive",
-                          side_effect=AssertionError("native code ran")):
-            out = _call_as_clodia("gdrive.list", {})
+        out = _call_as_clodia("gdrive.list", {})
         self.assertEqual(json.loads(out), {"from": "component"}, out)
         self.assertEqual(self.component.calls[0][0], "verb")
 
@@ -407,17 +536,17 @@ def _risposte() -> dict:
     out: dict = {}
     for verbo in _verbs():
         spec = egress.spec_for(verbo)
-        out[f"spec:{verbo}"] = None if spec is None else (spec[0], spec[1](dict(PINS.ARGS)))
-        out[f"fonte:{verbo}"] = resolved.source_uri(verbo, dict(PINS.ARGS))
+        out[f"spec:{verbo}"] = None if spec is None else (spec[0], spec[1](dict(ARGS)))
+        out[f"fonte:{verbo}"] = resolved.source_uri(verbo, dict(ARGS))
         out[f"lettura:{verbo}"] = resolved.is_declared_read(verbo)
         out[f"taint:{verbo}"] = taint.taints(verbo)
-    for raw, _want in PINS.CANONICAL:
+    for raw, _want in CANONICAL:
         out[f"canonico:{raw}"] = egress.canonical(raw)
     for extra in ("https://drive.google.com/drive/u/12/folders/ABC/view",
                   "https://drive.google.com.evil.example/drive/folders/ABC",
                   "https://evil.example/drive/folders/ABC"):
         out[f"canonico:{extra}"] = egress.canonical(extra)
-    for direzione, uri, _want in PINS.GRANTABLE:
+    for direzione, uri, _want in GRANTABLE:
         out[f"concedibile:{direzione}:{uri}"] = grantable(direzione, uri)
     for uri in ("gdrive:folder/X", "gsheets:S", "gcal:a@b.it"):
         out[f"danger:{uri}"] = egress.danger_note(uri)
@@ -472,12 +601,12 @@ class ParityTests(_Istanza):
                 self.assertEqual(r["card_altre"], ("google",))
 
     def test_the_pins_tables_hold_in_pack_position_too(self):
-        for verb, (spec, src, t) in PINS.PDP.items():
+        for verb, (spec, src, t) in PDP.items():
             with self.subTest(verb=verb):
                 got = egress.spec_for(verb)
-                self.assertEqual(None if got is None else (got[0], got[1](dict(PINS.ARGS))),
+                self.assertEqual(None if got is None else (got[0], got[1](dict(ARGS))),
                                  spec)
-                self.assertEqual(resolved.source_uri(verb, dict(PINS.ARGS)), src)
+                self.assertEqual(resolved.source_uri(verb, dict(ARGS)), src)
                 self.assertEqual(taint.taints(verb), t)
 
     def test_the_comparison_can_fail(self):
@@ -602,16 +731,6 @@ class FailClosedTests(_Istanza):
                 self.assertTrue(out.startswith("DENIED:"), out)
                 self.assertIn("gateway component", out)
 
-    def test_the_native_client_refuses_in_pack_position(self):
-        sentinel = []
-        with patch.object(google_io, "_transport",
-                          lambda *a: sentinel.append(a) or {}):
-            with self.assertRaises(google_io.NativeDisabled):
-                google_io.call("conto", "drive", "v3", "GET files", params={})
-            self.posizione("native")
-            google_io.call("conto", "drive", "v3", "GET files", params={})
-        self.assertEqual(len(sentinel), 1)
-
     def test_the_gateways_lookups_fail_closed_without_the_component(self):
         self.togli_componente()
         with self.assertRaises(google_switch.ComponentUnavailable) as e:
@@ -648,11 +767,10 @@ class LookupsFollowTheSwitchTests(_Istanza):
                                  "credential_changed", "credential_changed"])
 
     def test_in_native_position_the_component_is_never_asked(self):
-        from .. import tools_api
-        from ..tools import gdrive
+        """Nothing answers on `native` any more (#524): empty, and the
+        component is not asked."""
         self.posizione("native")
-        with patch.object(gdrive, "gworkspace_accounts", lambda: ["nativo"]):
-            self.assertEqual(google_switch.accounts(), ["nativo"])
+        self.assertEqual(google_switch.accounts(), [])
         self.assertEqual(self.component.calls, [])
         self.assertIsNone(loader.service(PACK, "accounts"))
 
