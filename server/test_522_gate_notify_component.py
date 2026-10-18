@@ -39,3 +39,23 @@ class GateNotifyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoFallbackTests(unittest.TestCase):
+    def test_on_pack_without_the_component_no_backend_answers(self):
+        """Like GitHub's git verbs: a mounted `telegram` backend is never a
+        fallback for comms-pack's component (#522 review)."""
+        with patch.object(main, "_is_packaged_verb", lambda n: True), \
+                patch.object(main, "_component_verb", lambda n: None), \
+                patch.object(main.proxy, "is_proxied", lambda n: True):
+            with self.assertRaises(main._PackVerbRefused) as cm:
+                main._check_component("telegram.send")
+        self.assertIn("comms-pack", str(cm.exception))
+
+    def test_join_link_falls_back_to_the_components_username(self):
+        from . import vault
+        svc = NS(handler=lambda a: {"bot_username": "clodia_bot"})
+        with patch.object(vault, "has_credential", lambda n: True), \
+                patch.object(vault, "read_internal", lambda n: {"token": "T"}), \
+                patch.object(loader, "service", lambda *a: svc):
+            self.assertEqual(main._telegram_bot_username(), "clodia_bot")

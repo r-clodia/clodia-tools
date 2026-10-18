@@ -2247,12 +2247,19 @@ def _dispatch_gsheets(name: str, a: dict):
 
 
 def _telegram_bot_username() -> str:
-    """The bot's @username, as stored with its credential (no Telegram call)."""
+    """The bot's @username: as stored with its credential, else as
+    comms-pack's component knows it (`telegram_status`, which asks `getMe`
+    when the credential holds the token only — #522)."""
     try:
         from . import vault as _vault
         if not _vault.has_credential("telegram_bot_token"):
             return ""
-        return str((_vault.read_internal("telegram_bot_token") or {}).get("bot_username") or "")
+        stored = str((_vault.read_internal("telegram_bot_token") or {}).get("bot_username") or "")
+        if stored:
+            return stored
+        from .components import loader as _components
+        svc = _components.service("comms-pack", "telegram_status")
+        return str(((svc.handler({}) if svc is not None else None) or {}).get("bot_username") or "")
     except Exception:  # noqa: BLE001 — unreadable: unknown, the caller says so
         return ""
 
@@ -4941,6 +4948,13 @@ def _check_component(name: str) -> None:
             why = (f"'{name}' is implemented by a pack on this instance, but no "
                    "gateway component and no mounted backend of that pack serves "
                    "it (see GET /internal/components)")
+    if (not why and name.startswith("telegram.") and name not in _GATEWAY_RETAINED_VERBS
+            and _is_packaged_verb(name) and _component_verb(name) is None):
+        # Same rule as GitHub's: only comms-pack's component serves Telegram
+        # (#522); a mounted backend of that namespace is never a fallback.
+        why = (f"'{name}' is served on `telegram: pack` by comms-pack's gateway "
+               "component (comms-pack ≥ 2.2.0), which is not serving it now "
+               "(see GET /internal/components)")
     if (not why and name.startswith("telegram.") and name not in _GATEWAY_RETAINED_VERBS
             and not _is_packaged_verb(name)):
         why = (f"'{name}' has no native implementation any more "

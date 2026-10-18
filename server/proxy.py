@@ -73,7 +73,7 @@ def _resolve_secrets(val):
         ${VAULT:cred.campo}   quel campo del bundle
 
     Un bundle non è sempre `{"value": …}`. `telegram_bot_token` è
-    `{"token", "bot_username", "bot_id"}` — lo scrive `tools_api.telegram_connect`
+    `{"token", "bot_username", "bot_id"}` — lo scriveva `tools_api.telegram_connect` (rimosso, #522)
     dopo aver validato con `getMe` — e con la sola prima forma il server MCP del
     pack che quella credenziale deve usarla partiva con il token **stringa
     vuota**: Telegram rispondeva 401 e il sintomo era «il token del bot è
