@@ -84,6 +84,34 @@ class AttachmentNameTests(unittest.TestCase):
         self.assertEqual(names, ["offerta àè.pdf"])
 
 
+class ReplyRecipientTests(unittest.TestCase):
+    def test_a_reply_goes_to_one_address_the_one_the_pdp_judges(self) -> None:
+        c = _client()
+        sent = {}
+
+        class S:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def send_message(self, msg):
+                sent["to"] = msg["To"]
+
+        orig = {"from": "Ok <ok@vetted.it>, evil@x.com", "subject": "x",
+                "message_id": "<1@x>", "references": ""}
+        with patch.object(c, "read_email", return_value=orig), \
+             patch.object(c, "connect_smtp", return_value=S()):
+            c.reply_email({"email": "a@x"}, "7", "ok")
+        self.assertEqual(sent["to"], "ok@vetted.it")
+        orig["from"] = "nobody"
+        with patch.object(c, "read_email", return_value=orig), \
+             patch.object(c, "connect_smtp", return_value=S()), \
+             self.assertRaises(ValueError):
+            c.reply_email({"email": "a@x"}, "7", "ok")
+
+
 class StrictIngressNonListTests(unittest.TestCase):
     def test_a_non_list_result_reveals_nothing(self) -> None:
         with patch.object(email_tool, "_record_ingress") as rec:
