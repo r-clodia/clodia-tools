@@ -311,9 +311,23 @@ def _detail(e: BaseException) -> str:
     contenere headers e URL già risolti — anche segreti diversi da quelli
     appena inseriti (review di #387).
     """
-    leaf = e
-    while getattr(leaf, "exceptions", None):
-        leaf = leaf.exceptions[0]
+    def _leaves(x: BaseException):
+        subs = getattr(x, "exceptions", None)
+        if subs:
+            for sub in subs:
+                yield from _leaves(sub)
+        else:
+            yield x
+            cause = x.__cause__ or x.__context__
+            if cause is not None and cause is not x:
+                yield from _leaves(cause)
+
+    # Il guasto che conta è quello con una risposta HTTP: in un task group di
+    # anyio il primo della lista è spesso l'effetto (BrokenResourceError dello
+    # stream chiuso), non la causa (il 403 del vendor, review del 18 ott 2026).
+    leaves = list(_leaves(e)) or [e]
+    leaf = next((x for x in leaves
+                 if getattr(getattr(x, "response", None), "status_code", None)), leaves[0])
     status = getattr(getattr(leaf, "response", None), "status_code", None)
     for marker in ("401", "403", "404", "429"):
         if status is None and marker in type(leaf).__name__:

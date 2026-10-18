@@ -167,6 +167,18 @@ class ImplicitTests(_Base):
                 self.mount(spec, name="leftover")
 
 
+class DetailTests(unittest.TestCase):
+
+    def test_the_http_status_wins_over_the_stream_error(self):
+        import anyio
+        import httpx
+        req = httpx.Request("POST", URL)
+        resp = httpx.Response(403, request=req)
+        status_err = httpx.HTTPStatusError("403", request=req, response=resp)
+        group = BaseExceptionGroup("tg", [anyio.BrokenResourceError(), status_err])
+        self.assertEqual(mcp_credentials._detail(group), "HTTPStatusError (HTTP 403)")
+
+
 class ReviewFixTests(_Base):
     """I guasti trovati dalla review di #387, uno per test."""
 
