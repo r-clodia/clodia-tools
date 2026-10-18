@@ -739,6 +739,12 @@ def register_mcp_core(config, secrets: dict | None = None,
         # quel namespace) è lo stesso backend. Due confronti diversi sulla
         # stessa domanda: quello più largo vince, se no il mount passa qui e la
         # proprietà lo registra là.
+        # A backend reads only its own vault entries, or those its pack's
+        # connectors bind (clodia-platform#568): refused at mount, naming them.
+        from .proxy import vault_refs_problem as _vrp
+        _why = _vrp(backend)
+        if _why:
+            raise McpRegisterError(_why, status=403)
         precedente = next((b for b in backends
                            if _norm_backend(b.get("name")) == _norm_backend(slug)),
                           None)

@@ -126,6 +126,71 @@ def _backends() -> dict[str, dict]:
     return out
 
 
+def _vault_ref_names(val) -> set[str]:
+    """The vault entries a backend's strings reference (`${VAULT:name[.field]}`)."""
+    out: set[str] = set()
+    if isinstance(val, str):
+        out.update(m.group(1).partition(".")[0] for m in _VAULT_RE.finditer(val))
+    elif isinstance(val, dict):
+        for v in val.values():
+            out |= _vault_ref_names(v)
+    elif isinstance(val, list):
+        for v in val:
+            out |= _vault_ref_names(v)
+    return out
+
+
+def _pack_bound_credentials(pack: str) -> tuple[set[str], set[str]]:
+    """(vault entries, vault prefixes) the connector manifests of `pack` bind:
+    `providers[].credential.vault_entry` and `credentials:`. Read from the
+    manifests the GATEWAY trusts (`resolved.manifests`: a first-party pack's
+    is the pinned upstream copy; a disabled pack has none)."""
+    entries: set[str] = set()
+    prefixes: set[str] = set()
+    try:
+        from .connectors import resolved
+        doc = resolved.manifests().get(pack) or {}
+    except Exception:  # noqa: BLE001 — unreadable: nothing bound
+        return entries, prefixes
+    for c in doc.get("connectors") or []:
+        if not isinstance(c, dict):
+            continue
+        for p in c.get("providers") or []:
+            cred = p.get("credential") if isinstance(p, dict) else None
+            if isinstance(cred, dict) and cred.get("vault_entry"):
+                entries.add(str(cred["vault_entry"]))
+        for x in c.get("credentials") or []:
+            x = str(x)
+            (prefixes if x.endswith("_") else entries).add(x)
+    return entries, prefixes
+
+
+def vault_refs_problem(b: dict) -> str | None:
+    """Why this backend may NOT read the vault entries it references, or None
+    (clodia-platform#568).
+
+    A backend reads only its OWN credentials (`mcp_<slug>_*`, `mcp_cred_<slug>`,
+    `mcp_oauth_<slug>`) or those a connector manifest of the SAME pack binds
+    (it-pack's `github` → `github_pat`). Before, `${VAULT:github_pat}` in any
+    mounted backend's header sent that secret to the backend's host."""
+    slug = str(b.get("name") or "")
+    refs = _vault_ref_names({k: b.get(k) for k in ("url", "headers", "env", "args")})
+    if not refs:
+        return None
+    pack = str(b.get("pack") or "")
+    entries, prefixes = _pack_bound_credentials(pack) if pack else (set(), set())
+    altrui = sorted(
+        n for n in refs
+        if not (n.startswith(f"mcp_{slug}_") or n in (f"mcp_cred_{slug}", f"mcp_oauth_{slug}")
+                or n in entries or any(n.startswith(p) for p in prefixes)))
+    if not altrui:
+        return None
+    return (f"il backend MCP '{slug}' fa riferimento a credenziali che non sono sue "
+            f"({', '.join(altrui)}): un backend legge solo le proprie "
+            "(mcp_<nome>_*, mcp_cred_<nome>, mcp_oauth_<nome>) o quelle che un "
+            "connettore del suo stesso pack dichiara")
+
+
 @asynccontextmanager
 async def session(b: dict, *, oauth_handlers: tuple | None = None):
     """Apre una ClientSession verso il backend (stdio o http). I secret
@@ -139,7 +204,14 @@ async def session(b: dict, *, oauth_handlers: tuple | None = None):
     """
     # La credenziale inserita al «Connetti» (#565) entra qui come `${VAULT:…}`,
     # e la risolve la riga dopo come ogni altro segreto del backend.
-    b = _resolve_secrets(mcp_credentials.apply(b))
+    b = mcp_credentials.apply(b)
+    # At every start, not only at mount: entries persisted before #568 are
+    # checked too, and a pack that loses a connector loses its credential.
+    _why = vault_refs_problem(b)
+    if _why:
+        LOG.error("mcp: %s — sessione rifiutata", _why)
+        raise PermissionError(_why)
+    b = _resolve_secrets(b)
     transport = b.get("transport", "stdio")
     if transport == "stdio":
         # `runtime_env` e non `os.environ`: i backend stdio sono i server MCP dei
