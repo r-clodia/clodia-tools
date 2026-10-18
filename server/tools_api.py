@@ -383,11 +383,7 @@ def connectors_snapshot() -> list[dict]:
     })
     # Telegram (tool telegram.*): connesso se il bot token è nel vault.
     # "Connetti" inserisce il token di un bot dedicato (paste-key) → vault.
-    try:
-        from .tools import telegram as _tg
-        _tg_status = _tg.status()
-    except Exception:  # noqa: BLE001
-        _tg_status = {"configured": vault.has_credential("telegram_bot_token")}
+    _tg_status = _telegram_status()
     connectors.append({
         "id": "telegram",
         "label": "Telegram",
@@ -1440,52 +1436,29 @@ async def email_mailbox_remove(request: Request):
                          "global_revoked": pulizia["global"]})
 
 
+def _telegram_status() -> dict:
+    """The bot's non-sensitive status (configured, @username, chats, last
+    error), from comms-pack's gateway component (#522): the gateway keeps no
+    Telegram client. Without the component, only whether a token is stored."""
+    configured = vault.has_credential("telegram_bot_token")
+    try:
+        from .components import loader as _components
+        svc = _components.service("comms-pack", "telegram_status")
+        if svc is not None:
+            return dict(svc.handler({}) or {})
+    except Exception as e:  # noqa: BLE001 — a status, never a failure
+        return {"configured": configured, "last_error": str(e)[:200]}
+    return {"configured": configured,
+            "note": "Telegram is served by comms-pack's gateway component "
+                    "(connectors: {telegram: pack}); it is not serving now"}
+
+
 async def telegram_status(request: Request):
     """Stato non sensibile dell'integrazione Telegram (per la card di setup e
     per Wainston via app_runtime). Mai il token."""
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    from .tools import telegram as tg
-    try:
-        return JSONResponse(tg.status())
-    except Exception as e:  # noqa: BLE001
-        return JSONResponse({"error": str(e)[:300]}, status_code=500)
-
-
-async def telegram_connect(request: Request):
-    g = _connector_guard("telegram")
-    if g is not None:
-        return g
-    """Connette un bot Telegram dedicato. Body: {token}. Valida con getMe,
-    deposita il token nel vault (grant clodia) e memorizza l'@username. token
-    vuoto → disconnette (rimuove la credenziale). Il token non transita mai dal
-    modello: lo usano solo i tool telegram.* via vault."""
-    if not _authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "bad_json"}, status_code=400)
-    from .tools import telegram as tg
-    token = (body.get("token") or "").strip()
-    if not token:
-        vault.remove("telegram_bot_token")
-        tg.set_bot_username(None)
-        LOG.info("telegram_connect: disconnesso (token rimosso)")
-        return JSONResponse({"connected": False})
-    # Valida il token con getMe prima di depositarlo.
-    try:
-        me = tg.api_call(token, "getMe")
-    except Exception as e:  # noqa: BLE001
-        LOG.warning("telegram_connect: getMe fallita (%s)", str(e)[:120])
-        return JSONResponse({"error": f"token non valido: {str(e)[:200]}"}, status_code=400)
-    username = me.get("username")
-    vault.deposit("telegram_bot_token", {"token": token, "bot_username": username,
-                                         "bot_id": me.get("id")},
-                  cred_type="api_key", grant_agents=["clodia"])
-    tg.set_bot_username(username)
-    LOG.info("telegram_connect: bot @%s connesso (token len=%d)", username, len(token))
-    return JSONResponse({"connected": True, "bot_username": username})
+    return JSONResponse(_telegram_status())
 
 
 GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
@@ -2005,7 +1978,6 @@ routes = [
     Route("/tools/gworkspace/auth", gworkspace_auth, methods=["GET"]),
     Route("/tools/gworkspace/connect", gworkspace_connect, methods=["POST"]),
     Route("/tools/telegram/status", telegram_status, methods=["GET"]),
-    Route("/tools/telegram/connect", telegram_connect, methods=["POST"]),
     Route("/tools/backup/config", backup_configure, methods=["POST"]),
     Route("/tools/backup/status", backup_status, methods=["GET"]),
     Route("/tools/backup/snapshots", backup_snapshots, methods=["GET"]),

@@ -141,7 +141,10 @@ class TheSwitchMovesTheConnectorTests(_Istanza):
             M.vault_entry_problem("telegram_bot_token", "telegram"), "")
         from .. import main
         self.assertNotIn(UN_VERBO_NATIVO, main.all_native_verb_names())
-        self.assertNotIn("telegram", main._native_tool_namespaces())
+        # Still a namespace the gateway serves — its own verbs (`listen`,
+        # `unlisten`, `join_link`) are all that is left of it natively (#522),
+        # so it stays grantable.
+        self.assertIn("telegram", main._native_tool_namespaces())
         self.assertTrue(main._is_packaged_verb(UN_VERBO_NATIVO))
 
     def test_on_native_nothing_of_that_has_moved(self):
@@ -150,9 +153,14 @@ class TheSwitchMovesTheConnectorTests(_Istanza):
         self.assertIn("telegram", M.core_namespaces())
         self.assertTrue(M.vault_entry_problem("telegram_bot_token", "telegram"))
         from .. import main
-        self.assertIn(UN_VERBO_NATIVO, main.all_native_verb_names())
+        # The native agent verbs are gone (#522): on `native` they are not
+        # listed and a call says which switch to turn.
+        self.assertNotIn(UN_VERBO_NATIVO, main.all_native_verb_names())
         self.assertIn("telegram", main._native_tool_namespaces())
         self.assertFalse(main._is_packaged_verb(UN_VERBO_NATIVO))
+        with self.assertRaises(main._PackVerbRefused) as cm:
+            main._check_component(UN_VERBO_NATIVO)
+        self.assertIn("telegram: pack", str(cm.exception))
 
     def test_no_section_means_native(self):
         """Una migrazione si accende. Il profilo di tutte le istanze di oggi non
@@ -534,16 +542,6 @@ class ThePackReachesItsCredentialTests(unittest.TestCase):
             self.assertEqual(proxy._resolve_secrets("${VAULT:niente.token}"),
                              "${VAULT:niente.token}")
 
-    def test_the_bundle_telegram_connect_writes_has_no_value_field(self):
-        """La prova che il difetto era reale e non ipotetico: il bundle che la
-        rotta di connessione deposita non ha `value`, quindi la forma senza
-        campo su quella credenziale non poteva che dare vuoto."""
-        from .. import tools_api
-        sorgente = inspect.getsource(tools_api.telegram_connect)
-        self.assertIn('vault.deposit("telegram_bot_token"', sorgente)
-        self.assertIn('"token": token', sorgente)
-        self.assertNotIn('"value"', sorgente)
-
 
 class TheRegisteredHandlerIsStillCallToolTests(unittest.TestCase):
     """`@app.call_tool()` decora `call_tool`, e nient'altro.
@@ -708,15 +706,15 @@ class NoVerbIsLeftBehindTests(_Istanza):
         self.assertEqual(main._fill_declared_defaults("telegram.join_link", {}), [])
         self.assertFalse(main._fill_declared_file("telegram.join_link", {}))
 
-    def test_they_are_all_there_in_the_other_position(self):
-        """Il controllo gemello: l'interruttore su `native` non deve togliere
-        niente. Senza questa metà, un elenco vuoto sarebbe verde due volte."""
+    def test_only_the_gateways_own_verbs_are_left_natively(self):
+        """Il controllo gemello: su `native` restano solo i verbi del gateway
+        (registri dei binding e dei join), il resto è del pack (#522)."""
         self.posizione("native")
         from .. import main
         rimasti = {n for n in main.all_native_verb_names()
                    if n.startswith("telegram.")}
-        self.assertIn("telegram.send", rimasti)
-        self.assertIn("telegram.roster", rimasti)
+        self.assertEqual(rimasti, {"telegram.listen", "telegram.unlisten",
+                                   "telegram.join_link"})
 
     def test_the_namespace_comes_from_the_builtin_manifest(self):
         """E non da una lista scritta nel dispatch: è il manifest builtin a dire

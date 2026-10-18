@@ -39,12 +39,26 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
 _START_RE = re.compile(r"^/start(?:@([A-Za-z0-9_]+))?\s+([A-Za-z0-9_-]{16,64})\s*$")
 
 
+def _chat_title(chat: dict) -> str:
+    if chat.get("title"):
+        return chat["title"]
+    name = " ".join(x for x in (chat.get("first_name"), chat.get("last_name")) if x)
+    if chat.get("username"):
+        name = f"{name} (@{chat['username']})".strip()
+    return name or str(chat.get("id"))
+
+
 def _path() -> Path:
     env = os.environ.get("CLODIA_TELEGRAM_JOIN")
     if env:
         return Path(env)
-    from .telegram import _state_path
-    return _state_path().parent / "telegram-join.json"
+    # Next to where the native client kept its state (the vault dir, or
+    # CLODIA_TELEGRAM_STATE's dir): the same file as before #522 removed it.
+    state = os.environ.get("CLODIA_TELEGRAM_STATE")
+    if state:
+        return Path(state).parent / "telegram-join.json"
+    from .. import vault
+    return Path(vault.vault_dir()) / "telegram-join.json"
 
 
 def _load() -> dict:
@@ -184,14 +198,12 @@ def announce(prop: dict) -> None:
 def intercept(msg: dict, bot_username: str | None) -> bool:
     """Handle a `/start <token>` join message. True = consumed, do not relay.
 
-    Called by both Telegram consumers (`poll_updates`, `_refresh`) on every
-    message. A message that is not a join command is left untouched."""
+    Called by the relay's `/poll` on every message (`telegram_api`). A message that is not a join command is left untouched."""
     tok = parse_start(msg.get("text") or "", bot_username)
     if not tok:
         return False
     chat = msg.get("chat") or {}
     frm = msg.get("from") or {}
-    from .telegram import _chat_title
     prop = claim(tok, chat_id=str(chat.get("id")), chat_title=_chat_title(chat),
                  chat_type=str(chat.get("type") or ""),
                  added_by=frm.get("username") or str(frm.get("id") or ""))

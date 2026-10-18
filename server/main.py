@@ -1830,58 +1830,11 @@ _EGRESS_ADMIN_TOOLS: list[Tool] = [
 # telegram.* — invio + inbound con lease per-chat. Un agente scrive solo a chat
 # che hanno già scritto e di cui detiene il lease; chat diverse → lease
 # indipendenti. Il bot token vive nel vault, mai nel modello.
+#: Only the gateway's OWN Telegram verbs: the channel bindings registry and
+#: the join-by-link tokens (#549). The agent verbs (`inbox`, `send`, `poll`,
+#: `roster`, …) are comms-pack's gateway component's; their native
+#: implementation is gone (clodia-platform#522).
 _TELEGRAM_TOOLS: list[Tool] = [
-    Tool(name="telegram.inbox",
-         description=("Chat Telegram con messaggi in arrivo (metadati, NON consuma): "
-                      "per ognuna chat_id, titolo, n. messaggi pendenti, anteprima e chi "
-                      "detiene il lease. Punto di partenza prima di prendere un lease."),
-         inputSchema={"type": "object", "properties": {}}),
-    Tool(name="telegram.lease_acquire",
-         description=("Acquisisce il lease ESCLUSIVO su una chat per N minuti: finché è "
-                      "valido sei l'unico a consumarne i messaggi e a poterle scrivere. "
-                      "Fallisce se un altro agente la detiene. Solo chat che hanno scritto."),
-         inputSchema={"type": "object", "properties": {
-             "chat_id": {"type": "string", "description": "ID chat (da telegram.inbox)"},
-             "minutes": {"type": "integer", "description": "Durata lease (default 10, max 120)"}},
-             "required": ["chat_id"]}),
-    Tool(name="telegram.poll",
-         description=("Consuma (svuota) i messaggi in coda di una chat. Richiede un lease "
-                      "attivo del chiamante su quella chat."),
-         inputSchema={"type": "object", "properties": {
-             "chat_id": {"type": "string"}}, "required": ["chat_id"]}),
-    Tool(name="telegram.send",
-         description=("Invia un messaggio a una chat/gruppo (lease-free: sei l'unico "
-                      "mittente). Vincolo Telegram: la chat deve aver già contattato il "
-                      "bot, o il bot dev'essere membro del gruppo. `chat_id` accetta anche "
-                      "il NOME del gruppo. `chat_id` OMESSO → la chat collegata al topic "
-                      "da cui stai chiamando (telegram.listen): PREFERISCI omettere, non "
-                      "indovinare/ricordare un nome — due gruppi con nomi quasi identici "
-                      "hanno già causato invii al gruppo sbagliato."),
-         inputSchema={"type": "object", "properties": {
-             "chat_id": {"type": "string", "description": "opzionale: default la chat del topic corrente"},
-             "text": {"type": "string"},
-             "thread_id": {"type": "integer", "description": "opzionale: il topic (thread) di un gruppo-forum, es. il message_thread_id di «#funding»; omesso = thread Generale"}},
-             "required": ["text"]}),
-    Tool(name="telegram.send_file",
-         description=("Invia un FILE del topic a una chat/gruppo Telegram come allegato "
-                      "(o come foto se è un'immagine). Solo tu (messaggero) puoi spedire. "
-                      "Passa `chat_id` (id o NOME del gruppo) e `path` (il file dentro il "
-                      "topic, es. `files/foo.png`): il TOPIC si ricava dal gruppo. `tier`/"
-                      "`name` solo se il file è in un topic diverso da quello del gruppo. "
-                      "`chat_id` OMESSO → la chat E il topic sono quelli da cui stai "
-                      "chiamando: preferiscilo, per lo stesso motivo di telegram.send."),
-         inputSchema={"type": "object", "properties": {
-             "chat_id": {"type": "string", "description": "opzionale: default la chat del topic corrente"},
-             "path": {"type": "string", "description": "path del file nel topic, es. files/foo.png"},
-             "tier": {"type": "string", "description": "opzionale (override topic)"},
-             "name": {"type": "string", "description": "opzionale: nome del topic (override)"},
-             "caption": {"type": "string"},
-             "thread_id": {"type": "integer", "description": "opzionale: il topic (thread) di un gruppo-forum; omesso = thread Generale"}},
-             "required": ["path"]}),
-    Tool(name="telegram.lease_release",
-         description="Rilascia anticipatamente il lease su una chat (no-op se non lo detieni).",
-         inputSchema={"type": "object", "properties": {
-             "chat_id": {"type": "string"}}, "required": ["chat_id"]}),
     Tool(name="telegram.listen",
          description=("Collega una chat Telegram a un topic: da ora il messaggero ne "
                       "riporta VERBATIM i messaggi nella chat del topic, con l'handle "
@@ -1924,11 +1877,6 @@ _TELEGRAM_TOOLS: list[Tool] = [
     # `_packaged_namespaces()` dal manifest, e trova questo verbo ovunque
     # stia — ma è dove il verbo va letto, e rende la PR 3 la cancellazione di
     # una lista sola.
-    Tool(name="telegram.roster",
-         description=("Amministratori e membri noti di un gruppo, con uid e "
-                      "username: serve a mappare le persone senza digitare numeri."),
-         inputSchema={"type": "object", "properties": {
-             "chat_id": {"type": "string"}}, "required": ["chat_id"]}),
 ]
 
 
@@ -2298,90 +2246,28 @@ def _dispatch_gsheets(name: str, a: dict):
     raise ValueError(f"unknown gsheets verb: {name}")
 
 
+def _telegram_bot_username() -> str:
+    """The bot's @username, as stored with its credential (no Telegram call)."""
+    try:
+        from . import vault as _vault
+        if not _vault.has_credential("telegram_bot_token"):
+            return ""
+        return str((_vault.read_internal("telegram_bot_token") or {}).get("bot_username") or "")
+    except Exception:  # noqa: BLE001 — unreadable: unknown, the caller says so
+        return ""
+
+
 def _dispatch_telegram(name: str, a: dict):
-    sub0 = name.split(NS_SEP_DOT, 1)[1]
-    if sub0 == "roster":
-        from .tools import telegram as _tg
-        tok = _tg._token_internal()
-        # `api_call` ritorna già il `result`: qui è direttamente la lista.
-        got = _tg.api_call(tok, "getChatAdministrators", {"chat_id": a["chat_id"]}) or []
-        out = []
-        for m in got:
-            u = m.get("user") or {}
-            if u.get("is_bot"):
-                continue
-            out.append({"uid": str(u.get("id")), "username": u.get("username"),
-                        "name": " ".join(x for x in (u.get("first_name"),
-                                                     u.get("last_name")) if x),
-                        "status": m.get("status")})
-        # Telegram non espone l'elenco COMPLETO dei membri di un gruppo a un
-        # bot: si ottengono gli amministratori. Lo si dice invece di far
-        # credere che la lista sia tutta — chi mappa deve sapere che i membri
-        # non amministratori vanno aggiunti a mano dal loro uid.
-        return {"members": out, "complete": False,
-                "note": ("Telegram espone a un bot i soli amministratori. Gli "
-                         "altri membri vanno mappati col loro uid, che compare "
-                         "quando scrivono nel gruppo.")}
-    from .tools import telegram as tg
+    """The gateway's own Telegram verbs (`join_link`, `listen`, `unlisten`):
+    they write the gateway's registries, never call Telegram."""
     verb = name.split(NS_SEP_DOT, 1)[1]
-    if verb == "inbox":
-        return tg.inbox()
-    if verb == "lease_acquire":
-        return tg.lease_acquire(a["chat_id"], a.get("minutes", 10))
-    if verb == "poll":
-        return tg.poll(a["chat_id"])
-    if verb == "send":
-        return tg.send(a.get("chat_id"), a["text"], thread_id=a.get("thread_id"))
-    if verb == "send_file":
-        # Legge il file dal topic (compartimento: dev'essere participant) e lo invia.
-        # `chat_id` ESPLICITO: il TOPIC si ricava dal gruppo (binding chat→topic),
-        # `tier`/`name` sono override opzionali per topic diversi da quello del
-        # gruppo. `chat_id` OMESSO: si parte dal topic CORRENTE per entrambi —
-        # stessa correzione di `telegram.send` (clodia-platform#381 seguito, 23
-        # set 2026): indovinare/ricordare un chat_id o un nome di gruppo ha
-        # prodotto invii ripetuti al gruppo sbagliato fra due nomi quasi
-        # identici. Il topic corrente è l'unica fonte che non può sbagliare.
-        import base64
-        import os as _os
-        from .tools import telegram_bindings as _tb
-        tier, tname = a.get("tier"), a.get("name")
-        chat_arg = a.get("chat_id")
-        if chat_arg:
-            cid = tg._resolve_chat(chat_arg)
-            if not (tier and tname):
-                b = _tb.get(cid)
-                if not b:
-                    raise ValueError(f"chat {cid} non legata a un topic: passa tier+name del topic")
-                tier, tname = b["tier"], b["topic"]
-        else:
-            if not (tier and tname):
-                scope = current_channel()
-                if not scope:
-                    raise ValueError(
-                        "nessun chat_id indicato e la chiamata non arriva da un "
-                        "topic: passa chat_id oppure tier+name")
-                tier, tname = scope.split("/", 1)
-            cid = _tb.get_for_topic(tier, tname)
-            if not cid:
-                raise ValueError(
-                    f"nessuna chat Telegram collegata al topic {tier}/{tname}: "
-                    f"fai prima telegram.listen(tier=\"{tier}\", name=\"{tname}\", "
-                    "chat_id=<chat_id>) — o passa chat_id esplicito.")
-        _require_topic_member(_topics(), tier, tname)
-        data = _topics().read_file(tier, tname, a["path"])
-        _note_crossing(data=data, kind="file")
-        return tg.send_file(cid, _os.path.basename(a["path"]),
-                            base64.b64encode(data).decode("ascii"), a.get("caption", ""),
-                            thread_id=a.get("thread_id"))
-    if verb == "lease_release":
-        return tg.lease_release(a["chat_id"])
     if verb == "join_link":
         # The link only asks Telegram to add the bot; what it authorises is
         # decided later by the topic owner (clodia-platform#549).
         from .tools import telegram_join as tj
         tier, tname = a["tier"], a["name"]
         _require_topic_member(_topics(), tier, tname)
-        uname = tg.bot_username()
+        uname = _telegram_bot_username()
         if not uname:
             raise ValueError("bot Telegram non configurato (username sconosciuto): "
                              "collega prima un bot dalla scheda Tools")
@@ -3444,8 +3330,13 @@ def _gate_notify_principal(agent: str, gate_key: str, principal: str | None) -> 
         msg = (f"🔐 Gate in attesa: '{agent}' vuole usare `{gate_key}` (azione non "
                f"presidiata). Approva/nega dalla sezione gate della webui.")
         if tg_id:
-            from .tools import telegram as _tg
-            _tg.send(str(tg_id), msg)
+            # comms-pack's component sends it (#522): the gateway has no
+            # Telegram client. No component → no notification (best effort).
+            from .components import loader as _components
+            svc = _components.service("comms-pack", "telegram_notify")
+            if svc is None:
+                return False
+            svc.handler({"chat_id": str(tg_id), "text": msg})
             return True
     except Exception:  # noqa: BLE001 — notifica best-effort, mai bloccante
         pass
@@ -5050,6 +4941,11 @@ def _check_component(name: str) -> None:
             why = (f"'{name}' is implemented by a pack on this instance, but no "
                    "gateway component and no mounted backend of that pack serves "
                    "it (see GET /internal/components)")
+    if (not why and name.startswith("telegram.") and name not in _GATEWAY_RETAINED_VERBS
+            and not _is_packaged_verb(name)):
+        why = (f"'{name}' has no native implementation any more "
+               "(clodia-platform#522): it is served by comms-pack's gateway "
+               "component with `connectors: {telegram: pack}` in the instance profile")
     if not why and name in _GITHUB_NATIVE_NAMES and not _is_packaged_verb(name):
         why = (f"'{name}' has no native implementation any more "
                "(clodia-platform#525): it is served by it-pack's gateway component "
@@ -5777,14 +5673,9 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_profile(name, arguments, _ag)
         elif name.startswith("settings."):
             result = _dispatch_settings(name, arguments, _ag)
-        elif name.startswith("telegram.") and not _is_packaged_verb(name):
-            # `and not _is_packaged_verb`: con l'interruttore su `pack` (#522)
-            # questi verbi li serve il backend MCP del pack, quindi la chiamata
-            # deve scendere fino al ramo `proxy.is_proxied`. Il ramo nativo
-            # resta qui finché la PR 3 lo porta via: due implementazioni dello
-            # stesso verbo non girano mai insieme — è il profilo a dire quale.
-            # `to_thread` è di #553: `_dispatch_telegram` fa rete (getUpdates,
-            # sendMessage) e fuori dal loop ci deve restare.
+        elif name in _GATEWAY_RETAINED_VERBS and name.startswith("telegram."):
+            # Only the gateway's own verbs (bindings, join links): the agent
+            # verbs are comms-pack's component's, dispatched below (#522).
             result = await asyncio.to_thread(_dispatch_telegram, name, arguments)
         elif name.startswith("memory."):
             result = _dispatch_memory(name, arguments)

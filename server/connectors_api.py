@@ -193,6 +193,14 @@ async def connect(request: Request):
         # around it (the MCP backend, `_connector_guard`, the integrations
         # profile). The generic route delegates to that handler, so the two
         # URLs are one behaviour; with no handler it refuses.
+        if cid == "telegram":
+            # No native Telegram any more (#522): its credential is comms-pack's
+            # connector's, deposited by this route in `pack` position.
+            return JSONResponse(
+                {"error": "Telegram non ha più un'implementazione nativa: metti "
+                          "`connectors: {telegram: pack}` nel profilo e installa "
+                          "comms-pack ≥ 2.2.0, poi collega il bot da qui"},
+                status_code=409)
         legacy = _LEGACY_CONNECT.get(cid)
         if legacy is None:
             return JSONResponse(
@@ -291,12 +299,11 @@ def _cred_type(connector) -> str:
 
 #: Built-in connectors whose credential has a dedicated handler in `tools_api`.
 #: Ognuno fa, attorno al deposito, qualcosa che il deposito generico non fa e
-#: che non va perso: GitHub monta/smonta il backend MCP ufficiale, Telegram
-#: valida il token con `getMe` e memorizza l'@username, OpenAI passa per il
-#: gating `integrations` del profilo. La rotta generica delega, così le due URL
+#: che non va perso: GitHub monta/smonta il backend MCP ufficiale, OpenAI passa
+#: per il gating `integrations` del profilo. (Telegram non c'è più: il suo
+#: handler nativo è stato rimosso con il client, #522.) La rotta generica delega, così le due URL
 #: restano UN comportamento e la webui può chiamarne una sola (#520).
 _LEGACY_CONNECT = {"github": "github_connect",
-                   "telegram": "telegram_connect",
                    "openai-images": "openai_connect"}
 
 

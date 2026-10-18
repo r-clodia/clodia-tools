@@ -289,24 +289,13 @@ class LaPortaDegliUpdateEUnaSolaTests(unittest.IsolatedAsyncioTestCase):
             return risposte.get(verbo, {})
         return patch.object(telegram_api, "_pack", fake)
 
-    def _posizione(self, nativo: bool):
-        return patch.object(telegram_api, "_nativo", lambda: nativo)
-
     async def test_il_poll_passa_dal_backend_del_pack(self) -> None:
         riga = {"chat_id": "-100", "text": "ciao", "chat_type": "supergroup"}
-        with self._posizione(False), \
-                self._pack({"updates": {"messages": [riga],
+        with self._pack({"updates": {"messages": [riga],
                                         "bot_username": "clodiabot"}}):
             r = await telegram_api.poll(_Req({"timeout": 5}))
         self.assertEqual(self.chiamate, [("updates", {"timeout": 5})])
         self.assertEqual(json.loads(r.body)["count"], 1)
-
-    async def test_in_posizione_nativa_il_backend_non_si_tocca(self) -> None:
-        with self._posizione(True), self._pack({}), \
-                patch.object(telegram_api.tg, "poll_updates", lambda t: []):
-            r = await telegram_api.poll(_Req({"timeout": 5}))
-        self.assertEqual(self.chiamate, [])
-        self.assertEqual(json.loads(r.body)["count"], 0)
 
     async def test_un_join_per_link_non_finisce_nel_topic(self) -> None:
         """`/start <token>` è un join che aspetta l'owner, non un messaggio da
@@ -316,8 +305,7 @@ class LaPortaDegliUpdateEUnaSolaTests(unittest.IsolatedAsyncioTestCase):
                 "chat_type": "supergroup", "from_username": "dadabit"}
         altro = {"chat_id": "-100", "text": "ciao", "chat_type": "supergroup"}
         visti: list = []
-        with self._posizione(False), \
-                self._pack({"updates": {"messages": [riga, altro],
+        with self._pack({"updates": {"messages": [riga, altro],
                                         "bot_username": "clodiabot"}}), \
                 patch("server.tools.telegram_join.intercept",
                       lambda msg, bot: visti.append((msg, bot)) or
@@ -332,34 +320,33 @@ class LaPortaDegliUpdateEUnaSolaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visti[0][1], "clodiabot")
 
     async def test_il_send_interno_passa_dal_pack(self) -> None:
-        with self._posizione(False), \
-                self._pack({"send": {"ok": True, "message_id": 9}}):
+        with self._pack({"send": {"ok": True, "message_id": 9}}):
             r = await telegram_api.send(_Req({"chat_id": "-100", "text": "ciao"}))
         self.assertEqual(self.chiamate[0][0], "send")
         self.assertEqual(json.loads(r.body)["message_id"], 9)
 
     async def test_il_download_passa_dal_pack(self) -> None:
-        with self._posizione(False), self._pack({"download": {"size": 3}}):
+        with self._pack({"download": {"size": 3}}):
             r = await telegram_api.download(_Req({"file_id": "F1"}))
         self.assertEqual(self.chiamate[0], ("download", {"file_id": "F1"}))
         self.assertEqual(json.loads(r.body)["size"], 3)
 
-    async def test_il_drenaggio_per_chat_dice_perche_non_c_e(self) -> None:
-        """Nel pack non esiste e nessuno lo chiama (il relay usa `poll`). Si
-        risponde col motivo invece di inventare un drenaggio che consumerebbe
-        la coda condivisa di tutte le chat."""
-        with self._posizione(False), self._pack({}):
-            r = await telegram_api.updates(_Req({"chat_id": "-100"}))
-        self.assertEqual(r.status_code, 501)
-        self.assertEqual(self.chiamate, [])
+    async def test_il_drenaggio_per_chat_non_esiste_piu(self) -> None:
+        """Solo il client nativo lo aveva, e nessuno lo chiamava (il relay usa
+        `poll`): con il nativo rimosso (#522) la rotta non c'è."""
+        self.assertFalse(hasattr(telegram_api, "updates"))
+        self.assertNotIn("/internal/telegram/updates",
+                         [r.path for r in telegram_api.routes])
 
-    async def test_un_errore_del_backend_non_diventa_un_risultato(self) -> None:
-        """Il backend risponde in testo: un `ERROR: …` letto come JSON sarebbe
-        un'eccezione oscura, e letto come successo sarebbe peggio."""
-        with patch.object(telegram_api.proxy, "call_proxied",
-                          lambda n, a: _async("ERROR: RuntimeError: niente bot")):
-            with self.assertRaises(RuntimeError):
+    async def test_senza_componente_nessun_altro_risponde(self) -> None:
+        """Né il client nativo né il backend MCP di comms-pack ≤ 2.0: se il
+        componente non serve, il relay riceve un errore, non un'altra strada."""
+        from server.components import loader
+        with patch.object(loader, "service", lambda *a: None), \
+                patch.object(loader, "verb", lambda *a: None):
+            with self.assertRaises(RuntimeError) as cm:
                 await telegram_api._pack("updates", {})
+        self.assertIn("comms-pack", str(cm.exception))
 
 
 async def _async(valore):
