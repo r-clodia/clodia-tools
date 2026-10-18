@@ -3595,11 +3595,22 @@ def _web_origin(url: object) -> str:
     if scheme not in ("http", "https") or not host:
         return ""
     if ":" in host:
+        import ipaddress as _ip
+        try:
+            _ip.IPv6Address(host)
+        except ValueError:
+            return ""
         host = f"[{host}]"
     else:
         try:
             host = host.encode("idna").decode("ascii")
         except UnicodeError:
+            return ""
+        # Only what a host name can be: a `|` (the key's separator) or any
+        # other character would let the remembered site differ from the one
+        # the card showed (review of clodia-tools#391).
+        import re as _re
+        if not _re.fullmatch(r"[a-z0-9.-]+", host):
             return ""
     try:
         port_n = p.port
@@ -3670,10 +3681,11 @@ async def _require_web_source(verb: str, arguments: dict, agent: str) -> None:
     await _require_gate_consent(
         agent, gate_key, consume=False,
         reason=(f"pagina richiesta: {src or origin}. Il sito non è fra le fonti "
-                "approvate del canale né fra quelle globali. Approvando, l'agente lo "
-                "legge per un tempo limitato; il contenuto è di terzi e il canale "
-                "risulterà contaminato. Per una fonte stabile va aggiunta agli "
-                "ingress del canale."),
+                "approvate del canale né fra quelle globali. «Approva ora»: l'agente "
+                "lo legge per un tempo limitato e il contenuto, di terzi, contamina "
+                "la conversazione. «Approva sempre»: il sito diventa una fonte "
+                "fidata di questo canale — non verrà più chiesto, e ciò che arriva "
+                "da lì non contaminerà più la conversazione."),
         allow_delegation=False)
 
 

@@ -126,6 +126,13 @@ class OriginTests(unittest.TestCase):
         self.assertEqual(main._web_origin("http://[2001:db8::1]:8080/"), "http://[2001:db8::1]:8080/")
         self.assertEqual(main._web_origin("https://pаypal.com/"), "https://xn--pypal-4ve.com/")
         self.assertEqual(main._web_origin("ftp://x.it/"), "")
+        self.assertEqual(main._web_origin("https://evil.com|good.com/"), "")
+        self.assertEqual(main._web_origin("https://a_b.it/"), "")
+
+    def test_the_owner_decides(self) -> None:
+        from . import gate
+        self.assertEqual(gate.gate_class("ingress:web:https://x.it/|chan:SEAL-1:t:c"),
+                         gate.GATE_WALLS)
         self.assertEqual(main._web_origin("https://user:pw@x.it/"), "https://x.it/")
         self.assertEqual(main._web_origin("not a url"), "")
 

@@ -172,7 +172,7 @@ async def remember(request: Request):
     if parti[0] == "ingress" and parti[1] == "web":
         # `ingress:web:<site>|<chat>` (#569): the chat scopes the consent, the
         # SITE is what goes into the list.
-        uri = uri.split("|", 1)[0]
+        uri = uri.rsplit("|", 1)[0]
         direction = "ingress"
     from . import egress as _eg
     try:
