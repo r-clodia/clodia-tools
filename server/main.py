@@ -1354,13 +1354,10 @@ _PROFILE_TOOLS: list[Tool] = [
 #: means — the text of the gate a person reads (clodia-platform#570).
 NATIVE_GATED_RISKS: dict[str, str] = {
     "WebSearch": (
-        "una ricerca sul web con lo strumento nativo del modello. La ricerca la "
-        "esegue il provider del modello (Anthropic), fuori dal gateway: la query "
-        "esce dalla piattaforma con le condizioni del provider, e i risultati — "
-        "testo di terzi, non vagliato — entrano nella conversazione senza i "
-        "controlli sulle fonti e senza la traccia del gateway. Approvando, il "
-        "canale risulta contaminato: le uscite successive chiedono conferma. "
-        "Aprire un risultato resta una lettura web, con il suo gate."),
+        "ricerca web eseguita dal provider del modello, FUORI dal gateway: la "
+        "query esce alle sue condizioni e i risultati (testo di terzi, non "
+        "vagliato) entrano nella conversazione senza controlli sulle fonti. "
+        "Approvando, il canale risulta contaminato."),
 }
 
 #: Gate key prefix of a native tool use (`native:<tool>|<chat>`).
@@ -3732,7 +3729,11 @@ async def _native_consent(arguments: dict, agent: str) -> dict:
     if tool not in NATIVE_GATED_RISKS:
         raise PermissionError(f"native.consent: '{tool}' non è uno strumento nativo "
                               "che si possa concedere")
-    query = str(arguments.get("query") or "").strip()[:300]
+    # The query is written by the model, i.e. possibly by an injection: on the
+    # card it is CODE, with nothing that could open a marker or a line
+    # (review of clodia-tools#392 — `<!-- gate=… -->` rebound the buttons).
+    import re as _re
+    query = _re.sub(r"[<>`\r\n]+", " ", str(arguments.get("query") or "")).strip()[:100]
     if is_unattended():
         raise PermissionError(
             f"native.consent: {tool} esce dal perimetro del gateway e la sessione "
@@ -3740,8 +3741,8 @@ async def _native_consent(arguments: dict, agent: str) -> dict:
     key = f"{NATIVE_GATE}{tool}|{current_chat() or '-'}"
     await _require_gate_consent(
         agent, key, consume=False,
-        reason=(f"{('ricerca: «' + query + '». ') if query else ''}Si tratta di "
-                f"{NATIVE_GATED_RISKS[tool]}"),
+        reason=(f"{tool}: {NATIVE_GATED_RISKS[tool]}"
+                + (f" Ricerca: `{query}`" if query else "")),
         allow_delegation=False)
     _taint.mark(current_chat(), "native", detail=f"{tool}: {query}"[:200], agent=agent)
     try:
@@ -3749,7 +3750,11 @@ async def _native_consent(arguments: dict, agent: str) -> dict:
         _audit.emit("flow.ingress", action="read", resource="native.consent",
                     tool={"name": tool, "source": f"native:{tool}", "vetted": "not_vetted"},
                     input={"hash": _audit.keep(query)})
-    except Exception as _e:  # noqa: BLE001 — the record never changes the grant
+    except Exception as _e:  # noqa: BLE001 — the record never changes the grant…
+        if isinstance(_e, _audit.AuditWriteError):
+            # …except the fail-closed refusal the owner asked for.
+            raise PermissionError("audit trail non disponibile: l'uso non si può "
+                                  "registrare, quindi non si concede")
         LOG.error("audit: native.consent not recorded (%s)", type(_e).__name__)
     return {"granted": True, "tool": tool}
 
@@ -3764,6 +3769,9 @@ async def _require_gate_consent(
     (cross-topic: l'intera operazione sul topic vale finché dura il consenso)."""
     from . import gate as _gate
     from . import observe as _obs
+    # A reason may carry text an agent chose (a URL, a search): it must never
+    # be able to write a card marker that binds the buttons to another gate.
+    reason = (reason or "").replace("<!--", "‹!--").replace("-->", "--›")
     if _obs.skipping():
         # Osservazione: si registra il gate che sarebbe scattato e si procede.
         # Prima della delega, così anche i gate coperti da delega restano contati
