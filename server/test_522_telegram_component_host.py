@@ -81,5 +81,22 @@ class StaleBackendTests(unittest.TestCase):
         resolved._TRANSPORTS = None
 
 
+class TransportCheckTests(unittest.TestCase):
+    """With the stale backend withheld, only calls that would reach it are
+    refused: component verbs and the gateway's own pass the check."""
+
+    def test_only_backend_bound_calls_are_refused(self) -> None:
+        from . import main
+        with patch.object(main.proxy, "is_proxied", return_value=True), \
+             patch("server.connectors.resolved.is_transport_backend", return_value=True), \
+             patch.object(main, "_component_verb",
+                          side_effect=lambda n: object() if n == "telegram.send" else None):
+            main._check_not_transport("telegram.send")            # the component's
+            retained = next(iter(main._GATEWAY_RETAINED_VERBS))
+            main._check_not_transport(retained)                  # the gateway's own
+            with self.assertRaises(main._PackVerbRefused):
+                main._check_not_transport("telegram.updates")    # the stale backend's
+
+
 if __name__ == "__main__":
     unittest.main()
