@@ -5,16 +5,13 @@ Discussione con Davide (19-20 set 2026): scartato un condiviso di sistema
 (`LOCAL_SHARED_ROOT`) bind-montata una volta sola nel gateway, con un
 sottopercorso per-topic anziché un path assoluto scelto a runtime.
 
-Il meccanismo è un symlink dentro `files/` del topic verso
-`LOCAL_SHARED_ROOT/<nome>`: `LocalFsStorage._abs()` risolve i symlink e
-rifiuta qualunque path che, risolto, esca dalla root — quindi un symlink
-VERSO `LOCAL_SHARED_ROOT` (che sta dentro la stessa root) passa il
-confinamento, mentre uno che punti fuori (un path assoluto del Mac non
-imbustato nella root) verrebbe rifiutato. Questi test coprono sia il verbo di
-alto livello sia le due primitive di storage da cui dipende
-(`symlink`/`unlink_symlink`), perché il footgun più pericoloso — cancellare
-il CONTENUTO REALE della cartella condivisa invece del solo collegamento — si
-annida in `unlink_symlink`, non nel verbo.
+Dal clodia-platform#571 il topic la vede come mount `shared/`, risolto
+direttamente su `LOCAL_SHARED_ROOT/<nome>`; fino ad allora era un symlink
+`files/<nome>`, che la migrazione toglie (`unlink_symlink`). Questi test
+coprono sia il verbo di alto livello sia le primitive di storage da cui
+dipende, perché il footgun più pericoloso — cancellare il CONTENUTO REALE
+della cartella condivisa invece del solo collegamento — si annida in
+`unlink_symlink`, non nel verbo. Il mount in sé è in `test_571_shared_mount`.
 """
 from __future__ import annotations
 
@@ -54,15 +51,17 @@ class LocalFolderAddTests(Base):
         self.assertIn(LOCAL_SHARED_ROOT, msg)
         self.assertIn("docker-compose", msg)
 
-    def test_a_successful_add_creates_a_real_symlink(self):
+    def test_a_successful_add_serves_the_folder_as_shared_without_a_symlink(self):
+        """#571: nessun symlink sotto `files/` — il mount `shared/` risolve
+        direttamente sulla sottocartella della radice condivisa."""
         tier, name = self.crea_topic()
         self.monta_radice_condivisa()
         out = self.svc.local_folder_add(tier, name, "tomato-amministrazione")
         self.assertEqual(out["local_folder"]["name"], "tomato-amministrazione")
+        self.assertEqual(out["path"], "shared/")
+        self.assertTrue((self.root / LOCAL_SHARED_ROOT / "tomato-amministrazione").is_dir())
         link = self.root / tier / name / "files" / "tomato-amministrazione"
-        self.assertTrue(link.is_symlink())
-        self.assertEqual(link.resolve(),
-                         (self.root / LOCAL_SHARED_ROOT / "tomato-amministrazione").resolve())
+        self.assertFalse(link.exists() or link.is_symlink())
 
     def test_the_shared_subfolder_is_group_writable(self):
         """Trovato da Davide il 23 set 2026: la cartella esisteva ma il suo
@@ -81,14 +80,14 @@ class LocalFolderAddTests(Base):
         self.monta_radice_condivisa()
         self.svc.local_folder_add(tier, name, "condivisa")
         (self.root / LOCAL_SHARED_ROOT / "condivisa" / "nota.txt").write_text("ciao")
-        entries = self.storage.list(f"{tier}/{name}/files/condivisa")
-        self.assertEqual([e.name for e in entries], ["nota.txt"])
+        entries = self.svc.list_files(tier, name, "shared")
+        self.assertEqual([e["path"] for e in entries], ["shared/nota.txt"])
 
     def test_a_write_from_the_topic_is_visible_on_the_mac_side(self):
         tier, name = self.crea_topic()
         self.monta_radice_condivisa()
         self.svc.local_folder_add(tier, name, "condivisa")
-        self.storage.write(f"{tier}/{name}/files/condivisa/report.md", b"# report")
+        self.svc.put_file(tier, name, "shared/report.md", b"# report")
         self.assertEqual(
             (self.root / LOCAL_SHARED_ROOT / "condivisa" / "report.md").read_bytes(),
             b"# report")
@@ -102,7 +101,7 @@ class LocalFolderAddTests(Base):
         tier, name = self.crea_topic()
         self.monta_radice_condivisa()
         self.svc.local_folder_add(tier, name, "condivisa")
-        self.storage.write(f"{tier}/{name}/files/condivisa/report.md", b"# report")
+        self.svc.put_file(tier, name, "shared/report.md", b"# report")
         mode = (self.root / LOCAL_SHARED_ROOT / "condivisa" / "report.md").stat().st_mode
         self.assertTrue(mode & 0o060, "il gruppo deve poter leggere e scrivere (0o664)")
 
@@ -144,28 +143,37 @@ class LocalFolderAddTests(Base):
         out_a = self.svc.local_folder_add("SEAL-1", "acme", "documenti")
         out_b = self.svc.local_folder_add("SEAL-1", "beta", "documenti")
         self.assertNotEqual(out_a["local_folder"]["name"], out_b["local_folder"]["name"])
-        link_a = (self.root / "SEAL-1" / "acme" / "files" / out_a["local_folder"]["name"]).resolve()
-        link_b = (self.root / "SEAL-1" / "beta" / "files" / out_b["local_folder"]["name"]).resolve()
-        self.assertNotEqual(link_a, link_b)
+        self.svc.put_file("SEAL-1", "acme", "shared/solo-acme.txt", b"a")
+        self.assertEqual(self.svc.list_files("SEAL-1", "beta", "shared"), [])
 
-    def test_a_colliding_name_gets_disambiguated_not_overwritten(self):
+    def test_a_second_shared_folder_is_refused(self):
+        """#571: il mount ha un nome fisso, `shared/`, quindi una cartella per
+        topic. La seconda non diventa `condivisa-2`: è rifiutata, col rimedio."""
         tier, name = self.crea_topic()
         self.monta_radice_condivisa()
         self.svc.local_folder_add(tier, name, "condivisa")
-        out = self.svc.local_folder_add(tier, name, "condivisa")
+        with self.assertRaises(TopicError) as cm:
+            self.svc.local_folder_add(tier, name, "altra")
+        self.assertIn("local_folder_remove", str(cm.exception))
+
+    def test_a_name_already_used_by_another_topic_gets_disambiguated(self):
+        self.monta_radice_condivisa()
+        self.crea_topic("SEAL-1", "acme")
+        self.crea_topic("SEAL-1", "beta")
+        self.svc.local_folder_add("SEAL-1", "acme", "condivisa")
+        out = self.svc.local_folder_add("SEAL-1", "beta", "condivisa")
         self.assertEqual(out["local_folder"]["name"], "condivisa-2")
 
-    def test_it_never_overwrites_an_existing_uploaded_file(self):
-        """Un file caricato a mano con lo stesso nome non deve sparire sotto
-        un symlink silenzioso."""
+    def test_it_never_hides_an_existing_uploaded_folder(self):
+        """Un `local/report/` caricato a mano non deve sparire: il vecchio path
+        `local/<slug>/` risolve a `shared/` (#571), quindi lo slug evita i nomi
+        già presenti sotto `files/`."""
         tier, name = self.crea_topic()
         self.monta_radice_condivisa()
         self.storage.write(f"{tier}/{name}/files/report/gia-qui.txt", b"x")
-        # "report" esiste già come cartella reale (non dichiarata in
-        # local_folders): _unique_name non lo vede, ma Storage.symlink deve
-        # comunque rifiutarsi di sovrascriverlo.
-        with self.assertRaises(TopicError):
-            self.svc.local_folder_add(tier, name, "report")
+        out = self.svc.local_folder_add(tier, name, "report")
+        self.assertEqual(out["local_folder"]["name"], "report-2")
+        self.assertEqual(self.svc.read_file(tier, name, "local/report/gia-qui.txt"), b"x")
 
 
 class LocalFolderRemoveTests(Base):
@@ -192,15 +200,22 @@ class LocalFolderRemoveTests(Base):
             self.svc.local_folder_remove(tier, name, "altra")
         self.assertIn("condivisa", str(cm.exception))
 
-    def test_removing_twice_is_not_an_error(self):
-        """Il symlink può essere già sparito (pulizia manuale, doppio click):
-        pulire il meta deve restare possibile."""
+    def test_removing_without_the_old_symlink_is_not_an_error(self):
+        """Dopo #571 il symlink non c'è più (o non c'è mai stato): pulire il
+        meta deve restare possibile."""
         tier, name = self.crea_topic()
         self.monta_radice_condivisa()
         self.svc.local_folder_add(tier, name, "condivisa")
-        link = self.root / tier / name / "files" / "condivisa"
-        link.unlink()
         self.svc.local_folder_remove(tier, name, "condivisa")  # non solleva
+
+    def test_removing_by_the_mount_name_shared(self):
+        tier, name = self.crea_topic()
+        self.monta_radice_condivisa()
+        self.svc.local_folder_add(tier, name, "condivisa")
+        out = self.svc.local_folder_remove(tier, name, "shared")
+        self.assertEqual(out["removed"], "condivisa")
+        with self.assertRaises(TopicError):
+            self.svc.list_files(tier, name, "shared")
 
 
 class StoragePrimitiveTests(Base):

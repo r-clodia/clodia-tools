@@ -403,14 +403,28 @@ def drive_folders(meta: dict) -> list:
 def local_folders(meta: dict) -> list:
     """Le sottocartelle della cartella condivisa agganciate a questo topic.
 
-    A differenza di `drive_folders`, qui il file È il mount: `local/<name>/`
-    è un vero symlink verso `LOCAL_SHARED_ROOT/<name>`, letto e scritto dal
-    normale storage locale del topic — nessun perimetro nuovo da dichiarare
-    per i verbi `topic.*`, perché non è una destinazione esterna, è
-    filesystem del topic come un file caricato a mano.
+    A differenza di `drive_folders`, qui il file È il mount: il topic la vede
+    come `shared/` (clodia-platform#571), un bind reale su
+    `LOCAL_SHARED_ROOT/<name>`, letto e scritto dal normale storage locale —
+    nessun perimetro nuovo da dichiarare per i verbi `topic.*`, perché non è
+    una destinazione esterna, è filesystem del topic come un file caricato a
+    mano.
     """
     raw = meta.get("local_folders")
     return [f for f in raw if isinstance(f, dict) and f.get("name")] if isinstance(raw, list) else []
+
+
+def shared_folder(meta: dict) -> str | None:
+    """The subfolder of `LOCAL_SHARED_ROOT` served as this topic's `shared/`
+    mount, or None (clodia-platform#571).
+
+    One per topic: the mount has a fixed name, so it can serve one folder.
+    `local_folder_add` refuses a second one; a legacy meta with more than one
+    entry serves the first, and the others stay reachable through their old
+    `files/<name>` symlink, which the migration leaves in place for them.
+    """
+    folders = local_folders(meta)
+    return str(folders[0]["name"]) if folders else None
 
 
 def topic_links(meta: dict) -> list:
@@ -531,7 +545,14 @@ class TopicService:
     # raggiunge coi verbi `gdrive.*` nello scratch di un agente. `local/`
     # resta, esplicito, perché path già scritti nei messaggi lo usano.
     MOUNT_LOCAL = "local"
-    _MOUNTS = (MOUNT_LOCAL,)
+    #: The Mac-shared folder attached to the topic (clodia-platform#571). On
+    #: the Mac it is `ClodiaShared/<codename>/` — the codename says which
+    #: topic it belongs to — while inside the topic it is just `shared/`.
+    #: Writable like `local/`; its bytes live on `LOCAL_SHARED_ROOT/<name>`.
+    MOUNT_SHARED = "shared"
+    _MOUNTS = (MOUNT_LOCAL, MOUNT_SHARED)
+    #: The mounts this topic writes to (everything else is a link, read-only).
+    _WRITABLE_MOUNTS = (MOUNT_LOCAL, MOUNT_SHARED)
 
     #: Mount di SOLA LETTURA: l'albero dati di un altro topic collegato
     #: (clodia-platform#477). Non è un valore di `_MOUNTS` perché il suo nome
@@ -560,6 +581,74 @@ class TopicService:
         `local/` è una vista su ciò che c'è già, quindi la migrazione non esiste e
         le chiavi di provenienza già memorizzate continuano a valere."""
         return self.s, f"{self._dir(tier, name)}/files"
+
+    def _shared_alias(self, tier: str, name: str, sub: str,
+                      meta: dict | None) -> tuple[dict | None, str | None]:
+        """`(meta, rest)` when `sub` — a path under `files/` — enters this
+        topic's shared folder by its OLD path (`local/<slug>/…`,
+        `files/<slug>/…`), else `(meta, None)` (clodia-platform#571).
+
+        Until #571 the shared folder was a symlink `files/<slug>`, and those
+        paths are written in messages already sent. They keep resolving, to the
+        same bytes, through the `shared` mount. The meta is read only when the
+        first segment names a folder that exists on the shared root: the common
+        path pays one `exists`, not a meta read. Ownership is then checked on
+        the meta — a slug of ANOTHER topic never resolves from here.
+        """
+        first, _, rest = (sub or "").partition("/")
+        if not first or not self.s.exists(f"{LOCAL_SHARED_ROOT}/{first}"):
+            return meta, None
+        if meta is None:
+            meta, _ = self._read_meta(tier, name)
+        if shared_folder(meta) != first:
+            return meta, None
+        return meta, rest
+
+    def _shared_mount(self, tier: str, name: str, meta: dict | None):
+        """`(store, base)` of the `shared/` mount, or TopicError if this topic
+        has no shared folder attached."""
+        if meta is None:
+            meta, _ = self._read_meta(tier, name)
+        slug = shared_folder(meta)
+        if not slug:
+            raise TopicError(
+                f"{tier}/{name} non ha una cartella condivisa agganciata: "
+                f"`{self.MOUNT_SHARED}/` esiste solo dopo `topic.local_folder_add` "
+                "(🗂️ Cartella Mac nella sidebar del topic). Qui si scrive sotto "
+                f"`{self.MOUNT_LOCAL}/`.")
+        return self.s, f"{LOCAL_SHARED_ROOT}/{slug}"
+
+    def _prov_key(self, meta: dict, mount: str, sub: str) -> str:
+        """The provenance-sidecar key of `sub` inside `mount`.
+
+        The sidecar is keyed by path under `files/`. A file in the shared
+        folder was keyed `<slug>/…` while the folder was a symlink there
+        (before clodia-platform#571); keeping that key keeps every label set
+        before the change, with no rewrite of the sidecar."""
+        if mount == self.MOUNT_SHARED:
+            slug = shared_folder(meta) or ""
+            return f"{slug}/{sub}".strip("/")
+        return sub
+
+    def _migrate_shared_symlink(self, tier: str, name: str,
+                                meta: dict | None = None) -> None:
+        """One-shot (clodia-platform#571): drop the `files/<slug>` symlink of
+        the folder served as `shared/`, so it no longer shows up a second time
+        under `local/`. Only a symlink is removed (`unlink_symlink`), never
+        what it points to; a real directory with that name is left alone and
+        logged. Old paths keep working through `_shared_alias`."""
+        if meta is None:
+            meta, _ = self._read_meta(tier, name)
+        slug = shared_folder(meta)
+        if not slug:
+            return
+        try:
+            self.s.unlink_symlink(f"{self._dir(tier, name)}/files/{slug}")
+        except NotFound:
+            pass
+        except (StorageError, NotImplementedError, AttributeError) as e:
+            LOG.warning("shared folder of %s/%s: files/%s left in place (%s)",
+                        tier, name, slug, type(e).__name__)
 
     def _links(self, tier: str, name: str, meta: dict | None = None) -> list[dict]:
         """I collegamenti ATTIVI di questo topic: quelli dichiarati da entrambi
@@ -701,14 +790,19 @@ class TopicService:
                            meta: dict | None = None, check_reader: bool = True):
         """`(store, base, sub, mount)` per un path dell'albero dati.
 
-        Tre forme:
+        Quattro forme:
 
         - `local/x`          → mount locale, esplicito;
+        - `shared/x`         → la cartella condivisa col Mac, su
+          `LOCAL_SHARED_ROOT/<slug>` (clodia-platform#571);
         - `files/x` o `x`    → LEGACY, stesso backend, comportamento invariato;
         - `<collegamento>/x` → albero dati di un altro topic collegato, in SOLA
           LETTURA (clodia-platform#477). Il nome del mount è quello registrato
           nel collegamento, e il `base` che si ottiene è la cartella `files/`
           dell'ALTRO topic: nessuna copia, nessuno specchio.
+
+        `local/<slug>/x` (e la forma legacy) — il path della cartella condivisa
+        prima di #571 — risolve a `shared/x`: vedi `_shared_alias`.
 
         Il meta si legge solo se serve davvero, cioè quando il primo segmento
         non è né `local` né la forma legacy: il percorso di sempre non paga una
@@ -719,9 +813,18 @@ class TopicService:
             raise TopicError(f"path non valido: {relpath}")
         parts = [x for x in rel.split("/") if x]
 
+        if parts and parts[0] == self.MOUNT_SHARED:
+            store, base = self._shared_mount(tier, name, meta)
+            return store, base, "/".join(parts[1:]), self.MOUNT_SHARED
+
         if parts and parts[0] == self.MOUNT_LOCAL:
+            sub = "/".join(parts[1:])
+            meta, rest = self._shared_alias(tier, name, sub, meta)
+            if rest is not None:
+                store, base = self._shared_mount(tier, name, meta)
+                return store, base, rest, self.MOUNT_SHARED
             store, base = self._local_mount(tier, name)
-            return store, base, "/".join(parts[1:]), self.MOUNT_LOCAL
+            return store, base, sub, self.MOUNT_LOCAL
 
         if parts and parts[0] != "files":
             if meta is None:
@@ -743,15 +846,29 @@ class TopicService:
 
         # LEGACY: `files/x` o `x` → backend locale, comportamento invariato.
         _, sub = self._files_rel(rel)
+        meta, rest = self._shared_alias(tier, name, sub, meta)
+        if rest is not None:
+            store, base = self._shared_mount(tier, name, meta)
+            return store, base, rest, self.MOUNT_SHARED
         store, base = self._files_backend(tier, name)
         return store, base, sub, self.MOUNT_LOCAL
 
     def data_mounts(self, tier: str, name: str, meta: dict | None = None) -> list[dict]:
         """I mount dell'albero dati, per la vista file: quello locale (unico
-        scrivibile, decision-record #40) più un mount in sola lettura per ogni
-        topic collegato (clodia-platform#477)."""
+        scrivibile, decision-record #40), `shared/` se il topic ha una cartella
+        condivisa col Mac (clodia-platform#571), più un mount in sola lettura
+        per ogni topic collegato (clodia-platform#477)."""
+        if meta is None:
+            meta, _ = self._read_meta(tier, name)
         out = [{"name": self.MOUNT_LOCAL, "path": self.MOUNT_LOCAL, "kind": "dir",
                 "mount": "local"}]
+        slug = shared_folder(meta)
+        if slug:
+            # `folder` is its name on the Mac side, under the shared root: the
+            # codename lives there, not in the topic's own tree.
+            out.append({"name": self.MOUNT_SHARED, "path": self.MOUNT_SHARED,
+                        "kind": "dir", "mount": self.MOUNT_SHARED,
+                        "folder": slug})
         for l in self._links(tier, name, meta):
             out.append({"name": l["name"], "path": l["name"], "kind": "dir",
                         "mount": self.MOUNT_KIND_LINK, "readonly": True,
@@ -1311,7 +1428,7 @@ class TopicService:
 
     def local_folder_add(self, tier: str, name: str, mount_name: str | None = None) -> dict:
         """Aggancia una sottocartella della cartella condivisa Mac↔container a
-        questo topic: `local/<mount_name>/` diventa un BIND filesystem reale,
+        questo topic: `shared/` diventa un BIND filesystem reale,
         non uno specchio come Drive — chi scrive dal Mac lo vede nel topic
         all'istante, e viceversa (discussione con Davide, 19-20 set 2026:
         scartato SMB per la privacy di un condiviso di sistema, scelta una
@@ -1325,9 +1442,11 @@ class TopicService:
         che l'owner già riconosce, e di norma è unico per costruzione (nome
         del topic) — di proposito il default, non solo un'opzione.
 
-        `mount_name` è insieme il nome del mount (`local/<mount_name>/`) e il
-        nome della sottocartella su `LOCAL_SHARED_ROOT`: un solo nome, non due
-        mappe che possono divergere. Nessun perimetro nuovo da dichiarare (a
+        `mount_name` è il nome della sottocartella su `LOCAL_SHARED_ROOT`, cioè
+        di quella che l'owner vede sul Mac. Dentro il topic la cartella è
+        sempre `shared/` (clodia-platform#571): il codename serve fuori, per
+        distinguere i topic sul Mac, e dentro sarebbe ridondante. Per questo
+        una sola cartella condivisa per topic. Nessun perimetro nuovo da dichiarare (a
         differenza di `drive_folder_add`): una volta agganciata, la cartella È
         filesystem del topic, governato dagli stessi verbi/permessi di
         qualunque file caricato a mano — non una destinazione esterna.
@@ -1341,6 +1460,12 @@ class TopicService:
                 "il gateway.")
         meta, ver = self._read_meta(tier, name)
         existing = local_folders(meta)
+        if existing:
+            raise TopicError(
+                f"{tier}/{name} ha già una cartella condivisa "
+                f"(`{self.MOUNT_SHARED}/`, sul Mac `{existing[0].get('name')}`): "
+                "una sola per topic. Per cambiarla sganciala prima con "
+                "`topic.local_folder_remove`.")
         # `presi` include le sottocartelle GIÀ ESISTENTI su LOCAL_SHARED_ROOT,
         # non solo quelle di QUESTO topic: senza, due topic che scelgono lo
         # stesso mount_name finirebbero per condividere silenziosamente la
@@ -1349,8 +1474,14 @@ class TopicService:
         # meccanismo che dovrebbe garantirla. Trovato da Davide il 23 set
         # 2026 su un topic con dati finanziari riservati.
         su_disco = {e.name for e in self.s.list(LOCAL_SHARED_ROOT) if e.kind == "dir"}
-        presi = ({str(f.get("name") or "") for f in existing}
-                | {"files", self.MOUNT_LOCAL} | su_disco)
+        # Also the top-level names under `files/`: `local/<slug>/…` is the old
+        # path of the shared folder and resolves to `shared/…` (#571), so a
+        # real folder with the slug's name would become unreachable.
+        try:
+            in_files = {e.name for e in self.s.list(f"{self._dir(tier, name)}/files")}
+        except Exception:  # noqa: BLE001 — topic senza files/: nessun nome occupato
+            in_files = set()
+        presi = ({"files", self.MOUNT_LOCAL, self.MOUNT_SHARED} | su_disco | in_files)
         slug = _unique_name(mount_name, presi)
         sub_path = f"{LOCAL_SHARED_ROOT}/{slug}"
         self.s.mkdir(sub_path)
@@ -1359,25 +1490,25 @@ class TopicService:
         # umano è un altro account) — senza, la cartella esiste ma l'owner
         # non può scriverci dal lato Mac. Vedi Storage.chmod_shared.
         self.s.chmod_shared(sub_path)
-        link_path = f"{self._dir(tier, name)}/files/{slug}"
-        try:
-            self.s.symlink(link_path, sub_path)
-        except StorageError as e:
-            raise TopicError(str(e)) from e
+        # No symlink under `files/` any more (#571): `shared/` resolves to
+        # `sub_path` directly, from the meta entry written below.
         voce = {"name": slug}
         meta["local_folders"] = existing + [voce]
         self._write_meta(tier, name, meta, base_version=ver)
-        return {"ok": True, "local_folder": voce}
+        return {"ok": True, "local_folder": voce, "path": f"{self.MOUNT_SHARED}/"}
 
     def local_folder_remove(self, tier: str, name: str, mount_name: str) -> dict:
-        """Sgancia una sottocartella condivisa da questo topic: rimuove SOLO
-        il symlink dentro `files/` (`unlink_symlink`, mai `delete` — vedi il
-        motivo nel docstring di `Storage.unlink_symlink`). Il contenuto reale
+        """Sgancia una sottocartella condivisa da questo topic: toglie la voce
+        dal meta (e `shared/` sparisce) e, se c'è ancora, il vecchio symlink
+        dentro `files/` (`unlink_symlink`, mai `delete` — vedi il motivo nel
+        docstring di `Storage.unlink_symlink`). Il contenuto reale
         su `LOCAL_SHARED_ROOT` NON viene toccato: resta lì, raggiungibile da
         un altro topic o riagganciabile in futuro — sganciare non è cancellare.
         """
         meta, ver = self._read_meta(tier, name)
         existing = local_folders(meta)
+        if mount_name == self.MOUNT_SHARED and shared_folder(meta):
+            mount_name = shared_folder(meta)    # the mount as the topic shows it
         if mount_name not in {f.get("name") for f in existing}:
             disponibili = ", ".join(sorted(str(f.get("name")) for f in existing))
             raise TopicError(
@@ -1404,7 +1535,7 @@ class TopicService:
         sparito pur essendo ancora lì — la stessa perdita silenziosa di
         clodia-platform#420.
         """
-        presi = {self.MOUNT_LOCAL, "files"} | {
+        presi = {self.MOUNT_LOCAL, self.MOUNT_SHARED, "files"} | {
             str(l.get("name") or "") for l in topic_links(meta)}
         try:
             presi |= {e.name for e in self.s.list(f"{self._dir(tier, name)}/files")}
@@ -1705,6 +1836,10 @@ class TopicService:
             self._migrate_mounts_field(tier, name)
         except Exception:  # noqa: BLE001
             LOG.warning("migrazione mounts→campi propri fallita per %s/%s", tier, name)
+        try:
+            self._migrate_shared_symlink(tier, name)
+        except Exception:  # noqa: BLE001 — the old symlink only shows twice
+            LOG.warning("migrazione cartella condivisa fallita per %s/%s", tier, name)
         try:
             meta_r = self.s.read(self._meta_p(tier, name))
         except NotFound:
@@ -2416,6 +2551,10 @@ class TopicService:
             _meta = json.loads(self.s.read(self._meta_p(tier, name)).data.decode())
         except Exception:  # noqa: BLE001
             pass
+        try:
+            self._migrate_shared_symlink(tier, name, _meta)
+        except Exception:  # noqa: BLE001 — the old symlink only shows twice
+            LOG.warning("migrazione cartella condivisa fallita per %s/%s", tier, name)
         out: list[dict] = []
         is_files = self._is_data_path(_meta, rel)
         sub = ""
@@ -2442,7 +2581,8 @@ class TopicService:
                     continue
                 p = _mp(sub, e.name)
                 st = store.stat(f"{base}/{sub}/{e.name}".strip("/"))
-                rel_in_files = (f"{sub}/" if sub else "") + e.name
+                rel_in_files = self._prov_key(
+                    _meta, mount, (f"{sub}/" if sub else "") + e.name)
                 out.append({"name": e.name, "path": p, "kind": "file",
                             "size": (getattr(st, "size", None) if st else e.size),
                             "mtime_iso": _iso(st.mtime) if st else None,
@@ -2539,11 +2679,12 @@ class TopicService:
         # scrive sotto `files/` e indicizza il sidecar con quel nome. Il
         # control-plane non ha bisogno di un'esclusione — `summary.md` una
         # etichetta non ce l'ha, quindi la ricerca torna None da sé.
-        _store, _base, sub, _mount = self._resolve_data_path(tier, name, relpath, meta)
+        _store, _base, sub, mount = self._resolve_data_path(tier, name, relpath, meta)
         if not sub:
             return None                     # un mount non è un file
         ot, on = self.mount_owner(tier, name, relpath, meta)
-        return (self.provenance_map(ot, on).get(sub) or {}).get("provenance")
+        key = self._prov_key(meta, mount, sub)
+        return (self.provenance_map(ot, on).get(key) or {}).get("provenance")
 
     def set_provenance(self, tier: str, name: str, relpath: str,
                        provenance: str, by: str = "") -> dict:
@@ -2581,11 +2722,11 @@ class TopicService:
         prov = (provenance or "untrusted").strip().lower()
         if prov not in ("trusted", "untrusted", "agent"):
             prov = "untrusted"
-        # La provenienza è etichettata SOLO sul mount locale: sul remote il file
-        # non l'ha messo lì il nostro upload, e attribuirgliene una sarebbe una
-        # classificazione inventata.
-        if mount == self.MOUNT_LOCAL:
-            self.set_provenance(tier, name, sub, prov, by=by)
+        # La provenienza è etichettata SOLO sui mount di questo topic: sul remote
+        # il file non l'ha messo lì il nostro upload, e attribuirgliene una
+        # sarebbe una classificazione inventata.
+        if mount in self._WRITABLE_MOUNTS:
+            self.set_provenance(tier, name, self._prov_key(meta, mount, sub), prov, by=by)
         return {"name": parts[-1], "path": f"{mount}/{sub}", "provenance": prov}
 
     def _resolve_write_target(self, tier: str, name: str, filename: str):
@@ -2610,9 +2751,11 @@ class TopicService:
         mount_prefix = ""
         while rel == "files" or rel.startswith("files/"):
             rel = rel[len("files"):].strip("/")
-        if rel == self.MOUNT_LOCAL or rel.startswith(self.MOUNT_LOCAL + "/"):
-            mount_prefix = self.MOUNT_LOCAL
-            rel = rel[len(self.MOUNT_LOCAL):].strip("/")
+        for m in self._WRITABLE_MOUNTS:
+            if rel == m or rel.startswith(m + "/"):
+                mount_prefix = m
+                rel = rel[len(m):].strip("/")
+                break
         if not rel or "\\" in rel:
             raise TopicError(f"nome file non valido: {filename}")
         parts = rel.split("/")
@@ -2659,12 +2802,12 @@ class TopicService:
         un'ALTRA stanza, e chi partecipa a questa può non partecipare a quella.
         Scriverci sarebbe mettere un file in un posto di cui non si risponde.
         """
-        if mount != self.MOUNT_LOCAL:
+        if mount not in self._WRITABLE_MOUNTS:
             raise TopicError(
                 f"'{path}' sta nel topic collegato montato come '{mount}', che è "
                 f"in SOLA LETTURA: i file di un altro topic si modificano nel "
                 f"topic a cui appartengono. Qui si scrive sotto "
-                f"`{self.MOUNT_LOCAL}/`.")
+                f"`{self.MOUNT_LOCAL}/` (o `{self.MOUNT_SHARED}/`).")
 
     def move_file(self, tier: str, name: str, relpath: str, dest: str) -> dict:
         """Sposta/RINOMINA un file o una cartella dentro l'albero dati del topic
@@ -2691,7 +2834,7 @@ class TopicService:
         if not self._is_data_path(meta, rel):
             raise TopicError(
                 "puoi spostare solo file dentro i mount del topic — "
-                f"`{self.MOUNT_LOCAL}/…` (meta, summary e AGENTS.md sono "
+                f"`{self.MOUNT_LOCAL}/…`, `{self.MOUNT_SHARED}/…` (meta, summary e AGENTS.md sono "
                 "control-plane: l'AGENTS.md si scrive con `topic.save_agents_md`)")
         store, base, sub, mount = self._resolve_data_path(tier, name, rel, meta,
                                                           check_reader=False)
@@ -2714,10 +2857,13 @@ class TopicService:
                 "`topic.delete_file` (che la mette nel cestino, non la perde).")
         # Una cartella dentro sé stessa: `shutil.move` lo farebbe davvero e
         # l'albero diventerebbe irraggiungibile dal suo stesso path.
-        if d_sub == sub or d_sub.startswith(sub.rstrip("/") + "/"):
+        # On absolute paths: `local/a` and `shared/a` share `sub` but not bytes.
+        if dst_abs.startswith(src_abs.rstrip("/") + "/"):
             raise TopicError("non puoi spostare una cartella dentro sé stessa")
         store.move(src_abs, dst_abs)
-        moved_labels = self._move_provenance(tier, name, sub, d_sub)
+        moved_labels = self._move_provenance(
+            tier, name, self._prov_key(meta, mount, sub),
+            self._prov_key(meta, d_mount, d_sub))
         return {"moved": f"{mount}/{sub}", "path": f"{d_mount}/{d_sub}",
                 "name": d_parts[-1], "provenance_entries_moved": moved_labels}
 
@@ -2767,7 +2913,7 @@ class TopicService:
         if not self._is_data_path(meta, rel):
             raise TopicError(
                 "puoi rimuovere solo file dentro i mount del topic — "
-                f"`{self.MOUNT_LOCAL}/…` "
+                f"`{self.MOUNT_LOCAL}/…`, `{self.MOUNT_SHARED}/…` "
                 "(meta, summary e AGENTS.md sono control-plane e non si "
                 "cancellano da qui)")
         store, base, sub, _mount = self._resolve_data_path(tier, name, rel, meta,
