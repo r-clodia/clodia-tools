@@ -9,12 +9,14 @@ the gateway goes through the object it receives:
     host.service(pack, name)  -> another pack's component service (granted pairs)
     host.credentials(prefix)  -> ScopedCredentials
     host.perimeter            -> read-only perimeter facts (config, lists, topics,
-                                 mailbox whitelist, strict ingress, vetted sources)
+                                 mailbox whitelist, strict ingress, vetted sources,
+                                 the room's approved repositories)
     host.topics               -> read_file / put_file with membership checks
     host.note_crossing(data=None, *, path=None, kind="file")
     host.scratch_path(path)   -> str inside the caller's spawn scratch
     host.config(key, default=None) / host.set_config(key, value)
     host.agent() / host.channel() / host.principal() / host.current_topic()
+    host.git_credential()     -> the room's git token, only serving `github`
     host.tool_allowed(verb)   -> the whitelist's answer (raises PermissionError)
     host.audit_decision(verb, kind, result, *, reason_class=None)
                               -> a decision record; AuditUnavailable if unwritable
@@ -307,6 +309,30 @@ class Perimeter:
         from .. import egress
         return bool(egress.is_vetted_source(uri, scope))
 
+    def require_approved_repo(self, repo: str) -> str:
+        """The canonical form of `repo` if it is approved for the room the
+        call comes from (signed claim), else `HostError` (clodia-platform#525).
+
+        The perimeter of the native git verbs: a repository is a whitelist
+        entry of the room, matched by repository prefix
+        (`TopicService._require_approved_repo`). The room is never an
+        argument: a component cannot ask about another one."""
+        from .. import main
+        from ..tools.github_repo import GitHubError, normalize_repo
+        from ..topics.service import TopicError, TopicService
+        tier, name = main._current_topic()
+        if not tier:
+            raise HostError("git verbs act inside a topic: this call has no channel")
+        try:
+            canonical = normalize_repo(str(repo or ""))
+        except GitHubError as e:
+            raise HostError(str(e)) from None
+        try:
+            TopicService._require_approved_repo(canonical, tier, name)
+        except TopicError as e:
+            raise HostError(str(e)) from None
+        return canonical
+
     def google_mail_account_exists(self, account: str) -> bool:
         """Whether a Google mail credential (`google_<acct>`/`gmail_<acct>`)
         EXISTS for `account` — a yes/no on the NAME, never its content. Lets
@@ -539,6 +565,23 @@ class Host:
         from . import loader
         spec = loader.service(*pair)
         return spec.handler if spec is not None else None
+
+    def git_credential(self) -> str | None:
+        """The git token for the room the call comes from: the room's own
+        credential, else the platform PAT, as natively
+        (`TopicService.git_credential`), or None (clodia-platform#525).
+
+        Only while this component serves `github`: the token is resolved per
+        call from the vault, never handed over at load, and a component that
+        does not hold the connector never gets it."""
+        if not self.serves("github"):
+            raise HostError(f"component '{self._c.key}' does not serve 'github' "
+                            "on this instance")
+        from .. import main
+        tier, name = main._current_topic()
+        if not tier:
+            raise HostError("git verbs act inside a topic: this call has no channel")
+        return main._topics().git_credential(tier, name)[0]
 
     def current_topic(self) -> tuple[str | None, str | None]:
         """`(tier, name)` of the room the call comes from (signed `chat`

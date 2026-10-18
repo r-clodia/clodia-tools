@@ -217,43 +217,56 @@ class SwitchTests(_Istanza):
                          (IMG_BACKEND, IMG_TOOL))
 
 
-class GitVerbsStayGatewayServedTests(_Istanza):
-    def test_listed_and_served_in_both_positions(self):
+class GitVerbsFollowTheSwitchTests(_Istanza):
+    """The four git verbs follow the `github` switch (clodia-platform#525):
+    native on `native`, it-pack's gateway component's on `pack`."""
+
+    def test_native_position_keeps_them_native(self):
         from .. import main
-        for pos in ("pack", "native"):
-            self.posizione(pos)
-            nomi = {t.name for t in main._all_native_tools()}
+        self.posizione("native")
+        nomi = {t.name for t in main._all_native_tools()}
+        for verbo in GIT_VERBS:
+            with self.subTest(verbo=verbo):
+                self.assertIn(verbo, nomi)
+                self.assertFalse(main._is_packaged_verb(verbo))
+                self.assertTrue(main._verb_implemented(verbo))
+
+    def test_pack_position_hands_them_to_the_component(self):
+        from .. import main
+        self.posizione("pack")
+        nomi = {t.name for t in main._all_native_tools()}
+        for verbo in GIT_VERBS:
+            with self.subTest(verbo=verbo):
+                self.assertNotIn(verbo, nomi)
+                self.assertNotIn(verbo, main._GATEWAY_RETAINED_VERBS)
+                self.assertTrue(main._is_packaged_verb(verbo))
+
+    def test_without_the_component_they_are_denied_never_proxied(self):
+        """On `pack` the official GitHub backend shares the namespace: a git
+        verb nobody registered must be refused, not sent to it."""
+        from .. import main
+        self.posizione("pack")
+        with patch.object(main.proxy, "is_proxied", lambda n: n.startswith("github.")), \
+                patch.object(main.proxy, "call_proxied",
+                             lambda *a, **k: self.fail("proxied")), \
+                patch.object(main, "_dispatch_github",
+                             lambda *a, **k: self.fail("served natively")):
             for verbo in GIT_VERBS:
-                with self.subTest(posizione=pos, verbo=verbo):
-                    self.assertIn(verbo, nomi)
-                    self.assertIn(verbo, main._GATEWAY_RETAINED_VERBS)
-                    self.assertFalse(main._is_packaged_verb(verbo))
-                    self.assertTrue(main._verb_implemented(verbo))
+                with self.subTest(verbo=verbo):
+                    with self.assertRaises(main._PackVerbRefused) as cm:
+                        main._check_component(verbo)
+                    self.assertIn("it-pack", str(cm.exception))
 
     def test_the_backend_verbs_belong_to_the_pack_in_pack_position(self):
         from .. import main
         self.assertTrue(main._is_packaged_verb("github.list_issues"))
         self.assertNotIn("github", M.core_namespaces())
-        # Still a namespace the gateway serves (its four git verbs, wholly
-        # retained like `email`): grantable, while no longer reserved.
-        self.assertIn("github", main._native_tool_namespaces())
+        # No longer a namespace the gateway serves: the git verbs went with it.
+        self.assertNotIn("github", main._native_tool_namespaces())
         self.posizione("native")
         self.assertFalse(main._is_packaged_verb("github.list_issues"))
         self.assertIn("github", M.core_namespaces())
         self.assertIn("github", main._native_tool_namespaces())
-
-    def test_pack_declarations_never_apply_to_the_git_verbs(self):
-        """A `context:` the pack declares for `github.*` must not rewrite the
-        arguments of a verb the gateway serves."""
-        from .. import main
-        entry = _github_connector()
-        entry["context"] = [{"arg": "agent", "value": "agent"}]
-        self.scrivi_pack(_it_pack(github=entry))
-        self.assertTrue(resolved.held_by_pack("github"), resolved.problems())
-        self.assertTrue(resolved.context_arguments("github.push"))
-        for verbo in GIT_VERBS:
-            args = {"dir": "x", "agent": "forged"}
-            self.assertIs(main._fill_declared_context(verbo, args), args)
 
 
 # --------------------------------------------------------------------------
