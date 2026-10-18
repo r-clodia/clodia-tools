@@ -218,7 +218,10 @@ class ReviewFixTests(_Base):
             b = proxy._resolve_secrets(mcp_credentials.apply(b))
             raise RuntimeError(f"401 headers={b.get('headers')}")
             yield  # pragma: no cover
-        b = self.mount({"url": URL, "headers": {"Y": "${VAULT:github_pat}"}, "auth": DECL})
+        # A foreign `${VAULT:…}` is refused at mount since #568; this test is
+        # about error redaction, so the mount check is set aside here.
+        with patch.object(proxy, "vault_refs_problem", return_value=None):
+            b = self.mount({"url": URL, "headers": {"Y": "${VAULT:github_pat}"}, "auth": DECL})
         with patch.object(proxy, "session", leaky), self.assertRaises(ValueError) as e:
             await mcp_credentials.connect(b, {"APIKEY": KEY})
         self.assertNotIn("ghp_REALSECRET", str(e.exception))
