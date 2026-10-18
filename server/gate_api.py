@@ -120,7 +120,7 @@ async def revoke_instance(request: Request):
     # The web-source consents of #569 are this spawn's too: they end with it,
     # not when the capability lapses.
     revoked = list(revoked or []) + list(
-        gate.revoke_instance(agent, instance, "web-source:") or [])
+        gate.revoke_instance(agent, instance, "ingress:web:") or [])
     if revoked:
         LOG.info("COPYBRAIN revocato a fine spawn %s@%s: %s (da %s)", agent, instance,
                  revoked, principal)
@@ -169,6 +169,11 @@ async def remember(request: Request):
                       "si possono ricordare, perché solo lì la decisione riguarda "
                       "un indirizzo e non un'azione"}, status_code=400)
     uri = parti[2]
+    if parti[0] == "ingress" and parti[1] == "web":
+        # `ingress:web:<site>|<chat>` (#569): the chat scopes the consent, the
+        # SITE is what goes into the list.
+        uri = uri.split("|", 1)[0]
+        direction = "ingress"
     from . import egress as _eg
     try:
         res = (_eg.scope_allow(direction, scope, uri) if scope

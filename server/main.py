@@ -3570,8 +3570,12 @@ def _push_destination(arguments: dict) -> dict:
 
 
 #: Gate key prefix of a web read from a source not in the ingress lists
-#: (clodia-platform#569): `web-source:<scheme>://<host>/`.
-WEB_SOURCE_GATE = "web-source:"
+#: (clodia-platform#569): `ingress:web:<scheme>://<host>/|<chat>`. In the
+#: `ingress:` family on purpose: it is a gate on a SOURCE, so the card offers
+#: «Approva sempre» (the site goes into the channel's ingress list) besides
+#: «Approva ora» and «Nega». The `|<chat>` suffix scopes the consent to the
+#: channel; it is not part of the address that is remembered.
+WEB_SOURCE_GATE = "ingress:web:"
 
 #: Verbs that load a URL the agent names.
 _WEB_READ_VERBS = frozenset({"web.fetch", "web.download"})
