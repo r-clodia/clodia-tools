@@ -1139,8 +1139,13 @@ def transport_backends() -> frozenset[str]:
     mounts, never a neighbour's, a core one or an unclaimed admin mount.
     """
     global _TRANSPORTS
+    try:
+        from ..components import loader as _components
+        serving = _components.serving_connectors()
+    except Exception:  # noqa: BLE001
+        serving = ()
     sig = (_signature(_manifest_files()), _mount_signature(), _switch_signature(),
-           _pins_signature())
+           _pins_signature(), serving)
     if _TRANSPORTS is not None and _TRANSPORTS[0] == sig:
         return _TRANSPORTS[1]
     owners = backend_owners()
@@ -1167,6 +1172,21 @@ def transport_backends() -> frozenset[str]:
     # unregister what is not — so `mail-transport` (comms-pack 1.4.0) would
     # stay mounted and, no longer declared, become an agent-callable raw mail
     # client. Still the pack's own stamped mount only.
+    # A connector now SERVED by its pack's gateway component (#522/#558): the
+    # pack's own stamped backend of the same name (`telegram` up to comms-pack
+    # 2.0.x) survives the Update until an admin unmounts it — withheld like a
+    # transport, so its tools are neither listed twice nor callable (its raw
+    # `getUpdates` would race the relay).
+    _docs = manifests()
+    for pack, cid in serving:
+        nomi = {cid}
+        for entry in (_docs.get(pack) or {}).get("connectors") or []:
+            if isinstance(entry, Mapping) and str(entry.get("id") or "") == cid \
+                    and entry.get("namespace"):
+                nomi.add(str(entry["namespace"]))
+        for n in nomi:
+            if _norm(n) in (owners.get(pack) or ()) and _norm(n) not in core_backends():
+                out.add(_norm(n))
     from . import builtin as _builtin
     for pack, names in _builtin.RETIRED_TRANSPORTS.items():
         for n in names:

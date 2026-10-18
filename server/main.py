@@ -5603,6 +5603,12 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # component verb never reaches a native lookup below.
                 _eargs = await asyncio.to_thread(
                     _component_pdp_arguments, _cpdp, name, arguments)
+                if name in ("telegram.send", "telegram.send_file"):
+                    # #402 holds whoever implements the verb: a `chat_id` that
+                    # is a group TITLE is refused before the verdict, never
+                    # resolved by substring into whichever chat matches
+                    # (review of clodia-logic#542).
+                    _telegram_chat_id_or_raise(arguments)
             elif name == "email.reply":
                 # The reply goes to the ORIGINAL sender, whatever `to` the
                 # caller wrote (the client ignores it): the PDP must judge that

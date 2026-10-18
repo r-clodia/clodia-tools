@@ -57,5 +57,29 @@ class RelayUsesTheComponentTests(unittest.TestCase):
         p.assert_called_once_with("telegram.updates", {"timeout": 5})
 
 
+
+
+class StaleBackendTests(unittest.TestCase):
+    """A connector served by its pack's component: the pack's own stamped
+    backend of the same name is withheld like a transport."""
+
+    def test_the_old_backend_is_withheld_once_the_component_serves(self) -> None:
+        from .connectors import resolved
+        resolved._TRANSPORTS = None
+        docs = {"comms-pack": {"connectors": [{"id": "telegram", "namespace": "telegram"}]}}
+        with patch.object(resolved, "manifests", return_value=docs), \
+             patch.object(resolved, "backend_owners", return_value={"comms-pack": {"telegram"}}), \
+             patch.object(resolved, "core_backends", return_value=frozenset()), \
+             patch.object(loader, "serving_connectors", return_value=(("comms-pack", "telegram"),)):
+            self.assertIn("telegram", resolved.transport_backends())
+        resolved._TRANSPORTS = None
+        with patch.object(resolved, "manifests", return_value=docs), \
+             patch.object(resolved, "backend_owners", return_value={"comms-pack": {"telegram"}}), \
+             patch.object(resolved, "core_backends", return_value=frozenset()), \
+             patch.object(loader, "serving_connectors", return_value=()):
+            self.assertNotIn("telegram", resolved.transport_backends())
+        resolved._TRANSPORTS = None
+
+
 if __name__ == "__main__":
     unittest.main()
