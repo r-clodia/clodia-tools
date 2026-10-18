@@ -1350,6 +1350,37 @@ _PROFILE_TOOLS: list[Tool] = [
 ]
 
 
+#: Native runtime tools that leave the gateway's perimeter, and what using one
+#: means — the text of the gate a person reads (clodia-platform#570).
+NATIVE_GATED_RISKS: dict[str, str] = {
+    "WebSearch": (
+        "una ricerca sul web con lo strumento nativo del modello. La ricerca la "
+        "esegue il provider del modello (Anthropic), fuori dal gateway: la query "
+        "esce dalla piattaforma con le condizioni del provider, e i risultati — "
+        "testo di terzi, non vagliato — entrano nella conversazione senza i "
+        "controlli sulle fonti e senza la traccia del gateway. Approvando, il "
+        "canale risulta contaminato: le uscite successive chiedono conferma. "
+        "Aprire un risultato resta una lettura web, con il suo gate."),
+}
+
+#: Gate key prefix of a native tool use (`native:<tool>|<chat>`).
+NATIVE_GATE = "native:"
+
+_NATIVE_CONSENT_TOOLS: list[Tool] = [
+    Tool(name="native.consent",
+         description=("Chiede all'owner della stanza di usare uno strumento NATIVO "
+                      "del runtime che esce dal perimetro del gateway (oggi: "
+                      "WebSearch). Apre un gate che spiega il rischio; approvato, "
+                      "contamina il canale. Lo chiama l'agent-server quando "
+                      "l'agente tenta lo strumento: chiamarlo a mano chiede la "
+                      "stessa cosa."),
+         inputSchema={"type": "object", "properties": {
+             "tool": {"type": "string", "enum": sorted(NATIVE_GATED_RISKS)},
+             "query": {"type": "string",
+                       "description": "La ricerca, mostrata a chi decide"}},
+             "required": ["tool"]}),
+]
+
 _RUNTIME_TOOLS: list[Tool] = [
     Tool(name="runtime.agents",
          description="Introspezione runtime: gli agent dell'istanza col quadro COMPLETO per decidere chi coinvolgere (dominio/expertise, skill, knowledge RAG, clearance SEAL, provider effettivo + suo SEAL, modello, ruolo, stato). Solo metadati, mai segreti — la decisione è tua, non del tool.",
@@ -2613,7 +2644,7 @@ def _native_tool_namespaces() -> list[str]:
              + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
              + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS
              + _PACKS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS
-             + _copybrain.TOOLS)
+             + _copybrain.TOOLS + _NATIVE_CONSENT_TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
     # The gateway-retained binding verbs do not keep a packaged namespace
@@ -3269,7 +3300,7 @@ def _all_native_tools() -> list:
                   + _GDRIVE_TOOLS + _GCALENDAR_TOOLS + _GDOCS_TOOLS + _GSHEETS_TOOLS
                   + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS + _PACKS_TOOLS
                   + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS
-                  + _copybrain.TOOLS)
+                  + _copybrain.TOOLS + _NATIVE_CONSENT_TOOLS)
     if instance_profile.rag_enabled():
         native += list(_EU_CORPUS_TOOLS + _RAG_TOOLS)
     # I connettori passati a un pack (#522) escono dal CATALOGO dei verbi
@@ -3689,6 +3720,40 @@ async def _require_web_source(verb: str, arguments: dict, agent: str) -> None:
         allow_delegation=False)
 
 
+async def _native_consent(arguments: dict, agent: str) -> dict:
+    """`native.consent` (clodia-platform#570): may this spawn use a native tool
+    that leaves the gateway's perimeter, here, now?
+
+    A gate on (tool, channel, spawn), decided by the room's owner (WALLS),
+    time-boxed, no delegation; refused in an unattended session. Approved →
+    the channel is TAINTED (what the tool brings in is unvetted third-party
+    text) and the use is an audit record."""
+    tool = str(arguments.get("tool") or "")
+    if tool not in NATIVE_GATED_RISKS:
+        raise PermissionError(f"native.consent: '{tool}' non è uno strumento nativo "
+                              "che si possa concedere")
+    query = str(arguments.get("query") or "").strip()[:300]
+    if is_unattended():
+        raise PermissionError(
+            f"native.consent: {tool} esce dal perimetro del gateway e la sessione "
+            "non è presidiata: nessuno può approvarlo")
+    key = f"{NATIVE_GATE}{tool}|{current_chat() or '-'}"
+    await _require_gate_consent(
+        agent, key, consume=False,
+        reason=(f"{('ricerca: «' + query + '». ') if query else ''}Si tratta di "
+                f"{NATIVE_GATED_RISKS[tool]}"),
+        allow_delegation=False)
+    _taint.mark(current_chat(), "native", detail=f"{tool}: {query}"[:200], agent=agent)
+    try:
+        from . import audit as _audit
+        _audit.emit("flow.ingress", action="read", resource="native.consent",
+                    tool={"name": tool, "source": f"native:{tool}", "vetted": "not_vetted"},
+                    input={"hash": _audit.keep(query)})
+    except Exception as _e:  # noqa: BLE001 — the record never changes the grant
+        LOG.error("audit: native.consent not recorded (%s)", type(_e).__name__)
+    return {"granted": True, "tool": tool}
+
+
 async def _require_gate_consent(
     agent: str, gate_key: str, *, consume: bool, reason: str = "",
     allow_delegation: bool = True, arguments: dict | None = None,
@@ -3707,7 +3772,7 @@ async def _require_gate_consent(
         return None
     inst = "-"
     if gate_key == "crosstopic" or gate_key.startswith(_copybrain_prefix()) \
-            or gate_key.startswith(WEB_SOURCE_GATE):
+            or gate_key.startswith((WEB_SOURCE_GATE, NATIVE_GATE)):
         # Il grant `crosstopic` vale per lo SPAWN che l'ha chiesto, non per il
         # seed (decisione di Davide, 23 set 2026): senza questo, un consenso
         # dato a `clodia-1` varrebbe per ogni altro spawn di `clodia`, cioè per
@@ -3789,6 +3854,10 @@ async def _require_gate_consent(
                                f"{gate_key[len(WEB_SOURCE_GATE):].split('|', 1)[0]}** "
                                f"in questo canale, per lo spawn {inst}")
                          if gate_key.startswith(WEB_SOURCE_GATE)
+                         else (f"di usare lo strumento nativo **"
+                               f"{gate_key[len(NATIVE_GATE):].split('|', 1)[0]}** "
+                               f"in questo canale, per lo spawn {inst}")
+                         if gate_key.startswith(NATIVE_GATE)
                          else (f"di accedere al topic {gate_key.split(':', 1)[1]}"
                                if gate_key.startswith("topic-access:")
                                else f"di usare `{gate_key}`"))
@@ -5634,6 +5703,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             result = fs.list_dir(arguments["path"])
         elif name == "web.fetch":
             result = await asyncio.to_thread(web_fetch.fetch, arguments, agent=_ag or "")
+        elif name == "native.consent":
+            result = await _native_consent(arguments, _ag or "")
         elif name == "web.download":
             _dest = _safe_scratch_path(arguments["dest"])
             _os.makedirs(_os.path.dirname(_dest), exist_ok=True)
