@@ -41,7 +41,7 @@ class RelayUsesTheComponentTests(unittest.TestCase):
         calls = []
         spec = NS(handler=lambda a: calls.append(a) or {"messages": [], "count": 0})
         with patch.object(loader, "service", return_value=spec) as svc, \
-             patch.object(telegram_api.proxy, "call_proxied") as proxied:
+             patch("server.proxy.call_proxied") as proxied:
             out = asyncio.run(telegram_api._pack("updates", {"timeout": 5}))
         svc.assert_called_once_with("comms-pack", "telegram_updates")
         proxied.assert_not_called()
@@ -61,7 +61,7 @@ class RelayUsesTheComponentTests(unittest.TestCase):
         claims = {"agent": "clodia", "execution_id": "relay"}
         with patch.object(loader, "service", return_value=None), \
              patch.object(loader, "verb", return_value=spec) as v, \
-             patch.object(telegram_api.proxy, "call_proxied") as proxied:
+             patch("server.proxy.call_proxied") as proxied:
             out = asyncio.run(telegram_api._pack("send", {"chat_id": "-100", "text": "ciao"},
                                                  claims=claims, token="t"))
         v.assert_called_once_with("telegram.send")
@@ -69,16 +69,14 @@ class RelayUsesTheComponentTests(unittest.TestCase):
         self.assertEqual(sent, [("clodia", {"chat_id": "-100", "text": "ciao"})])
         self.assertTrue(out["ok"])
 
-    def test_without_the_component_the_backend_is_used(self) -> None:
-        async def proxied(name, args):
-            return '{"messages": [], "count": 0}'
+    def test_without_the_component_nothing_else_answers(self) -> None:
+        """No native client, no comms-pack ≤ 2.0 backend any more (#522)."""
         with patch.object(loader, "service", return_value=None), \
              patch.object(loader, "verb", return_value=None), \
-             patch.object(telegram_api.proxy, "call_proxied", side_effect=proxied) as p:
-            asyncio.run(telegram_api._pack("updates", {"timeout": 5}))
-        p.assert_called_once_with("telegram.updates", {"timeout": 5})
-
-
+             patch("server.proxy.call_proxied") as p:
+            with self.assertRaises(RuntimeError):
+                asyncio.run(telegram_api._pack("updates", {"timeout": 5}))
+        p.assert_not_called()
 
 
 class StaleBackendTests(unittest.TestCase):

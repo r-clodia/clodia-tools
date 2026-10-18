@@ -108,9 +108,19 @@ def _whitelist_uids(instance: str | None) -> dict:
 def _chat_admins(chat_id: str) -> list:
     """Amministratori della chat (l'unica lista di membri che Telegram dà a un
     bot). Isolata in una funzione perché è l'unico punto che parla con la rete."""
-    from . import telegram as tg
-    return tg.api_call(tg._token_internal(), "getChatAdministrators",
-                       {"chat_id": chat_id}) or []
+    # comms-pack's gateway component asks Telegram (#522): the gateway keeps
+    # no Telegram client.
+    from ..components import loader as _components
+    svc = _components.service("comms-pack", "telegram_chat_admins")
+    if svc is None:
+        # Not loaded in this process: the migration does not fetch or load
+        # components itself (that is the gateway's, with its user and audit).
+        raise RuntimeError(
+            "the chat administrators come from comms-pack ≥ 2.2.0's gateway "
+            "component (connectors: {telegram: pack}), not loaded in this "
+            "process: pass the members in the plan (--json) or run it where "
+            "the component is loaded")
+    return svc.handler({"chat_id": str(chat_id)}) or []
 
 
 def _relay_state_paths(chat_id: str) -> list:

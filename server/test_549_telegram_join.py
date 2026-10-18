@@ -15,7 +15,6 @@ import time
 import unittest
 from unittest.mock import patch
 
-from server.tools import telegram as tg
 from server.tools import telegram_join as tj
 
 
@@ -81,18 +80,21 @@ class TokenTests(_TmpJoin):
         self.assertEqual(tj.proposals("SEAL-1", "funding"), [])
 
 
-class PollInterceptTests(_TmpJoin):
-    def test_poll_updates_consumes_the_join_and_relays_the_rest(self):
+class RelayInterceptTests(_TmpJoin):
+    def test_the_relay_poll_consumes_the_join_and_relays_the_rest(self):
+        """The relay's `/poll` (comms-pack's component, #522) is the only door
+        updates come in by: the join is consumed there, the rest relayed."""
+        from server import telegram_api
         tok = tj.mint("SEAL-1", "funding", by="x")["token"]
-        updates = [{"update_id": 10, "message": _msg(f"/start@clodia_bot {tok}")},
-                   {"update_id": 11, "message": _msg("buongiorno")}]
-        tg.set_bot_username("clodia_bot")
-        with patch.object(tg, "_token_internal", lambda: "T"), \
-                patch.object(tg, "api_call", lambda *a, **k: updates):
-            out = tg.poll_updates(timeout=0)
+        msgs = [{"text": f"/start@clodia_bot {tok}", "chat_id": -1004433615610,
+                 "chat_title": "cop-pilot", "chat_type": "supergroup",
+                 "from_username": "dadabit", "from_id": 7},
+                {"text": "buongiorno", "chat_id": -1004433615610,
+                 "chat_title": "cop-pilot", "chat_type": "supergroup",
+                 "from_username": "dadabit", "from_id": 7}]
+        out = telegram_api._intercetta_join(msgs, "clodia_bot")
         self.assertEqual([m["text"] for m in out], ["buongiorno"])
         self.assertEqual(len(tj.proposals("SEAL-1", "funding")), 1)
-        self.assertEqual(tg._load_state()["offset"], 12)
 
 
 class ActionStateTests(_TmpJoin):

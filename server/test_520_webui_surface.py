@@ -289,8 +289,10 @@ class CredentialFormTests(_NoPacks):
         """
         import inspect
         from . import tools_api
+        # Telegram's handler went with the native client (#522): its
+        # credential is comms-pack's connector's, deposited generically.
+        self.assertNotIn("telegram", connectors_api._LEGACY_CONNECT)
         for cid, atteso in (("github", "github_connect"),
-                            ("telegram", "telegram_connect"),
                             ("openai-images", "openai_connect")):
             with self.subTest(connettore=cid):
                 nome = connectors_api._LEGACY_CONNECT[cid]
