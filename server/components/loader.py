@@ -77,6 +77,20 @@ fetcher_factory: Callable[[], store.Fetcher] = store.GitHubFetcher
 # lookups used by the dispatcher and the routes
 # --------------------------------------------------------------------------
 
+def serving_connectors() -> tuple[tuple[str, str], ...]:
+    """`(pack, connector id)` of every SERVING component's connectors, sorted.
+    Never raises."""
+    out: set[tuple[str, str]] = set()
+    try:
+        for st in list(_STATES.values()):
+            if _serving(st):
+                for cid in st.component.connectors:
+                    out.add((st.component.pack, str(cid)))
+    except Exception:  # noqa: BLE001
+        return ()
+    return tuple(sorted(out))
+
+
 def _serving(st: State) -> bool:
     """Loaded AND its namespaces are not the gateway's right now. Between a
     switch moved back to `native` and the next reconcile, the native verbs

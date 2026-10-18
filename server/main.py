@@ -5137,6 +5137,12 @@ def _check_not_transport(name: str) -> None:
     included. Not in `list_tools` either (`proxy.list_proxied_tools`)."""
     if not proxy.is_proxied(name):
         return
+    # Only a call that would REACH the backend is refused: a verb served by a
+    # gateway component, or kept by the gateway itself, never goes there —
+    # even when a stale backend of the same name is still mounted and
+    # withheld (comms-pack ≤ 2.0.x `telegram`, review of clodia-tools#394).
+    if _component_verb(name) is not None or name in _GATEWAY_RETAINED_VERBS:
+        return
     from .connectors import resolved as _conn
     if _conn.is_transport_backend(name):
         raise _PackVerbRefused(
@@ -5603,6 +5609,12 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # component verb never reaches a native lookup below.
                 _eargs = await asyncio.to_thread(
                     _component_pdp_arguments, _cpdp, name, arguments)
+                if name in ("telegram.send", "telegram.send_file"):
+                    # #402 holds whoever implements the verb: a `chat_id` that
+                    # is a group TITLE is refused before the verdict, never
+                    # resolved by substring into whichever chat matches
+                    # (review of clodia-logic#542).
+                    _telegram_chat_id_or_raise(arguments)
             elif name == "email.reply":
                 # The reply goes to the ORIGINAL sender, whatever `to` the
                 # caller wrote (the client ignores it): the PDP must judge that

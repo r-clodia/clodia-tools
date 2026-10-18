@@ -47,6 +47,14 @@ async def _pack(verbo: str, args: dict) -> dict:
     """
     import json as _json
 
+    # comms-pack ≥ 2.1.0 runs Telegram as a GATEWAY COMPONENT (#558/#522):
+    # the relay's two internal operations are its services, never agent verbs.
+    # Before that version, its MCP backend `telegram`.
+    from .components import loader as _components
+    _svc = _components.service("comms-pack", f"{CONNECTOR}_{verbo}")
+    if _svc is not None:
+        return await asyncio.to_thread(_svc.handler, dict(args))
+
     testo = await proxy.call_proxied(f"{CONNECTOR}.{verbo}", args)
     if str(testo).startswith("ERROR: "):
         raise RuntimeError(str(testo)[len("ERROR: "):][:200])
