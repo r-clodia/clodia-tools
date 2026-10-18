@@ -80,10 +80,11 @@ def rooms() -> list[dict]:
             if not str(uri).startswith("inbox:"):
                 continue
             addr = str(uri)[len("inbox:"):].strip().lower()
-            if addr in boxes:
-                out.append({"tier": tier, "name": name, "account": boxes[addr],
-                            "address": addr,
-                            "strict": bool(egress.ingress_strict(f"{tier}/{name}"))})
+            row = {"tier": tier, "name": name, "account": boxes.get(addr, ""),
+                   "address": addr,
+                   "strict": bool(egress.ingress_strict(f"{tier}/{name}"))}
+            if addr in boxes and row not in out:
+                out.append(row)
     return out
 
 
@@ -109,12 +110,31 @@ async def _room_call(request: Request, service: str, keys: tuple[str, ...]):
     payload, err = _authorize(request)
     if err:
         return err
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad_json"}, status_code=400)
     tier, name = str(body.get("tier") or ""), str(body.get("name") or "")
     if not (tier and name and await asyncio.to_thread(_topic_exists, tier, name)):
         return JSONResponse({"error": "tier/name of an existing topic required"},
                             status_code=400)
+    # Only a pair `rooms()` offers: the room's OWN `inbox:` list names the
+    # mailbox. A global entry would let the caller pull a mailbox into any
+    # room (review of #406).
+    account = str(body.get("account") or "")
+    offerte = await asyncio.to_thread(rooms)
+    if not any(r["tier"] == tier and r["name"] == name and r["account"] == account
+               for r in offerte):
+        return JSONResponse({"error": f"mailbox '{account}' is not in the inbox: list "
+                                      f"of {tier}/{name}"}, status_code=403)
     args = {k: body[k] for k in keys if k in body}
+    if "limit" in args:
+        try:
+            args["limit"] = max(1, min(int(args["limit"]), 50))
+        except (TypeError, ValueError):
+            args.pop("limit")
     try:
         return JSONResponse(await asyncio.to_thread(_in_room, tier, name, payload,
                                                     service, args))

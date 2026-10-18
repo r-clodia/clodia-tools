@@ -56,6 +56,8 @@ class InRoomTests(unittest.TestCase):
             return {"envelopes": []}
         with patch.object(C, "_authorize", lambda r: ({"agent": "clodia"}, None)), \
                 patch.object(C, "_topic_exists", lambda t, n: True), \
+                patch.object(C, "rooms", lambda: [{"tier": "SEAL-2", "name": "preventivi",
+                                                   "account": "info"}]), \
                 patch.object(whitelist, "CONFIG", {"agents": {"clodia": {}}}), \
                 patch("server.tools.mail_switch.call", call):
             r = asyncio.run(C.envelopes_route(_Req({
@@ -72,6 +74,8 @@ class InRoomTests(unittest.TestCase):
             raise PermissionError("la casella non è nella whitelist inbox")
         with patch.object(C, "_authorize", lambda r: ({"agent": "clodia"}, None)), \
                 patch.object(C, "_topic_exists", lambda t, n: True), \
+                patch.object(C, "rooms", lambda: [{"tier": "SEAL-2", "name": "x",
+                                                   "account": "info"}]), \
                 patch("server.tools.mail_switch.call", call):
             r = asyncio.run(C.attachment_route(_Req({
                 "tier": "SEAL-2", "name": "x", "account": "info",
@@ -86,6 +90,17 @@ class InRoomTests(unittest.TestCase):
             r = asyncio.run(C.envelopes_route(_Req({"tier": "SEAL-1", "name": "x",
                                                     "account": "info"})))
         self.assertEqual(r.status_code, 400)
+
+    def test_a_mailbox_the_room_does_not_list_is_refused_before_the_component(self):
+        with patch.object(C, "_authorize", lambda r: ({"agent": "clodia"}, None)), \
+                patch.object(C, "_topic_exists", lambda t, n: True), \
+                patch.object(C, "rooms", lambda: [{"tier": "SEAL-2", "name": "a",
+                                                   "account": "info"}]), \
+                patch("server.tools.mail_switch.call",
+                      lambda *a: self.fail("component called")):
+            r = asyncio.run(C.envelopes_route(_Req({"tier": "SEAL-2", "name": "b",
+                                                    "account": "info"})))
+        self.assertEqual(r.status_code, 403)
 
     def test_unauthorized_callers_are_refused(self):
         from starlette.responses import JSONResponse
