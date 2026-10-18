@@ -223,6 +223,27 @@ class ConfinementTests(Base):
             self.svc.list_files(tier, name, "shared")
 
 
+    def test_a_symlink_to_another_topics_shared_folder_is_refused(self):
+        tier, name = self.topic()
+        self.topic("beta")
+        (self.mac("beta") / "suo.txt").write_text("b")
+        (self.mac("acme") / "ponte").symlink_to(self.mac("beta"))
+        with self.assertRaises(TopicError):
+            self.svc.read_file(tier, name, "shared/ponte/suo.txt")
+
+    def test_an_imported_meta_drops_local_folders(self):
+        import json
+        from .. import topics_api
+        raw = json.dumps({"title": "x", "local_folders": [{"name": "victim"}]})
+        meta = json.loads(topics_api._snapshot_meta_bytes(raw.encode(), "SEAL-1"))
+        self.assertNotIn("local_folders", meta)
+
+    def test_a_long_name_still_gives_a_usable_shared_folder(self):
+        self.svc.new("SEAL-1", "acme", {"title": "acme"})
+        self.svc.local_folder_add("SEAL-1", "acme", "x" * 300)
+        self.assertIn("shared", [e["name"] for e in self.svc.list_files("SEAL-1", "acme", "")])
+
+
 class EagerMigrationTests(Base):
     def test_boot_migrates_every_legacy_topic_without_opening_them(self):
         self.legacy_topic("acme")

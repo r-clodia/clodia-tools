@@ -26,7 +26,7 @@ from starlette.routing import Route
 
 from . import human_mcp, internal_auth, pki_mint
 from .topics.local_fs import LocalFsStorage
-from .topics.service import (MESSAGE_KINDS, SCHEMA_VERSION, TopicError, TopicService,
+from .topics.service import (VALID_TIER, MESSAGE_KINDS, SCHEMA_VERSION, TopicError, TopicService,
                              normalize_meta_v2, topic_links)
 from .topics.storage import VersionConflict
 
@@ -958,6 +958,10 @@ def _snapshot_meta_bytes(raw: bytes, tier: str) -> bytes:
     # imported meta.json is the archive's word, not theirs. Links are made
     # (and approved) again after the import.
     meta.pop("links", None)
+    # The shared folder (clodia-platform#571) for the same reason: it names a
+    # folder of THIS instance's shared root, maybe another topic's. It is
+    # attached again, through the gated `topic.local_folder_add`.
+    meta.pop("local_folders", None)
     return json.dumps(meta, ensure_ascii=False, indent=2).encode()
 
 
@@ -1051,6 +1055,10 @@ async def import_topics(request: Request):
                 parts = rel.split("/")
                 # anti-traversal + struttura attesa tier/name/...
                 if rel.startswith("/") or ".." in parts or len(parts) < 3:
+                    continue
+                # Only a tier directory: anything else (`_shared-local/…`,
+                # the trash, the store's own files) is not a topic.
+                if parts[0] not in VALID_TIER:
                     continue
                 key = f"{parts[0]}/{parts[1]}"
                 if key in existing:

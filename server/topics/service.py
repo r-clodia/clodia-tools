@@ -629,13 +629,14 @@ class TopicService:
         self._confine_shared(base)
         return self.s, base
 
-    def _confine_shared(self, path: str) -> None:
+    def _confine_shared(self, path: str, prefix: str = LOCAL_SHARED_ROOT) -> None:
         """TopicError unless `path`, resolved through symlinks, stays under
-        `LOCAL_SHARED_ROOT`. The folder is written from the Mac side too, so a
-        symlink there must not lead the `shared/` mount into another topic or
-        into the control plane of the store."""
+        `prefix`: the shared root for the mount itself, the topic's own folder
+        for anything inside it. The folder is written from the Mac side too,
+        so a symlink there must not lead the `shared/` mount into another
+        topic, another topic's shared folder or the store's control plane."""
         within = getattr(self.s, "within", None)
-        if within is not None and not within(path, LOCAL_SHARED_ROOT):
+        if within is not None and not within(path, prefix):
             raise TopicError(
                 f"`{self.MOUNT_SHARED}/` punta fuori dalla radice delle cartelle "
                 "condivise: accesso rifiutato.")
@@ -680,6 +681,7 @@ class TopicService:
         has no symlink left and costs one `lstat`. One bad topic never stops
         the pass. Returns counters for the boot log."""
         seen = migrated = 0
+        owners: dict[str, str] = {}
         for tr in VALID_TIER:
             try:
                 entries = self.s.list(tr)
@@ -696,6 +698,12 @@ class TopicService:
                 if not slug:
                     continue
                 seen += 1
+                if slug in owners:
+                    # Two metas naming one folder: only `local_folder_add`
+                    # should attach it, and it never hands out a taken name.
+                    LOG.warning("shared folder %s claimed by %s and %s/%s",
+                                slug, owners[slug], tr, e.name)
+                owners.setdefault(slug, f"{tr}/{e.name}")
                 link = f"{self._dir(tr, e.name)}/files/{slug}"
                 try:
                     had = self.s.is_symlink(link)
@@ -875,7 +883,7 @@ class TopicService:
             store, base = self._shared_mount(tier, name, meta)
             sub = "/".join(parts[1:])
             if sub:
-                self._confine_shared(f"{base}/{sub}")
+                self._confine_shared(f"{base}/{sub}", base)
             return store, base, sub, self.MOUNT_SHARED
 
         if parts and parts[0] == self.MOUNT_LOCAL:
@@ -884,7 +892,7 @@ class TopicService:
             if rest is not None:
                 store, base = self._shared_mount(tier, name, meta)
                 if rest:
-                    self._confine_shared(f"{base}/{rest}")
+                    self._confine_shared(f"{base}/{rest}", base)
                 return store, base, rest, self.MOUNT_SHARED
             store, base = self._local_mount(tier, name)
             return store, base, sub, self.MOUNT_LOCAL
@@ -913,7 +921,7 @@ class TopicService:
         if rest is not None:
             store, base = self._shared_mount(tier, name, meta)
             if rest:
-                self._confine_shared(f"{base}/{rest}")
+                self._confine_shared(f"{base}/{rest}", base)
             return store, base, rest, self.MOUNT_SHARED
         store, base = self._files_backend(tier, name)
         return store, base, sub, self.MOUNT_LOCAL
@@ -1551,7 +1559,8 @@ class TopicService:
         except Exception:  # noqa: BLE001 — topic senza files/: nessun nome occupato
             in_files = set()
         presi = ({"files", self.MOUNT_LOCAL, self.MOUNT_SHARED} | su_disco | in_files)
-        slug = _unique_name(mount_name, presi)
+        # Capped so that the slug, `-N` included, stays within `_SHARED_SLUG`.
+        slug = _unique_name(str(mount_name or "")[:90], presi)
         sub_path = f"{LOCAL_SHARED_ROOT}/{slug}"
         self.s.mkdir(sub_path)
         # Scrivibile anche dal gruppo: il bind mount attraversa utenti macOS
