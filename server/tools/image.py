@@ -152,6 +152,14 @@ def _via_transport(op: str, prompt: str, *, size: str, quality: str,
         return png
     transport = resolved.transport_for(CONNECTOR)
     if transport is None:
+        try:
+            st = _components.state_of("it-pack")
+        except Exception:  # noqa: BLE001
+            st = None
+        if st:
+            raise ImageGenError(
+                f"image generation is it-pack's on this instance, but its gateway "
+                f"component is {st.get('status')}: {str(st.get('reason') or '')[:200]}")
         raise ImageGenError(
             "image generation is handed to a pack on this instance "
             "(connectors: {openai-images: pack}) but its transport provider "

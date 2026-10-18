@@ -34,5 +34,11 @@ class ImagesComponentTests(unittest.TestCase):
                                      quality="auto", background="auto")
 
 
+class StaleTransportTests(unittest.TestCase):
+    def test_imagegen_transport_is_retired(self) -> None:
+        from .connectors import builtin
+        self.assertIn("imagegen-transport", builtin.RETIRED_TRANSPORTS["it-pack"])
+
+
 if __name__ == "__main__":
     unittest.main()
