@@ -52,6 +52,10 @@ class State:
     verbs: dict[str, VerbSpec] = field(default_factory=dict)
     routes: dict[str, RouteSpec] = field(default_factory=dict)
     services: dict[str, ServiceSpec] = field(default_factory=dict)
+    #: The namespaces the component served when it registered (#522): a switch
+    #: that changes this set reloads it, so a component of several connectors
+    #: registers exactly the halves on `pack`.
+    served: frozenset = frozenset()
 
     def describe(self) -> dict:
         c = self.component
@@ -105,10 +109,21 @@ def _serving(st: State) -> bool:
         return False
 
 
+def _served_now(component: GatewayComponent) -> frozenset:
+    """Its namespaces that are NOT the gateway's on this instance right now."""
+    try:
+        reserved = _reserved_namespaces()
+    except Exception:  # noqa: BLE001 — unknown: serve nothing
+        return frozenset()
+    return frozenset(ns for ns in component.namespaces.values() if ns not in reserved)
+
+
 def verb(name: str) -> VerbSpec | None:
     for st in list(_STATES.values()):
         spec = st.verbs.get(name)
-        if spec is not None and _serving(st):
+        # Per namespace too: between a switch flip and the next reconcile a
+        # verb of a half now native is neither dispatched nor listed (#522).
+        if spec is not None and _serving(st) and spec.namespace in _served_now(st.component):
             return spec
     return None
 
@@ -121,7 +136,8 @@ def tools() -> list:
     out = []
     for st in list(_STATES.values()):
         if _serving(st):
-            out += [v.tool for v in st.verbs.values()]
+            ora = _served_now(st.component)
+            out += [v.tool for v in st.verbs.values() if v.namespace in ora]
     return out
 
 
@@ -420,7 +436,8 @@ def load(component: GatewayComponent, pin: store.Pin) -> State:
                 component.key, pin.commit[:12], len(host.verbs), len(host.routes))
     return State(component=component, status="loaded", commit=pin.commit,
                  tree_sha256=pin.tree_sha256, verbs=dict(host.verbs),
-                 routes=dict(host.routes), services=dict(host.services))
+                 routes=dict(host.routes), services=dict(host.services),
+                 served=_served_now(component))
 
 
 def unload(key: str) -> None:
@@ -532,7 +549,8 @@ def reconcile(*, force: bool = False, refresh_pack: str | None = None,
                                          tree_sha256=pin.tree_sha256)
                 continue
             if current is not None and current.status == "loaded" and \
-                    current.commit == pin.commit and current.component == comp:
+                    current.commit == pin.commit and current.component == comp \
+                    and current.served == _served_now(comp):
                 current.reason = ""
                 continue
             unload(key)

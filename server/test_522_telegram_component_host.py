@@ -130,5 +130,27 @@ class OneComponentSeveralConnectorsTests(unittest.TestCase):
             self.assertEqual(loader.serving_connectors(), (("comms-pack", "telegram"),))
 
 
+class SwitchFlipTests(unittest.TestCase):
+    """A switch flip on ONE half: the verbs of the half now native are not
+    served nor listed at once, and the reconcile reloads the component."""
+
+    def test_verbs_of_a_native_half_are_withheld_at_once(self) -> None:
+        comp = NS(pack="comms-pack", id="comms", key="comms-pack/comms",
+                  connectors=("mail", "telegram"),
+                  namespaces={"mail": "email", "telegram": "telegram"})
+        tool = lambda n: NS(name=n)  # noqa: E731
+        st = loader.State(component=comp, status="loaded",
+                          verbs={"email.send": NS(namespace="email", tool=tool("email.send")),
+                                 "telegram.send": NS(namespace="telegram", tool=tool("telegram.send"))},
+                          served=frozenset({"email", "telegram"}))
+        with patch.dict(loader._STATES, {"comms-pack/comms": st}, clear=True), \
+             patch.object(loader, "_reserved_namespaces", return_value=frozenset({"email"})):
+            self.assertIsNone(loader.verb("email.send"))
+            self.assertIsNotNone(loader.verb("telegram.send"))
+            self.assertEqual([t.name for t in loader.tools()], ["telegram.send"])
+            # the reconcile's "unchanged" test fails → the component reloads
+            self.assertNotEqual(st.served, loader._served_now(comp))
+
+
 if __name__ == "__main__":
     unittest.main()
