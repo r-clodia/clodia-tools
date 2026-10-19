@@ -156,14 +156,16 @@ class VaultEntryTests(unittest.TestCase):
         self.assertIn("sms_x", out["errors"][0])
 
 
-    def test_the_migrating_namespace_keeps_its_core_prefix_only_after_migration(self):
-        """In production the migrating namespaces are reserved, so nobody has
-        `telegram_…`; a registry reproduced with the reservation lifted (the
-        day #522 lands) lets the telegram namespace use its own prefix."""
-        from .connectors.manifest import vault_entry_problem
-        self.assertTrue(vault_entry_problem("telegram_bot_token", "telegram"))
-        self.assertEqual(vault_entry_problem("telegram_bot_token", "telegram",
-                                             reserved=frozenset()), "")
+    def test_a_migrated_namespace_keeps_its_core_prefix_and_only_it(self):
+        """Since #522/#526 `telegram` is comms-pack's: its namespace may use
+        its own core prefix (and only comms-pack may hold that namespace,
+        `builtin.expected_claims`). Under the full reservation it may not."""
+        from .connectors.manifest import MIGRATING_NAMESPACES, vault_entry_problem
+        from .connectors import builtin
+        self.assertEqual(vault_entry_problem("telegram_bot_token", "telegram"), "")
+        self.assertEqual(builtin.expected_claims()["ns:telegram"], "comms-pack")
+        self.assertTrue(vault_entry_problem("telegram_bot_token", "telegram",
+                                            reserved=MIGRATING_NAMESPACES))
         self.assertTrue(vault_entry_problem("telegram_bot_token", "sms"))
         self.assertTrue(vault_entry_problem("mailbox_team", "mailbox"))
         self.assertTrue(vault_entry_problem("mcp_x_token", "mcp_x"))
@@ -223,7 +225,8 @@ class IsolationTests(unittest.TestCase):
         os.utime(manifest, (self._quando, self._quando))
 
     def _ids(self):
-        return {c.id for c in resolved.registry().connectors if not c.builtin}
+        return {c.id for c in resolved.registry().connectors
+                if not c.builtin and c.pack not in _first_party.manifests()}
 
     def test_a_malformed_pack_does_not_drop_the_others(self):
         self.install("good-pack", _sms())
@@ -262,3 +265,16 @@ class IsolationTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+from .connectors import first_party_fixture as _first_party
+
+
+def setUpModule() -> None:
+    # The first-party packs, installed as on every instance: since the switch
+    # was retired (#526) the tables pinned here are theirs, not the gateway's.
+    _first_party.install()
+
+
+def tearDownModule() -> None:
+    _first_party.uninstall()

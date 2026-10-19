@@ -68,7 +68,7 @@ async def _pack(verbo: str, args: dict, *, claims: dict | None = None,
     # backend are gone (#522). Telegram is the component's, or nobody's.
     raise RuntimeError(
         "telegram is served by comms-pack's gateway component (comms-pack ≥ "
-        "2.2.0) with `connectors: {telegram: pack}`, which is not serving now")
+        "2.2.0), which is not serving now")
 
 
 def _intercetta_join(messaggi: list, bot_username) -> list:

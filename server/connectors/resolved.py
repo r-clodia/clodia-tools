@@ -28,12 +28,12 @@ a rewritten one can do is point its own verbs at destinations that the egress
 whitelist still has to contain and the gate still has to show. It declares; it
 never grants.
 
-Known gap, deliberate: `pack_import.install_pack_from_root` in `clodia-logic`
-rewrites a *curated* `pack.yaml` with the keys it knows, so a `connectors:`
-block does not survive installation today. Until clodia-platform#519 preserves
-it (and refuses a malformed manifest at install time), this registry is empty on
-a real instance and every path below is a no-op. That is why the tests build the
-registry straight from manifests.
+`pack_import.install_pack_from_root` in `clodia-logic` keeps the `connectors:`
+block in the `pack.yaml` it writes, after asking this gateway to validate it
+(`POST /internal/connectors/validate`, clodia-platform#519): a pack whose block
+the gateway refuses, or cannot validate, is not installed. A first-party pack
+with a gateway component is read from its PINNED upstream manifest instead
+(`manifests`, #558).
 """
 from __future__ import annotations
 
@@ -214,34 +214,12 @@ def _signature(paths: list[Path]) -> tuple:
     return tuple(out)
 
 
-#: Backend MCP che il CORE monta da sé (il connettore GitHub nativo): non sono
-#: di nessun pack, nemmeno di uno che li dichiari fra i propri `mcp_servers`.
-#: `{backend: connector id}` — the connector whose native implementation mounts
-#: that backend (`tools_api.github_connect`).
+#: The backend the gateway's former native GitHub connector mounted itself,
+#: unstamped (`tools_api.github_connect` before #525): `{backend: connector
+#: id}`. No longer reserved — it-pack mounts that backend as its own — but
+#: still how `tools_api._core_entry_released` recognises the leftover entry it
+#: may hand over to it-pack.
 _CORE_BACKEND_CONNECTORS = {"github": "github"}
-#: The full set, whatever the switch says. Kept for readers that want the
-#: shipped list; the checks below use `core_backends()`.
-_CORE_BACKENDS = frozenset(_CORE_BACKEND_CONNECTORS)
-
-
-def core_backends() -> frozenset[str]:
-    """The core backends reserved on THIS instance (clodia-platform#525).
-
-    `github` is the core's own mount only while the gateway implements the
-    GitHub connector. With `connectors: {github: pack}` it-pack declares the
-    connector (namespace `github`) and mounts the GitHub MCP backend itself:
-    reserving the name then would refuse exactly the connector that has to
-    take over — the same reason `manifest.reserved_namespaces()` follows
-    `builtin.released()`. The reservation goes with the switch, and only with
-    it: in `native` position, or when the profile cannot be read, `github`
-    stays reserved for everyone, which is yesterday's gateway.
-    """
-    try:
-        from .. import instance_profile
-        return frozenset(b for b, cid in _CORE_BACKEND_CONNECTORS.items()
-                         if instance_profile.connector_mode(cid) != "pack")
-    except Exception:  # noqa: BLE001 — in doubt everything stays reserved
-        return _CORE_BACKENDS
 
 
 def norm_name(name: str) -> str:
@@ -270,17 +248,6 @@ def _backend_entries() -> list[dict]:
     return list(proxy._backends().values())
 
 
-def _switch_signature() -> frozenset[str]:
-    """The connectors the profile hands to packs: part of every cache key here,
-    because the switch decides which builtins exist and which core backends
-    are reserved (#525) — a registry built in the other position would answer
-    for a connector that is not the one in charge."""
-    try:
-        return _builtin._packaged()
-    except Exception:  # noqa: BLE001
-        return frozenset()
-
-
 def mounted_backends() -> frozenset[str]:
     """I nomi (normalizzati) dei backend MCP montati adesso (`mcp_backends`)."""
     return frozenset(_norm(str(b.get("name") or "")) for b in _backend_entries())
@@ -301,14 +268,14 @@ def backend_owners(packs: Mapping[str, Mapping] | None = None) -> dict[str, froz
     chi l'ha montato: `register_mcp_core(..., pack=<nome>)`, il percorso del
     mount di un pack, scrive `pack:` nella voce del backend; un backend montato
     da `mcp.add`/Tools senza pack non è di nessuno, quindi è riservato per
-    tutti. I backend del core (`_CORE_BACKENDS`) non sono mai di un pack.
+    tutti.
     `packs` è ignorato (resta nella firma per i chiamanti).
     """
     out: dict[str, set[str]] = {}
     for b in _backend_entries():
         pack = b.get("pack")
         name = _norm(str(b.get("name") or ""))
-        if isinstance(pack, str) and pack and name and name not in core_backends():
+        if isinstance(pack, str) and pack and name:
             out.setdefault(pack, set()).add(name)
     return {k: frozenset(v) for k, v in out.items()}
 
@@ -316,15 +283,15 @@ def backend_owners(packs: Mapping[str, Mapping] | None = None) -> dict[str, froz
 def foreign_backends(pack: str) -> frozenset[str]:
     """I namespace di backend MCP che `pack` NON può prendersi come namespace.
 
-    Tutti quelli montati, più quelli del core, meno i soli server MCP che il
-    pack monta come propri. Senza questa riserva un pack poteva dichiarare
+    Tutti quelli montati, meno i soli server MCP che il pack monta come
+    propri. Senza questa riserva un pack poteva dichiarare
     `namespace: github` (o quello di un `normattiva` montato con `mcp.add`) e
     mappare `github.get_*` come lettura `direction: source` di una fonte scelta
     da lui — cioè etichettare come fidate le letture di un altro backend e
     spegnere il taint.
     """
     owned = _build_owners().get(pack, frozenset())
-    return (mounted_backends() | core_backends()) - owned
+    return mounted_backends() - owned
 
 
 def reserved_for(pack: str) -> frozenset[str]:
@@ -414,13 +381,15 @@ def _installed_manifests() -> dict[str, dict]:
 
 def _strip_foreign_claims(installed: dict) -> tuple[dict, list[str]]:
     """Drop, from packs other than the expected one, any connector entry that
-    claims a builtin connector switched to a pack (by id or by namespace).
+    claims a connector of `builtin.RELEASED_TO` (by id or by namespace).
 
-    `connectors: {github: pack}` means "to it-pack", not "to whoever comes
-    first": before this, a pack imported ahead of it-pack held `github` (the
-    push lost its egress mapping) and `openai-images` (its transport received
-    the API key). Stripped BEFORE the build, so the expected pack is never
-    dropped as the "newcomer" of a clash with an intruder (review of #379).
+    `github` is it-pack's, not "whoever comes first": before this, a pack
+    imported ahead of it-pack held `github` (the push lost its egress mapping)
+    and `openai-images` (its transport received the API key). Stripped BEFORE
+    the build, so the expected pack is never dropped as the "newcomer" of a
+    clash with an intruder (review of #379). Since the switch is retired
+    (#526) this is the ONLY thing keeping a third-party pack off `email`,
+    `telegram`, `github`, `openai`, `gdrive`, … (`test_526_retired_switch`).
     """
     try:
         claims = _builtin.expected_claims()
@@ -440,11 +409,20 @@ def _strip_foreign_claims(installed: dict) -> tuple[dict, list[str]]:
             if isinstance(e, Mapping):
                 atteso = claims.get(str(e.get("id") or "")) or \
                     claims.get("ns:" + str(e.get("namespace") or ""))
+                if not atteso:
+                    # Or the addresses: a first-party scheme under a namespace
+                    # of the intruder's own (review of #409).
+                    for s in e.get("schemes") or []:
+                        nome = str((s or {}).get("scheme") or "") \
+                            if isinstance(s, Mapping) else ""
+                        if claims.get("sch:" + nome, pack) != pack:
+                            atteso = claims["sch:" + nome]
+                            break
                 if atteso and atteso != pack:
                     refused.append(
-                        f"pack '{pack}', connector '{e.get('id')}': on this "
-                        f"instance that connector is switched to '{atteso}', "
-                        f"not to '{pack}'; refused")
+                        f"pack '{pack}', connector '{e.get('id')}': that "
+                        f"connector belongs to '{atteso}', not to '{pack}'; "
+                        f"refused")
                     continue
             kept.append(e)
         out[pack] = {**meta, "connectors": kept} if len(kept) != len(entries) else meta
@@ -476,8 +454,9 @@ def _build_owners() -> dict[str, frozenset[str]]:
 #: source, and an empty registry is permissive: `egress.decide` answers
 #: «not checked, allowed» and `taint.taints` answers False. These two sets are
 #: the namespaces of the builtin manifests' outbound verbs and of their reads
-#: (`test_518_fail_closed` keeps them in step with the manifests): in degraded
-#: mode the first are DENIED and the second TAINT.
+#: (`test_518_review_fixes` keeps them a superset), plus those of the
+#: first-party packs' connectors that used to be builtins (#526): in degraded
+#: mode no pack is held either, so the first are DENIED and the second TAINT.
 FAILSAFE_EGRESS_NAMESPACES = frozenset({
     "email", "gdrive", "github", "gsheets", "telegram", "web"})
 FAILSAFE_SOURCE_NAMESPACES = frozenset({
@@ -502,25 +481,7 @@ def _builtin_registry() -> Registry:
     without any table at all.
     """
     own = _builtin.manifests()
-    try:
-        return build_registry(own, builtin=tuple(own), reserved=frozenset())
-    except ManifestError:
-        full = _builtin._all()
-        if set(full) == set(own) and all(full[k] == own[k] for k in own):
-            raise
-        # A connector released to a pack can leave the OTHER builtins unable
-        # to stand alone (#523): `gdrive.upload` shares with a person on
-        # `mailto:`, which `mail.yaml` declares. Healthy, the pack supplies the
-        # scheme and the real registry builds (`_build_isolated`); this floor
-        # is what remains when it cannot — and a floor that refused to build
-        # would deny every native outbound verb of the instance over a pack
-        # problem. So the floor is the gateway's manifests as shipped. The
-        # released connector's verbs stay refused all the same: they need
-        # the PACK's connector held (`main._check_pack_connector_held`), and
-        # a builtin is never that.
-        LOG.info("connectors: i builtin rimasti non stanno in piedi da soli "
-             "(connettori passati ai pack); pavimento = builtin completi")
-        return build_registry(full, builtin=tuple(full), reserved=frozenset())
+    return build_registry(own, builtin=tuple(own), reserved=frozenset())
 
 
 def _build_isolated(own: dict, installed: dict,
@@ -622,14 +583,17 @@ def _failsafe_from(packs: Mapping[str, Mapping],
         pass
     taken |= {_norm(x) for x in (reserved or ())}
     try:
-        mounted = {_norm(b) for b in (mounted_backends() | core_backends())}
+        mounted = {_norm(b) for b in mounted_backends()}
     except Exception:  # noqa: BLE001
-        mounted = {_norm(b) for b in _CORE_BACKENDS}
+        mounted = set()
     try:
         owners = backend_owners()
     except Exception:  # noqa: BLE001
         # Without proof of ownership no mounted backend is the pack's own.
         owners = {}
+    # A first-party connector's namespace (`email` is comms-pack's, #526) is
+    # off limits to every other pack, held or not.
+    claims = _builtin.expected_claims()
     out: set[str] = set()
     for pack, meta in (packs or {}).items():
         # A broken pack's OWN mounted backend is not «somebody else's».
@@ -641,6 +605,8 @@ def _failsafe_from(packs: Mapping[str, Mapping],
                 continue
             ns = str(entry.get("namespace") or "")
             if not ns or _norm(ns) in off_limits:
+                continue
+            if claims.get("ns:" + ns, pack) != pack:
                 continue
             verbs = entry.get("verbs")
             for v in verbs if isinstance(verbs, list) else []:
@@ -668,8 +634,7 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
     # Nella firma anche i plugin (chi possiede quale server MCP) e i backend
     # montati: un `mcp.add` fatto dopo la costruzione deve riservare quel
     # namespace alla chiamata successiva, non al prossimo cambio di pack.yaml.
-    sig = (_signature(_manifest_files()), _mount_signature(), _switch_signature(),
-           _pins_signature())
+    sig = (_signature(_manifest_files()), _mount_signature(), _pins_signature())
     if _CACHE is not None and _CACHE[0] == sig:
         return _CACHE[1], _CACHE[2]
     # 1. The floor: the gateway's own connectors. If THEY fail the result is
@@ -704,7 +669,7 @@ def _build() -> tuple[Registry, tuple[str, ...]]:
         # Namespace di backend MCP montati: riservati come quelli nativi, salvo
         # il server MCP che il pack monta come proprio. Il connettore che ne
         # prende uno altrui è rifiutato da solo — gli altri restano.
-        mounted = mounted_backends() | core_backends()
+        mounted = mounted_backends()
         keep = []
         for c in reg.connectors:
             if not c.builtin and \
@@ -971,8 +936,7 @@ def source_uri(verb: str, arguments: dict | None,
 def held_by_pack(namespace: str) -> bool:
     """True when the registry HOLDS a pack connector owning `namespace`.
 
-    In `pack` position the gateway dispatches the namespace's verbs to the
-    pack backend; if the pack's connector was refused (malformed manifest,
+    The gateway dispatches the namespace's verbs to the pack; if the pack's connector was refused (malformed manifest,
     clash) its context/egress declarations are gone while the backend may
     still be mounted. Calls must then be refused, not passed through with
     the caller's own `agent`/`channel` (review of clodia-tools#374).
@@ -1062,15 +1026,8 @@ def transport_for(connector_id: str,
       adds Gmail to the mail vocabulary comms-pack owns). One vocabulary,
       several implementations, each with its own transport.
 
-    Only in `pack` position of the switch that governs the connector holding
-    the provider (`builtin.switch_of`: `mail-gmail` follows `google`, not
-    `mail`): in `native` the transport is the gateway's own code, and a pack
-    declaration must not be able to redirect it — the position is checked
-    first so that the answer never depends on a collision happening to refuse
-    the pack's connector.
-
     Only from a pack connector the registry HOLDS: a refused manifest has no
-    say. Only from the pack that connector is switched TO (`RELEASED_TO`), so
+    say. Only from the pack that connector belongs to (`RELEASED_TO`), so
     a neighbour contributing a provider of the same name to the same
     vocabulary is never elected. And only when the named backend is really
     that pack's own mount (`backend_owners`, the `pack:` stamp of
@@ -1080,10 +1037,6 @@ def transport_for(connector_id: str,
 
     None means «no usable transport»; the caller fails closed on it.
     """
-    from .. import instance_profile
-    if provider_id is None and \
-            instance_profile.connector_mode(_builtin.switch_of(connector_id)) != "pack":
-        return None              # native: not even a registry read
     reg = registry()
     if provider_id is None:
         connector = reg.by_id(connector_id)
@@ -1097,21 +1050,19 @@ def transport_for(connector_id: str,
             (None, None))
     if connector is None or connector.builtin or provider is None:
         return None
-    if instance_profile.connector_mode(_builtin.switch_of(connector.id)) != "pack":
-        return None
     expected = _builtin.RELEASED_TO.get(connector.id)
-    if provider_id is not None and expected is None:
-        # A provider asked for by name is one the gateway routes credentials
-        # of a known kind to (Gmail): only a connector it knows may carry it.
+    if expected is None:
+        # The gateway routes credentials of a known kind to a transport (mail,
+        # Gmail): only a connector it knows may carry one.
         return None
-    if expected is not None and expected != connector.pack:
+    if expected != connector.pack:
         LOG.warning("connectors: transport of '%s' declared by pack '%s', but "
-                    "the connector is switched to '%s': not used",
+                    "the connector belongs to '%s': not used",
                     connector.id, connector.pack, expected)
         return None
     backend = provider.transport.backend
     owned = backend_owners().get(connector.pack, frozenset())
-    if _norm(backend) not in owned or _norm(backend) in core_backends():
+    if _norm(backend) not in owned:
         LOG.warning("connectors: transport of '%s' names backend '%s', which "
                     "pack '%s' has not mounted: not used", connector.id,
                     backend, connector.pack)
@@ -1131,10 +1082,9 @@ def transport_backends() -> frozenset[str]:
     takes a raw argv and the files of a credential; exposed as a verb it would
     be a way around every check the gateway's own verbs make.
 
-    Read from the RAW installed manifests, not from the held connectors, and
-    whatever the switch says: in `native` position the pack's connector is
-    refused for collision with the builtin, but its backend may well be
-    mounted — and is no less raw for that. A backend is withheld unless it is
+    Read from the RAW installed manifests, not from the held connectors: a
+    pack whose connector is refused may well have its backend mounted — and
+    it is no less raw for that. A backend is withheld unless it is
     a mount the declaring pack itself stamped: a pack may hide its own
     mounts, never a neighbour's, a core one or an unclaimed admin mount.
     """
@@ -1144,8 +1094,8 @@ def transport_backends() -> frozenset[str]:
         serving = _components.serving_connectors()
     except Exception:  # noqa: BLE001
         serving = ()
-    sig = (_signature(_manifest_files()), _mount_signature(), _switch_signature(),
-           _pins_signature(), serving)
+    sig = (_signature(_manifest_files()), _mount_signature(), _pins_signature(),
+           serving)
     if _TRANSPORTS is not None and _TRANSPORTS[0] == sig:
         return _TRANSPORTS[1]
     owners = backend_owners()
@@ -1158,7 +1108,7 @@ def transport_backends() -> frozenset[str]:
                 t = p.get("transport") if isinstance(p, Mapping) else None
                 name = _norm(str(t.get("backend") or "")) \
                     if isinstance(t, Mapping) else ""
-                if not name or name in core_backends():
+                if not name:
                     continue
                 # Only the pack's OWN stamped mounts: an unclaimed backend
                 # (mounted by an admin, e.g. normattiva) must not be hideable
@@ -1185,12 +1135,12 @@ def transport_backends() -> frozenset[str]:
                     and entry.get("namespace"):
                 nomi.add(str(entry["namespace"]))
         for n in nomi:
-            if _norm(n) in (owners.get(pack) or ()) and _norm(n) not in core_backends():
+            if _norm(n) in (owners.get(pack) or ()):
                 out.add(_norm(n))
     from . import builtin as _builtin
     for pack, names in _builtin.RETIRED_TRANSPORTS.items():
         for n in names:
-            if _norm(n) in (owners.get(pack) or ()) and _norm(n) not in core_backends():
+            if _norm(n) in (owners.get(pack) or ()):
                 out.add(_norm(n))
     result = frozenset(out)
     _TRANSPORTS = (sig, result)

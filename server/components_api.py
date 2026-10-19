@@ -93,18 +93,48 @@ async def component_route(request: Request):
     path = request.path_params["rest"]
     spec = components.route(pack, path)
     if spec is None:
+        state = None
+        try:
+            state = components.state_of(pack)
+        except Exception:  # noqa: BLE001 — unknown: answered as before
+            state = None
+        if state is not None and state.get("status") != "loaded" \
+                and _auth_ok(request, "admin"):
+            # The pack declares a component that is not serving: say why
+            # (e.g. the Tools page's Google consent while google-pack's
+            # component failed), never a bare 404. Only to a human admin.
+            return JSONResponse(
+                {"error": "component_unavailable",
+                 "detail": f"{pack}'s gateway component is {state.get('status')}: "
+                           f"{str(state.get('reason') or '-')[:300]}"},
+                status_code=503)
         return _core_answer(request)
     return await serve(request, spec)
+
+
+def _pack_allowed(pack: str) -> bool:
+    """The edition's gating (`instance_profile.connector_allowed`, #526) on a
+    component route: allowed when at least one of the component's connectors
+    is. A component of no connector is not gated."""
+    from . import instance_profile
+    try:
+        connectors = list((components.state_of(pack) or {}).get("connectors") or [])
+    except Exception:  # noqa: BLE001 — unknown component: no route served anyway
+        connectors = []
+    if not connectors:
+        return True
+    return any(instance_profile.connector_allowed(c) for c in connectors)
 
 
 async def serve(request: Request, spec):
     """Authenticate, check the method, run and audit one component route.
 
-    Also the way a CORE route hands a request to a component (e.g.
-    `/tools/google/auth` in `pack` position, #558): the component's own
-    authentication and audit apply, whatever URL the request came in on."""
+    The component's own authentication and audit apply."""
     if not _auth_ok(request, spec.auth):
         resp = JSONResponse({"error": "unauthorized"}, status_code=401)
+    elif not _pack_allowed(spec.pack):
+        resp = JSONResponse({"error": f"the connectors of '{spec.pack}' are not "
+                                      "part of this edition"}, status_code=403)
     elif request.method not in spec.methods:
         resp = JSONResponse({"error": "method not allowed"}, status_code=405)
     else:

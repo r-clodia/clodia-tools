@@ -29,6 +29,7 @@ from . import connectors_api, internal_auth, pki_verify, tools_api, topics_api, 
 from . import egress as eg
 from .tools import telegram_bindings as tb
 from .connectors import actions as ca
+from .connectors import first_party_fixture as _first_party
 from .connectors import manifest as cm
 from .connectors import resolved
 
@@ -71,13 +72,14 @@ class _Session:
 
 
 class _NoPacks(unittest.TestCase):
-    """Registry dei soli connettori builtin: i pack installati sull'istanza
-    reale non devono entrare nelle asserzioni di un test."""
+    """Registry dei connettori builtin e dei tre pack first-party (#526), come
+    su ogni istanza: gli altri pack installati sull'istanza reale non devono
+    entrare nelle asserzioni di un test."""
 
     def setUp(self):
         resolved.invalidate()
         self.addCleanup(resolved.invalidate)
-        p = patch.object(resolved, "manifests", dict)
+        p = patch.object(resolved, "manifests", _first_party.manifests)
         p.start()
         self.addCleanup(p.stop)
         self.c = TestClient(Starlette(routes=connectors_api.routes))
@@ -434,3 +436,4 @@ class DocsUrlTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+

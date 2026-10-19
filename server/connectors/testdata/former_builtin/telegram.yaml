@@ -1,3 +1,7 @@
+# TEST FIXTURE since clodia-platform#526: the gateway's former builtin
+# declaration, kept as the parity reference of the first-party packs
+# (`server/connectors/first_party_fixture.py`). The gateway never loads it.
+#
 # Telegram, come il gateway lo implementa oggi (clodia-platform#518).
 # La migrazione #522 sposta questo file in comms-pack e lo cancella da qui.
 # Nel frattempo l'interruttore per istanza lo toglie dal SERVIZIO senza

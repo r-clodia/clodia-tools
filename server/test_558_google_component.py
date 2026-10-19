@@ -12,16 +12,18 @@ short-circuited. The datadir holds the same `pack.yaml`, the profile says
 Then:
 
 1. **Load**: status `loaded`, the 24 verbs with the native schemas verbatim,
-   the routes, the services; on `native` the component is pinned on standby
-   and serves nothing.
+   the routes, the services; a profile still saying `native` changes nothing
+   (#526).
 2. **PDP parity**: every public PDP answer about Google is the same with the
-   builtin manifest (`native`) and with google-pack's PINNED manifest (`pack`);
-   the pins tables of `test_524_google_pins` hold.
+   former builtin declaration (`testdata/former_builtin/google.yaml`) and with
+   google-pack's PINNED manifest; the pins tables of `test_524_google_pins`
+   hold.
 3. (The native Google suites re-run against the component lived here until
    the native client was removed, #524: those cases are in clodia-logic now.)
 4. **The call path**: `call_tool` runs a component verb after the whitelist and
    the egress PDP (and `gdrive.update`'s parent lookup is the component's
-   service); the gateway's `/tools/google/*` forward to the component's routes;
+   service); the component's routes `/tools/google-pack/*` (the gateway's
+   `/tools/google/*` aliases were removed with #526);
    the custody of `google_<acct>` is unchanged (same name, shape, type, grant).
 """
 from __future__ import annotations
@@ -229,31 +231,18 @@ class LoadTests(GoogleComponentInstance, unittest.TestCase):
         self.assertEqual(guard.scan_tree(pin.dir), [])
         self.assertEqual(store.verify(pin), "")
 
-    def test_native_position_keeps_it_on_standby(self):
+    def test_a_profile_saying_native_changes_nothing(self):
         from . import main
-        from . import components
         self.position("native")
-        row = self.state()
-        self.assertEqual(row["status"], "standby")
-        self.assertEqual((row["verbs"], row["routes"], row["services"]), ([], [], []))
-        self.assertEqual(components.tools(), [])
-        for verb in main._GOOGLE_NATIVE_NAMES:
-            self.assertIsNone(main._component_verb(verb))
-            self.assertEqual(components.refusal(verb), "")
-        self.position("pack")
         self.assertEqual(self.state()["status"], "loaded")
+        for verb in main._GOOGLE_NATIVE_NAMES:
+            self.assertIsNotNone(main._component_verb(verb))
 
-    def test_its_credentials_follow_the_switch(self):
-        from .components.host import HostError
+    def test_its_credentials_are_google_packs(self):
         host = self.comp["gdrive"]._host.get()
+        self.position("native")                          # ignored (#526)
         for prefix in ("google_", "gworkspace_", "gmail_", "app_google_oauth"):
             host.credentials(prefix)                     # no exception
-        from . import instance_profile
-        (self.base / "data" / "profile.yaml").write_text(
-            "edition: full\nconnectors:\n  google: native\n", encoding="utf-8")
-        instance_profile.load(force=True)
-        with self.assertRaises(HostError):
-            host.credentials("google_")
 
 
 # --------------------------------------------------------------------------
@@ -262,16 +251,14 @@ class LoadTests(GoogleComponentInstance, unittest.TestCase):
 
 @NEEDS_LOGIC
 class PdpParityTests(GoogleComponentInstance, unittest.TestCase):
-    def test_every_answer_is_the_same_in_both_positions(self):
+    def test_every_answer_is_the_former_builtins(self):
         from .connectors import resolved
         from .connectors.test_558_google_switch import _risposte
         self.assertEqual(resolved.registry().by_id("google").pack, PACK)
         self.assertIsNotNone(__import__("server.components.store", fromlist=["x"])
                              .pinned_manifest(PACK), "the manifest is the pinned one")
         da_pack = _risposte()
-        self.position("native")
-        self.assertTrue(resolved.registry().by_id("google").builtin)
-        nativo = _risposte()
+        nativo = _former_builtin_answers(_risposte)
         self.assertEqual(set(nativo), set(da_pack))
         for key in sorted(nativo):
             with self.subTest(question=key):
@@ -546,6 +533,18 @@ class CallPathTests(_OnComponent, unittest.TestCase):
         self.assertIsNone(importlib.util.find_spec("server.tools.google_io"))
 
 
+def _former_builtin_answers(risposte):
+    """`risposte()` asked of the registry the former builtin declarations
+    build (`first_party_fixture`, the parity reference of #522–#525)."""
+    from .connectors import first_party_fixture, resolved
+    with patch.object(resolved, "manifests", first_party_fixture.manifests):
+        resolved.invalidate()
+        try:
+            return risposte()
+        finally:
+            resolved.invalidate()
+
+
 class _Req:
     def __init__(self, method="GET", body=None, token="ui"):
         self.method = method
@@ -555,6 +554,15 @@ class _Req:
 
     async def json(self):
         return self._body
+
+
+def _route(path: str, req: "_Req"):
+    """`/tools/google-pack/<path>`: the component's route, through the
+    gateway's generic component entrance (the `/tools/google/*` aliases
+    were removed with #526)."""
+    from . import components_api
+    req.path_params = {"pack": PACK, "rest": path}
+    return asyncio.run(components_api.component_route(req))
 
 
 @NEEDS_LOGIC
@@ -575,24 +583,23 @@ class RouteAndCustodyTests(_OnComponent, unittest.TestCase):
 
     def test_auth_is_the_components_and_needs_a_human_admin(self):
         from . import tools_api
-        r = asyncio.run(tools_api.google_auth(_Req()))
+        r = _route("auth", _Req())
         self.assertEqual(r.status_code, 200, r.body)
         body = json.loads(r.body)
         self.assertIn("client_id=CID", body["auth_url"])
         self.assertIn(body["state"], sys.modules[f"{MODULE_ROOT}.routes"]._states)
         with patch.object(tools_api, "_authorized", lambda _r: True):
-            r = asyncio.run(tools_api.google_auth(_Req(token="agent-token")))
+            r = _route("auth", _Req(token="agent-token"))
         self.assertEqual(r.status_code, 401)        # the component's auth applies
 
     def test_connect_deposits_the_same_bundle(self):
         from . import tools_api, vault
         go = self.comp["google_oauth"]
-        state = json.loads(asyncio.run(tools_api.google_auth(_Req())).body)["state"]
+        state = json.loads(_route("auth", _Req()).body)["state"]
         with patch.object(go, "exchange_code",  # gitleaks:allow — fake test credential
                           lambda *a: {"refresh_token": "RT", "access_token": "AT"}), \
                 patch.object(go, "get_profile_email", lambda _t: "Mario.Rossi@x.it"):
-            r = asyncio.run(tools_api.google_connect(
-                _Req("POST", {"code": "C", "state": state})))
+            r = _route("connect", _Req("POST", {"code": "C", "state": state}))
         self.assertEqual(r.status_code, 200, r.body)
         self.assertEqual(json.loads(r.body), {"connected": True, "account": "Mario_Rossi",
                                               "email": "Mario.Rossi@x.it"})
@@ -604,21 +611,31 @@ class RouteAndCustodyTests(_OnComponent, unittest.TestCase):
 
     def test_app_status_and_config(self):
         from . import tools_api, vault
-        r = asyncio.run(tools_api.google_app_status(_Req()))
+        r = _route("app", _Req())
         self.assertEqual(json.loads(r.body), {"configured": True,
                                               "redirect_uri": "http://127.0.0.1"})
-        r = asyncio.run(tools_api.google_app_config(_Req("POST", {
-            "client_id": "N", "client_secret": "S"})))  # gitleaks:allow
+        r = _route("app", _Req("POST", {
+            "client_id": "N", "client_secret": "S"}))  # gitleaks:allow
         self.assertEqual(r.status_code, 200, r.body)
         self.assertEqual(vault.read_internal("app_google_oauth")["client_id"], "N")
 
     def test_without_the_component_the_routes_fail_closed(self):
-        from . import tools_api
         from .components import loader
-        loader.reset()
-        r = asyncio.run(tools_api.google_auth(_Req()))
+        loader._STATES[KEY].status = "failed"
+        r = _route("auth", _Req())
         self.assertEqual(r.status_code, 503)
         self.assertIn("google-pack", json.loads(r.body)["detail"])
+
+    def test_the_edition_gates_the_routes(self):
+        """#526: `integrations.connectors` without Google closes google-pack's
+        routes too, not only its card."""
+        from . import instance_profile
+        with patch.object(instance_profile, "connectors_allowed",
+                          lambda: ["mailboxes"]):
+            r = _route("auth", _Req())
+        self.assertEqual(r.status_code, 403)
+        with patch.object(instance_profile, "connectors_allowed", lambda: ["google"]):
+            self.assertEqual(_route("auth", _Req()).status_code, 200)
 
     def test_the_tools_card_test_is_the_components(self):
         from . import tools_api
@@ -628,3 +645,16 @@ class RouteAndCustodyTests(_OnComponent, unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+def setUpModule() -> None:
+    # comms-pack and it-pack as on every instance (#526): google-pack's
+    # `gdrive.upload` shares on comms-pack's `mailto:`. google-pack is this
+    # module's own (its REAL manifest, pinned).
+    from .connectors import first_party_fixture
+    first_party_fixture.install(without=("google-pack",))
+
+
+def tearDownModule() -> None:
+    from .connectors import first_party_fixture
+    first_party_fixture.uninstall()

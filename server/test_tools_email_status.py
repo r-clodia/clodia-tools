@@ -41,7 +41,6 @@ class ToolsEmailStatusTest(unittest.IsolatedAsyncioTestCase):
              patch.object(
                  tools_api.email_tool, "credential_diagnostics", return_value=diagnostics
              ), \
-             patch("server.tools.mail_switch.in_pack", return_value=True), \
              patch("server.tools.mail_switch.service", return_value=lambda *a: []), \
              patch("server.tools.mail_switch.credential_diagnostics",
                    return_value=[r for r in diagnostics if r["kind"] == "mailbox"]), \
@@ -56,9 +55,9 @@ class ToolsEmailStatusTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(connectors["google"]["connected"])
         self.assertFalse(connectors["google"]["operational"])
         self.assertEqual(connectors["google"]["issues"][0]["account"], "broken")
-        self.assertTrue(connectors["mailboxes"]["connected"])
-        self.assertTrue(connectors["mailboxes"]["operational"])
-        self.assertEqual(connectors["mailboxes"]["accounts"], ["studio"])
+        self.assertTrue(connectors["mail"]["connected"])
+        self.assertTrue(connectors["mail"]["operational"])
+        self.assertEqual(connectors["mail"]["accounts"], ["studio"])
 
 
 if __name__ == "__main__":

@@ -4,8 +4,9 @@ the mounting mechanism, tested on the fixture pack of `test_558_components`.
 - `host.register_service` and `components.service(pack, name)`: callables the
   GATEWAY calls (never an agent), with the registration rules of verbs;
 - `host.perimeter`: read-only perimeter facts, read live from the gateway;
-- `standby`: a component whose namespaces the gateway still implements (switch
-  on `native`) is pinned but not imported, serves nothing, denies nothing;
+- a component whose namespaces are all the gateway's own is pinned but not
+  imported (status `refused`; the `standby` of the retired switch, #526),
+  serves nothing, denies nothing;
 - the manifest's `unmapped:` (a component verb with no PDP mapping must be
   classified explicitly);
 - no `__pycache__` in a pinned tree, whatever the component imports later.
@@ -183,12 +184,12 @@ class UnmappedGrammarTests(unittest.TestCase):
                           for v in c.unmapped_verbs}, set())
 
 
-class StandbyTests(_WithServices):
-    def test_reserved_namespaces_put_it_on_standby(self) -> None:
+class ReservedNamespacesTests(_WithServices):
+    def test_reserved_namespaces_keep_it_from_loading(self) -> None:
         reserved = frozenset({"fixture"}) | loader._reserved_namespaces()
         with patch.object(loader, "_reserved_namespaces", lambda: reserved):
             row = self.reconcile()["fixture-pack/gw"]
-            self.assertEqual(row["status"], "standby", row)
+            self.assertEqual(row["status"], "refused", row)
             self.assertEqual((row["verbs"], row["routes"], row["services"]),
                              ([], [], []))
             self.assertTrue(row["commit"])           # pinned all the same
@@ -203,8 +204,8 @@ class StandbyTests(_WithServices):
         self.assertIsNotNone(loader.service("fixture-pack", "ping"))
 
     def test_a_loaded_component_steps_aside_at_once(self) -> None:
-        """The switch turned back: before the next reconcile, its verbs are
-        neither listed nor dispatched (the native ones serve)."""
+        """Its namespaces become the gateway's: before the next reconcile,
+        its verbs are neither listed nor dispatched."""
         self.reconcile()
         self.assertIsNotNone(loader.verb("fixture.send"))
         reserved = frozenset({"fixture"}) | loader._reserved_namespaces()
@@ -214,14 +215,14 @@ class StandbyTests(_WithServices):
             self.assertIsNone(loader.route("fixture-pack", "connect"))
             self.assertEqual(loader.refusal("fixture.send"), "")
 
-    def test_standby_while_the_switch_moves_says_so(self) -> None:
+    def test_held_back_until_the_next_reconcile_says_why(self) -> None:
         reserved = frozenset({"fixture"}) | loader._reserved_namespaces()
         with patch.object(loader, "_reserved_namespaces", lambda: reserved):
             self.reconcile()
-        # Switch moved, reconcile not yet run: denied, with the reason.
+        # Reservation lifted, reconcile not yet run: denied, with the reason.
         why = loader.refusal("fixture.send")
-        self.assertIn("standby", why)
-        self.assertIn("/internal/components/fixture-pack/refresh", why)
+        self.assertIn("refused", why)
+        self.assertIn("gateway's own", why)
 
 
 class PerimeterTests(_WithServices):

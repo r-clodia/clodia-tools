@@ -1,14 +1,13 @@
 """clodia-platform#519 — azione di topic e credenziale, dal manifest.
 
-Le due rotte di oggi (`telegram-link`, `mailbox-link`) sono diventate alias
-sottili di **una** implementazione guidata dal manifest. La prova di parità più
-forte non è in questo file: sono i 26 test di `test_telegram_link.py` e
-`test_mailbox_link.py`, scritti prima di #519 sulle rotte vecchie, che passano
-invariati sull'implementazione nuova. Qui si verifica ciò che quelli non
-possono vedere:
+Le rotte di ieri (`telegram-link`, `mailbox-link`) sono diventate **una**
+implementazione guidata dal manifest; l'alias `telegram-link` è stato tolto
+con #526 (la webui chiama solo la rotta generica, e `test_telegram_link.py`
+gira su quella), `mailbox-link` resta finché la webui ne legge la forma. Qui si
+verifica:
 
-* che la rotta **generica** faccia la stessa cosa dell'alias, sugli stessi
-  payload — se no «alias» sarebbe un modo gentile di dire «seconda copia»;
+* che la rotta **generica** faccia la stessa cosa dell'alias `mailbox-link`,
+  sugli stessi payload;
 * che un campo con un insieme di valori prenda il valore dal GATEWAY e non dal
   corpo della richiesta: è l'invariante per cui l'azione sulle caselle esiste
   («una whitelist scritta da chi ne è soggetto non è una whitelist»);
@@ -145,20 +144,14 @@ class TopicActionTests(unittest.TestCase):
             self.assertEqual(t.liste[("egress", t.scope)], [])
             self.assertEqual(t.bindings, {})
 
-    def test_the_generic_route_and_the_alias_do_the_same_thing(self) -> None:
-        """«Alias» deve voler dire un comportamento sotto due URL, non due
-        implementazioni che un giorno divergono."""
+    def test_the_telegram_alias_is_gone(self) -> None:
+        """#526: one URL for the Telegram button, the generic one."""
         with _Topic() as t:
-            _client().post(_url(t, "telegram", "telegram-link"),
-                           json={"action": "connect", "chat": "-100123"},
-                           headers=_H)
-            generico = dict(t.liste), dict(t.bindings)
-        with _Topic() as t:
-            _client().post(f"/internal/topics/{t.tier}/{t.name}/telegram-link",
-                           json={"action": "connect", "chat_id": "-100123"},
-                           headers=_H)
-            alias = dict(t.liste), dict(t.bindings)
-        self.assertEqual(generico, alias)
+            r = _client().post(f"/internal/topics/{t.tier}/{t.name}/telegram-link",
+                               json={"action": "connect", "chat_id": "-100123"},
+                               headers=_H)
+            self.assertEqual(r.status_code, 404)
+            self.assertEqual((t.liste, t.bindings), ({}, {}))
 
     def test_an_undeclared_action_is_refused(self) -> None:
         with _Topic() as t:
@@ -316,8 +309,9 @@ class ConnectTests(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
         self.assertIn("oauth", r.json()["error"].lower())
 
-    def test_a_builtin_without_a_handler_is_refused(self) -> None:
-        r = self.c.post("/internal/tools/connectors/google/connect",
+    def test_a_builtin_is_refused(self) -> None:
+        """The gateway's own connectors are schema-only (#526)."""
+        r = self.c.post("/internal/tools/connectors/core/connect",
                         json={}, headers=_H)
         self.assertEqual(r.status_code, 400)
         self.assertEqual(self.depositi, [])
@@ -354,16 +348,12 @@ class TelegramEntryAdoptionTests(unittest.TestCase):
     disconnected from the Tools page. Any other foreign type stays refused."""
 
     def setUp(self) -> None:
-        from . import instance_profile, tools_api
+        from . import tools_api
         resolved.invalidate()
         self.addCleanup(resolved.invalidate)
         self.tipo = "api_key"
         self.depositi: list[tuple] = []
         for p in (patch.object(tools_api, "_authorized", lambda request: True),
-                  patch.object(instance_profile, "connector_mode",
-                               lambda cid: "pack" if cid == "telegram" else "native"),
-                  patch.object(instance_profile, "packaged_connectors",
-                               lambda: frozenset({"telegram"})),
                   patch.object(resolved, "manifests",
                                lambda: {"comms-pack": TELEGRAM_PACK}),
                   patch.object(vault, "credential_type", lambda e: self.tipo),
@@ -388,3 +378,16 @@ class TelegramEntryAdoptionTests(unittest.TestCase):
                         json={"token": "123:NEW"}, headers=_H)
         self.assertEqual(r.status_code, 409, r.text)
         self.assertEqual(self.depositi, [])
+
+
+from .connectors import first_party_fixture as _first_party
+
+
+def setUpModule() -> None:
+    # The first-party packs, installed as on every instance: since the switch
+    # was retired (#526) the tables pinned here are theirs, not the gateway's.
+    _first_party.install()
+
+
+def tearDownModule() -> None:
+    _first_party.uninstall()

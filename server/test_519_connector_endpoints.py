@@ -5,10 +5,9 @@ Two questions, and they are not the same:
 * `POST /internal/connectors/validate` — what a candidate `connectors:` block
   would do here. The verdict has two classes and only one of them stops an
   installation: a manifest that is **wrong** (anywhere, any day) against a
-  manifest that is merely **inert** on this instance because the gateway still
-  implements that connector itself. Without the split, comms-pack — which
-  declares `telegram.` while the native verbs exist — would be uninstallable
-  from the moment the check is switched on.
+  connector that is merely **inert** on this instance — it names a scheme of
+  the gateway's own manifests, or a first-party connector's id or namespace
+  (`telegram.` is comms-pack's, #526).
 * `GET /internal/connectors` — what is installed, for the webui of #520, with
   the instance profile applied and **no secret in the payload**.
 
@@ -29,6 +28,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from . import connectors_api, egress, instance_profile
+from .connectors import first_party_fixture as _first_party
 from .connectors import resolved
 from .connectors import validate as cv
 
@@ -55,8 +55,8 @@ SMS = {
                "arg": "to", "dtype": "sms"}],
 }
 
-#: La dichiarazione di comms-pack per #522: ben formata, ma il gateway
-#: implementa ancora `telegram.` e `tg:`.
+#: Una dichiarazione ben formata di `telegram.`: di comms-pack, e di nessun
+#: altro (`builtin.expected_claims`, #526).
 COMMS_TELEGRAM = {
     "id": "telegram-pack", "manifest_version": 1, "namespace": "telegram",
     "label": "Telegram", "schemes": [{"scheme": "tg2", "direction": "both"}],
@@ -145,27 +145,29 @@ class ValidateTests(unittest.TestCase):
         self.assertTrue(out["ok"], out)
         self.assertEqual(out["ignored"], [])
 
-    def test_a_connector_the_gateway_still_implements_is_ignored_not_refused(self):
-        """The whole point of the two classes: comms-pack installs, and the
-        connector stays inactive until the migration of #522 removes the
-        builtin file."""
-        out = cv.validate("comms-pack", [COMMS_TELEGRAM])
+    def test_a_first_party_namespace_claimed_by_another_pack_is_ignored(self):
+        """The whole point of the two classes: the pack installs, and the
+        connector that claims comms-pack's `telegram` stays inactive — the
+        same answer the registry gives at runtime (#526)."""
+        out = cv.validate("acme-pack", [COMMS_TELEGRAM])
         self.assertTrue(out["ok"], out)
         self.assertEqual(out["errors"], [])
         self.assertEqual(len(out["ignored"]), 1)
         self.assertIn("telegram", out["ignored"][0])
+        self.assertIn("comms-pack", out["ignored"][0])
         self.assertEqual(out["connectors"], [])
 
     def test_the_ignored_connector_really_stays_out_of_the_registry(self) -> None:
-        """«Ignored» has to mean inactive, not merely reported: the native
+        """«Ignored» has to mean inactive, not merely reported: comms-pack's
         mapping must still be the one that answers."""
         with patch.object(resolved, "manifests",
-                          lambda: {"comms-pack": {"name": "comms-pack",
-                                                  "connectors": [COMMS_TELEGRAM]}}):
+                          lambda: {**_first_party.manifests(),
+                                   "acme-pack": {"name": "acme-pack",
+                                                 "connectors": [COMMS_TELEGRAM]}}):
             resolved.invalidate()
             reg = resolved.registry()
             self.assertEqual([c.id for c in reg.connectors
-                              if c.pack == "comms-pack"], [])
+                              if c.pack == "acme-pack"], [])
             self.assertTrue(reg.refused)
             spec = egress.spec_for("telegram.send")
             self.assertEqual(spec[1]({"chat_id": "-100"}), ["tg:-100"])
@@ -190,7 +192,7 @@ class ValidateTests(unittest.TestCase):
                 resolved.invalidate()
                 self.assertIsNone(egress.spec_for("altro.send"))
                 self.assertTrue(resolved.problems())
-                # and the gateway's own connectors are untouched
+                # and the other packs' connectors are untouched
                 self.assertIsNotNone(egress.spec_for("email.send"))
 
 
@@ -198,7 +200,7 @@ class RouteTests(unittest.TestCase):
     def setUp(self) -> None:
         resolved.invalidate()
         self.addCleanup(resolved.invalidate)
-        p = patch.object(resolved, "manifests", dict)
+        p = patch.object(resolved, "manifests", _first_party.manifests)
         p.start()
         self.addCleanup(p.stop)
 
@@ -237,14 +239,21 @@ class RouteTests(unittest.TestCase):
             self.assertIsInstance(p["connected"], bool)
 
     def test_the_instance_profile_filters_the_listing(self) -> None:
-        def _no_telegram(cid: str) -> None:
-            if cid == "telegram":
-                raise PermissionError("non ammesso su questa istanza")
-        with _Auth(), patch.object(instance_profile, "connector_check",
-                                   _no_telegram):
+        """acme-min's `[mailboxes]` (#526): the profile's name is the snapshot
+        card's, the registry's is `mail` — the same decision on both."""
+        with _Auth(), patch.object(instance_profile, "connectors_allowed",
+                                   lambda: ["mailboxes"]):
             body = _client().get("/internal/connectors", headers=_H).json()
-        self.assertNotIn("telegram", {c["id"] for c in body["connectors"]})
-        self.assertIn("mail", {c["id"] for c in body["connectors"]})
+        ids = {c["id"] for c in body["connectors"]}
+        self.assertEqual(ids, {"mail", "core", "datastore"})
+        mail = next(c for c in body["connectors"] if c["id"] == "mail")
+        self.assertIn("mailbox-link", [a["id"] for a in mail["topic_actions"]])
+        with _Auth(), patch.object(instance_profile, "connectors_allowed",
+                                   lambda: []):
+            body = _client().get("/internal/connectors", headers=_H).json()
+        # No connector, but the schemas every whitelist is written in stay.
+        self.assertEqual({c["id"] for c in body["connectors"]}, {"core", "datastore"})
+        self.assertIn("https", body["schemes"]["egress"])
 
     def test_the_validate_route_answers_the_two_classes(self) -> None:
         with _Auth():
@@ -252,9 +261,13 @@ class RouteTests(unittest.TestCase):
             ok = c.post("/internal/connectors/validate",
                         json={"pack": "sms-pack", "connectors": [SMS]},
                         headers=_H).json()
+            # comms-pack is installed here: a claim on its namespace collides
+            # (an error); a scheme of the gateway's own manifests is inert.
             inert = c.post("/internal/connectors/validate",
-                           json={"pack": "comms-pack",
-                                 "connectors": [COMMS_TELEGRAM]},
+                           json={"pack": "acme-pack",
+                                 "connectors": [{**SMS, "schemes": [
+                                     {"scheme": "datastore", "direction": "source"}],
+                                     "verbs": []}]},
                            headers=_H).json()
             bad = c.post("/internal/connectors/validate",
                          json={"pack": "sms-pack",
@@ -281,3 +294,16 @@ class RouteTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+from .connectors import first_party_fixture as _first_party
+
+
+def setUpModule() -> None:
+    # The first-party packs, installed as on every instance: since the switch
+    # was retired (#526) the tables pinned here are theirs, not the gateway's.
+    _first_party.install()
+
+
+def tearDownModule() -> None:
+    _first_party.uninstall()

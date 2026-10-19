@@ -89,13 +89,11 @@ class StaleBackendTests(unittest.TestCase):
         docs = {"comms-pack": {"connectors": [{"id": "telegram", "namespace": "telegram"}]}}
         with patch.object(resolved, "manifests", return_value=docs), \
              patch.object(resolved, "backend_owners", return_value={"comms-pack": {"telegram"}}), \
-             patch.object(resolved, "core_backends", return_value=frozenset()), \
              patch.object(loader, "serving_connectors", return_value=(("comms-pack", "telegram"),)):
             self.assertIn("telegram", resolved.transport_backends())
         resolved._TRANSPORTS = None
         with patch.object(resolved, "manifests", return_value=docs), \
              patch.object(resolved, "backend_owners", return_value={"comms-pack": {"telegram"}}), \
-             patch.object(resolved, "core_backends", return_value=frozenset()), \
              patch.object(loader, "serving_connectors", return_value=()):
             self.assertNotIn("telegram", resolved.transport_backends())
         resolved._TRANSPORTS = None
@@ -120,21 +118,21 @@ class TransportCheckTests(unittest.TestCase):
 
 class OneComponentSeveralConnectorsTests(unittest.TestCase):
     """comms-pack has ONE gateway component (the pin carries the pack's
-    manifest) serving mail and Telegram: it is on standby only when BOTH are
-    native, and registers only what is on `pack`."""
+    manifest) serving mail and Telegram: it is held back only when BOTH
+    namespaces are the gateway's, and registers only the others."""
 
     def _comp(self):
         return NS(pack="comms-pack", id="comms", key="comms-pack/comms",
                   connectors=("mail", "telegram"),
                   namespaces={"mail": "email", "telegram": "telegram"})
 
-    def test_standby_only_when_nothing_is_served(self) -> None:
+    def test_held_back_only_when_nothing_is_served(self) -> None:
         c = self._comp()
-        for reserved, standby in ((frozenset({"email", "telegram"}), True),
-                                  (frozenset({"email"}), False),
-                                  (frozenset(), False)):
+        for reserved, held in ((frozenset({"email", "telegram"}), True),
+                               (frozenset({"email"}), False),
+                               (frozenset(), False)):
             with patch.object(loader, "_reserved_namespaces", return_value=reserved):
-                self.assertEqual(bool(loader._standby_reason(c)), standby, reserved)
+                self.assertEqual(bool(loader._reserved_reason(c)), held, reserved)
 
     def test_serves_and_serving_connectors(self) -> None:
         c = self._comp()

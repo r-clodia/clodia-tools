@@ -89,9 +89,7 @@ class BootWarningTests(unittest.TestCase):
         with patch("server.whitelist.CONFIG", {"agents": {}, "mcp_backends": []}), \
              patch("server.tools.mail_switch.credential_diagnostics", return_value=[]), \
              patch("server.tools.mail_switch.service", return_value=lambda *a: []), \
-             patch.object(main.instance_profile, "connector_mode",
-                          lambda cid: "pack" if cid in ("github", "openai-images", "mail",
-                                                      "telegram", "google") else "native"), \
+             patch.object(main.instance_profile, "retired_connector_switch", return_value=[]), \
              patch("server.tools.pack_runtime.missing_requirements", return_value=[gap]):
             warnings = main.runtime_configuration_warnings()
 
@@ -104,24 +102,23 @@ class BootWarningTests(unittest.TestCase):
         with patch("server.whitelist.CONFIG", {"agents": {}, "mcp_backends": []}), \
              patch("server.tools.mail_switch.credential_diagnostics", return_value=[]), \
              patch("server.tools.mail_switch.service", return_value=lambda *a: []), \
-             patch.object(main.instance_profile, "connector_mode",
-                          lambda cid: "pack" if cid in ("github", "openai-images", "mail",
-                                                      "telegram", "google") else "native"), \
+             patch.object(main.instance_profile, "retired_connector_switch", return_value=[]), \
              patch("server.tools.pack_runtime.missing_requirements", return_value=[]):
             self.assertEqual([], main.runtime_configuration_warnings())
 
-    def test_native_github_and_images_are_named_at_boot(self) -> None:
-        """#525: on `native` the git verbs and image generation have no
-        implementation any more; the boot says which switch to turn."""
+    def test_a_profile_still_saying_native_is_named_once_at_boot(self) -> None:
+        """#526: the switch is retired; a profile still putting connectors on
+        `native` gets ONE warning naming them, not one per connector."""
         with patch("server.whitelist.CONFIG", {"agents": {}, "mcp_backends": []}), \
              patch("server.tools.mail_switch.credential_diagnostics", return_value=[]), \
              patch("server.tools.mail_switch.service", return_value=lambda *a: []), \
-             patch.object(main.instance_profile, "connector_mode", return_value="native"), \
+             patch.object(main.instance_profile, "retired_connector_switch",
+                          return_value=["github", "mail"]), \
              patch("server.tools.pack_runtime.missing_requirements", return_value=[]):
             warnings = main.runtime_configuration_warnings()
-        self.assertEqual(5, len(warnings))
-        for i, cid in enumerate(("github", "openai-images", "mail", "google", "telegram")):
-            self.assertIn(f"{cid}: pack", warnings[i])
+        self.assertEqual(1, len(warnings))
+        self.assertIn("#526", warnings[0])
+        self.assertIn("'github', 'mail'", warnings[0])
 
 
 class ConnectorSnapshotTests(unittest.TestCase):

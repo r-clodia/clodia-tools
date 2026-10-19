@@ -241,7 +241,11 @@ class _Instance(unittest.TestCase):
             self.manifests["broken-pack"] = broken_manifest()
         # The DATADIR copies (what the agent-server writes). `resolved.
         # manifests()` substitutes the pinned upstream copy on top of them.
-        m = patch.object(resolved, "_installed_manifests", lambda: dict(self.manifests))
+        # The first-party packs first, as on every instance (#526): the
+        # fixture maps onto comms-pack's `mailto:`.
+        from ..connectors import first_party_fixture
+        m = patch.object(resolved, "_installed_manifests",
+                         lambda: {**first_party_fixture.manifests(), **self.manifests})
         m.start()
         self.addCleanup(m.stop)
         self.fetcher = FakeFetcher()
@@ -907,41 +911,27 @@ class CredentialsTests(_Instance):
         with self.assertRaises(HostError):
             self.host(self.comp(creds=("weather_",))).credentials("weather_")
 
-    def test_core_prefix_only_after_the_switch_to_this_pack(self) -> None:
+    def test_core_prefix_only_for_the_pack_of_its_connector(self) -> None:
         comp = self.comp(pack="google-pack", creds=("google_", "app_google_oauth"),
                          ns={"google": "gdrive"})
         host = self.host(comp)
-        with patch.object(builtin, "_packaged", lambda: frozenset()):
-            builtin._RELEASED.clear()
-            for p in ("google_", "app_google_oauth"):
-                with self.subTest(p=p), self.assertRaises(HostError):
-                    host.credentials(p)
-        everything = frozenset({"google", "google-sheets", "google-docs",
-                                "google-calendar", "mail-gmail"})
-        with patch.object(builtin, "_packaged", lambda: everything):
-            builtin._RELEASED.clear()
-            host.credentials("google_")
-            host.credentials("app_google_oauth")
-            # …but never for another pack, even a first-party one.
-            other = self.host(self.comp(pack="comms-pack",
-                                        creds=("google_", "app_google_oauth")))
-            for p in ("google_", "app_google_oauth"):
-                with self.subTest(p=p), self.assertRaises(HostError):
-                    other.credentials(p)
-        builtin._RELEASED.clear()
+        host.credentials("google_")
+        host.credentials("app_google_oauth")
+        # …but never for another pack, even a first-party one.
+        other = self.host(self.comp(pack="comms-pack",
+                                    creds=("google_", "app_google_oauth")))
+        for p in ("google_", "app_google_oauth"):
+            with self.subTest(p=p), self.assertRaises(HostError):
+                other.credentials(p)
 
-    def test_switch_flipped_back_revokes_an_accessor_already_handed_out(self) -> None:
+    def test_an_accessor_already_handed_out_is_checked_again(self) -> None:
+        """The prefix is checked at every call, not only when handed out: a
+        connector that no longer belongs to the pack revokes it at once."""
         comp = self.comp(pack="google-pack", creds=("google_",), ns={"google": "gdrive"})
-        everything = frozenset({"google", "google-sheets", "google-docs",
-                                "google-calendar", "mail-gmail"})
-        with patch.object(builtin, "_packaged", lambda: everything):
-            builtin._RELEASED.clear()
-            creds = self.host(comp).credentials("google_")
-        builtin._RELEASED.clear()
-        with patch.object(builtin, "_packaged", lambda: frozenset()), \
+        creds = self.host(comp).credentials("google_")
+        with patch.dict(builtin.RELEASED_TO, {"google": "other-pack"}), \
                 self.assertRaises(HostError):
             creds.list()
-        builtin._RELEASED.clear()
 
 
 class RouteTests(_Instance):

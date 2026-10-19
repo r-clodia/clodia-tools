@@ -129,9 +129,8 @@ class RemoveRouteTests(unittest.TestCase):
         p = [
             patch.object(tools_api, "_authorized", lambda _r: True),
             # comms-pack's component removes the credential and reads the
-            # address first (`mailbox_remove`, `mail: pack` — the native mail
-            # code is gone, #523); the gateway withdraws the list entries.
-            patch.object(mail_switch, "in_pack", lambda: True),
+            # address first (`mailbox_remove`; the native mail code is gone,
+            # #523); the gateway withdraws the list entries.
             patch.object(mail_switch, "call", self._component),
             patch.object(w, "CONFIG", self.cfg),
             patch.object(w, "save_config", lambda: None),
@@ -215,3 +214,16 @@ class RevocaCanonicaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from .connectors import first_party_fixture as _first_party
+
+
+def setUpModule() -> None:
+    # The first-party packs, installed as on every instance: since the switch
+    # was retired (#526) the tables pinned here are theirs, not the gateway's.
+    _first_party.install()
+
+
+def tearDownModule() -> None:
+    _first_party.uninstall()

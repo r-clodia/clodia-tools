@@ -1,3 +1,7 @@
+# TEST FIXTURE since clodia-platform#526: the gateway's former builtin
+# declaration, kept as the parity reference of the first-party packs
+# (`server/connectors/first_party_fixture.py`). The gateway never loads it.
+#
 # La posta, come il gateway la implementa oggi (clodia-platform#518).
 #
 # Finché `email.*` è un verbo nativo, il vocabolario della posta è dichiarato

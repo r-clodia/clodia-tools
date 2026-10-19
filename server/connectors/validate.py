@@ -13,15 +13,12 @@ someone else already owns, a namespace that is not its own, a regex that would
 cost the event loop, a field that does not parse. Nothing here depends on the
 day it is asked: the install is refused, and the message says where.
 
-**ignored** — the manifest is well formed, but names something this gateway
-still implements itself: `telegram.` while the native verbs exist, `tg:` while
-`builtin_manifests/telegram.yaml` is there. The install **proceeds** and the
-connector stays inactive, exactly as the registry treats it at runtime (#518).
-It starts working by itself the day the migration deletes the builtin file.
-
-That split is what makes the pack of a pending migration installable without a
-«validation off until #522» switch — a switch somebody then has to remember to
-turn on, which is the kind of thing that is remembered in the wrong direction.
+**ignored** — the manifest is well formed, but a connector names something the
+registry will not hold: a scheme of the gateway's own builtin manifests, or a
+connector id or namespace that belongs to a first-party pack
+(`builtin.expected_claims`: `email` is comms-pack's, `github` it-pack's, …).
+The install **proceeds** and the connector stays inactive, exactly as the
+registry treats it at runtime (#518, `resolved._strip_foreign_claims`).
 
 Validating never writes anything. The connectors of the candidate pack are not
 installed, not granted, and not cached: the registry on disk is untouched.
@@ -61,6 +58,13 @@ def validate(pack: str, connectors: Any) -> dict:
         # reinstalling a pack is not two packs colliding with each other.
         reg = build_registry({**own, **installed, name: candidate},
                              builtin=tuple(own))
+        # A first-party connector's id or namespace claimed by another pack:
+        # the registry strips it at runtime, so the preview does too, and
+        # says so (#526).
+        stripped, foreign = _resolved._strip_foreign_claims({name: candidate})
+        if foreign:
+            reg = build_registry({**own, **installed, name: stripped[name]},
+                                 builtin=tuple(own))
     except ManifestError as e:
         # One message, the author's: `build_registry` is all-or-nothing and the
         # first refusal is the one to fix. Reporting a half-parsed registry
@@ -74,14 +78,13 @@ def validate(pack: str, connectors: Any) -> dict:
                 "connectors": []}
 
     mine = [c for c in reg.connectors if c.pack == name]
-    ignored = [r for r in reg.refused if r.startswith(f"pack '{name}'")]
+    ignored = list(foreign) + [r for r in reg.refused if r.startswith(f"pack '{name}'")]
     return {
         "ok": True,
         "pack": name,
         "errors": [],
         # Well formed but inactive here and now, with the reason. The install
-        # goes ahead: this is a statement about the gateway's own migration
-        # state, not about the pack.
+        # goes ahead: this is a statement about the instance, not the pack.
         "ignored": ignored,
         "connectors": [summary(c) for c in mine],
     }

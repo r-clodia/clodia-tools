@@ -56,9 +56,7 @@ def _via_component(op: str, prompt: str, *, size: str, quality: str,
                 f"{st.get('status')}: {str(st.get('reason') or '')[:200]}")
         raise ImageGenError(
             "image generation is served by it-pack's gateway component "
-            "(it-pack ≥ 0.19.0) with `connectors: {openai-images: pack}`; it is "
-            "not installed, not enabled, or the switch is on `native`, which has "
-            "no implementation any more")
+            "(it-pack ≥ 0.19.0), which is not installed or not enabled")
     sargs = {"op": op, "prompt": prompt, "size": size, "quality": quality,
              "background": background}
     if image_bytes is not None:

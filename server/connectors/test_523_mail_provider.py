@@ -8,15 +8,16 @@ mail code is the pack's GATEWAY COMPONENT (`test_558_mail_switch.py`,
 1. the grammar (`transport:` parsed, refused in a builtin manifest) — a
    generic mechanism (it-pack's images use it), and comms-pack 1.4.0's
    manifest must stay VALID on a gateway that is updated before the pack;
-2. the resolution (`transport_for` only in `pack` position, only from a held
-   connector, only on the pack's own backend), and the backend being the
-   gateway's (hidden, denied to every caller);
-3. parity: the PDP's answers about mail are the same with the builtin and
-   with comms-pack's connector, and they are not vacuous;
+2. the resolution (`transport_for` only from a held connector of the pack the
+   connector belongs to, only on the pack's own backend), and the backend
+   being the gateway's (hidden, denied to every caller);
+3. the PDP's answers about mail from comms-pack's connector, pinned (the
+   parity with the former builtin was the acceptance of #522/#523);
 4. fail closed: no held connector → `email.*` DENIED.
 
-The suites of #503/#461/#420/#428 run in `pack` position against the REAL
-component in `server/test_558_mail_component.py`.
+The suites of #503/#461/#420/#428 run against the REAL component in
+`server/test_558_mail_component.py`. Since #526 the `native|pack` switch is
+retired: a profile still saying `native` changes nothing.
 """
 from __future__ import annotations
 
@@ -37,6 +38,7 @@ import yaml
 
 from .. import egress, instance_profile, proxy, taint
 from . import builtin as B
+from . import first_party_fixture as _FP
 from . import manifest as M
 from . import resolved
 
@@ -49,7 +51,7 @@ def _mail_connector() -> dict:
     """comms-pack 1.4.0's `mail` connector: the builtin vocabulary, verbatim,
     plus what a PACK must add — `forms:` on the mailbox schemes — and the
     IMAP/SMTP provider WITH its transport (the #523 design)."""
-    doc = yaml.safe_load((B.DIR / "mail.yaml").read_text(encoding="utf-8"))
+    doc = yaml.safe_load((_FP.FORMER_BUILTIN / "mail.yaml").read_text(encoding="utf-8"))
     entry = copy.deepcopy(doc["connectors"][0])
     forma = [{"label": "address", "pattern": r"^[^@\s]+@[A-Za-z0-9.-]+$",
               "example": "studio@example.org"}]
@@ -195,11 +197,11 @@ class TransportResolutionTests(_Istanza):
     def test_in_pack_position_the_held_connector_names_it(self):
         self.assertEqual(resolved.transport_for("mail"), (BACKEND, TOOL))
 
-    def test_in_native_position_there_is_none(self):
-        self.posizione("native")
-        self.assertIsNone(resolved.transport_for("mail"))
-        self.posizione(None)
-        self.assertIsNone(resolved.transport_for("mail"))
+    def test_a_profile_saying_native_changes_nothing(self):
+        for pos in ("native", None):
+            with self.subTest(posizione=pos):
+                self.posizione(pos)
+                self.assertEqual(resolved.transport_for("mail"), (BACKEND, TOOL))
 
     def test_without_the_pack_there_is_none(self):
         (self.dir / "packs" / PACK / "pack.yaml").unlink()
@@ -285,21 +287,9 @@ def _risposte() -> dict:
     return out
 
 
-class ParityTests(_Istanza):
-    def test_every_answer_is_the_same_in_both_positions(self):
-        self.posizione("native")
-        self.assertTrue(resolved.registry().by_id("mail").builtin)
-        nativo = _risposte()
-        self.posizione("pack")
-        self.assertEqual(resolved.registry().by_id("mail").pack, PACK)
-        da_pack = _risposte()
-        self.assertEqual(set(nativo), set(da_pack))
-        for chiave in sorted(nativo):
-            with self.subTest(domanda=chiave):
-                self.assertEqual(nativo[chiave], da_pack[chiave])
-
-    def test_the_answers_are_not_vacuous(self):
-        for pos in ("native", "pack"):
+class AnswersTests(_Istanza):
+    def test_the_answers_are_pinned(self):
+        for pos in ("native", "pack"):           # the profile changes nothing
             with self.subTest(posizione=pos):
                 self.posizione(pos)
                 r = _risposte()
@@ -313,15 +303,13 @@ class ParityTests(_Istanza):
                 self.assertIn("mailto", r["schemi"][0])
                 self.assertEqual(r["azione"][2], ("inbox:x@y.it",))
 
-    def test_the_comparison_can_fail(self):
+    def test_the_pins_can_fail(self):
         """A dropped `cc` mapping in the pack shows up as a difference."""
-        self.posizione("native")
         nativo = _risposte()
         entry = _mail_connector()
         entry["verbs"] = [v for v in entry["verbs"]
                           if not (v["verb"] == "email.send" and v["arg"] == "cc")]
         self.scrivi_pack({"name": PACK, "connectors": [entry]})
-        self.posizione("pack")
         self.assertNotEqual(nativo["spec:email.send"],
                             _risposte()["spec:email.send"])
 
@@ -353,24 +341,25 @@ class FailClosedTests(_Istanza):
         resolved.invalidate()
         self.assertTrue(_call("email.send", {"to": "x@y.it"}).startswith("DENIED:"))
 
-    def test_without_the_pack_the_other_builtins_keep_their_mappings(self):
-        """`gdrive.upload` shares with a person on `mailto:`, declared by
-        `mail.yaml`. Released to a pack that is not there, the remaining
-        builtins cannot stand alone — and a floor that refused to build would
-        deny every native outbound verb of the instance (degraded registry)."""
+    def test_without_the_pack_the_others_fail_closed_not_the_registry(self):
+        """`gdrive.upload` shares with a person on `mailto:`, which comms-pack
+        declares. Without it google-pack cannot be held — its outbound verbs
+        fail closed — but the gateway's own registry is not degraded."""
         (self.dir / "packs" / PACK / "pack.yaml").unlink()
         resolved.invalidate()
         self.assertEqual(resolved.degraded(), "")
-        self.assertIsNotNone(egress.spec_for("gdrive.upload"))
+        self.assertIsNone(egress.spec_for("gdrive.upload"))
+        self.assertTrue(resolved.failsafe_denied("gdrive.upload"))
         self.assertFalse(resolved.held_by_pack("email"))
         self.assertIsNone(resolved.transport_for("mail"))
         self.assertTrue(_call("email.send", {"to": "x@y.it"}).startswith("DENIED:"))
 
-    def test_on_native_nothing_is_refused_for_this(self):
+    def test_a_profile_saying_native_does_not_lift_the_refusal(self):
         from .. import main
         self.posizione("native")
         self._rifiuta_il_connettore()
-        main._check_pack_connector_held("email.send")  # no exception
+        with self.assertRaises(main._PackVerbRefused):
+            main._check_pack_connector_held("email.send")
 
 class TelegramBindingVerbsFailClosedTests(unittest.TestCase):
     """The retained Telegram binding verbs follow the same rule now: in `pack`
@@ -503,3 +492,13 @@ class SyncCallTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def setUpModule() -> None:
+    # google-pack and it-pack as on every instance (#526); comms-pack is this
+    # module's own (`_MailIstanza` writes it).
+    _FP.install(without=("comms-pack",))
+
+
+def tearDownModule() -> None:
+    _FP.uninstall()

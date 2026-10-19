@@ -143,36 +143,30 @@ CORE_VAULT_PREFIXES = (
     "app_", "backup_", "github_", "gmail_", "google_", "gworkspace_",
     "mailbox_", "mcp_", "openai_", "profile_", "provider_", "scope_",
     "telegram_")
-#: Namespaces reserved for EVERYONE until the migration issue that moves the
-#: matching core connector into a pack lands (#522 telegram/mail, #523 google,
-#: #525 github, …): the stems of `CORE_VAULT_PREFIXES`. Second verification of
-#: #359: `namespace: google` + `vault_entry: google_studio` loaded, because
-#: `google` is no native namespace and the prefix was exempted by name. Now no
-#: pack can hold these namespaces, so no pack can reach these vault entries.
-#: Added to `core_namespaces()`, which every namespace check reserves.
+#: The stems of `CORE_VAULT_PREFIXES`: namespaces no pack may hold, so no
+#: pack can reach those vault entries (second verification of #359:
+#: `namespace: google` + `vault_entry: google_studio` loaded, because `google`
+#: was no native namespace and the prefix was exempted by name). Added to
+#: `core_namespaces()`, which every namespace check reserves — minus the ones
+#: the pack-served connectors own (`reserved_namespaces`).
 MIGRATING_NAMESPACES = frozenset(p.rstrip("_") for p in CORE_VAULT_PREFIXES)
 
 
 def reserved_namespaces() -> frozenset[str]:
-    """`MIGRATING_NAMESPACES` meno i connettori che su QUESTA istanza stanno
-    già in un pack (clodia-platform#522).
+    """`MIGRATING_NAMESPACES` minus the namespaces and vault prefixes of the
+    connectors first-party packs serve (`builtin.released()`: `telegram`,
+    `github`, `openai`, …).
 
-    La riserva esiste per tenere un namespace e il suo prefisso di vault fuori
-    dalla portata dei pack *finché il gateway li implementa*. Quando l'owner
-    gira l'interruttore su `pack`, quel finché è finito: continuare a riservarli
-    rifiuterebbe esattamente il manifest che deve subentrare — ed è una
-    riserva, non un divieto, quindi la toglie la stessa decisione che la
-    rendeva necessaria.
-
-    `MIGRATING_NAMESPACES` resta il nome della lista PIENA: è la mappa delle
-    migrazioni che restano da fare, e non dipende da come è configurata una
-    istanza.
+    Those are not free for everyone: `builtin.expected_claims()` hands each to
+    its own pack only, and `resolved._strip_foreign_claims` drops any other
+    pack's claim before the registry is built. Reserving them here as well
+    would refuse exactly the pack that serves them.
     """
     from . import builtin as _builtin
 
     try:
         namespaces, prefixes = _builtin.released()
-    except Exception:  # noqa: BLE001 — in dubbio si riserva tutto, come ieri
+    except Exception:  # noqa: BLE001 — in doubt everything stays reserved
         return MIGRATING_NAMESPACES
     return MIGRATING_NAMESPACES - namespaces - {p.rstrip("_") for p in prefixes}
 
@@ -794,8 +788,8 @@ class Provider:
     credential: Credential | None = None
     status_verb: str = ""
     test_verb: str = ""
-    #: Where the gateway sends the transport operations of this provider when
-    #: the connector is in `pack` position (`Transport`, #523). Pack-only.
+    #: Where the gateway sends the transport operations of this provider
+    #: (`Transport`, #523). Pack-only.
     transport: Transport | None = None
 
 
@@ -1095,27 +1089,19 @@ def core_namespaces() -> frozenset[str]:
     (#518) without a cycle, and so that a namespace added to the gateway is
     reserved here the same day it exists, without anybody remembering to.
     """
-    from ..main import (_GATEWAY_RETAINED_VERBS, _RETIRED_NATIVE_VERBS,
-                        _packaged_namespaces, all_native_verb_names)
+    from ..main import (_GATEWAY_RETAINED_VERBS, _packaged_namespaces,
+                        all_native_verb_names)
 
-    # The verbs the gateway keeps in a packaged namespace (Telegram's binding
-    # verbs, which write the gateway's own binding registry; GitHub's git
-    # verbs) do not make the namespace the gateway's again: otherwise keeping
-    # them would refuse the pack connector. Only when the namespace IS
-    # packaged, though: in `native` position dropping them would leave the
-    # namespace claimable by any pack while the gateway serves it.
+    # The verbs the gateway keeps in a pack's namespace (Telegram's binding
+    # verbs, which write the gateway's own binding registry) do not make the
+    # namespace the gateway's again: otherwise keeping them would refuse the
+    # pack connector.
     packaged = _packaged_namespaces()
-    # Verbs whose native implementation is gone (#522/#523/#525) still name a
-    # namespace the gateway owns while their switch is on `native`: nothing
-    # serves them there, and nothing else may (a pack's `email` backend would
-    # otherwise answer `email.send` behind the switch's back).
-    retired = {name.split(".", 1)[0] for name in _RETIRED_NATIVE_VERBS
-               if "." in name} - set(packaged)
     return frozenset(
         name.split(".", 1)[0] for name in all_native_verb_names()
         if "." in name and not (name in _GATEWAY_RETAINED_VERBS
                                 and name.split(".", 1)[0] in packaged)
-    ) | reserved_namespaces() | retired
+    ) | reserved_namespaces()
 
 
 def check_namespace(namespace: str, verbs: Iterable[str], *,
@@ -2023,9 +2009,9 @@ class Registry:
         everything pushed there to anyone» hangs off `https:` URIs. While the
         gateway declared it that was a builtin rule; once it-pack declares the
         connector, `danger_for` (rightly) ignores a pack's rule on a shared
-        scheme, and the warning would vanish from the gate card. A pack whose
-        connector id the profile hands to a pack (`connector_ids`, the switch)
-        is not «any pack»: it is the connector the owner elected. Its rules
+        scheme, and the warning would vanish from the gate card. A connector
+        whose id the gateway hands to its first-party pack (`connector_ids`,
+        `builtin.RELEASED_TO`) is not «any pack»: it is the elected one. Its rules
         apply — but the caller ADDS them to the scheme's own warning, never
         in place of it (`egress.danger_note`), so even the elected pack can
         say more than the core, never less.
@@ -2056,8 +2042,8 @@ class Registry:
         the image, not input.
 
         `elected` (#524) is `{connector id: hosts}` for the pack connectors
-        the owner put in a builtin's place (`builtin.ELECTED_URL_HOSTS`, only
-        for a switch in `pack` position). Such a connector's rules may also
+        that replaced a builtin (`builtin.ELECTED_URL_HOSTS`). Such a
+        connector's rules may also
         read an `http(s)` URL — but only one whose PARSED host is in its list:
         google-pack turns `https://drive.google.com/…` into `gdrive:folder/…`
         as the builtin did, and can never rewrite any other URL (a call's

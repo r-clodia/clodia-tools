@@ -13,8 +13,8 @@ short-circuited. The datadir holds the same `pack.yaml`s, the profile says
 Then:
 
 1. **Load**: status `loaded`, the 8 verbs with the native schemas verbatim,
-   the services; the natives step aside; on `native` the component is pinned
-   on standby and serves nothing; the `mailbox_` scope follows the switch.
+   the services; the natives step aside; a profile still saying `native`
+   changes nothing (#526); the `mailbox_` scope is comms-pack's.
 2. **PDP parity**: every public PDP answer about mail is the same with the
    builtin manifest (`native`) and with comms-pack's PINNED manifest (`pack`);
    the PDP tables of #518 hold; every component verb is classified.
@@ -228,6 +228,18 @@ class _Run:
 # 1. load
 # --------------------------------------------------------------------------
 
+def _former_builtin_answers(risposte):
+    """`risposte()` asked of the registry the former builtin declarations
+    build (`first_party_fixture`, the parity reference of #522–#525)."""
+    from .connectors import first_party_fixture, resolved
+    with patch.object(resolved, "manifests", first_party_fixture.manifests):
+        resolved.invalidate()
+        try:
+            return risposte()
+        finally:
+            resolved.invalidate()
+
+
 @NEEDS_LOGIC
 class LoadTests(MailComponentInstance, unittest.TestCase):
     def test_loaded_with_the_8_verbs_and_services(self):
@@ -283,33 +295,22 @@ class LoadTests(MailComponentInstance, unittest.TestCase):
                     with self.subTest(file=path.name, module=m):
                         self.assertFalse(m == "server" or m.startswith("server."))
 
-    def test_native_position_keeps_it_on_standby(self):
+    def test_a_profile_saying_native_changes_nothing(self):
         from . import main
-        from . import components
         self.position("native")
-        # comms-pack's one component also carries Telegram (2.1.1): on
-        # `mail: native` it may stay loaded for that half, but serves no mail.
+        self.assertEqual(self.state()["status"], "loaded")
         for verb in EMAIL_VERBS:
-            self.assertIsNone(main._component_verb(verb))
-            self.assertEqual(components.refusal(verb), "")
+            self.assertIsNotNone(main._component_verb(verb))
             # No native implementation any more (#523): not listed natively.
             self.assertNotIn(verb, {t.name for t in main._all_native_tools()})
-        self.position("pack")
-        self.assertEqual(self.state()["status"], "loaded")
 
-    def test_its_credentials_follow_the_switch(self):
+    def test_its_credentials_are_comms_packs(self):
         from .components.host import HostError
-        from . import instance_profile
         host = sys.modules[f"{MAIL_ROOT}._host"].get()
+        self.position("native")                          # ignored (#526)
         host.credentials("mailbox_")                     # no exception
         with self.assertRaises(HostError):
             host.credentials("google_")
-        (self.base / "data" / "profile.yaml").write_text(
-            "edition: full\nconnectors:\n  mail: native\n  google: pack\n",
-            encoding="utf-8")
-        instance_profile.load(force=True)
-        with self.assertRaises(HostError):
-            host.credentials("mailbox_")
 
     def test_the_refusal_phrase_is_the_gateways(self):
         from . import main
@@ -322,16 +323,14 @@ class LoadTests(MailComponentInstance, unittest.TestCase):
 
 @NEEDS_LOGIC
 class PdpParityTests(MailComponentInstance, unittest.TestCase):
-    def test_every_answer_is_the_same_in_both_positions(self):
+    def test_every_answer_is_the_former_builtins(self):
         from .connectors import resolved
         from .components import store
         from .connectors.test_523_mail_provider import _risposte
         self.assertEqual(resolved.registry().by_id("mail").pack, COMMS)
         self.assertIsNotNone(store.pinned_manifest(COMMS), "the manifest is the pinned one")
         da_pack = _risposte()
-        self.position("native")
-        self.assertTrue(resolved.registry().by_id("mail").builtin)
-        nativo = _risposte()
+        nativo = _former_builtin_answers(_risposte)
         self.assertEqual(set(nativo), set(da_pack))
         for key in sorted(nativo):
             with self.subTest(question=key):
@@ -674,7 +673,8 @@ class GmailTests(_CallPath, unittest.TestCase):
         self.assertIn("inbox:devnull@gmail.com", out)
 
     def test_without_google_pack_a_google_account_is_not_served(self):
-        self.position("pack", "native")                 # google-pack on standby
+        from .components import loader
+        loader._STATES[f"{GOOGLE}/google"].status = "failed"   # not serving
         out = self.run_call("email.folders", {"account": "devnull"},
                             ingress=("inbox:devnull@gmail.com",))
         self.assertTrue(out.startswith(("DENIED", "ERROR")), out)
@@ -754,13 +754,13 @@ class RouteTests(_OnComponent, unittest.TestCase):
             self.assertEqual(r.status_code, 503)
             self.assertIn("comms-pack", json.loads(r.body)["detail"])
         self.assertFalse(tools_api._test_connector("mailboxes")["ok"])
-        card = [c for c in tools_api.connectors_snapshot() if c["id"] == "mailboxes"][0]
+        card = [c for c in tools_api.connectors_snapshot() if c["id"] == "mail"][0]
         self.assertFalse(card["operational"])
         self.assertEqual(card["issues"][-1]["error"], "component_unavailable")
 
     def test_the_tools_card_test_is_the_components(self):
         from . import tools_api
-        self.assertEqual(tools_api._test_connector("mailboxes"),
+        self.assertEqual(tools_api._test_connector("mail"),
                          {"ok": None, "detail": "nessuna casella configurata"})
 
 
@@ -847,3 +847,15 @@ class EndToEndSendTests(_OnComponent, unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+def setUpModule() -> None:
+    # it-pack as on every instance (#526); comms-pack and google-pack are this
+    # module's own (their REAL manifests, pinned).
+    from .connectors import first_party_fixture
+    first_party_fixture.install(without=("comms-pack", "google-pack"))
+
+
+def tearDownModule() -> None:
+    from .connectors import first_party_fixture
+    first_party_fixture.uninstall()

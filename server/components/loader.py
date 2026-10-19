@@ -11,12 +11,11 @@ A component that is refused or fails is disabled ALONE: logged CRITICAL, its
 state says why, and every verb of its connectors' namespaces is DENIED with
 that reason (`refusal`). The gateway and the other components carry on.
 
-A component whose connectors the GATEWAY still implements on this instance —
-the switch of a migration on `native` (`connectors: {google: native}`), so
-their namespaces are reserved by native verbs — is pinned but not imported:
-status `standby`, no verb, no route, no service, and nothing denied (the
-native verbs serve). It is loaded at the first reconcile after the owner
-turns the switch to `pack`, and put back on standby when it is turned back.
+A component whose connectors' namespaces are ALL the gateway's own
+(`core_namespaces`) is pinned but not imported: status `refused`, no verb, no
+route, no service, and nothing denied (the gateway's verbs serve). Before
+#526 this was the `standby` of a connector switch on `native`; the switch is
+retired, and a first-party component's namespaces are never reserved.
 """
 from __future__ import annotations
 
@@ -45,16 +44,16 @@ _LOCK = threading.RLock()
 @dataclass
 class State:
     component: GatewayComponent
-    status: str                      # loaded | standby | failed | refused
+    status: str                      # loaded | failed | refused
     reason: str = ""
     commit: str = ""
     tree_sha256: str = ""
     verbs: dict[str, VerbSpec] = field(default_factory=dict)
     routes: dict[str, RouteSpec] = field(default_factory=dict)
     services: dict[str, ServiceSpec] = field(default_factory=dict)
-    #: The namespaces the component served when it registered (#522): a switch
-    #: that changes this set reloads it, so a component of several connectors
-    #: registers exactly the halves on `pack`.
+    #: The namespaces the component served when it registered (#522): a
+    #: change of this set reloads it, so a component of several connectors
+    #: registers exactly the ones the gateway does not reserve.
     served: frozenset = frozenset()
 
     def describe(self) -> dict:
@@ -98,13 +97,11 @@ def serving_connectors() -> tuple[tuple[str, str], ...]:
 
 
 def _serving(st: State) -> bool:
-    """Loaded AND its namespaces are not the gateway's right now. Between a
-    switch moved back to `native` and the next reconcile, the native verbs
-    serve and the component's are neither listed nor dispatched."""
+    """Loaded AND its namespaces are not all the gateway's right now."""
     if st.status != "loaded":
         return False
     try:
-        return not _standby_reason(st.component)
+        return not _reserved_reason(st.component)
     except Exception:  # noqa: BLE001 — unknown: the native side keeps them
         return False
 
@@ -121,8 +118,8 @@ def _served_now(component: GatewayComponent) -> frozenset:
 def verb(name: str) -> VerbSpec | None:
     for st in list(_STATES.values()):
         spec = st.verbs.get(name)
-        # Per namespace too: between a switch flip and the next reconcile a
-        # verb of a half now native is neither dispatched nor listed (#522).
+        # Per namespace too: a verb of a namespace the gateway reserves is
+        # neither dispatched nor listed (#522).
         if spec is not None and _serving(st) and spec.namespace in _served_now(st.component):
             return spec
     return None
@@ -214,11 +211,6 @@ def refusal(name: str) -> str:
             # mounted backend serves (`topic.*`, another pack's MCP tools).
             if _served_elsewhere(name, ns):
                 return ""
-            if st.status == "standby":
-                return (f"gateway component '{st.component.key}' is on standby: the "
-                        "connector switch moved to `pack` and the component loads at "
-                        "the next reconcile (CLODIA_COMPONENT_INTERVAL seconds) or on "
-                        f"POST /internal/components/{st.component.pack}/refresh")
             return (f"gateway component '{st.component.key}' is disabled "
                     f"({st.status}): {st.reason}")
     return ""
@@ -373,22 +365,17 @@ def _reserved_namespaces() -> frozenset[str]:
     return core_namespaces()
 
 
-def _standby_reason(component: GatewayComponent) -> str:
-    """Why `component` must not run now although it is trusted and pinned, or "".
-
-    Its connectors' namespaces are reserved by the gateway: the instance switch
-    of that migration is on `native`, so the native verbs are listed and
-    served, and registering the component's would be refused anyway."""
+def _reserved_reason(component: GatewayComponent) -> str:
+    """Why `component` must not run although it is trusted and pinned, or "":
+    every namespace of its connectors is the gateway's own, so registering
+    its verbs would be refused anyway. A component of several connectors
+    runs when at least one is free, and registers only those (`host.serves`)."""
     reserved = _reserved_namespaces()
     mine = set(component.namespaces.values())
     taken = sorted(ns for ns in mine if ns in reserved)
-    # Standby only when it would serve NOTHING: a component of several
-    # connectors (comms-pack: mail + Telegram) runs for the ones on `pack` and
-    # registers only those (`host.serves`) — one pack, one gateway component.
     if taken and set(taken) == mine:
-        return (f"the gateway implements {taken} natively on this instance (the "
-                "connector switch is on `native`); the component loads when the "
-                "owner turns it to `pack`")
+        return (f"its namespaces {taken} are the gateway's own on this "
+                "instance: the component has nothing to serve")
     return ""
 
 
@@ -476,8 +463,7 @@ def _declared() -> tuple[dict[str, tuple[GatewayComponent, Mapping]], list[str]]
 def _signature() -> tuple:
     from ..connectors import resolved
     try:
-        return (resolved._signature(resolved._manifest_files()),
-                resolved._switch_signature())
+        return (resolved._signature(resolved._manifest_files()),)
     except Exception:  # noqa: BLE001
         return ()
 
@@ -551,14 +537,14 @@ def reconcile(*, force: bool = False, refresh_pack: str | None = None,
                 unload(key)
                 _STATES[key] = _fail(comp, "failed", reason)
                 continue
-            idle = _standby_reason(comp)
+            idle = _reserved_reason(comp)
             if idle:
-                if current is None or current.status != "standby" or \
+                if current is None or current.status != "refused" or \
                         current.commit != pin.commit or current.reason != idle:
                     unload(key)
-                    LOG.warning("components: %s pinned at %s, on standby: %s",
+                    LOG.warning("components: %s pinned at %s, not loaded: %s",
                                 key, pin.commit[:12], idle)
-                    _STATES[key] = State(component=comp, status="standby",
+                    _STATES[key] = State(component=comp, status="refused",
                                          reason=idle, commit=pin.commit,
                                          tree_sha256=pin.tree_sha256)
                 continue

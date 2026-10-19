@@ -117,7 +117,7 @@ def _chat_admins(chat_id: str) -> list:
         # components itself (that is the gateway's, with its user and audit).
         raise RuntimeError(
             "the chat administrators come from comms-pack ≥ 2.2.0's gateway "
-            "component (connectors: {telegram: pack}), not loaded in this "
+            "component, not loaded in this "
             "process: pass the members in the plan (--json) or run it where "
             "the component is loaded")
     return svc.handler({"chat_id": str(chat_id)}) or []
