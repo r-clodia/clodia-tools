@@ -16,9 +16,15 @@ from unittest.mock import patch
 from server import proxy
 
 
+class _FakeTool:
+    def __init__(self, i):
+        self.name, self.description = f"t{i}", f"tool {i}"
+        self.inputSchema = {"type": "object"}
+
+
 class _FakeToolsResult:
     def __init__(self, n):
-        self.tools = [object()] * n
+        self.tools = [_FakeTool(i) for i in range(n)]
 
 
 class TestBackendTests(unittest.IsolatedAsyncioTestCase):

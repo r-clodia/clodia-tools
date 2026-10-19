@@ -1312,7 +1312,28 @@ async def test_connector(request: Request):
     if r["ok"] is None and cid in {b.get("name") for b in (whitelist.CONFIG.get("mcp_backends") or [])}:
         # non è uno dei provider nativi sopra: prova come backend MCP montato
         r = await proxy.test_backend(cid)
+        tools = r.pop("tools", None)
+        if r.get("ok") and tools is not None:
+            # Off the event loop: the checks read manifests and mounts.
+            r = {**r, "verbs": await asyncio.to_thread(_backend_verbs, tools)}
     return JSONResponse(r)
+
+
+def _backend_verbs(tools: list[dict]) -> list[dict]:
+    """The backend's tools as verbs, each with the gateway's own answer to
+    «can it be reached at all» (#575): enabled ones first, by name."""
+    from . import main as _main
+    out, seen = [], set()
+    for t in tools:
+        if t["name"] in seen:  # a backend listing a name twice: once is enough
+            continue
+        seen.add(t["name"])
+        why = _main.proxied_verb_refusal(t["name"])
+        row = {"name": t["name"], "description": t["description"], "enabled": not why}
+        if why:
+            row["reason"] = why[:300]
+        out.append(row)
+    return sorted(out, key=lambda v: (not v["enabled"], v["name"]))
 
 
 routes = [

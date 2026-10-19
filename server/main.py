@@ -4568,6 +4568,33 @@ def _check_component(name: str) -> None:
         raise _PackVerbRefused(why)
 
 
+def proxied_verb_refusal(name: str) -> str:
+    """Why a mounted backend's tool `name` (`<backend>.<tool>`) cannot be
+    reached through the gateway by anyone, or "" when it can (#575).
+
+    The same checks `call_tool` runs before any per-agent rule — the backend
+    test lists them, it does not restate them. Per-agent grants are not
+    part of it: «enabled» is about the instance, not about who holds it."""
+    if _component_verb(name) is not None or name in _GATEWAY_RETAINED_VERBS:
+        return ("a gateway verb of the same name is served instead: this "
+                "backend's tool is never reached")
+    # A backend named after a native namespace (`jobs`, `memory`, …): the
+    # dispatch takes the native branch by prefix, so nothing of it is reached
+    # (review of #410). A pack's namespace is not native: its rules follow.
+    ns = name.split(NS_SEP_DOT, 1)[0]
+    if ns in {t.name.split(NS_SEP_DOT, 1)[0] for t in _all_native_tools()} \
+            and not _is_packaged_namespace(name):
+        return (f"'{ns}' is a namespace of the gateway's own verbs: this "
+                "backend's tool is never reached")
+    try:
+        _check_not_transport(name)
+        _check_pack_connector_held(name)
+        _check_component(name)
+    except _PackVerbRefused as e:
+        return str(e)
+    return ""
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     from . import audit as _audit
