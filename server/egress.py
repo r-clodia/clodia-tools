@@ -340,6 +340,24 @@ def is_vetted_source(uri: str, scope: str | None = None) -> bool:
     return any(_matches(uri, r) for r in ingress_rules(scope))
 
 
+def room_sender_rules(scope: str | None) -> list[str]:
+    """The `mailfrom:` entries of the room `scope` ITSELF (#576): what the mail
+    courier delivers there. Global entries and participants are left out on
+    purpose — the same mailbox feeds many rooms, and an instance-wide sender
+    would fan its mail out to all of them."""
+    return [u for u in scope_uris("ingress", scope)
+            if str(u).strip().lower().startswith("mailfrom:")]
+
+
+def room_declares_sender(address: str, scope: str | None) -> bool:
+    """Is `address` declared by the room's own `mailfrom:` entries (#576)?
+    No room, no address or no entry → False: nothing is delivered."""
+    addr = address_of(address or "") or (address or "").strip()
+    if not (scope and addr and "@" in addr):
+        return False
+    return any(_matches(f"mailfrom:{addr}", r) for r in room_sender_rules(scope))
+
+
 def perimeter_addresses(scope: str | None = None) -> set[str]:
     """Recapiti email di chi appartiene allo scope: owner e partecipanti.
 

@@ -33,8 +33,11 @@ class RoomsTests(unittest.TestCase):
     def test_a_room_with_its_own_inbox_entry(self):
         out = self._rooms({"scope_source_allow": {
             "SEAL-2/preventivi": ["inbox:info@tomato.blue", "mailfrom:a@b.it"]}})
+        sig = out[0].pop("senders_sig") if out else ""
+        self.assertEqual(len(sig), 16)
         self.assertEqual(out, [{"tier": "SEAL-2", "name": "preventivi", "account": "info",
-                                "address": "info@tomato.blue", "strict": False}])
+                                "address": "info@tomato.blue", "strict": False,
+                                "senders": 1}])
 
     def test_global_entries_send_only_boxes_and_missing_topics_are_not_rooms(self):
         out = self._rooms({"source_allow": ["inbox:info@tomato.blue"],
@@ -114,7 +117,8 @@ class InRoomTests(unittest.TestCase):
         paths = {r.path for r in C.routes}
         self.assertEqual(paths, {"/internal/mail/courier/rooms",
                                  "/internal/mail/courier/envelopes",
-                                 "/internal/mail/courier/attachment"})
+                                 "/internal/mail/courier/attachment",
+                                 "/internal/mail/courier/eml"})
 
 
 if __name__ == "__main__":

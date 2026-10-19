@@ -14,6 +14,11 @@ list, and on a strict room (#503) only declared senders pass.
 - `GET  /internal/mail/courier/rooms`       → `[{tier, name, account, address, strict}]`
 - `POST /internal/mail/courier/envelopes`   {tier, name, account, folder?, limit?, skip?}
 - `POST /internal/mail/courier/attachment`  {tier, name, account, email_id, filename, folder?}
+- `POST /internal/mail/courier/eml`         {tier, name, account, email_id, folder?}
+
+Only mail from a sender the room itself declares (`mailfrom:` among its OWN
+ingress entries) is delivered (#576): a room with no declared sender gets
+nothing, and `rooms()` says how many senders each room declares.
 """
 from __future__ import annotations
 
@@ -82,10 +87,23 @@ def rooms() -> list[dict]:
             addr = str(uri)[len("inbox:"):].strip().lower()
             row = {"tier": tier, "name": name, "account": boxes.get(addr, ""),
                    "address": addr,
-                   "strict": bool(egress.ingress_strict(f"{tier}/{name}"))}
+                   "strict": bool(egress.ingress_strict(f"{tier}/{name}")),
+                   **_senders(f"{tier}/{name}")}
             if addr in boxes and row not in out:
                 out.append(row)
     return out
+
+
+def _senders(scope: str) -> dict:
+    """How many `mailfrom:` entries the room declares, and a signature of the
+    set (#576): when it changes the courier records what is already in the
+    mailbox instead of delivering it — a sender added today brings its mail
+    from today, like a mailbox linked today."""
+    import hashlib
+    from . import egress
+    regole = sorted(str(r).strip().lower() for r in egress.room_sender_rules(scope))
+    return {"senders": len(regole),
+            "senders_sig": hashlib.sha256("\n".join(regole).encode()).hexdigest()[:16]}
 
 
 def _in_room(tier: str, name: str, payload: dict, service: str, args: dict):
@@ -155,7 +173,12 @@ async def attachment_route(request: Request):
                             ("account", "email_id", "filename", "folder"))
 
 
+async def eml_route(request: Request):
+    return await _room_call(request, "courier_eml", ("account", "email_id", "folder"))
+
+
 routes = [
+    Route("/internal/mail/courier/eml", eml_route, methods=["POST"]),
     Route("/internal/mail/courier/rooms", rooms_route, methods=["GET"]),
     Route("/internal/mail/courier/envelopes", envelopes_route, methods=["POST"]),
     Route("/internal/mail/courier/attachment", attachment_route, methods=["POST"]),
