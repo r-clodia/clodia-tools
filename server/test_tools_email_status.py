@@ -41,7 +41,6 @@ class ToolsEmailStatusTest(unittest.IsolatedAsyncioTestCase):
              patch.object(
                  tools_api.email_tool, "credential_diagnostics", return_value=diagnostics
              ), \
-             patch("server.tools.mail_switch.in_pack", return_value=True), \
              patch("server.tools.mail_switch.service", return_value=lambda *a: []), \
              patch("server.tools.mail_switch.credential_diagnostics",
                    return_value=[r for r in diagnostics if r["kind"] == "mailbox"]), \

@@ -28,8 +28,8 @@ page it was built for instead of being readable only from the inside.
 The second is the install-time half: `pack_import` in clodia-logic asks before
 registering a pack, the way it already asks `/flow-allow` for the flow
 declarations. The verdict is computed in `connectors/validate.py` — see there
-for why a refusal and an «ignored because the gateway still implements it» are
-two different answers, and only the first stops an installation.
+for why a refusal and an «ignored, inert on this instance» are two different
+answers, and only the first stops an installation.
 
 **No secret is ever returned.** A provider is described by the NAME of its vault
 entry and by whether something is stored under it, never by its contents.
@@ -71,12 +71,12 @@ def _allowed(cid: str) -> bool:
 
     Asked per connector rather than filtering a list afterwards, so a connector
     that the profile excludes is missing from the listing for the same reason it
-    is refused at the Tools page: one rule, one place (`connector_check`).
+    is refused at the Tools page: one rule, one place
+    (`instance_profile.connector_allowed`).
     """
     try:
-        instance_profile.connector_check(cid)
-        return True
-    except PermissionError:
+        return instance_profile.connector_allowed(cid)
+    except Exception:  # noqa: BLE001 — an unreadable profile is FULL already
         return False
 
 
@@ -135,9 +135,7 @@ async def validate_connectors(request: Request):
 
     Called by `pack_import` before it registers a pack. Answers `ok: false` only
     for what is wrong wherever and whenever it is asked; a declaration that is
-    merely inert on this instance today comes back in `ignored`, with `ok: true`
-    — a pack must not become uninstallable because the gateway has not finished
-    its own migration.
+    merely inert on this instance comes back in `ignored`, with `ok: true`.
     """
     _payload, err = _authorize(request)
     if err:
@@ -187,36 +185,19 @@ async def connect(request: Request):
         return JSONResponse({"error": f"connettore '{cid}' non installato"},
                             status_code=404)
     if connector.builtin:
-        # Review of #360: a connector the gateway implements itself has a
-        # credential whose SHAPE its native code reads (`github_pat` is
-        # `{"value": pat}`, read by `proxy._resolve_secrets`) and side effects
-        # around it (the MCP backend, `_connector_guard`, the integrations
-        # profile). The generic route delegates to that handler, so the two
-        # URLs are one behaviour; with no handler it refuses.
-        if cid == "telegram":
-            # No native Telegram any more (#522): its credential is comms-pack's
-            # connector's, deposited by this route in `pack` position.
-            return JSONResponse(
-                {"error": "Telegram non ha più un'implementazione nativa: metti "
-                          "`connectors: {telegram: pack}` nel profilo e installa "
-                          "comms-pack ≥ 2.2.0, poi collega il bot da qui"},
-                status_code=409)
-        legacy = _LEGACY_CONNECT.get(cid)
-        if legacy is None:
-            return JSONResponse(
-                {"error": f"il connettore '{cid}' è del gateway: si collega "
-                          f"dalla sua pagina, non da qui"}, status_code=400)
-        return await _delegate(legacy, request, connector)
+        # The gateway's own connectors (`core`, `datastore`) are schema-only:
+        # nothing to connect.
+        return JSONResponse(
+            {"error": f"il connettore '{cid}' è del gateway: non ha credenziali "
+                      f"da collegare"}, status_code=400)
     adopted = _LEGACY_ADOPTED.get(cid)
     if adopted is not None:
-        # In `pack` position (#525) the connector is the pack's, but the
-        # credential is still read by the GATEWAY in the shape its handler
-        # writes: `github_pat` = `{"value"}` of type `mcp_secret`,
-        # `openai_api_key` = `{"api_key"}` of type `api_key`. The generic
-        # deposit would refuse those entries (their type is not
-        # `connector:<id>`) or rewrite them in a type the native position
-        # does not recognise — so the handler keeps doing it, with the grant
-        # to clodia and the profile checks around it. Only when the pack
+        # The connector is the pack's (#525), but the credential is still read
+        # by the GATEWAY in the shape its handler writes: `github_pat` =
+        # `{"value"}` of type `mcp_secret`, `openai_api_key` = `{"api_key"}` of
+        # type `api_key`. The generic deposit would refuse those entries
+        # (their type is not `connector:<id>`) — so the handler keeps doing
+        # it, with the grant to clodia and the profile checks around it. Only when the pack
         # declares that very entry: a different one is not what the gateway
         # reads, and accepting it would deposit a credential nobody uses.
         entries = {p.credential.vault_entry for p in connector.providers
@@ -303,22 +284,20 @@ def _cred_type(connector) -> str:
     return f"connector:{connector.id}"
 
 
-#: Built-in connectors whose credential has a dedicated handler in `tools_api`.
-#: Ognuno fa, attorno al deposito, qualcosa che il deposito generico non fa e
-#: che non va perso: GitHub monta/smonta il backend MCP ufficiale, OpenAI passa
-#: per il gating `integrations` del profilo. (Telegram non c'è più: il suo
-#: handler nativo è stato rimosso con il client, #522.) La rotta generica delega, così le due URL
-#: restano UN comportamento e la webui può chiamarne una sola (#520).
+#: Connectors whose credential has a dedicated handler in `tools_api`. Each
+#: does, around the deposit, something the generic deposit does not: GitHub
+#: clears the leftover unstamped backend and grants clodia's verbs, both pass
+#: the profile's gating. The generic route delegates, so the two URLs stay ONE
+#: behaviour and the webui calls only one (#520).
 _LEGACY_CONNECT = {"github": "github_connect",
                    "openai-images": "openai_connect"}
 
 
-#: Connectors whose credential the GATEWAY keeps reading after the switch to
-#: `pack` (clodia-platform#525): `{connector id: the vault entry it reads}`.
-#: The generic route delegates to the legacy handler for them in BOTH
-#: positions, so the entry keeps its shape and type (`mcp_secret`, `api_key`)
-#: and switching back to `native` finds it where it always was. Telegram is
-#: not here: in `pack` position its credential is the pack's own (#522).
+#: Connectors whose credential the GATEWAY keeps reading although the pack
+#: serves them (clodia-platform#525): `{connector id: the vault entry it
+#: reads}`. The generic route delegates to the legacy handler for them, so the
+#: entry keeps its shape and type (`mcp_secret`, `api_key`). Telegram is not
+#: here: its credential is the pack's own (#522).
 _LEGACY_ADOPTED = {"github": "github_pat", "openai-images": "openai_api_key"}
 
 

@@ -1,23 +1,16 @@
-"""Which Google implementation answers on this instance (clodia-platform#558).
+"""Google, as the gateway's own code asks for it (clodia-platform#558).
 
-The instance switch `connectors: {google: native|pack}` (`profile.yaml`):
-
-* `native` (default) — NOTHING serves Google any more: the gateway's own
-  modules (`gdrive`, `gsheets`, `gdocs`, `gcalendar`, `google_io`,
-  `gdrive_labels`, the Drive-API half of `gdrive_root`) were removed
-  (clodia-platform#524). Verbs refused, OAuth routes 409, listings empty;
-* `pack` — google-pack's GATEWAY COMPONENT does (`catalogs/packs/google-pack/
-  gateway` in r-clodia/clodia-logic, fetched, pinned and loaded by
-  `server.components`): it registers the 24 verbs, which the dispatcher runs
-  through the normal `call_tool` path, its OAuth routes, and the services
-  below.
+Google is served by google-pack's GATEWAY COMPONENT (`catalogs/packs/
+google-pack/gateway` in r-clodia/clodia-logic, fetched, pinned and loaded by
+`server.components`): it registers the 24 verbs, which the dispatcher runs
+through the normal `call_tool` path, its OAuth routes, and the services below.
+The gateway's own Google modules were removed (#524) and the `native|pack`
+switch is retired (#526).
 
 This module is the one place where gateway code that STAYS — the confinement
 API, the labels of a whitelist, the vault's token cache, the Tools card test,
-the Gmail provider of `email.*` — asks which side answers. In `pack` position a
-missing component is a refusal (`ComponentUnavailable`), never a fallback to
-the native code: an owner who turned the switch must not be verifying the
-wrong implementation on real traffic.
+the Gmail provider of `email.*` — reaches the component. A missing component
+is a refusal (`ComponentUnavailable`), never a fallback.
 """
 from __future__ import annotations
 
@@ -26,24 +19,13 @@ from typing import Any
 
 LOG = logging.getLogger("clodia-tools.google-switch")
 
-#: The connector id of the switch, and the pack it hands Google to.
+#: The connector id, and the pack whose component serves it.
 CONNECTOR = "google"
 PACK = "google-pack"
 
 
-NATIVE_REMOVED = ("Google has no native implementation any more "
-                  "(clodia-platform#524): set `connectors: {google: pack}` in the "
-                  "instance profile and install google-pack ≥ 2.0.0")
-
-
 class ComponentUnavailable(PermissionError):
-    """`pack` position, but google-pack's gateway component is not serving."""
-
-
-def in_pack() -> bool:
-    """`connectors: {google: pack}`. Asked per call; in doubt `native`."""
-    from .. import instance_profile
-    return instance_profile.connector_mode(CONNECTOR) == "pack"
+    """google-pack's gateway component is not serving."""
 
 
 def _why_unavailable() -> str:
@@ -64,7 +46,7 @@ def service(name: str):
     spec = components.service(PACK, name)
     if spec is None:
         raise ComponentUnavailable(
-            f"Google is in `pack` position on this instance, but {_why_unavailable()}. "
+            f"Google is served by google-pack, but {_why_unavailable()}. "
             "See GET /internal/components.")
     return spec.handler
 
@@ -74,21 +56,17 @@ def call(name: str, *args: Any, **kwargs: Any) -> Any:
 
 
 # --------------------------------------------------------------------------
-# what the gateway's own code asks, answered by the side in charge
+# what the gateway's own code asks, answered by the component
 # --------------------------------------------------------------------------
 
 def accounts() -> list[str]:
     """The Google accounts with a Drive-capable credential."""
-    if in_pack():
-        return list(call("accounts"))
-    return []          # `native`: no Google implementation any more (#524)
+    return list(call("accounts"))
 
 
 def describe_folder(account: str, folder_id: str) -> dict:
     """`{id, name?, is_folder, error?}` of a Drive folder, for the confinement API."""
-    if in_pack():
-        return dict(call("describe_folder", account, folder_id))
-    raise ComponentUnavailable(NATIVE_REMOVED)
+    return dict(call("describe_folder", account, folder_id))
 
 
 def perimeter_changed() -> None:
@@ -117,12 +95,10 @@ def credential_changed(name: str) -> None:
 def folder_labels(uris: list) -> dict:
     """`{uri: {url, name}}` for the `gdrive:folder/` entries of a whitelist.
     Best effort by contract: `{}` when the component is not serving."""
-    if in_pack():
-        try:
-            return dict(call("folder_labels", list(uris)))
-        except ComponentUnavailable:
-            return {}
-    return {}          # `native`: no Google implementation any more (#524)
+    try:
+        return dict(call("folder_labels", list(uris)))
+    except ComponentUnavailable:
+        return {}
 
 
 def component_test_connection() -> dict:
@@ -134,7 +110,7 @@ def component_test_connection() -> dict:
 
 
 def gmail_runner():
-    """The Gmail provider of `email.*` in `pack` position: the component's
+    """The Gmail provider of `email.*`: the component's
     `mail_run` service (`{argv, files, timeout}` → `{returncode, stdout,
     stderr}`), or `ComponentUnavailable`."""
     return service("mail_run")

@@ -193,14 +193,10 @@ def canonical(uri: str) -> str:
     s = _registry().scheme(scheme)
     if s is not None and s.lowercase:
         return u.lower()
-    try:
-        # The pack connector the owner elected in a builtin's place may read
-        # the browser URLs of ITS hosts (#524: google-pack's Drive URLs).
-        from .connectors import builtin as _builtin
-        elected = _builtin.elected_url_hosts()
-    except Exception:  # noqa: BLE001 — in doubt, only the builtins' rules
-        elected = {}
-    out = _registry().canonical(u, elected)
+    # The first-party pack connector that replaced a builtin may read the
+    # browser URLs of ITS hosts (#524: google-pack's Drive URLs).
+    from .connectors import builtin as _builtin
+    out = _registry().canonical(u, _builtin.ELECTED_URL_HOSTS)
     if out is not None:
         return out
     if u.lower().startswith(("http://", "https://")):
@@ -796,11 +792,11 @@ def danger_note(uri: str) -> str:
         return rule
     scheme = reg.scheme(u.partition(":")[0])
     generic = scheme.danger if scheme else ""
-    # The connector the owner moved to a pack (#525: GitHub's warning on
-    # github.com) keeps warning — added to the scheme's text, never instead.
+    # A connector that moved to its first-party pack (#525: GitHub's warning
+    # on github.com) keeps warning — added to the scheme's text, never instead.
     try:
         from .connectors import builtin as _builtin
-        elected = reg.elected_danger_for(u, _builtin._packaged())
+        elected = reg.elected_danger_for(u, _builtin.RELEASED_TO)
     except Exception:  # noqa: BLE001 — the generic warning stands alone
         elected = ""
     return " ".join(t for t in (elected, generic) if t)

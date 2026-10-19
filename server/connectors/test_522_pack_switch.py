@@ -1,33 +1,21 @@
-"""L'interruttore di #522: lo stesso connettore, dal gateway o dal pack.
+"""L'interruttore di #522, ritirato da #526: Telegram è di comms-pack, sempre.
 
-clodia-platform#522, criterio 1 («parity tests green with the switch in both
-positions») e decisione G3 dell'epic #527: il nativo e il pack **convivono
-dietro un interruttore per istanza**, l'owner lo gira sulla propria, verifica su
-traffico vero, e solo allora si cancella il codice nativo.
+clodia-platform#522 introdusse `connectors: {telegram: native|pack}` (decisione
+G3 dell'epic #527): il nativo e il pack convivevano dietro un interruttore per
+istanza, e la parità delle risposte del PDP nelle due posizioni era il criterio
+di accettazione. Il codice nativo è stato cancellato e l'interruttore ritirato
+(#526): qui si misura che
 
-Due cose si misurano qui, e la seconda è quella che vale.
+1. **il profilo non sposta più niente.** Con `native`, senza sezione o con un
+   valore storpiato, il connettore che risponde è quello di comms-pack, e il
+   profilo continua a caricarsi;
 
-1. **L'interruttore sposta davvero il connettore.** Su `native` è il file
-   `builtin_manifests/telegram.yaml` a stare nel registry e la dichiarazione di
-   comms-pack è rifiutata per collisione; su `pack` è il contrario, e insieme
-   cadono le tre riserve che la tenevano fuori — il manifest builtin, i verbi
-   nativi nel catalogo, il namespace e il prefisso di vault.
+2. **le risposte del PDP su Telegram sono quelle fissate** — non vuote — e una
+   perturbazione della dichiarazione del pack le fa cambiare
+   (`PinsCanFailTests`): un confronto sa diventare rosso.
 
-2. **Le risposte non cambiano.** Non il confronto fra due manifest, che
-   potrebbero essere scritti diversi e valere uguale (o uguali e applicati
-   diversi): le stesse domande pubbliche del PDP — `check_grantable`,
-   `danger_note`, `spec_for`, `taints`, l'azione di topic, la credenziale —
-   poste nelle due posizioni, e nessuna risposta deve differire. Una batteria,
-   non un campione.
-
-   Un confronto fra due risposte è verde anche quando entrambe sono vuote, cioè
-   proprio quando il connettore è sparito: perciò `test_the_answers_are_not_
-   vacuous` pretende che nelle due posizioni le risposte *dicano* qualcosa, e
-   `SwitchParityCanFailTests` dimostra che il confronto sa diventare rosso.
-
-Il manifest che fa da pack installato è l'esempio comms-pack di `SCHEMA.md` —
-lo stesso che la fase 1 ha messo in comms-pack (clodia-logic PR #515) — scritto
-in una data dir finta, così il registry lo legge dalla strada vera
+Il manifest che fa da pack installato è l'esempio comms-pack di `SCHEMA.md`,
+scritto in una data dir finta, così il registry lo legge dalla strada vera
 (`$CLODIA_DATA/packs/<pack>/pack.yaml`) invece che da un'iniezione.
 """
 from __future__ import annotations
@@ -88,18 +76,15 @@ class _Istanza(unittest.TestCase):
                             lambda: self.dir / "first-seen.json")
         seen.start()
         self.addCleanup(seen.stop)
-        self.posizione("native")
+        self.posizione()
 
     def _ricarica(self) -> None:
         instance_profile.load(force=True)
         resolved.invalidate()
 
     def posizione(self, *modi: str) -> None:
-        """Scrive il profilo con l'interruttore in quella posizione.
-
-        `modi` vuoto = nessuna sezione `connectors:`, cioè il profilo che hanno
-        tutte le istanze oggi.
-        """
+        """Scrive il profilo con `connectors: {telegram: <modo>}` (ritirato da
+        #526: non deve cambiare niente). `modi` vuoto = nessuna sezione."""
         righe = ["edition: full"]
         if modi:
             righe.append("connectors:")
@@ -109,32 +94,31 @@ class _Istanza(unittest.TestCase):
         self._ricarica()
 
 
-class TheSwitchMovesTheConnectorTests(_Istanza):
-    """Su `pack` il gateway si fa da parte, e il pack subentra."""
+class TelegramIsThePacksTests(_Istanza):
+    """Il gateway non dichiara più Telegram: il connettore è di comms-pack."""
 
-    def test_on_native_the_builtin_holds_it_and_the_pack_is_refused(self):
-        self.posizione("native")
-        telegram = resolved.registry().by_id("telegram")
-        self.assertIsNotNone(telegram)
-        self.assertTrue(telegram.builtin)
-        self.assertEqual(telegram.pack, "gateway-telegram")
-        self.assertTrue(any("telegram" in r for r in resolved.registry().refused),
-                        "senza l'interruttore la dichiarazione del pack deve "
-                        "restare rifiutata per collisione")
+    def test_whatever_the_profile_says_the_packs_declaration_counts(self):
+        for modi in (("pack",), ("native",), ()):
+            with self.subTest(modi=modi):
+                self.posizione(*modi)
+                telegram = resolved.registry().by_id("telegram")
+                self.assertEqual((telegram.pack, telegram.builtin),
+                                 ("comms-pack", False))
+                self.assertFalse(any("telegram" in r
+                                     for r in resolved.registry().refused))
 
-    def test_on_pack_the_packs_declaration_is_the_one_that_counts(self):
-        self.posizione("pack")
+    def test_the_packs_declaration_is_the_one_that_counts(self):
         telegram = resolved.registry().by_id("telegram")
         self.assertIsNotNone(telegram)
         self.assertFalse(telegram.builtin)
         self.assertEqual(telegram.pack, "comms-pack")
         self.assertNotIn("gateway-telegram", B.manifests())
 
-    def test_on_pack_the_three_reservations_fall_together(self):
+    def test_the_three_reservations_are_gone(self):
         """Namespace, prefisso di vault e verbi nativi: se ne restasse anche
         solo uno, il connettore del pack sarebbe caricato a metà o per niente —
         ed è il genere di guasto che si legge come «il pack non fa nulla»."""
-        self.posizione("pack")
+        self.posizione("native")                 # ignorato
         self.assertNotIn("telegram", M.reserved_namespaces())
         self.assertNotIn("telegram", M.core_namespaces())
         self.assertEqual(
@@ -147,38 +131,32 @@ class TheSwitchMovesTheConnectorTests(_Istanza):
         self.assertIn("telegram", main._native_tool_namespaces())
         self.assertTrue(main._is_packaged_verb(UN_VERBO_NATIVO))
 
-    def test_on_native_nothing_of_that_has_moved(self):
-        self.posizione("native")
-        self.assertIn("telegram", M.reserved_namespaces())
-        self.assertIn("telegram", M.core_namespaces())
-        self.assertTrue(M.vault_entry_problem("telegram_bot_token", "telegram"))
+    def test_a_profile_with_the_retired_key_keeps_loading(self):
+        """#526: `connectors:` non è più validata. Un valore che nessuno
+        capisce non deve buttare il profilo intero su FULL — spegnerebbe il
+        gating di tutto il resto per una chiave che non decide niente."""
+        (self.dir / "profile.yaml").write_text(
+            "edition: acme\nfeatures:\n  rag: off\n"
+            "connectors:\n  telegram: packs\n  mail: native\n",
+            encoding="utf-8")
+        self._ricarica()
+        self.assertEqual(instance_profile.load()["edition"], "acme")
+        self.assertEqual(instance_profile.rag_mode(), "off")
+        self.assertEqual(instance_profile.retired_connector_switch(), ["mail"])
+        self.assertEqual(resolved.registry().by_id("telegram").pack, "comms-pack")
+
+    def test_native_is_reported_once_at_boot(self):
         from .. import main
-        # The native agent verbs are gone (#522): on `native` they are not
-        # listed and a call says which switch to turn.
-        self.assertNotIn(UN_VERBO_NATIVO, main.all_native_verb_names())
-        self.assertIn("telegram", main._native_tool_namespaces())
-        self.assertFalse(main._is_packaged_verb(UN_VERBO_NATIVO))
-        with self.assertRaises(main._PackVerbRefused) as cm:
-            main._check_component(UN_VERBO_NATIVO)
-        self.assertIn("telegram: pack", str(cm.exception))
+        self.posizione("native")
+        avvisi = [w for w in main.runtime_configuration_warnings()
+                  if "#526" in w]
+        self.assertEqual(len(avvisi), 1, avvisi)
+        self.assertIn("telegram", avvisi[0])
+        self.posizione("pack")
+        self.assertFalse([w for w in main.runtime_configuration_warnings()
+                          if "#526" in w])
 
-    def test_no_section_means_native(self):
-        """Una migrazione si accende. Il profilo di tutte le istanze di oggi non
-        ha questa sezione, e deve continuare a significare «come ieri»."""
-        self.posizione()
-        self.assertEqual(instance_profile.connector_mode("telegram"), "native")
-        self.assertEqual(instance_profile.packaged_connectors(), frozenset())
-        self.assertTrue(resolved.registry().by_id("telegram").builtin)
-
-    def test_a_misspelt_value_falls_back_to_native(self):
-        """Fail-safe nella direzione giusta: un valore che questo lettore non
-        capisce non deve poter spegnere il connettore. Il profilo intero ricade
-        su FULL, dove `connectors` è vuoto."""
-        self.posizione("packs")  # "packs", non "pack"
-        self.assertEqual(instance_profile.connector_mode("telegram"), "native")
-        self.assertTrue(resolved.registry().by_id("telegram").builtin)
-
-    def test_on_pack_without_a_backend_the_verb_does_not_exist(self):
+    def test_without_a_backend_the_verb_does_not_exist(self):
         """Il controllo che prova che il ramo NATIVO è davvero spento (da #373).
 
         Niente implementazione nativa e nessun backend MCP montato ⇒ il verbo
@@ -187,7 +165,6 @@ class TheSwitchMovesTheConnectorTests(_Istanza):
         a servire la chiamata sarebbe il gateway: l'interruttore spegnerebbe
         l'elenco lasciando acceso il negozio.
         """
-        self.posizione("pack")
         from .. import main
         with patch.object(main.proxy, "is_proxied", lambda _n: False):
             self.assertFalse(main._verb_implemented("telegram.send"))
@@ -195,34 +172,15 @@ class TheSwitchMovesTheConnectorTests(_Istanza):
             # Not even mail's: its native code is gone too (#523).
             self.assertFalse(main._verb_implemented("email.send"))
 
-    def test_on_pack_without_the_pack_installed_nobody_answers(self):
-        """L'interruttore non INVENTA un connettore: se il pack che lo dichiara
-        non è installato, in posizione `pack` non risponde nessuno. È lo stato
-        in cui l'owner si trova fra la PR 1 e la PR 2, e deve essere leggibile
-        come «manca il pack», non come un gateway rotto."""
+    def test_without_the_pack_installed_nobody_answers(self):
+        """Il gateway non INVENTA un connettore: se il pack che lo dichiara non
+        è installato non risponde nessuno, e si legge come «manca il pack»,
+        non come un gateway rotto."""
         (self.dir / "packs" / "comms-pack" / "pack.yaml").unlink()
-        self.posizione("pack")
+        resolved.invalidate()
         self.assertIsNone(resolved.registry().by_id("telegram"))
         from .. import egress
         self.assertIsNone(egress.spec_for("telegram.send"))
-
-    def test_a_document_left_without_connectors_is_dropped_whole(self):
-        """Un file builtin i cui connettori sono TUTTI passati a un pack non
-        resta come documento vuoto: un `name:` senza niente sotto terrebbe
-        occupato un nome di pack per un manifest che non dichiara nulla."""
-        self.posizione("pack")
-        self.assertNotIn("gateway-telegram", B.manifests())
-        self.assertIn("gateway-telegram", B._all())
-
-    def test_the_other_connectors_do_not_move(self):
-        """L'interruttore nomina UN connettore: gli altri file builtin restano
-        dove sono, e con loro i namespace riservati."""
-        self.posizione("pack")
-        self.assertIn("gateway-mail", B.manifests())
-        self.assertIsNotNone(resolved.registry().by_id("mail"))
-        self.assertTrue(resolved.registry().by_id("mail").builtin)
-        self.assertIn("google", M.reserved_namespaces())
-
 
 def _risposte() -> dict:
     """Le domande pubbliche del PDP su Telegram, e le loro risposte.
@@ -270,40 +228,17 @@ def _risposte() -> dict:
     return out
 
 
-class SwitchParityTests(_Istanza):
-    """Le stesse domande, nelle due posizioni, con le stesse risposte."""
-
-    def _confronto(self) -> tuple[dict, dict]:
-        self.posizione("native")
-        self.assertTrue(resolved.registry().by_id("telegram").builtin,
-                        "chi risponde in posizione `native` deve essere il "
-                        "manifest del gateway")
-        nativo = _risposte()
-        self.posizione("pack")
-        # Senza questo controllo il confronto sarebbe VACUO: se l'interruttore
-        # non spostasse niente, a rispondere sarebbe il gateway tutte e due le
-        # volte e la parità verrebbe verde senza aver misurato il pack.
-        self.assertEqual(resolved.registry().by_id("telegram").pack, "comms-pack")
-        da_pack = _risposte()
-        return nativo, da_pack
-
-    def test_every_answer_is_the_same_in_both_positions(self):
-        nativo, da_pack = self._confronto()
-        self.assertEqual(set(nativo), set(da_pack))
-        for chiave in sorted(nativo):
-            with self.subTest(domanda=chiave):
-                self.assertEqual(nativo[chiave], da_pack[chiave])
+class PinnedAnswersTests(_Istanza):
+    """Le risposte del PDP su Telegram, da comms-pack. La parità con il
+    manifest builtin di ieri (`testdata/former_builtin/telegram.yaml`) era il
+    criterio di #522; ciò su cui erano d'accordo è fissato qui."""
 
     def test_the_answers_are_not_vacuous(self):
-        """Il confronto di sopra è verde anche se nelle due posizioni non
-        risponde nessuno: è proprio il caso in cui il connettore è sparito.
-        Qui si pretende che le risposte dicano qualcosa."""
-        for posizione, atteso in (("native", "gateway-telegram"),
-                                  ("pack", "comms-pack")):
-            with self.subTest(posizione=posizione):
-                self.posizione(posizione)
+        for modi in (("native",), ("pack",)):    # il profilo non cambia niente
+            with self.subTest(modi=modi):
+                self.posizione(*modi)
                 self.assertEqual(
-                    resolved.registry().by_id("telegram").pack, atteso)
+                    resolved.registry().by_id("telegram").pack, "comms-pack")
                 r = _risposte()
                 self.assertTrue(r["forme"]["egress:-1001234567890"])
                 self.assertFalse(r["forme"]["egress:*"])
@@ -317,12 +252,9 @@ class SwitchParityTests(_Istanza):
                 self.assertEqual(r["azione"][0], "channel")
 
 
-class SwitchParityCanFailTests(_Istanza):
-    """La prova che il confronto di sopra sa diventare rosso.
-
-    Un test di parità è verde per costruzione finché le due parti coincidono: la
-    dimostrazione che coglie una differenza è perturbare la dichiarazione del
-    pack e vedere il rosso. Una perturbazione per famiglia di risposta, perché
+class PinsCanFailTests(_Istanza):
+    """La prova che le risposte fissate sanno diventare rosse: si perturba la
+    dichiarazione del pack e la risposta cambia. Una perturbazione per famiglia di risposta, perché
     una sola proverebbe che il confronto guarda UN campo.
     """
 
@@ -337,7 +269,6 @@ class SwitchParityCanFailTests(_Istanza):
 
     def setUp(self) -> None:
         super().setUp()
-        self.posizione("native")
         self.nativo = _risposte()
 
     def test_a_looser_handle_is_caught(self):
@@ -567,16 +498,16 @@ class TheRegisteredHandlerIsStillCallToolTests(unittest.TestCase):
 
 
 class ContextIsRefusedWhereItIsNotDeclaredTests(_Istanza):
-    """Senza l'interruttore non c'è contesto da riempire: il connettore del
-    pack non è nel registry, e il verbo nativo prende canale e agente dal
-    processo come ha sempre fatto."""
+    """Senza il connettore del pack non c'è contesto da riempire — e il verbo
+    non si serve: niente arriva al pack con il canale del chiamante."""
 
-    def test_on_native_nothing_is_filled(self):
-        self.posizione("native")
+    def test_without_the_packs_connector_nothing_is_filled_and_it_is_refused(self):
+        (self.dir / "packs" / "comms-pack" / "pack.yaml").unlink()
+        resolved.invalidate()
         self.assertEqual(resolved.context_arguments("telegram.send"), {})
         from .. import main
-        args = {"text": "ciao", "channel": "SEAL-3/x"}
-        self.assertIs(main._fill_declared_context("telegram.send", args), args)
+        with self.assertRaises(main._PackVerbRefused):
+            main._check_pack_connector_held("telegram.send")
 
 
 class TheGrammarRefusesWhatItCannotFillTests(unittest.TestCase):
@@ -708,8 +639,8 @@ class NoVerbIsLeftBehindTests(_Istanza):
         self.assertFalse(main._fill_declared_file("telegram.join_link", {}))
 
     def test_only_the_gateways_own_verbs_are_left_natively(self):
-        """Il controllo gemello: su `native` restano solo i verbi del gateway
-        (registri dei binding e dei join), il resto è del pack (#522)."""
+        """Restano solo i verbi del gateway (registri dei binding e dei join),
+        il resto è del pack (#522) — qualunque cosa dica il profilo."""
         self.posizione("native")
         from .. import main
         rimasti = {n for n in main.all_native_verb_names()
@@ -717,28 +648,22 @@ class NoVerbIsLeftBehindTests(_Istanza):
         self.assertEqual(rimasti, {"telegram.listen", "telegram.unlisten",
                                    "telegram.join_link"})
 
-    def test_the_namespace_comes_from_the_builtin_manifest(self):
-        """E non da una lista scritta nel dispatch: è il manifest builtin a dire
-        quale namespace quel connettore occupa."""
-        self.posizione("pack")
+    def test_the_namespace_comes_from_the_gateways_table(self):
+        """E non da una lista scritta nel dispatch: è `RELEASED_NAMESPACES` a
+        dire quale namespace quel connettore occupa — quello che il manifest
+        builtin dichiarava prima di #526."""
+        from . import first_party_fixture
         namespaces, prefissi = B.released()
-        self.assertEqual(namespaces, frozenset({"telegram"}))
-        self.assertEqual(prefissi, frozenset({"telegram_"}))
-        dichiarato = {str(e.get("id")): str(e.get("namespace"))
-                      for doc in B._all().values()
-                      for e in (doc.get("connectors") or [])}
-        self.assertEqual(dichiarato["telegram"], "telegram")
+        self.assertIn("telegram", namespaces)
+        self.assertIn("telegram_", prefissi)
+        ieri = first_party_fixture.former("telegram")["connectors"][0]
+        self.assertEqual(B.RELEASED_NAMESPACES["telegram"], ieri["namespace"])
 
     def test_a_prefix_a_remaining_connector_still_uses_is_not_released(self):
         """Un prefisso di vault si libera solo se NESSUN connettore rimasto nel
-        gateway lo usa. Oggi è uno a uno; la migrazione dopo è google-pack
-        (#523), che di prefissi ne ha tre — e liberarne uno che serve ancora
-        al gateway lo consegnerebbe a un pack mentre il gateway ci scrive."""
-        self.posizione("pack")
+        gateway lo usa: liberarne uno che serve ancora al gateway lo
+        consegnerebbe a un pack mentre il gateway ci scrive."""
         with patch.object(B, "_all", lambda: {
-            "gateway-telegram": {"connectors": [
-                {"id": "telegram", "namespace": "telegram", "providers": [
-                    {"id": "bot", "credential": {"vault_entry": "telegram_bot_token"}}]}]},
             "gateway-altro": {"connectors": [
                 {"id": "altro", "namespace": "altro", "providers": [
                     {"id": "x", "credential": {"vault_entry": "telegram_shared"}}]}]},
@@ -746,8 +671,20 @@ class NoVerbIsLeftBehindTests(_Istanza):
             B._RELEASED.clear()
             self.addCleanup(B._RELEASED.clear)
             namespaces, prefissi = B.released()
-        self.assertEqual(namespaces, frozenset({"telegram"}))
-        self.assertEqual(prefissi, frozenset())
+        self.assertIn("telegram", namespaces)
+        self.assertNotIn("telegram_", prefissi)
+
+
+def setUpModule() -> None:
+    # google-pack and it-pack as on every instance (#526); comms-pack is this
+    # module's own (the SCHEMA.md example `_Istanza` writes).
+    from . import first_party_fixture
+    first_party_fixture.install(without=("comms-pack",))
+
+
+def tearDownModule() -> None:
+    from . import first_party_fixture
+    first_party_fixture.uninstall()
 
 
 if __name__ == "__main__":

@@ -437,8 +437,7 @@ def materialize_google_oauth(credential: str, dest_dir: Path) -> str:
 
 def _forget_google_token(credential: str) -> None:
     """A Google credential re-saved or removed drops its cached access token
-    (`tools.google_io`, and google-pack's gateway component on `google: pack`,
-    #558), so a re-consent or a removal takes effect at once instead of at the
+    (google-pack's gateway component, #558), so a re-consent or a removal takes effect at once instead of at the
     token's expiry (review of clodia-tools#380)."""
     if not str(credential).startswith(("google_", "gworkspace_", "gmail_")):
         return

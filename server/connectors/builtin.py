@@ -1,33 +1,22 @@
-"""The connectors this gateway still implements itself, read from `builtin/`.
+"""The connectors this gateway still declares itself, read from `builtin_manifests/`.
 
-clodia-platform#518 moves the PDP's tables into a connector registry. The
-registry of #516/#517 is fed by the manifests of *installed packs* — and the
-connectors of this instance are not packs yet: they are gateway code. So the
-tables could not simply be deleted; the knowledge in them had to be declared
-somewhere first, in the same grammar, or the registry would answer «no mapping»
-for `email.send` and the PDP would stop constraining the one verb it exists for.
+clodia-platform#518 moved the PDP's tables into a connector registry fed by
+the manifests of installed packs. What the gateway itself still owns is
+declared here in the same grammar:
 
-`builtin_manifests/*.yaml` is that somewhere. Each file is a `pack.yaml`-shaped document
-the gateway ships with itself:
+    core.yaml       http: https: topic: mcp: — the platform-intrinsic schemes.
+    datastore.yaml  datastore: — the gateway's own store.
 
-    core.yaml       http: https: topic: mcp: — the platform-intrinsic schemes,
-                    the only ones the issue leaves in a core manifest. This file
-                    stays here forever.
-    mail.yaml       → comms-pack with migration #522
-    telegram.yaml   → comms-pack with migration #522
-    google.yaml     → google-pack with migration #524 (four connectors,
-                    one switch: see `SWITCH_WITH`)
-    github.yaml     → it-pack with migration #525
+Both are schema-only: no provider, no tools card. These files are code, not
+input: they live in the image and are the only manifests allowed to declare
+the intrinsic schemes or to span namespaces.
 
-A migration deletes its file in the same change that adds the pack, and the
-registry notices nothing: the entries simply arrive from the other side. Until
-then a pack declaring the same connector id or the same scheme is **refused**
-(`build_registry`, `builtin=`): while the gateway is the thing actually sending
-the mail, an installed manifest must not be able to redefine where it goes.
-
-These files are code, not input. They live in the image, next to the modules
-that implement them, and they are the only manifests allowed to declare the
-intrinsic schemes or to span namespaces.
+The connectors the gateway used to implement — mail, Telegram, Google, GitHub,
+image generation — are served by first-party packs (epic #527); the per-instance
+`native|pack` switch that moved them one at a time is retired (#526). What the
+gateway still knows about them is in the tables below (`RELEASED_TO`,
+`RELEASED_NAMESPACES`, `ADOPTED_VAULT_ENTRIES`): which pack owns each of them,
+so that no other pack can claim their ids, namespaces or credentials.
 """
 from __future__ import annotations
 
@@ -40,7 +29,7 @@ DIR = Path(__file__).resolve().parent / "builtin_manifests"
 
 
 def _all() -> dict[str, dict]:
-    """Ogni file di `builtin_manifests/`, senza guardare l'interruttore."""
+    """Every file of `builtin_manifests/`."""
     import yaml
 
     out: dict[str, dict] = {}
@@ -53,19 +42,30 @@ def _all() -> dict[str, dict]:
     return out
 
 
-#: Connector ids that have no switch of their own: they follow the switch
-#: named here (clodia-platform#524). Google is four connectors — one per verb
-#: namespace, because a pack connector owns exactly one — but ONE decision of
-#: the owner: `connectors: {google: pack}` hands Drive, Sheets, Docs and
-#: Calendar over together, and Gmail's provider of the mail vocabulary
-#: (`mail-gmail`, a pack-only id) with them. Splitting the switch would let an
-#: instance run half of one credential's verbs here and half in the pack.
-#:
-#: A notion of the gateway, not of the manifest grammar: which connectors move
-#: together is a fact about how the GATEWAY implements them, and a pack must
-#: not be able to attach itself to somebody else's switch. A sibling written
-#: alone in `profile.yaml` (`google-sheets: pack`) is ignored.
-SWITCH_WITH: dict[str, str] = {
+def manifests() -> dict[str, dict]:
+    """`{pack name: parsed document}` for every file shipped in `builtin_manifests/`.
+
+    A file that does not parse raises: unlike a pack manifest — which comes from
+    a volume the gateway does not own, and whose breakage must not take the
+    other connectors down — this one is ours, and a gateway whose own
+    connectors are missing would keep working while silently checking nothing.
+    """
+    return _all()
+
+
+#: The builtin connectors: schema-only (no provider, no card). Never filtered
+#: by the edition's `integrations.connectors` (`instance_profile
+#: .connector_allowed`): their schemes are what every whitelist is written in.
+SCHEMA_ONLY_CONNECTORS: frozenset[str] = frozenset({"core", "datastore"})
+
+
+#: Connector ids that belong to the family of another (clodia-platform#524).
+#: Google is four connectors — one per verb namespace, because a pack
+#: connector owns exactly one — but ONE credential and one decision of the
+#: owner, and Gmail's provider of the mail vocabulary (`mail-gmail`) rides on
+#: the same consent. Read by the edition gating: `integrations.connectors:
+#: [google]` admits the whole family (`instance_profile.connector_allowed`).
+CONNECTOR_FAMILY: dict[str, str] = {
     "google-sheets": "google",
     "google-docs": "google",
     "google-calendar": "google",
@@ -73,79 +73,10 @@ SWITCH_WITH: dict[str, str] = {
 }
 
 
-def switch_of(connector_id: str) -> str:
-    """The id of the switch that decides `connector_id`'s position."""
-    return SWITCH_WITH.get(connector_id, connector_id)
-
-
-def _packaged() -> frozenset[str]:
-    """Gli id che il profilo dell'istanza affida a un pack (#522). Mai
-    un'eccezione: un profilo illeggibile lascia il gateway com'era.
-
-    Expanded with the ids that follow a switch (`SWITCH_WITH`, #524): with
-    `google: pack` the set holds the four Google connectors and `mail-gmail`;
-    a following id written on its own counts for nothing."""
-    try:
-        from .. import instance_profile
-        raw = instance_profile.packaged_connectors()
-    except Exception:  # noqa: BLE001
-        return frozenset()
-    switches = {c for c in raw if c not in SWITCH_WITH}
-    return frozenset(switches | {c for c, s in SWITCH_WITH.items()
-                                 if s in switches})
-
-
-def manifests() -> dict[str, dict]:
-    """`{pack name: parsed document}` for every file shipped in `builtin_manifests/`.
-
-    A file that does not parse raises: unlike a pack manifest — which comes from
-    a volume the gateway does not own, and whose breakage must not take the
-    other connectors down — this one is ours, and a gateway whose own mail
-    connector is missing would keep working while silently checking nothing.
-
-    Meno i connettori che il profilo d'istanza affida a un pack
-    (clodia-platform#522). È QUI che l'interruttore agisce davvero: finché il
-    gateway dichiara `telegram`, `build_registry` rifiuta per collisione il
-    connettore omonimo del pack — con la stessa frase che la migrazione cita,
-    «becomes effective when that implementation moves into a pack». Togliere il
-    file è ciò che la migrazione farà per sempre; l'interruttore lo fa per una
-    istanza alla volta, e senza un deploy diverso.
-    """
-    packaged = _packaged()
-    if not packaged:
-        return _all()
-    out: dict[str, dict] = {}
-    for name, doc in _all().items():
-        entries = doc.get("connectors")
-        if not isinstance(entries, list):
-            out[name] = doc
-            continue
-        kept = [e for e in entries
-                if not (isinstance(e, dict) and str(e.get("id") or "") in packaged)]
-        if len(kept) == len(entries):
-            out[name] = doc
-            continue
-        if not kept:
-            # Un file i cui connettori sono TUTTI passati ai pack non va
-            # lasciato come documento vuoto: `build_registry(builtin=…)` lo
-            # conterebbe fra i pack builtin e il nome resterebbe occupato.
-            continue
-        out[name] = {**doc, "connectors": kept}
-    return out
-
-
-#: Memo di `released()`, per insieme di connettori passati ai pack. I file
-#: stanno nell'immagine e non cambiano a runtime, mentre `released()` è sul
-#: percorso caldo (`main._verb_implemented`, una volta per chiamata): senza
-#: memo sarebbero sette YAML riletti a ogni verbo.
-_RELEASED: dict[frozenset, tuple[frozenset, frozenset]] = {}
-
-
-#: The first-party pack each builtin connector moves to (epic #527). The
-#: switch `connectors: {<id>: pack}` hands the connector to THIS pack only:
-#: without the name, whichever pack was imported first could claim the
-#: namespace, the official mount and its credential (review of
-#: clodia-tools#379). A connector not listed here cannot be switched to a pack.
+#: The first-party pack that serves each connector the gateway used to
+#: implement (epic #527, switch retired by #526). That pack ONLY: without the
+#: name, whichever pack was imported first could claim the namespace, the
+#: official mount and its credential (review of clodia-tools#379).
 RELEASED_TO: dict[str, str] = {
     "telegram": "comms-pack",
     "mail": "comms-pack",
@@ -158,6 +89,32 @@ RELEASED_TO: dict[str, str] = {
     "google-docs": "google-pack",
     "google-calendar": "google-pack",
     "mail-gmail": "google-pack",
+}
+
+
+#: The namespace each of those connectors owns — what the gateway's builtin
+#: manifests declared for them before the packs took over (#522–#525).
+#: `mail-gmail` has none of its own: it `extends:` the mail vocabulary.
+RELEASED_NAMESPACES: dict[str, str] = {
+    "mail": "email",
+    "telegram": "telegram",
+    "github": "github",
+    "openai-images": "openai",
+    "google": "gdrive",
+    "google-sheets": "gsheets",
+    "google-docs": "gdocs",
+    "google-calendar": "gcalendar",
+}
+
+
+#: The vault entry the gateway's own declaration gave a connector, which its
+#: pack adopts as is (#568): the credential that pack's backend may read even
+#: before its connector is held. Mail and Google have none: their credentials
+#: stay in the gateway's custody (`CORE_CREDENTIALS_FOLLOW`).
+ADOPTED_VAULT_ENTRIES: dict[str, str] = {
+    "telegram": "telegram_bot_token",
+    "github": "github_pat",
+    "openai-images": "openai_api_key",
 }
 
 
@@ -184,20 +141,18 @@ FIRST_PARTY_PACKS: frozenset[str] = frozenset(FIRST_PARTY_SOURCES)
 
 
 #: Vault prefixes (ending in `_`) and exact entries of the gateway's custody
-#: that a GATEWAY COMPONENT of the switched pack may use (#558):
-#: `{prefix or entry: switch id}`. Reachable through `host.credentials` only
-#: while that switch is on `pack` and `RELEASED_TO` hands it to the
-#: component's own pack; checked again at every access, so flipping the switch
-#: back revokes it at once.
+#: that a GATEWAY COMPONENT of the connector's pack may use (#558):
+#: `{prefix or entry: connector id}`. Reachable through `host.credentials`
+#: only by the component of the pack `RELEASED_TO` names for that connector.
 #:
-#: Needed because #524 kept credential custody in the gateway: `google.yaml`
-#: declares no provider credential, so `released()` frees no Google prefix, and
-#: `app_` (the OAuth app client) is no connector's prefix at all. The credentials
+#: Needed because #524 kept credential custody in the gateway: the Google
+#: connectors declare no provider credential, so `released()` frees no Google
+#: prefix, and `app_` (the OAuth app client) is no connector's prefix at all. The credentials
 #: stay in the gateway vault — no re-consent — and the component that now
 #: implements the verbs reaches them through the host, scoped.
 #:
-#: `mailbox_` follows `mail` for the same reason (#558): `mail.yaml` declares
-#: no provider credential either, the IMAP/SMTP mailboxes stay in the gateway
+#: `mailbox_` follows `mail` for the same reason (#558): mail declares no
+#: provider credential either, the IMAP/SMTP mailboxes stay in the gateway
 #: vault, and comms-pack's gateway component reaches them through the host.
 CORE_CREDENTIALS_FOLLOW: dict[str, str] = {
     "google_": "google",
@@ -225,9 +180,9 @@ RETIRED_TRANSPORTS: dict[str, frozenset[str]] = {
 #: service), …}}`. Code, not datadir, and closed by default: a component calls
 #: no other component unless the pair is listed here.
 #:
-#: comms-pack owns the mail vocabulary and serves `email.*` for every account
-#: on `mail: pack`; a Google account's credential is google-pack's and never
-#: in comms-pack's scope, so comms-pack asks google-pack for exactly two
+#: comms-pack owns the mail vocabulary and serves `email.*` for every
+#: account; a Google account's credential is google-pack's and never in
+#: comms-pack's scope, so comms-pack asks google-pack for exactly two
 #: things — the Google mail accounts (names and addresses, no secret) and one
 #: client run on an account's own XOAUTH2 files, which google-pack writes.
 COMPONENT_SERVICES: dict[str, frozenset[tuple[str, str]]] = {
@@ -236,170 +191,110 @@ COMPONENT_SERVICES: dict[str, frozenset[tuple[str, str]]] = {
 }
 
 
-#: The browser hosts whose URLs the pack connector a switch elects may
-#: canonicalise into its own schemes (#524, `Registry.canonical`). The builtin
-#: `google.yaml` reads `https:` to turn a Drive folder URL copied from the
-#: browser into `gdrive:folder/<id>`; a pack may not read a shared scheme, and
-#: without this the switch would silently stop recognising those URLs in
-#: whitelists, topic buttons and call destinations. Pinned HERE and not in the
-#: pack's manifest: canonicalisation also applies to a call's destination, so
-#: a manifest that chose its own hosts could rewrite any URL into an approved
+#: The browser hosts whose URLs a first-party pack connector may canonicalise
+#: into its own schemes (#524, `Registry.canonical`). The builtin Google
+#: manifest read `https:` to turn a Drive folder URL copied from the browser
+#: into `gdrive:folder/<id>`; a pack may not read a shared scheme, and without
+#: this google-pack would silently stop recognising those URLs in whitelists,
+#: topic buttons and call destinations. Pinned HERE and not in the pack's
+#: manifest: canonicalisation also applies to a call's destination, so a
+#: manifest that chose its own hosts could rewrite any URL into an approved
 #: folder.
 ELECTED_URL_HOSTS: dict[str, frozenset[str]] = {
     "google": frozenset({"drive.google.com", "docs.google.com"}),
 }
 
 
-def elected_url_hosts() -> dict[str, frozenset[str]]:
-    """`ELECTED_URL_HOSTS` for the connectors switched to a pack, else `{}`."""
-    packaged = _packaged()
-    return {cid: hosts for cid, hosts in ELECTED_URL_HOSTS.items()
-            if cid in packaged}
-
-
 def released_vault_entries(pack: str) -> set[str]:
-    """The vault entries of the builtin connectors switched to `pack`
-    (`RELEASED_TO`, switch on `pack`), from the gateway's OWN declarations —
-    the credential a first-party pack's backend may read even before its own
-    connector has replaced the builtin in the registry (an adoption, #568).
-    Never raises: in doubt, nothing."""
-    packaged = _packaged()
-    out: set[str] = set()
-    if not packaged or not pack:
-        return out
-    try:
-        docs = _all()
-    except Exception:  # noqa: BLE001
-        return out
-    for doc in docs.values():
-        for entry in doc.get("connectors") or []:
-            if not isinstance(entry, dict):
-                continue
-            cid = str(entry.get("id") or "")
-            if cid not in packaged or RELEASED_TO.get(cid) != pack:
-                continue
-            for p in entry.get("providers") or []:
-                cred = p.get("credential") if isinstance(p, dict) else None
-                if isinstance(cred, dict) and cred.get("vault_entry"):
-                    out.add(str(cred["vault_entry"]))
-    return out
+    """The vault entries of the connectors `RELEASED_TO` hands to `pack`
+    (`ADOPTED_VAULT_ENTRIES`) — the credential a first-party pack's backend may
+    read even before its own connector is held (an adoption, #568)."""
+    return {entry for cid, entry in ADOPTED_VAULT_ENTRIES.items()
+            if pack and RELEASED_TO.get(cid) == pack}
 
 
 def expected_claims() -> dict[str, str]:
-    """`{connector id or namespace: pack}` for the connectors switched to a pack.
+    """`{connector id or "ns:"+namespace: pack}` for every connector of
+    `RELEASED_TO`: the only pack that may declare it.
 
     Both keys, because a foreign pack could claim the vocabulary under another
-    connector id but the same namespace. Never raises: in doubt, nothing."""
-    packaged = _packaged()
-    if not packaged:
-        return {}
-    out: dict[str, str] = {}
-    try:
-        docs = _all()
-    except Exception:  # noqa: BLE001
-        return {}
-    for doc in docs.values():
-        for entry in doc.get("connectors") or []:
-            if not isinstance(entry, dict):
-                continue
-            cid = str(entry.get("id") or "")
-            if cid not in packaged or cid not in RELEASED_TO:
-                continue
-            out[cid] = RELEASED_TO[cid]
-            ns = str(entry.get("namespace") or "")
-            if ns:
-                out["ns:" + ns] = RELEASED_TO[cid]
-    # Pack-only ids that follow a switch (`mail-gmail`): no builtin entry to
-    # read them from, but no less reserved to their pack — its transport
-    # receives a Google account's mail credential.
-    for cid in packaged:
-        if cid in RELEASED_TO and cid not in out:
-            out[cid] = RELEASED_TO[cid]
+    connector id but the same namespace."""
+    out: dict[str, str] = dict(RELEASED_TO)
+    for cid, ns in RELEASED_NAMESPACES.items():
+        out["ns:" + ns] = RELEASED_TO[cid]
     return out
 
 
+#: Memo of `_released_for`, per set of connector ids: the tables are code.
+_RELEASED: dict[frozenset, tuple[frozenset, frozenset]] = {}
+
+
 def released() -> tuple[frozenset[str], frozenset[str]]:
-    """`(namespace, prefissi di vault)` che i connettori passati a un pack lasciano.
+    """`(namespaces, vault prefixes)` that the pack-served connectors take
+    out of the gateway's reservation.
 
-    Derivato dai manifest builtin, mai da una seconda lista: un connettore
-    rinuncia al proprio namespace e ai prefissi di vault che le credenziali
-    DICHIARATE lì dentro occupano. Senza questa resa l'interruttore non
-    accenderebbe niente — `check_namespace` continuerebbe a riservare
-    `telegram` a nessuno e `vault_entry_problem` rifiuterebbe
-    `telegram_bot_token` al pack, cioè il connettore del pack verrebbe caricato
-    a metà o per niente.
-
-    Mai un'eccezione: in dubbio non si libera nulla, che è il gateway di ieri.
+    A connector gives up its namespace and the core vault prefixes its
+    adopted credential falls under: without this `check_namespace` would keep
+    `telegram` reserved for nobody and `vault_entry_problem` would refuse
+    `telegram_bot_token` to comms-pack. Who may then claim them is
+    `expected_claims` (`resolved._strip_foreign_claims`): their pack, nobody
+    else.
     """
-    return _released_for(_packaged())
+    return _released_for(frozenset(RELEASED_TO))
 
 
 def released_to(pack: str) -> frozenset[str]:
-    """The vault prefixes released by the connectors switched to `pack` ONLY
-    (#558). A prefix shared with a connector switched to another pack, or kept
-    by the gateway, is not in it. Never raises: in doubt, nothing."""
-    try:
-        mine = frozenset(c for c in _packaged() if RELEASED_TO.get(c) == pack)
-        return _released_for(mine)[1] if mine else frozenset()
-    except Exception:  # noqa: BLE001
-        return frozenset()
+    """The vault prefixes released by the connectors handed to `pack` ONLY
+    (#558). A prefix shared with a connector of another pack, or kept by the
+    gateway, is not in it."""
+    mine = frozenset(c for c, p in RELEASED_TO.items() if p == pack)
+    return _released_for(mine)[1] if mine else frozenset()
 
 
-def follows_switch_to(entry: str, pack: str) -> bool:
-    """True when `entry` is a `CORE_CREDENTIALS_FOLLOW` credential whose switch
-    is on `pack` position and hands its connector to `pack` (#558)."""
-    switch = CORE_CREDENTIALS_FOLLOW.get(entry)
-    if not switch:
-        return False
-    try:
-        return switch in _packaged() and RELEASED_TO.get(switch) == pack
-    except Exception:  # noqa: BLE001
-        return False
+def follows_to(entry: str, pack: str) -> bool:
+    """True when `entry` is a `CORE_CREDENTIALS_FOLLOW` credential whose
+    connector is served by `pack` (#558)."""
+    cid = CORE_CREDENTIALS_FOLLOW.get(entry)
+    return bool(cid) and RELEASED_TO.get(cid) == pack
 
 
-def _released_for(packaged: frozenset[str]) -> tuple[frozenset[str], frozenset[str]]:
-    if not packaged:
-        return frozenset(), frozenset()
-    memo = _RELEASED.get(packaged)
+def _released_for(ids: frozenset[str]) -> tuple[frozenset[str], frozenset[str]]:
+    memo = _RELEASED.get(ids)
     if memo is not None:
         return memo
     from .manifest import CORE_VAULT_PREFIXES
 
-    try:
-        docs = _all()
-    except Exception:  # noqa: BLE001
-        return frozenset(), frozenset()
     partiti: tuple[set[str], set[str]] = (set(), set())   # namespace, vault
     restati: tuple[set[str], set[str]] = (set(), set())
-    for doc in docs.values():
+    for cid in RELEASED_TO:
+        dove = partiti if cid in ids else restati
+        if RELEASED_NAMESPACES.get(cid):
+            dove[0].add(RELEASED_NAMESPACES[cid])
+        if ADOPTED_VAULT_ENTRIES.get(cid):
+            dove[1].add(ADOPTED_VAULT_ENTRIES[cid])
+    for doc in _all().values():
         for entry in doc.get("connectors") or []:
             if not isinstance(entry, dict):
                 continue
-            dove = partiti if str(entry.get("id") or "") in packaged else restati
-            ns = str(entry.get("namespace") or "")
-            if ns:
-                dove[0].add(ns)
+            if entry.get("namespace"):
+                restati[0].add(str(entry["namespace"]))
             for provider in entry.get("providers") or []:
-                if not isinstance(provider, dict):
-                    continue
-                cred = provider.get("credential")
+                cred = provider.get("credential") if isinstance(provider, dict) else None
                 if isinstance(cred, dict) and cred.get("vault_entry"):
-                    dove[1].add(str(cred["vault_entry"]))
+                    restati[1].add(str(cred["vault_entry"]))
 
     def tocca(prefix: str, dati: tuple[set[str], set[str]]) -> bool:
         stem = prefix.rstrip("_")
         return stem in dati[0] or any(e == stem or e.startswith(prefix)
                                       for e in dati[1])
 
-    # Un prefisso che serve ANCHE a un connettore rimasto nel gateway non si
-    # libera: `google_` lo userebbero sia il connettore che migra sia uno che
-    # resta, e liberarlo lo consegnerebbe a un pack mentre il gateway ci scrive
-    # ancora. Oggi non capita — un prefisso, un connettore — ma la migrazione
-    # successiva è di google-pack (#523), che di prefissi ne ha tre.
+    # A prefix that ALSO serves a connector of another pack, or one the
+    # gateway keeps, is not released: handing it over would give one pack a
+    # credential another one (or the gateway) writes.
     prefixes = {p for p in CORE_VAULT_PREFIXES
                 if tocca(p, partiti) and not tocca(p, restati)}
     out = (frozenset(partiti[0]), frozenset(prefixes))
-    _RELEASED[packaged] = out
+    _RELEASED[ids] = out
     return out
 
 

@@ -159,15 +159,16 @@ class GithubParityTests(unittest.TestCase):
         return _connect_client().post("/internal/tools/connectors/github/connect",
                                       json=body, headers=_H)
 
-    def test_the_pat_is_stored_as_the_proxy_reads_it_and_the_backend_mounted(self):
+    def test_the_pat_is_stored_as_the_proxy_reads_it_and_nothing_mounted(self):
+        """The backend is it-pack's own mount (#525/#526): the route deposits
+        the PAT in the shape the pack's mount reads, and mounts nothing."""
         with _Vault() as v:
             r = self._post({"token": "ghp_x"})
             self.assertEqual(r.status_code, 200, r.text)
             self.assertNotIn("ghp_x", r.text)
             self.assertEqual(v.store["github_pat"], ({"value": "ghp_x"},
                                                      "mcp_secret"))
-        self.assertEqual([b["name"] for b in self.cfg["mcp_backends"]],
-                         ["github"])
+        self.assertEqual(self.cfg["mcp_backends"], [])
         self.assertTrue(r.json()["connected"])
         self.assertEqual(r.json()["vault_entry"], "github_pat")
 
@@ -252,34 +253,29 @@ class ActionSchemeTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# alias parity
+# the Telegram button through the generic route (the `telegram-link` alias
+# was removed with #526: the webui calls the generic route only)
 # --------------------------------------------------------------------------
 
-class AliasParityTests(unittest.TestCase):
+class TelegramActionTests(unittest.TestCase):
     def _tg(self, t, body):
-        return _client().post(f"/internal/topics/{t.tier}/{t.name}/telegram-link",
+        return _client().post(_url(t, "telegram", "telegram-link"),
                               json=body, headers=_H)
 
     def _missing(self, t):
         return patch.object(topics_api, "_service", lambda: _MissingSvc())
 
-    def test_telegram_connect_on_a_missing_topic_is_400(self):
+    def test_telegram_connect_on_a_missing_topic_writes_nothing(self):
         with _Topic() as t, self._missing(t):
-            r = self._tg(t, {"action": "connect", "chat_id": "-100123"})
-            self.assertEqual(r.status_code, 400, r.text)
-            self.assertEqual(t.liste, {})
+            r = self._tg(t, {"action": "connect", "chat": "-100123"})
+            self.assertIn(r.status_code, (400, 404), r.text)
+            self.assertEqual((t.liste, t.bindings), ({}, {}))
 
-    def test_telegram_disconnect_on_a_missing_topic_is_200(self):
-        with _Topic() as t, self._missing(t):
-            r = self._tg(t, {"action": "disconnect"})
-            self.assertEqual(r.status_code, 200, r.text)
-            self.assertFalse(r.json()["connected"])
-
-    def test_the_missing_field_is_named_chat_id(self):
+    def test_the_missing_field_is_named(self):
         with _Topic() as t:
             r = self._tg(t, {"action": "connect"})
             self.assertEqual(r.status_code, 400)
-            self.assertIn("chat_id", r.json()["error"])
+            self.assertIn("chat", r.json()["error"])
 
     def test_mailbox_value_error_is_400(self):
         def _boom(direction, scope, uri):
@@ -294,7 +290,7 @@ class AliasParityTests(unittest.TestCase):
         def _boom(direction, scope, uri):
             raise ValueError("config non scrivibile")
         with _Topic() as t, patch.object(egress, "scope_allow", _boom):
-            r = self._tg(t, {"action": "connect", "chat_id": "-100123"})
+            r = self._tg(t, {"action": "connect", "chat": "-100123"})
             self.assertEqual(r.status_code, 400, r.text)
             self.assertEqual(t.bindings, {})
 
@@ -312,3 +308,16 @@ class _MissingSvc:
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+from .connectors import first_party_fixture as _first_party
+
+
+def setUpModule() -> None:
+    # The first-party packs, installed as on every instance: since the switch
+    # was retired (#526) the tables pinned here are theirs, not the gateway's.
+    _first_party.install()
+
+
+def tearDownModule() -> None:
+    _first_party.uninstall()

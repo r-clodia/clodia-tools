@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 from . import egress, taint
 from .connectors import builtin, manifest, resolved
+from .connectors import first_party_fixture as _first_party
 from .connectors.manifest import (
     MANIFEST_VERSION,
     ManifestError,
@@ -37,9 +38,11 @@ def _pack(schemes=None, danger_uris=None, verbs=None) -> dict:
 
 
 def _with_builtins_and(*packs: dict):
-    """The registry of a real instance: the gateway's manifests plus `packs`."""
+    """The registry of a real instance: the gateway's manifests, the
+    first-party packs (#526) and `packs`."""
     own = builtin.manifests()
-    reg = build_registry({**own, **{p["name"]: p for p in packs}},
+    reg = build_registry({**own, **_first_party.manifests(),
+                          **{p["name"]: p for p in packs}},
                          builtin=tuple(own), reserved=frozenset())
     return patch.object(resolved, "registry", lambda: reg)
 
@@ -156,7 +159,11 @@ class FailClosedTests(unittest.TestCase):
                     v = egress.decide({}, verb, args)
                     self.assertTrue(v["checked"])
                     self.assertFalse(v["allowed"])
-                    self.assertIn("non disponibile", v["reason"])
+                    # The packs' verbs are refused by the failsafe of the
+                    # unbuildable registry, the gateway's by its namespaces.
+                    self.assertTrue(v["reason"])
+            self.assertIn("non disponibile", egress.decide(
+                {}, "web.post", {"url": "https://x.example/"})["reason"])
 
     def test_reads_taint(self):
         with self._broken_builtins():
@@ -179,10 +186,11 @@ class FailClosedTests(unittest.TestCase):
 
     def test_core_namespaces_failing_does_not_drop_the_builtins(self):
         """The reviewer's PoC: a transient exception while deriving the native
-        namespaces (it imports `server.main`) used to leave `Registry()`."""
+        namespaces (it imports `server.main`) used to leave `Registry()`. The
+        gateway's own connectors stay; the packs' outbound verbs fail closed."""
         with patch.object(manifest, "core_namespaces",
                           side_effect=RuntimeError("import cycle")):
-            self.assertIsNotNone(egress.spec_for("email.send"))
+            self.assertIsNotNone(egress.spec_for("web.post"))
             self.assertTrue(taint.taints("web.fetch"))
             self.assertFalse(egress.decide({}, "email.send",
                                            {"to": "a@b.it"})["allowed"])
@@ -298,3 +306,12 @@ class FullMatchTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+def setUpModule() -> None:
+    # The first-party packs, installed as on every instance (#526).
+    _first_party.install()
+
+
+def tearDownModule() -> None:
+    _first_party.uninstall()

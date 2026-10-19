@@ -1,3 +1,7 @@
+# TEST FIXTURE since clodia-platform#526: the gateway's former builtin
+# declaration, kept as the parity reference of the first-party packs
+# (`server/connectors/first_party_fixture.py`). The gateway never loads it.
+#
 # GitHub, come il gateway lo governa oggi (clodia-platform#518).
 # Migrazione #525: questo file si sposta in it-pack e sparisce da qui.
 #

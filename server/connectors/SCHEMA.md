@@ -74,7 +74,7 @@ extending nothing, is empty and refused.
 | `providers` | no | implementations, each with its credential |
 | `verbs` | no | verb → destination and read → source; a verb may appear more than once |
 | `danger_uris` | no | warnings for URIs of a shared scheme (`match` + `text`) |
-| `taint` | no | MCP prefixes of this pack whose answers do not taint a channel |
+| `taint` | no | verb names or prefixes, inside the connector's namespace, whose answers DO taint the channel they land in — content nobody vouched for (`taint.taints`); e.g. comms-pack's `telegram.inbox`, google-pack's `gcalendar.list_events` |
 | `unmapped` | no | verbs of the namespace that deliberately have NO egress/source mapping (#558); see below |
 | `topic_actions` | no | buttons the connector adds to a topic |
 | `tools_card` | no | what the Tools page shows: `setup_label`, `status_verb`, `test_verb`, `docs_url`, `blurb`, `scope`, `icon` |
@@ -179,8 +179,7 @@ any byte of a mailbox comes back the gateway takes decisions that belong to the
 reference monitor — the mailbox whitelist (`inbox:`/`outbox:`), strict ingress
 and its audit record (#503), topic attachments in and out with their taint, the
 reply recipient — so the verbs `email.*` stay in the gateway and only the I/O
-moves. With the instance switch on `pack` (`connectors: {mail: pack}`) the
-gateway, inside each verb and after every one of those checks, calls
+moves. The gateway, inside each verb and after every one of those checks, calls
 `<backend>.<tool>` of the pack connector it holds for that id, with:
 
 ```
@@ -639,11 +638,11 @@ host.service(pack, name) -> callable | None     # ANOTHER pack's service, grante
   component's config. There is no public route.
 - **Credentials**: a prefix must be declared, and must be usable *now*: inside
   the namespace of one of the component's connectors; or a core prefix
-  (`google_`, `gmail_`, …) released by the connectors switched to this very
-  pack (`builtin.released_to`); or a gateway-infrastructure entry listed in
-  `builtin.CORE_CREDENTIALS_FOLLOW` (e.g. `app_google_oauth`) whose switch is
-  on this pack. Checked again at every call: flipping the switch back revokes
-  the access at once. `read` enforces the calling agent's vault grant;
+  (`telegram_`, `github_`, …) released by the connectors of this very pack
+  (`builtin.released_to`); or a gateway-custody entry listed in
+  `builtin.CORE_CREDENTIALS_FOLLOW` (e.g. `google_`, `app_google_oauth`) whose
+  connector is this pack's (`builtin.RELEASED_TO`). Checked again at every
+  call. `read` enforces the calling agent's vault grant;
   `read_internal` is the component's own infrastructure read.
 - **Topics**: membership/clearance checks (`_require_topic_member`), crossing
   notes on reads, `untrusted` writes taint the room; a component cannot label a
@@ -683,13 +682,12 @@ host.service(pack, name) -> callable | None     # ANOTHER pack's service, grante
   on the agent's behalf under another verb's authority (`email.reply` reads the
   message it answers as `email.read`). `host.current_topic()` is the room of
   the signed claim, for verbs whose topic defaults to the caller's.
-- **Standby.** A trusted, pinned component whose connectors' namespaces the
-  gateway still reserves — the instance switch of that migration on `native`
-  — is not imported: status `standby`, no verb, route or service, nothing
-  denied (the native verbs serve). The first reconcile after the switch moves
-  to `pack` (at boot, since the profile is read at start) loads it; a switch
-  turned back makes a loaded component step aside at once (its verbs are no
-  longer listed or dispatched) and the next reconcile puts it on standby.
+- **Reserved namespaces.** A trusted, pinned component whose connectors'
+  namespaces are ALL the gateway's own (`core_namespaces`) is not imported:
+  status `refused`, no verb, route or service, nothing denied (the gateway's
+  verbs serve). A component of several connectors registers only the ones
+  that are free (`host.serves`). (Until #526 this was the `standby` of a
+  connector switch on `native`; the switch is retired.)
 - **No bytecode.** Modules under `clodia_components.*` are loaded by a finder
   that never writes `__pycache__`: a component importing its modules after
   `register` (or lazily) would otherwise change the pinned tree and fail its
@@ -714,191 +712,85 @@ button, the owner runs it with their own session token:
 ```sh
 curl -sS -X POST -H "Authorization: Bearer $OWNER_SESSION_TOKEN" \
      https://<gateway>/internal/components/google-pack/refresh
-# then check: GET /internal/components  →  status "loaded" (or "standby")
+# then check: GET /internal/components  →  status "loaded"
 ```
 
 ## The gateway's own manifests
 
 `connectors/builtin_manifests/*.yaml` are manifests the gateway ships with
 itself (#518). They are read with the same grammar and land in the same
-registry; they are what the PDP reads while a connector is still implemented in
-gateway code rather than in a pack:
+registry:
 
-| file | holds | leaves with |
-|---|---|---|
-| `core.yaml` | `http:`, `https:`, `topic:`, `mcp:` | never: this is the core manifest |
-| `mail.yaml` | the mail vocabulary and `email.*` | #522 |
-| `telegram.yaml` | `tg:` and `telegram.*` | #522 |
-| `google.yaml` | `gdrive:`, `gsheets:`, `gcal:` and the 24 Google verbs, as four connectors (`google`, `google-sheets`, `google-docs`, `google-calendar`) | #524 |
-| `github.yaml` | the GitHub verbs on `https:`, and its warning | #525 |
-| `datastore.yaml` | `datastore:` and `datastore.read` | — |
+| file | holds |
+|---|---|
+| `core.yaml` | `http:`, `https:`, `topic:`, `mcp:` and `web.post`: the core manifest |
+| `datastore.yaml` | `datastore:` and `datastore.read` |
 
-They are code, not input: they live in the image, next to the modules that
-implement them. Three privileges follow, and nothing on disk can obtain them:
-they may declare the intrinsic schemes, they are not checked against the
-reserved namespaces (they *are* the gateway's namespaces, and one file may span
-several), and they **win** a collision — a pack declaring the same connector id
-or the same scheme is refused on its own, without taking the registry down with
-it. Letting the pack win would mean an installed manifest redefining what
-`mailto:` means while the native implementation is still the thing doing the
-sending. Each migration deletes its file in the change that adds the pack.
+Both are schema-only (no provider, no Tools card): the edition's
+`integrations.connectors` never filters them (`instance_profile
+.connector_allowed`), because every whitelist is written in their schemes.
 
-**The switch, while a migration is in flight (#522).** Deleting the file is the
-end of a migration, not its beginning: in between, the owner of one instance
-turns the connector over to the pack and watches real traffic. That is
-`profile.yaml`:
+They are code, not input: they live in the image. Three privileges follow, and
+nothing on disk can obtain them: they may declare the intrinsic schemes, they
+are not checked against the reserved namespaces (they *are* the gateway's
+namespaces), and they **win** a collision — a pack declaring the same
+connector id or the same scheme is refused on its own, without taking the
+registry down with it.
 
-```
-connectors:
-  telegram: pack        # native (default) | pack
-```
+### The first-party connectors (#522–#526)
 
-With `pack`, three things happen together, and they are three faces of one
-statement — *the gateway no longer implements this*: the builtin file above is
-left out of the registry, the native verbs of that namespace leave the tool
-catalogue and the dispatch, and the namespace and its vault prefix stop being
-reserved, so the pack's declaration is finally held instead of being refused
-for collision. Nothing is shared and nothing runs twice: a connector has one
-implementation per instance, and the profile says which.
+Mail, Telegram, Google, GitHub and image generation used to be builtin files
+here too. The migrations of the epic #527 moved each into a first-party pack —
+comms-pack (`mail`, `telegram`), google-pack (`google`, `google-sheets`,
+`google-docs`, `google-calendar`, and Gmail's `mail-gmail`), it-pack
+(`github`, `openai-images`) — whose **gateway component** implements the
+verbs inside the reference monitor (see «Components»). For a while an
+instance switch (`profile.yaml`, `connectors: {<id>: native|pack}`) chose per
+connector between the gateway's code and the pack's; the native code is gone
+and #526 retired the switch. A profile that still carries `connectors:` keeps
+loading; a `native` value is ignored with one boot warning.
 
-Absent, unreadable or misspelled, the file means `native`. A migration is
-switched on; it is never suffered.
+What the gateway keeps about them is in `connectors/builtin.py`, as code:
 
-`mail: pack` (#523, then #558) moves mail to **comms-pack's gateway
-component** (the transport design of #523 is superseded: comms-pack 2.0.0 has
-no `mail-transport`). On `pack` the builtin `mail.yaml` is released,
-comms-pack's `mail` connector supplies the vocabulary the PDP reads, and the
-eight `email.*` verbs leave the native catalogue and dispatch: the component
-registers them, for EVERY account, and takes inside the reference monitor the
-decisions they carry — account resolution, the mailbox whitelist
-(`host.perimeter.mailbox_allowed`), strict ingress with its fail-closed audit
-record (`host.audit_decision`; the refusal text is the gateway's, so
-`main._denial_class` still files it as `sender_not_vetted`), agent attachments
-confined to the caller's scratch, topic attachments in and out with their
-taint, the reply recipient (its `pdp_arguments` service; the caller's `to` is
-dropped). `email.folders` and `email.save_attachment` are listed in
-`unmapped:`.
-
-- **The credential stays.** `mailbox_<acct>` remains in the gateway's vault
-  with the same names and shapes; the component reaches it through
-  `host.credentials("mailbox_")` (`CORE_CREDENTIALS_FOLLOW`: only while `mail`
-  is on `pack`). It runs the bundled client on ONE mailbox's credential, in a
-  private per-call directory, with a minimal environment.
-- **Gmail** stays google-pack's: a Google account's credential is never in
-  comms-pack's scope. comms-pack asks google-pack's component
-  (`host.service("google-pack", "mail_accounts" | "mail_exec")`); google-pack
-  writes the XOAUTH2 files itself. Without google-pack serving (absent,
-  `google: native`, failed) a Google account is refused, never served by the
-  gateway's native client. On `mail: native` Gmail follows `google` as before
-  (the gateway's `email.py` calls google-pack's `mail_run`).
-- **Legacy accounts** (`secrets/email_config.json`) are listed and refused on
-  `pack`; they run on `native` only.
-- **Tools page.** `/tools/email/mailboxes` (GET/POST/DELETE) and the
-  mailboxes card test keep their URLs and the gateway's own authentication; on
-  `pack` they call the component's services (`mailboxes_list`, `mailbox_add`,
-  `mailbox_remove`, `test_mailboxes`), and the gateway withdraws a removed
-  mailbox's `inbox:`/`outbox:` entries itself (`egress.forget_mailbox`). The
-  topic's mailbox button and its option set read `system_mailboxes`
-  (`server/tools/mail_switch.py`).
-- **Fail closed.** No component serving: every `email.*` verb `DENIED`, the
-  routes answer 503, the option set is empty, a configuration warning says
-  why; the native `email._run_cli` refuses (`NativeDisabled`) in that position.
-- **Retired transport.** An Update does not unmount `mail-transport` (the
-  agent-server mounts what is declared, it does not unregister what is not):
-  `builtin.RETIRED_TRANSPORTS` keeps a pack's own stamped mount of a transport
-  it no longer declares gateway-internal (never listed, DENIED) until an admin
-  removes it (`DELETE /tools/mcp/mail-transport`).
-
-`github: pack` and `openai-images: pack` (#525) follow the same two shapes.
-GitHub: the four git verbs (`github.clone/pull/push/pull_request`) are retained
-— room, repository perimeter, origin, credential and scratch are the reference
-monitor's — while it-pack's `github` connector supplies the mappings, taint and
-warning, and it-pack mounts the GitHub MCP backend itself: `github` stops being
-a core backend reserved for nobody, `/tools/github/connect` only deposits the
-PAT (`github_pat`, `{"value"}`, readable as `${VAULT:github_pat.value}`), and
-the pack's mount replaces the native connector's unstamped `github` entry
-instead of getting a 409. A pack's `danger_uris` on a scheme it does not own
-apply only for the connector the switch elected, and only **added** to the
-scheme's own warning. OpenAI images: `image.generate` and `/internal/imagegen`
-stay the gateway's; `generate`/`edit` go to the provider's `transport` with
-`{op, prompt, size, quality, background, image_b64?, api_key}` and expect
-`{"png_b64": "<base64>"}` back — no transport, no image, never the in-process
-client. Both credentials keep their legacy vault entries and types; the generic
-connect route hands them to their legacy handlers in both positions.
-
-`google: pack` (#524, #558) moves Google to **google-pack's gateway
-component** — the first real component (the transport design of #524 step 3
-is superseded and removed).
-
-- **One switch, four connectors.** `google.yaml` declares `google` (namespace
-  `gdrive`: the `gdrive:`/`gsheets:`/`gcal:` vocabulary, the account provider,
-  the `drive-folder` button, the Tools card) and the verb-only siblings
-  `google-sheets`, `google-docs`, `google-calendar`. The siblings have no
-  switch of their own: they follow `google` (`builtin.SWITCH_WITH`, a notion
-  of the gateway, not of this grammar — a pack cannot attach itself to
-  somebody else's switch, and `google-sheets: pack` written alone is
-  ignored). `google: pack` releases all four namespaces, and google-pack —
-  only google-pack (`RELEASED_TO`) — must hold a connector in each.
-- **The verbs move.** On `pack` the 24 `gdrive/gsheets/gdocs/gcalendar` verbs
-  leave the native catalogue and dispatch (like Telegram's); google-pack's
-  component registers them, with the whole `gdrive_root` perimeter (parent
-  walk, shortcuts, list filtering, adopt-after-create, writable parent, `gcal:`
-  allowlist) reading the perimeter through `host.perimeter`, and the dispatcher
-  runs them through the same `call_tool` path (whitelist, deny, unattended
-  block, gates, the egress PDP on google-pack's PINNED mappings — the parent
-  lookup of `gdrive.update` is the component's `pdp_arguments` service —,
-  scratch I/O through the host, taint, audit). Eleven verbs have no mapping and
-  are listed in `unmapped:`. A namespace whose google-pack connector is not
-  held, or with no component serving it, has its verbs `DENIED`; the native
-  `google_io` refuses (`NativeDisabled`) instead of running.
-- **The credential stays.** `google_`, `gworkspace_`, `gmail_` and `app_`
-  remain reserved vault prefixes, and the bundles stay where they are, with the
-  same names, shapes and types: the component reaches them through
-  `host.credentials(...)` (`CORE_CREDENTIALS_FOLLOW`, only while the switch is
-  on `pack`). No re-consent. For the same reason `google` stays a reserved
-  NAMESPACE; google-pack's connectors live in the namespaces the switch
-  releases, and `mail-gmail` sits in `gdrive`, next to its owner.
-- **Consent and the Tools card.** The component's routes `app`, `auth`,
-  `connect` (`/tools/google-pack/...`) do the OAuth flow and deposit
-  `google_<acct>` / `app_google_oauth`; on `pack` the gateway's
-  `/tools/google/{app,auth,connect}` forward to them with the component's
-  authentication (human admin or trusted core) and audit, so the Tools page
-  does not change. The `google` card's test is the component's
-  `test_connection` service. The legacy `/tools/gmail/*` and
-  `/tools/gworkspace/*` routes stay the gateway's until their removal.
-- **The gateway's own lookups** ask the component's services on `pack`
-  (`server/tools/google_switch.py`): `accounts` and `describe_folder` (the
-  confinement API), `perimeter_changed`, `folder_labels` (whitelist labels),
-  `credential_changed` (the vault drops cached tokens), `test_connection`.
-  Without the component they fail closed.
-- **Browser URLs.** A pack may not read a shared scheme, yet `gdrive:` must
-  keep recognising a Drive URL pasted from the browser. The connector the
-  switch elects may canonicalise `http(s)` URLs whose PARSED host the gateway
-  pins for it (`builtin.ELECTED_URL_HOSTS`: `drive.google.com`,
-  `docs.google.com`), into its own schemes only. The hosts are pinned in the
-  gateway, not in the manifest, because a call's destination is
-  canonicalised too: a manifest choosing its hosts could turn any URL into an
-  approved folder.
-- **Gmail** is google-pack's provider `gmail` of the mail vocabulary
-  (`mail-gmail`, `extends: mail`, no transport). A Gmail account (one with a
-  `google_`/`gmail_` credential) follows the `google` switch, every other
-  account follows `mail`. On `pack`, after every check of the `email.*` verbs,
-  the gateway calls the component's `mail_run` service with the mail
-  transport's contract (`{argv, files, timeout}` → `{returncode, stdout,
-  stderr}`), `files` being the per-call XOAUTH2 files the vault materialises
-  for that one account; the component runs its bundled `email_client.py` in a
-  private per-call directory. No component, no Gmail: refused, never the
-  in-process client.
+- **Who owns them.** `RELEASED_TO` names the ONE pack each connector belongs
+  to, and `RELEASED_NAMESPACES` its namespace (`email`, `telegram`, `github`,
+  `openai`, `gdrive`, `gsheets`, `gdocs`, `gcalendar`). Any other pack that
+  declares one of those connector ids or namespaces has that entry stripped
+  before the registry is built (`resolved._strip_foreign_claims`), and the
+  install preview reports it as `ignored`: a third-party pack can never answer
+  `email.send` or receive `github_pat`.
+- **The credentials stay in the gateway's custody.** `mailbox_<acct>`,
+  `google_`/`gworkspace_`/`gmail_` and `app_google_oauth` remain reserved vault
+  prefixes with the same names and shapes; the owning pack's component reaches
+  them through `host.credentials(...)` (`CORE_CREDENTIALS_FOLLOW`). The adopted
+  entries `telegram_bot_token`, `github_pat` and `openai_api_key`
+  (`ADOPTED_VAULT_ENTRIES`) keep their legacy shapes; `github_pat` and
+  `openai_api_key` are still written by their legacy handlers
+  (`connectors_api._LEGACY_ADOPTED`). `google` stays a reserved NAMESPACE with
+  its prefix, which is why `mail-gmail` lives in `gdrive`.
+- **What a pack may not choose for itself.** The browser hosts google-pack may
+  canonicalise into `gdrive:`/`gsheets:` (`ELECTED_URL_HOSTS`:
+  `drive.google.com`, `docs.google.com`, read from the RAW prefix of the URL),
+  and the `danger_uris` of the elected connectors on a shared scheme (GitHub's
+  warning on `https:`), which are only ever ADDED to the scheme's own text.
+- **Retired transports.** An Update does not unmount a transport a pack no
+  longer declares (`mail-transport`, comms-pack 1.4.0):
+  `RETIRED_TRANSPORTS` keeps such a stamped mount gateway-internal (never
+  listed, DENIED) until an admin removes it.
+- **The gateway's own code** that still needs mail or Google (the mailbox
+  routes and topic button, the confinement API, whitelist labels, the token
+  cache, the Tools card tests) asks the component's services
+  (`server/tools/mail_switch.py`, `server/tools/google_switch.py`) and fails
+  closed without them. `/tools/google/{app,auth,connect}` forward to
+  google-pack's component routes with the component's own authentication and
+  audit; the OAuth redirect URI the owner registered points there.
 
 ---
 
 ## Examples
 
-They describe the **end state** of the epic, the one the migrations #522–#525
-lead to: `telegram.`, `mail.` and `github.` are namespaces of packs there, not of
-the gateway. Validated today against the core namespaces they would of course
-collide with the native verbs that still exist — which is exactly what
-`check_namespace` is for, and what each migration removes on its way out.
+They describe the shape of the first-party packs (abridged): `telegram.`,
+`mail.` and `github.` are namespaces of packs, not of the gateway.
 
 ### comms-pack — Telegram, and the mail vocabulary with its IMAP provider
 
@@ -1089,12 +981,11 @@ connectors:
 
 ### google-pack — Drive, Sheets, Docs and Calendar, Gmail as a second provider of `mail`
 
-The shape #524/#558 switch to (see «The switch»): four connectors, one per
-verb namespace of the 24 Google verbs, plus `mail-gmail` — a different pack,
-the same mail vocabulary, and not one line of it redefines a scheme or a verb —
-and the gateway component that implements them. `mail-gmail` sits in the
-namespace the pack holds after the switch (`gdrive`), not in `google`: see
-«The switch» for why. (Abridged: the real manifest is
+The shape of #524/#558: four connectors, one per verb namespace of the 24
+Google verbs, plus `mail-gmail` — a different pack, the same mail vocabulary,
+and not one line of it redefines a scheme or a verb — and the gateway
+component that implements them. `mail-gmail` sits in `gdrive`, not in
+`google`: see «The first-party connectors» for why. (Abridged: the real manifest is
 `catalogs/packs/google-pack/pack.yaml` in clodia-logic.)
 
 ```yaml
@@ -1128,9 +1019,9 @@ connectors:
         canonicalise:
           - from: '^gdrive://([\w-]+)/?$'
             to: 'gdrive:folder/{1}'
-          # Read from `https:` only because the switch ELECTS this connector,
-          # and only on the hosts the gateway pins for it (drive.google.com,
-          # docs.google.com): see «The switch».
+          # Read from `https:` only because the gateway ELECTS this connector,
+          # and only on the hosts it pins for it (drive.google.com,
+          # docs.google.com): see «The first-party connectors».
           - from: '^https?://drive\.google\.com/drive/folders/([\w-]+)$'
             to: 'gdrive:folder/{1}'
           - from: '^https?://drive\.google\.com/drive/folders/([\w-]+)[/?#].*$'
@@ -1313,10 +1204,8 @@ connectors:
   transforms is closed, in `manifest.NORMALISERS`.
 - **Who reads this.** The PDP does: #517 applies the mappings at call time and
   #518 made the registry the only place the gateway knows a connector from.
-  What is still missing is the generic HTTP endpoints (#519, which also refuses
-  a malformed manifest at install time — until then `pack_import` drops the
-  `connectors:` block and no PACK reaches the registry) and the webui rendered
-  from it (#520).
-- **Install-time refusal.** `pack_import` in `clodia-logic` will ask the gateway
-  to validate a `connectors:` block the way it already asks `/flow-allow` for the
-  flow declarations. That endpoint is #519.
+  `pack_import` in clodia-logic keeps the `connectors:` block in the installed
+  `pack.yaml`, and the webui renders the Tools page from the registry (#520).
+- **Install-time refusal.** Done (#519): `pack_import` asks the gateway to
+  validate a `connectors:` block (`POST /internal/connectors/validate`) before
+  installing, and refuses the pack when the gateway says no or cannot answer.

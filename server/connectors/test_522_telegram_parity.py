@@ -166,7 +166,7 @@ class TheDeclarationSaysTheSameTests(unittest.TestCase):
                 self.assertTrue(taint.taints(prefisso))
 
     def test_the_topic_button_writes_the_two_uris_the_route_writes(self):
-        """`topics_api.telegram_link` mette `tg:<chat_id>` in USCITA e in
+        """Il bottone del topic (`connectors.actions.apply`) mette `tg:<chat>` in USCITA e in
         INGRESSO, e crea il binding del canale. Senza l'ingresso il mittente non
         è vagliato; senza il binding il messaggero non riporta nulla pur con la
         whitelist scritta (sintomo del 23 set 2026)."""
@@ -191,3 +191,16 @@ class TheDeclarationSaysTheSameTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from . import first_party_fixture as _first_party
+
+
+def setUpModule() -> None:
+    # The first-party packs, installed as on every instance: since the switch
+    # was retired (#526) the tables pinned here are theirs, not the gateway's.
+    _first_party.install()
+
+
+def tearDownModule() -> None:
+    _first_party.uninstall()

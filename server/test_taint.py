@@ -346,3 +346,16 @@ class SourceResolutionTests(unittest.TestCase):
                     out = connectors.source_uri(v.verb, args, sample)
                     self.assertTrue(out, f"{v.verb} non nomina nessuna fonte")
 
+
+
+from .connectors import first_party_fixture as _first_party
+
+
+def setUpModule() -> None:
+    # The first-party packs, installed as on every instance: since the switch
+    # was retired (#526) the tables pinned here are theirs, not the gateway's.
+    _first_party.install()
+
+
+def tearDownModule() -> None:
+    _first_party.uninstall()

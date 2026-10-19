@@ -726,66 +726,10 @@ async def connector_action(request: Request):
                                      body=body or {}, principal=principal or ""))
     except ca.TopicMissing as e:
         return JSONResponse({"error": str(e)[:400]}, status_code=404)
+    except ca.ConnectorNotAllowed as e:
+        return JSONResponse({"error": str(e)[:400]}, status_code=403)
     except ca.ActionError as e:
         return JSONResponse({"error": str(e)[:400]}, status_code=400)
-
-
-async def telegram_link(request: Request):
-    """GET/POST /internal/topics/{tier}/{name}/telegram-link.
-
-    Alias sottile dell'azione generica `telegram/telegram-link` (#519), tenuto
-    finché la webui parla questa lingua: stesso corpo, stessa risposta
-    `{connected, chat_id, seal}`. La rimozione è a fine epic, non qui — ed è
-    **un solo** comportamento sotto due URL, non due implementazioni che un
-    giorno divergono.
-
-    Fa ENTRAMBI i passi che prima erano scollegati (Davide, 23 set 2026):
-    whitelist egress/ingress `tg:<chat_id>` PIÙ il binding vero — senza il
-    secondo il messaggero non riporta nulla anche con la whitelist scritta.
-    """
-    principal, err = _authorize_topic_owner(request)
-    if err:
-        return err
-    tier = request.path_params["tier"]; name = request.path_params["name"]
-    from .connectors import actions as ca
-    try:
-        connector, action = ca.find("telegram", "telegram-link")
-    except ca.ActionError as e:
-        return JSONResponse({"error": str(e)[:200]}, status_code=400)
-    if request.method == "GET":
-        return JSONResponse(_telegram_shape(
-            ca.state(connector, action, tier, name)))
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "bad_json"}, status_code=400)
-    body = dict(body or {})
-    if "chat_id" in body:
-        body.setdefault("chat", body.get("chat_id"))
-    # Parità con la rotta di prima (review di #360): il campo mancante si
-    # chiama `chat_id` in questa lingua, e si controlla prima del topic.
-    if body.get("action") == "connect" and not str(body.get("chat") or "").strip():
-        return JSONResponse({"error": "richiesto 'chat_id'"}, status_code=400)
-    try:
-        out = ca.apply(connector, action, tier, name, body=body,
-                       principal=principal or "")
-    except ca.ActionError as e:
-        testo = str(e)
-        stato = {}
-        try:
-            stato = {"seal": ca.state(connector, action, tier, name)["seal"]}
-        except Exception:  # noqa: BLE001 — l'errore vero è quello sopra
-            stato = {}
-        # 400 anche per un topic inesistente, come prima: questa rotta non ha
-        # mai risposto 404.
-        return JSONResponse({"error": testo[:400], **stato}, status_code=400)
-    return JSONResponse(_telegram_shape(out))
-
-
-def _telegram_shape(stato: dict) -> dict:
-    """Lo stato generico nella forma che la webui conosce."""
-    return {"connected": bool(stato.get("connected")),
-            "chat_id": stato.get("bound"), "seal": stato.get("seal")}
 
 
 def _mailbox_state(scope: str) -> dict:
@@ -844,6 +788,8 @@ async def mailbox_link(request: Request):
     from .connectors import actions as ca
     try:
         connector, action = ca.find("mail", "mailbox-link")
+    except ca.ConnectorNotAllowed as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=403)
     except ca.ActionError as e:
         return JSONResponse({"error": str(e)[:200]}, status_code=400)
     # Il topic deve ESISTERE (review di #310): le liste per scope sono chiavi di
@@ -1222,7 +1168,6 @@ routes = [
     Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/local-folder", local_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/link", topic_link, methods=["POST"]),
-    Route("/internal/topics/{tier}/{name}/telegram-link", telegram_link, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/tier", topic_tier, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/mailbox-link", mailbox_link, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/connectors/{id}/{action}",

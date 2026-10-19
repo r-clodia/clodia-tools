@@ -131,10 +131,10 @@ def credential_problem(component: GatewayComponent, prefix: str) -> str:
     Three cases:
 
     * a `CORE_CREDENTIALS_FOLLOW` key (a prefix or entry of the gateway's
-      custody, e.g. `google_`, `app_google_oauth`): only while its switch is on
-      `pack` position and hands the connector to this component's pack;
+      custody, e.g. `google_`, `app_google_oauth`): only when its connector is
+      this component's pack's (`builtin.RELEASED_TO`);
     * anything overlapping a core vault prefix (`google_`, `gmail_`, …): only
-      the prefixes the connectors switched to THIS pack release
+      the prefixes the connectors of THIS pack release
       (`builtin.released_to`);
     * anything else: inside the namespace of one of the component's connectors
       (`<ns>` or `<ns>_…`), the rule `vault_entry_problem` applies to a pack
@@ -147,11 +147,11 @@ def credential_problem(component: GatewayComponent, prefix: str) -> str:
         return (f"'{prefix}' is not among the credentials component "
                 f"'{component.key}' declares ({list(component.credentials)})")
     if prefix in builtin.CORE_CREDENTIALS_FOLLOW:
-        if builtin.follows_switch_to(prefix, component.pack):
+        if builtin.follows_to(prefix, component.pack):
             return ""
-        return (f"'{prefix}' is a gateway credential scope that follows the "
-                f"'{builtin.CORE_CREDENTIALS_FOLLOW[prefix]}' switch, which is "
-                f"not handed to '{component.pack}' on this instance")
+        return (f"'{prefix}' is a gateway credential scope of the "
+                f"'{builtin.CORE_CREDENTIALS_FOLLOW[prefix]}' connector, which "
+                f"is not '{component.pack}''s")
     stem = prefix.rstrip("_")
     cores = [c for c in CORE_VAULT_PREFIXES
              if prefix.startswith(c) or c.startswith(prefix) or stem == c.rstrip("_")]
@@ -160,8 +160,7 @@ def credential_problem(component: GatewayComponent, prefix: str) -> str:
         missing = [c for c in cores if c not in freed]
         if missing:
             return (f"'{prefix}' overlaps the core vault prefix(es) {missing}, "
-                    f"which no connector switched to '{component.pack}' releases "
-                    "on this instance")
+                    f"which no connector of '{component.pack}' releases")
         return ""
     for ns in component.namespaces.values():
         if stem == ns or stem.startswith(f"{ns}_"):

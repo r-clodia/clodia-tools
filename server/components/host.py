@@ -115,8 +115,7 @@ class ScopedCredentials:
     """Vault access limited to ONE declared prefix (or exact entry).
 
     Every name is checked against the prefix before the vault is touched, and
-    the prefix is checked again against the instance (switch, releases) at
-    every call: an owner who flips a switch back takes the access back at once.
+    the prefix is checked again (`trust.credential_problem`) at every call.
     """
 
     def __init__(self, component: GatewayComponent, prefix: str) -> None:
@@ -432,9 +431,9 @@ class Host:
 
     def serves(self, namespace: str) -> bool:
         """Does this component serve `namespace` on this instance now? False
-        for a namespace that is not its own, or that the gateway implements
-        natively (switch on `native`): a component of several connectors
-        registers only the ones on `pack` (#522)."""
+        for a namespace that is not its own, or that the gateway reserves
+        (`core_namespaces`): a component of several connectors registers only
+        the others (#522)."""
         ns = str(namespace or "")
         return ns in set(self._c.namespaces.values()) and ns not in set(self._reserved())
 
@@ -582,7 +581,7 @@ class Host:
         Only the pairs `connectors.builtin.COMPONENT_SERVICES` grants to this
         component's pack (comms-pack → google-pack's `mail_accounts`,
         `mail_exec`); anything else is a `HostError`. Looked up per call: a
-        component that stops serving (switch turned back, failure) is gone
+        component that stops serving (disabled, failure) is gone
         from the next call on — the caller fails closed on None."""
         from ..connectors import builtin
         pair = (str(pack or ""), str(name or ""))

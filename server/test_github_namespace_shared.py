@@ -68,12 +68,25 @@ class TheCallActuallyRoutesTests(unittest.TestCase):
         self.assertEqual(out, "PROXY:github.issue_write")
 
     def test_a_git_verb_never_reaches_the_backend(self):
-        """On `native` (the default) the git verbs have no implementation: the
-        call is refused and says how to get one, never proxied."""
+        """Without it-pack's gateway component the git verbs have no
+        implementation: the call is refused naming it, never proxied."""
         out = self._call("github.clone", {"repo": "r", "dest": "d"})
         self.assertTrue(out.startswith("DENIED:"), out)
-        self.assertIn("github: pack", out)
+        self.assertIn("it-pack", out)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from .connectors import first_party_fixture as _first_party
+
+
+def setUpModule() -> None:
+    # The first-party packs, installed as on every instance: since the switch
+    # was retired (#526) the tables pinned here are theirs, not the gateway's.
+    _first_party.install()
+
+
+def tearDownModule() -> None:
+    _first_party.uninstall()

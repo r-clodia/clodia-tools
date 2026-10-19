@@ -1,11 +1,10 @@
-"""#558: `connectors: {mail: native|pack}` hands mail to comms-pack's component.
+"""#558: mail is comms-pack's component's (the switch is retired, #526).
 
-The switch, with a STAND-IN component in the loader (no clodia-logic needed;
-the real component is `server/test_558_mail_component.py`):
+With a STAND-IN component in the loader (no clodia-logic needed; the real
+component is `server/test_558_mail_component.py`):
 
-1. the switch: `mail: pack` releases the `email` namespace, the builtin
-   `gateway-mail` manifest steps aside and comms-pack's `mail` connector is
-   the one the PDP reads; the `mailbox_` vault scope follows the switch;
+1. comms-pack's `mail` connector is the one the PDP reads, whatever the
+   profile says; the `mailbox_` vault scope is comms-pack's component's;
 2. the eight verbs LEAVE the native catalogue and dispatch (they are no longer
    gateway-retained, #523's design is superseded) and reach the component's
    handlers through `call_tool`;
@@ -14,8 +13,7 @@ the real component is `server/test_558_mail_component.py`):
 4. fail closed: no component → every `email.*` verb DENIED, the native client
    refuses (`NativeDisabled`), the mailbox routes answer 503, the option set
    and the Tools card are empty, a configuration warning says why;
-5. native position: nothing of the component runs, the gateway's own code
-   serves as before.
+5. a profile still saying `native` changes nothing.
 """
 from __future__ import annotations
 
@@ -37,6 +35,7 @@ from ..components.grammar import GatewayComponent
 from ..components.host import ServiceSpec, VerbSpec
 from ..tools import mail_switch
 from . import builtin as B
+from . import first_party_fixture as _FP
 from . import resolved
 
 PACK = "comms-pack"
@@ -77,7 +76,7 @@ def _mail_connector() -> dict:
     plus what a PACK must add — `forms:` on the mailbox schemes (a topic action
     writes into them), the `imap` provider (no transport: the code is the
     component's) and `unmapped:` (a component verb must be classified)."""
-    doc = yaml.safe_load((B.DIR / "mail.yaml").read_text(encoding="utf-8"))
+    doc = yaml.safe_load((_FP.FORMER_BUILTIN / "mail.yaml").read_text(encoding="utf-8"))
     entry = copy.deepcopy(doc["connectors"][0])
     forma = [{"label": "address", "pattern": r"^[^@\s]+@[A-Za-z0-9.-]+$",
               "example": "studio@example.org"}]
@@ -208,22 +207,24 @@ class SwitchTests(_Istanza):
         self.assertEqual((mail.pack, mail.builtin, mail.namespace), (PACK, False, "email"))
         self.assertNotIn("gateway-mail", B.manifests())
         self.assertTrue(resolved.held_by_pack("email"))
-        self.assertEqual(sorted(resolved.registry().unmapped_verbs()), UNMAPPED)
+        self.assertEqual(sorted(v for v in resolved.registry().unmapped_verbs()
+                                if v.startswith("email.")), UNMAPPED)
 
-    def test_on_native_the_builtin_holds_it(self):
+    def test_a_profile_saying_native_changes_nothing(self):
         for pos in ("native", None):
             with self.subTest(posizione=pos):
                 self.posizione(pos)
                 mail = resolved.registry().by_id("mail")
-                self.assertTrue(mail.builtin)
-                self.assertEqual(mail.pack, "gateway-mail")
+                self.assertEqual((mail.pack, mail.builtin), (PACK, False))
 
-    def test_the_mailbox_scope_follows_the_switch(self):
+    def test_the_mailbox_scope_is_comms_packs(self):
         comp = self.component.state().component
         self.assertEqual(B.CORE_CREDENTIALS_FOLLOW["mailbox_"], "mail")
+        self.posizione("native")                 # ignored
         self.assertEqual(trust.credential_problem(comp, "mailbox_"), "")
-        self.posizione("native")
-        self.assertTrue(trust.credential_problem(comp, "mailbox_"))
+        import dataclasses
+        other = dataclasses.replace(comp, pack="google-pack")
+        self.assertTrue(trust.credential_problem(other, "mailbox_"))
 
     def test_released_frees_the_namespace_and_no_vault_prefix(self):
         namespaces, prefixes = B.released()
@@ -235,7 +236,7 @@ class SwitchTests(_Istanza):
 # 2. the verbs move to the component
 # --------------------------------------------------------------------------
 class TheVerbsMoveToTheComponentTests(_Istanza):
-    def test_in_pack_position_they_leave_the_native_catalogue(self):
+    def test_they_are_not_in_the_native_catalogue(self):
         from .. import main
         from . import manifest as M
         natives = {t.name for t in main._all_native_tools()}
@@ -247,23 +248,17 @@ class TheVerbsMoveToTheComponentTests(_Istanza):
                 self.assertIsNotNone(main._component_verb(verb))
                 self.assertTrue(main._verb_implemented(verb))
         self.assertNotIn("email", M.core_namespaces())
-        self.assertEqual(main._EMAIL_NATIVE_NAMES, frozenset(EMAIL_VERBS))
+        self.assertEqual(main._EMAIL_VERB_NAMES, frozenset(EMAIL_VERBS))
 
-    def test_on_native_nothing_serves_them(self):
-        """The native mail code is gone (#523): on `native` the verbs are not
-        listed and a call says which switch to turn."""
+    def test_a_profile_saying_native_still_hands_them_to_the_component(self):
         from .. import main
         from . import manifest as M
         self.posizione("native")
-        natives = {t.name for t in main._all_native_tools()}
         for verb in EMAIL_VERBS:
-            self.assertNotIn(verb, natives)
-            self.assertFalse(main._is_packaged_verb(verb))
-            # Refused either way: by the stale component's own state here, by
-            # the missing native implementation when no component is pinned.
-            with self.assertRaises(main._PackVerbRefused):
-                main._check_component(verb)
-        self.assertIn("email", M.core_namespaces())
+            with self.subTest(verb=verb):
+                self.assertTrue(main._is_packaged_verb(verb))
+                self.assertIsNotNone(main._component_verb(verb))
+        self.assertNotIn("email", M.core_namespaces())
 
     def test_a_call_runs_the_components_handler_not_the_native(self):
         out = _call("email.folders", {"account": "studio"})
@@ -373,8 +368,8 @@ class FailClosedTests(_Istanza):
 # --------------------------------------------------------------------------
 # 5. the gateway's own code asks the side in charge
 # --------------------------------------------------------------------------
-class LookupsFollowTheSwitchTests(_Istanza):
-    def test_pack_position_asks_the_component(self):
+class LookupsAskTheComponentTests(_Istanza):
+    def test_the_component_is_asked(self):
         from . import actions
         self.assertEqual(mail_switch.system_mailboxes(),
                          [{"account": "studio", "email": "studio@x.it",
@@ -402,12 +397,11 @@ class LookupsFollowTheSwitchTests(_Istanza):
         self.assertEqual((cfg["egress_allow"], cfg["source_allow"]), ([], []))
         self.assertIn(("mailbox_remove", "studio"), self.component.calls)
 
-    def test_native_position_never_asks_the_component(self):
-        """Nothing answers on `native` any more (#523): empty, and the
-        component is not asked."""
+    def test_a_profile_saying_native_still_asks_the_component(self):
         self.posizione("native")
-        self.assertEqual(mail_switch.system_mailboxes(), [])
-        self.assertEqual(self.component.calls, [])
+        self.assertEqual(mail_switch.system_mailboxes(),
+                         [{"account": "studio", "email": "studio@x.it",
+                           "send_only": False}])
 
 
 # --------------------------------------------------------------------------
@@ -450,3 +444,13 @@ class RetiredTransportTests(_Istanza):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+def setUpModule() -> None:
+    # google-pack and it-pack as on every instance (#526); comms-pack is this
+    # module's own (`_MailIstanza` writes it).
+    _FP.install(without=("comms-pack",))
+
+
+def tearDownModule() -> None:
+    _FP.uninstall()

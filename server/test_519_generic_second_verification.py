@@ -1,7 +1,7 @@
 """Second verification of clodia-tools#360.
 
 * a topic's connectors (`…/connectors/{id}/{action}` and the aliases
-  `telegram-link`, `mailbox-link`, `drive-folder`) are changed only by the
+  `mailbox-link`, `drive-folder`) are changed only by the
   topic's owner or an admin, on-behalf — or by the agent-server's own session,
   which SAYS SO (signed claim `role: agent-server`, clodia-platform#539 §1) and
   checks owner/admin before forwarding. An agent's runtime token
@@ -58,7 +58,6 @@ def _calls(t):
     return [
         (_url(t, "telegram", "telegram-link"),
          {"action": "connect", "chat": "-100777"}),
-        (f"{base}/telegram-link", {"action": "connect", "chat_id": "-100777"}),
         (f"{base}/mailbox-link", {"action": "connect", "account": "studio"}),
         (f"{base}/drive-folder", {"action": "add", "folder": "F"}),
     ]
@@ -75,7 +74,7 @@ class TopicOwnerOnlyTests(unittest.TestCase):
 
     def test_an_agent_runtime_token_is_refused_everywhere(self):
         codes, (liste, bindings) = self._run(AGENT_RUNTIME)
-        self.assertEqual(codes, [403, 403, 403, 403])
+        self.assertEqual(codes, [403, 403, 403])
         self.assertEqual((liste, bindings), ({}, {}))
 
     def test_a_token_without_the_claim_is_not_the_agent_server(self):
@@ -83,19 +82,19 @@ class TopicOwnerOnlyTests(unittest.TestCase):
         che manca. Prima bastava un token senza `execution_id` e senza `chat`
         per scrivere i muri di una stanza qualunque."""
         codes, (liste, bindings) = self._run(BARE)
-        self.assertEqual(codes, [403, 403, 403, 403])
+        self.assertEqual(codes, [403, 403, 403])
         self.assertEqual((liste, bindings), ({}, {}))
 
     def test_a_non_owner_human_is_refused_everywhere(self):
         codes, (liste, bindings) = self._run(STRANGER)
-        self.assertEqual(codes, [403, 403, 403, 403])
+        self.assertEqual(codes, [403, 403, 403])
         self.assertEqual((liste, bindings), ({}, {}))
 
     def test_the_owner_admin_and_the_agent_server_pass(self):
         for who in (OWNER, ADMIN, SYSTEM):
             with self.subTest(who=who):
                 codes, (liste, bindings) = self._run(who)
-                self.assertEqual(codes, [200, 200, 200, 200])
+                self.assertEqual(codes, [200, 200, 200])
                 self.assertIn("-100777", bindings)
 
     def test_the_state_read_follows_the_same_rule(self):
@@ -128,3 +127,16 @@ class ActionSchemeNeedsFormsTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+from .connectors import first_party_fixture as _first_party
+
+
+def setUpModule() -> None:
+    # The first-party packs, installed as on every instance: since the switch
+    # was retired (#526) the tables pinned here are theirs, not the gateway's.
+    _first_party.install()
+
+
+def tearDownModule() -> None:
+    _first_party.uninstall()

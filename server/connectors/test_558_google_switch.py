@@ -1,13 +1,10 @@
-"""The `google` switch with Google implemented by google-pack's gateway
-component (clodia-platform#558, superseding the transport design of #524).
+"""Google implemented by google-pack's gateway component (clodia-platform#558,
+superseding the transport design of #524; the `native|pack` switch is retired
+by #526 — a profile still saying `native` changes nothing):
 
-With `connectors: {google: pack}`:
-
-- the builtin `gateway-google` manifest — four connectors, `google` (owner of
-  `gdrive:`/`gsheets:`/`gcal:`, namespace `gdrive`) and the verb-only siblings
-  `google-sheets`/`google-docs`/`google-calendar` — is released as a whole, by
-  ONE switch (`builtin.SWITCH_WITH`); google-pack's four connectors supply the
-  vocabulary the PDP reads;
+- google-pack's four connectors — `google` (owner of `gdrive:`/`gsheets:`/
+  `gcal:`, namespace `gdrive`) and the verb-only siblings `google-sheets`/
+  `google-docs`/`google-calendar` — supply the vocabulary the PDP reads;
 - the 24 `gdrive/gsheets/gdocs/gcalendar` verbs LEAVE the native catalogue and
   dispatch: google-pack's gateway component registers and serves them through
   the same `call_tool` path; nothing serving them is a refusal, never the
@@ -20,8 +17,8 @@ With `connectors: {google: pack}`:
   the component's `mail_run` service.
 
 What is pinned here, WITHOUT the real component (a stand-in is installed in
-the loader): the switch positions; parity of every PDP answer about Google
-between the two positions (and that the comparison can fail); fail-closed;
+the loader): that the profile changes nothing; every PDP answer about Google
+(and that the pins can fail); fail-closed;
 routing of the gateway's lookups and of Gmail; foreign packs. The real
 component — loaded from a clodia-logic checkout — and the Google suites re-run
 against it are in `server/test_558_google_component.py`.
@@ -51,6 +48,7 @@ from ..components.grammar import GatewayComponent
 from ..components.host import ServiceSpec, VerbSpec
 from ..tools import google_switch
 from . import builtin as B
+from . import first_party_fixture as _FP
 from . import manifest as M
 from . import resolved
 from .test_523_mail_provider import _comms_pack
@@ -245,7 +243,7 @@ def _google_connectors() -> list[dict]:
     verbatim, except what a PACK must write differently — the canonicalisation
     in the safe regex subset, and `unmapped:` for the verbs the PDP has nothing
     to read on (a component verb must be classified)."""
-    doc = yaml.safe_load((B.DIR / "google.yaml").read_text(encoding="utf-8"))
+    doc = yaml.safe_load((_FP.FORMER_BUILTIN / "google.yaml").read_text(encoding="utf-8"))
     entries = copy.deepcopy(doc["connectors"])
     owner = entries[0]
     assert owner["id"] == "google"
@@ -325,8 +323,8 @@ class _FakeComponent:
 class _GoogleIstanza:
     """A fake instance with google-pack installed and a stand-in component.
 
-    Mixin. The switch is turned by writing `profile.yaml` for real, as in
-    test_522/523/525."""
+    Mixin. `posizione` writes `profile.yaml` for real: since #526 its
+    `connectors:` must change nothing."""
 
     COMPONENT = True
 
@@ -415,45 +413,29 @@ def _call_as_clodia(name: str, args: dict) -> str:
 # 1. the switch
 # --------------------------------------------------------------------------
 class SwitchTests(_Istanza):
-    def test_one_switch_moves_the_four_connectors_and_gmail(self):
-        self.assertEqual(B._packaged(), frozenset(GOOGLE_IDS) | {"mail-gmail"})
-        self.assertNotIn("gateway-google", B.manifests())
-        reg = resolved.registry()
-        for cid in GOOGLE_IDS + ("mail-gmail",):
-            with self.subTest(connettore=cid):
-                c = reg.by_id(cid)
-                self.assertEqual((c.pack, c.builtin), (PACK, False))
-        for ns in NAMESPACES:
-            self.assertTrue(resolved.held_by_pack(ns))
-
-    def test_native_position_keeps_the_builtins(self):
-        for pos in ("native", None):
+    def test_google_pack_holds_the_four_connectors_and_gmail(self):
+        for pos in ("pack", "native", None):     # the profile changes nothing
             with self.subTest(posizione=pos):
                 self.posizione(pos)
-                self.assertEqual(B._packaged(), frozenset())
-                self.assertIn("gateway-google", B.manifests())
-                for cid in GOOGLE_IDS:
-                    self.assertTrue(resolved.registry().by_id(cid).builtin)
-                self.assertIsNone(resolved.registry().by_id("mail-gmail"))
-                self.assertFalse(any(resolved.held_by_pack(ns) for ns in NAMESPACES))
+                self.assertNotIn("gateway-google", B.manifests())
+                reg = resolved.registry()
+                for cid in GOOGLE_IDS + ("mail-gmail",):
+                    c = reg.by_id(cid)
+                    self.assertEqual((c.pack, c.builtin), (PACK, False), cid)
+                for ns in NAMESPACES:
+                    self.assertTrue(resolved.held_by_pack(ns))
 
-    def test_a_sibling_cannot_be_switched_alone(self):
-        self.posizione(None, **{"google-sheets": "pack", "mail-gmail": "pack"})
-        self.assertEqual(B._packaged(), frozenset())
-        self.assertIn("gateway-google", B.manifests())
-        self.assertTrue(resolved.registry().by_id("google-sheets").builtin)
-
-    def test_switch_of(self):
+    def test_the_family_of_google(self):
         for cid in GOOGLE_IDS[1:] + ("mail-gmail",):
-            self.assertEqual(B.switch_of(cid), "google")
+            self.assertEqual(B.CONNECTOR_FAMILY[cid], "google")
         for cid in ("google", "mail", "telegram", "github"):
-            self.assertEqual(B.switch_of(cid), cid)
+            self.assertNotIn(cid, B.CONNECTOR_FAMILY)
 
     def test_released_frees_every_namespace_and_no_vault_prefix(self):
         namespaces, prefixes = B.released()
         self.assertTrue(set(NAMESPACES) <= namespaces)
         # Credential custody stays: consent, app client and the per-account
-        # bundles are the gateway's in both positions.
+        # bundles are the gateway's.
         for p in ("google_", "gworkspace_", "gmail_", "app_"):
             self.assertNotIn(p, prefixes)
         for ns in ("google", "gworkspace", "gmail", "app"):
@@ -465,21 +447,20 @@ class SwitchTests(_Istanza):
     def test_released_to_names_google_pack(self):
         for cid in GOOGLE_IDS + ("mail-gmail",):
             self.assertEqual(B.RELEASED_TO[cid], PACK)
+        self.posizione("native")                 # ignored
         claims = B.expected_claims()
         for key in GOOGLE_IDS + ("mail-gmail",) + tuple(f"ns:{n}" for n in NAMESPACES):
             self.assertEqual(claims.get(key), PACK, key)
-        self.posizione("native")
-        self.assertEqual(B.expected_claims(), {})
 
-    def test_core_namespaces_follow_the_switch(self):
-        core = M.core_namespaces()
-        self.assertFalse(set(NAMESPACES) & core)
-        self.posizione("native")
-        self.assertTrue(set(NAMESPACES) <= M.core_namespaces())
+    def test_core_namespaces_never_hold_them(self):
+        for pos in ("pack", "native"):
+            with self.subTest(posizione=pos):
+                self.posizione(pos)
+                self.assertFalse(set(NAMESPACES) & M.core_namespaces())
 
 
 class TheVerbsMoveToTheComponentTests(_Istanza):
-    def test_in_pack_position_they_leave_the_native_catalogue(self):
+    def test_they_are_not_in_the_native_catalogue(self):
         from .. import main
         self.assertEqual(len(_verbs()), 24)
         nomi = {t.name for t in main._all_native_tools()}
@@ -494,20 +475,13 @@ class TheVerbsMoveToTheComponentTests(_Istanza):
         for ns in NAMESPACES:
             self.assertNotIn(ns, main._native_tool_namespaces())
 
-    def test_in_native_position_nothing_serves_them(self):
-        """The native Google code is gone (#524): on `native` the verbs are not
-        listed, no component serves them, a call is refused."""
+    def test_a_profile_saying_native_still_hands_them_to_the_component(self):
         from .. import main
         self.posizione("native")
-        nomi = {t.name for t in main._all_native_tools()}
         for verbo in _verbs():
             with self.subTest(verbo=verbo):
-                self.assertNotIn(verbo, nomi)
-                self.assertFalse(main._is_packaged_verb(verbo))
-                self.assertIsNone(main._component_verb(verbo))
-                with self.assertRaises(main._PackVerbRefused):
-                    main._check_component(verbo)
-        self.assertEqual(main._component_tools(), [])
+                self.assertTrue(main._is_packaged_verb(verbo))
+                self.assertIsNotNone(main._component_verb(verbo))
 
     def test_a_call_reaches_the_component_not_the_native_code(self):
         from .. import main
@@ -523,7 +497,7 @@ class TheVerbsMoveToTheComponentTests(_Istanza):
 
 
 # --------------------------------------------------------------------------
-# 2. PDP parity, the four connectors
+# 2. the PDP's answers, the four connectors
 # --------------------------------------------------------------------------
 def _risposte() -> dict:
     """Every public PDP answer about Google, asked as the pins ask them."""
@@ -567,21 +541,13 @@ def _risposte() -> dict:
     return out
 
 
-class ParityTests(_Istanza):
-    def test_every_answer_is_the_same_in_both_positions(self):
-        self.posizione("native")
-        self.assertTrue(resolved.registry().by_id("google").builtin)
-        nativo = _risposte()
-        self.posizione("pack")
-        self.assertEqual(resolved.registry().by_id("google").pack, PACK)
-        da_pack = _risposte()
-        self.assertEqual(set(nativo), set(da_pack))
-        for chiave in sorted(nativo):
-            with self.subTest(domanda=chiave):
-                self.assertEqual(nativo[chiave], da_pack[chiave])
+class AnswersTests(_Istanza):
+    """What google-pack's connectors answer. The parity with the former
+    builtin (`testdata/former_builtin/google.yaml`) was the acceptance of
+    #524/#558; what it agreed on is pinned here and in `PDP`."""
 
-    def test_the_answers_are_not_vacuous(self):
-        for pos in ("native", "pack"):
+    def test_the_answers_are_pinned(self):
+        for pos in ("native", "pack"):           # the profile changes nothing
             with self.subTest(posizione=pos):
                 self.posizione(pos)
                 r = _risposte()
@@ -600,7 +566,7 @@ class ParityTests(_Istanza):
                 self.assertEqual(r["azione"][2], ("gdrive:folder/F1",))
                 self.assertEqual(r["card_altre"], ("google",))
 
-    def test_the_pins_tables_hold_in_pack_position_too(self):
+    def test_the_pins_tables_hold(self):
         for verb, (spec, src, t) in PDP.items():
             with self.subTest(verb=verb):
                 got = egress.spec_for(verb)
@@ -609,10 +575,9 @@ class ParityTests(_Istanza):
                 self.assertEqual(resolved.source_uri(verb, dict(ARGS)), src)
                 self.assertEqual(taint.taints(verb), t)
 
-    def test_the_comparison_can_fail(self):
+    def test_the_pins_can_fail(self):
         """A mapping dropped from google-sheets, a taint dropped from
         google-calendar: both show up as differences."""
-        self.posizione("native")
         nativo = _risposte()
 
         def rompi(entries):
@@ -622,7 +587,6 @@ class ParityTests(_Istanza):
                 if e["id"] == "google-calendar":
                     e["taint"] = ["gcalendar.list_calendars"]
         self.scrivi_pack(PACK, _google_pack(mutate=rompi))
-        self.posizione("pack")
         rotto = _risposte()
         self.assertNotEqual(nativo["spec:gsheets.append_rows"],
                             rotto["spec:gsheets.append_rows"])
@@ -666,11 +630,12 @@ class ElectedCanonicalisationTests(_Istanza):
         self.assertEqual(egress.canonical("https://drive.google.com/x/A"),
                          "https://drive.google.com/x/A")
 
-    def test_only_in_pack_position(self):
-        self.assertEqual(B.elected_url_hosts(),
+    def test_the_hosts_are_pinned_in_the_gateway(self):
+        self.posizione("native")                 # ignored
+        self.assertEqual(B.ELECTED_URL_HOSTS,
                          {"google": frozenset({"drive.google.com", "docs.google.com"})})
-        self.posizione("native")
-        self.assertEqual(B.elected_url_hosts(), {})
+        self.assertEqual(egress.canonical("https://drive.google.com/drive/folders/A"),
+                         "gdrive:folder/A")
 
 
 # --------------------------------------------------------------------------
@@ -713,12 +678,14 @@ class FailClosedTests(_Istanza):
         for verbo in ("email.send", "telegram.send", "web.fetch", "topic.list"):
             main._check_pack_connector_held(verbo)          # no exception
 
-    def test_on_native_nothing_is_refused_for_this(self):
+    def test_a_profile_saying_native_does_not_lift_the_refusal(self):
         from .. import main
         self.posizione("native")
         self.togli_pack(PACK)
         for verbo in _verbs():
-            main._check_pack_connector_held(verbo)          # no exception
+            with self.subTest(verbo=verbo):
+                with self.assertRaises(main._PackVerbRefused):
+                    main._check_pack_connector_held(verbo)
 
     def test_without_the_component_the_24_verbs_are_denied(self):
         """google-pack's connectors held (e.g. google-pack 1.x, or a component
@@ -745,10 +712,10 @@ class FailClosedTests(_Istanza):
 
 
 # --------------------------------------------------------------------------
-# 4. the gateway's own Google lookups follow the switch
+# 4. the gateway's own Google lookups ask the component
 # --------------------------------------------------------------------------
-class LookupsFollowTheSwitchTests(_Istanza):
-    def test_in_pack_position_the_component_answers(self):
+class LookupsAskTheComponentTests(_Istanza):
+    def test_the_component_answers(self):
         from .. import tools_api
         self.assertEqual(google_switch.accounts(), ["conto"])
         self.assertEqual(tools_api._describe_folder("conto", "F1"),
@@ -766,13 +733,10 @@ class LookupsFollowTheSwitchTests(_Istanza):
                                  "test_connection", "perimeter_changed",
                                  "credential_changed", "credential_changed"])
 
-    def test_in_native_position_the_component_is_never_asked(self):
-        """Nothing answers on `native` any more (#524): empty, and the
-        component is not asked."""
+    def test_a_profile_saying_native_still_asks_the_component(self):
         self.posizione("native")
-        self.assertEqual(google_switch.accounts(), [])
-        self.assertEqual(self.component.calls, [])
-        self.assertIsNone(loader.service(PACK, "accounts"))
+        self.assertEqual(google_switch.accounts(), ["conto"])
+        self.assertEqual([c[0] for c in self.component.calls], ["accounts"])
 
     def test_the_pdp_reads_only_mapped_arguments_from_the_component(self):
         from .. import main
@@ -843,7 +807,7 @@ class ForeignPackCannotClaimTests(_Istanza):
         self._intruso(self._tutto_di_evil())
         for cid in GOOGLE_IDS + ("mail-gmail",):
             self.assertEqual(resolved.registry().by_id(cid).pack, PACK)
-        self.assertTrue(any("evil-pack" in p and f"switched to '{PACK}'" in p
+        self.assertTrue(any("evil-pack" in p and f"belongs to '{PACK}'" in p
                             for p in resolved.problems()))
 
     def test_without_google_pack_nobody_holds_them(self):
@@ -860,12 +824,11 @@ class ForeignPackCannotClaimTests(_Istanza):
         self.assertIsNone(resolved.registry().by_id("sheets-clone"))
         self.assertFalse(resolved.held_by_pack("gsheets"))
 
-    def test_on_native_the_builtins_win_the_collision(self):
+    def test_a_profile_saying_native_changes_nothing_for_the_intruder(self):
         self.posizione("native")
         self._intruso(self._tutto_di_evil())
-        for cid in GOOGLE_IDS:
-            self.assertTrue(resolved.registry().by_id(cid).builtin)
-        self.assertIsNone(resolved.registry().by_id("mail-gmail"))
+        for cid in GOOGLE_IDS + ("mail-gmail",):
+            self.assertEqual(resolved.registry().by_id(cid).pack, PACK)
 
 
 if __name__ == "__main__":  # pragma: no cover
@@ -884,3 +847,14 @@ class ElectedUrlHostIsTheRawPrefixTests(unittest.TestCase):
                     "https://drive.google.com.evil.io/drive/folders/X"):
             m = _re.match(r"https?://([a-z0-9.-]+)/", url)
             self.assertNotEqual(m.group(1) if m else "", "drive.google.com", url)
+
+
+def setUpModule() -> None:
+    # comms-pack and it-pack as on every instance (#526): `gdrive.upload`
+    # shares on `mailto:`, which comms-pack's `mail` declares. google-pack is
+    # this module's own (`_GoogleIstanza` writes it).
+    _FP.install(without=("google-pack",))
+
+
+def tearDownModule() -> None:
+    _FP.uninstall()

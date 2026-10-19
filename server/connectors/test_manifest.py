@@ -117,9 +117,7 @@ class DocumentedExamplesTests(unittest.TestCase):
     def test_topic_action_declares_what_it_would_add(self):
         registry = M.build_registry(self.examples, reserved=NO_RESERVED)
         action = next(a for a in registry.topic_actions() if a.id == "telegram-link")
-        # `chat_id` and not `chat`: it is the name the route reads today
-        # (`topics_api.telegram_link`), and the parity test of #522 compares the
-        # two sides field by field.
+        # `chat_id`: the field name comms-pack's real manifest uses.
         self.assertEqual(action.adds_ingress, ("tg:{chat_id}",))
         self.assertEqual(action.adds_egress, ("tg:{chat_id}",))
         self.assertEqual(action.binding, "channel")

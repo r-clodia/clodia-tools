@@ -170,7 +170,7 @@ def _pack_bound_credentials(pack: str) -> set[str]:
 
     From the resolved registry, never from the raw manifest: there each entry
     has passed `vault_entry_problem` (inside the connector's own namespace,
-    never a core prefix) and foreign claims on switched connectors are
+    never a core prefix) and foreign claims on first-party connectors are
     stripped — so a pack cannot grant itself `github_pat`, `provider_*` or
     another backend's `mcp_*` by writing it (review of clodia-tools#393)."""
     out: set[str] = set()
@@ -183,9 +183,9 @@ def _pack_bound_credentials(pack: str) -> set[str]:
         for p in c.providers:
             if p.pack == pack and p.credential and p.credential.vault_entry:
                 out.add(p.credential.vault_entry)
-    # A builtin connector the owner switched to THIS pack: its credential, from
-    # the gateway's own declaration (the pack's connector may not have replaced
-    # the builtin yet — the adoption of the legacy mount).
+    # A former builtin connector that THIS pack serves: its credential, from
+    # the gateway's own table (`builtin.ADOPTED_VAULT_ENTRIES`) — the pack's
+    # connector may not be held yet: the adoption of the legacy mount.
     try:
         from .connectors import builtin as _bi
         out |= _bi.released_vault_entries(pack)

@@ -1,5 +1,7 @@
-"""`/internal/topics/{tier}/{name}/telegram-link` — connetti/disconnetti in un
-click, non due passi scollegati.
+"""The Telegram button of a topic — connetti/disconnetti in un click, non due
+passi scollegati — through the generic route
+`/internal/topics/{tier}/{name}/connectors/telegram/telegram-link` (the
+`…/telegram-link` alias was removed with #526: the webui calls only this).
 
 Difetto riportato da Davide (23 set 2026): aveva aggiunto `tg:<chat_id>` alla
 whitelist egress/ingress del topic (l'icona rapida Telegram esistente) ma il
@@ -26,6 +28,16 @@ from .topics.service import TopicService
 from .test_519_generic_actions import come_agent_server
 
 _H = {"Authorization": "Bearer ckt1.finto"}
+
+
+def _u(tier: str, name: str) -> str:
+    return f"/internal/topics/{tier}/{name}/connectors/telegram/telegram-link"
+
+
+def _shape(r) -> dict:
+    """`{connected, chat_id}` of the generic state (`bound` is the chat)."""
+    d = r.json()
+    return {"connected": d["connected"], "chat_id": d["bound"]}
 
 
 class Base(unittest.TestCase):
@@ -56,14 +68,13 @@ class ConnectTests(Base):
     def test_connect_writes_both_the_binding_and_the_whitelist(self):
         from . import whitelist as w
         with patch.object(w, "CONFIG", {}), patch.object(w, "save_config", lambda: None):
-            r = self.client.post("/internal/topics/SEAL-1/acme/telegram-link",
-                                 headers=_H, json={"action": "connect", "chat_id": "-100"})
+            r = self.client.post(_u("SEAL-1", "acme"),
+                                 headers=_H, json={"action": "connect", "chat": "-100"})
             self.assertEqual(r.status_code, 200)
-            # `seal` è additivo (clodia-platform#405): la risposta dice sempre a
-            # che punto sta il cap, così la UI non deve duplicarne la regola.
-            self.assertEqual(
-                {k: v for k, v in r.json().items() if k != "seal"},
-                {"connected": True, "chat_id": "-100"})
+            # `seal` (clodia-platform#405): la risposta dice sempre a che punto
+            # sta il cap, così la UI non deve duplicarne la regola.
+            self.assertIn("seal", r.json())
+            self.assertEqual(_shape(r), {"connected": True, "chat_id": "-100"})
             self.assertEqual(tb.get("-100"), {"instance": "messaggero",
                                               "tier": "SEAL-1", "topic": "acme"})
             self.assertIn("tg:-100", w.CONFIG["scope_egress_allow"]["SEAL-1/acme"])
@@ -71,14 +82,14 @@ class ConnectTests(Base):
 
     def test_connect_refuses_a_chat_already_bound_elsewhere(self):
         tb.set_binding("-200", "messaggero", "SEAL-1", "altro-topic")
-        r = self.client.post("/internal/topics/SEAL-1/acme/telegram-link",
-                             headers=_H, json={"action": "connect", "chat_id": "-200"})
+        r = self.client.post(_u("SEAL-1", "acme"),
+                             headers=_H, json={"action": "connect", "chat": "-200"})
         self.assertEqual(r.status_code, 400)
         self.assertIn("altro-topic", r.json()["error"])
         self.assertEqual(tb.get("-200")["topic"], "altro-topic")  # invariato
 
     def test_connect_without_chat_id_is_refused(self):
-        r = self.client.post("/internal/topics/SEAL-1/acme/telegram-link",
+        r = self.client.post(_u("SEAL-1", "acme"),
                              headers=_H, json={"action": "connect"})
         self.assertEqual(r.status_code, 400)
 
@@ -87,42 +98,34 @@ class DisconnectTests(Base):
     def test_disconnect_removes_both_the_binding_and_the_whitelist(self):
         from . import whitelist as w
         with patch.object(w, "CONFIG", {}), patch.object(w, "save_config", lambda: None):
-            self.client.post("/internal/topics/SEAL-1/acme/telegram-link",
-                             headers=_H, json={"action": "connect", "chat_id": "-300"})
-            r = self.client.post("/internal/topics/SEAL-1/acme/telegram-link",
+            self.client.post(_u("SEAL-1", "acme"),
+                             headers=_H, json={"action": "connect", "chat": "-300"})
+            r = self.client.post(_u("SEAL-1", "acme"),
                                  headers=_H, json={"action": "disconnect"})
             self.assertEqual(r.status_code, 200)
-            self.assertEqual(
-                {k: v for k, v in r.json().items() if k != "seal"},
-                {"connected": False, "chat_id": None})
+            self.assertEqual(_shape(r), {"connected": False, "chat_id": None})
             self.assertIsNone(tb.get("-300"))
             self.assertNotIn("tg:-300", w.CONFIG.get("scope_egress_allow", {}).get("SEAL-1/acme", []))
 
     def test_disconnect_with_nothing_connected_is_a_no_op(self):
-        r = self.client.post("/internal/topics/SEAL-1/acme/telegram-link",
+        r = self.client.post(_u("SEAL-1", "acme"),
                              headers=_H, json={"action": "disconnect"})
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(
-            {k: v for k, v in r.json().items() if k != "seal"},
-            {"connected": False, "chat_id": None})
+        self.assertEqual(_shape(r), {"connected": False, "chat_id": None})
 
 
 class StatusTests(Base):
     def test_get_reflects_no_connection(self):
-        r = self.client.get("/internal/topics/SEAL-1/acme/telegram-link", headers=_H)
-        self.assertEqual(
-            {k: v for k, v in r.json().items() if k != "seal"},
-            {"connected": False, "chat_id": None})
+        r = self.client.get(_u("SEAL-1", "acme"), headers=_H)
+        self.assertEqual(_shape(r), {"connected": False, "chat_id": None})
 
     def test_get_reflects_an_existing_binding(self):
         tb.set_binding("-400", "messaggero", "SEAL-1", "acme")
-        r = self.client.get("/internal/topics/SEAL-1/acme/telegram-link", headers=_H)
-        self.assertEqual(
-            {k: v for k, v in r.json().items() if k != "seal"},
-            {"connected": True, "chat_id": "-400"})
+        r = self.client.get(_u("SEAL-1", "acme"), headers=_H)
+        self.assertEqual(_shape(r), {"connected": True, "chat_id": "-400"})
 
     def test_get_on_an_uncapped_topic_asks_for_nothing(self):
-        r = self.client.get("/internal/topics/SEAL-1/acme/telegram-link", headers=_H)
+        r = self.client.get(_u("SEAL-1", "acme"), headers=_H)
         self.assertEqual(r.json()["seal"],
                          {"tier": "SEAL-1", "cap": "SEAL-1",
                           "requires_ack": False, "ack": None})
@@ -149,12 +152,12 @@ class SealCapTests(Base):
         self.svc.new("SEAL-2", "preventivi", {"title": "P", "owner": "davide"})
 
     def _connect(self, **extra):
-        return self.client.post("/internal/topics/SEAL-2/preventivi/telegram-link",
+        return self.client.post(_u("SEAL-2", "preventivi"),
                                 headers=_H,
-                                json={"action": "connect", "chat_id": "-1001", **extra})
+                                json={"action": "connect", "chat": "-1001", **extra})
 
     def test_get_says_that_the_owner_has_to_acknowledge(self):
-        r = self.client.get("/internal/topics/SEAL-2/preventivi/telegram-link",
+        r = self.client.get(_u("SEAL-2", "preventivi"),
                             headers=_H)
         self.assertEqual(r.json()["seal"],
                          {"tier": "SEAL-2", "cap": "SEAL-1",
@@ -168,7 +171,8 @@ class SealCapTests(Base):
             self.assertIn("SEAL-2", r.json()["error"])
             # L'errore deve dire il gesto che sblocca, non solo che è vietato.
             self.assertIn("accept_seal_downgrade", r.json()["error"])
-            self.assertTrue(r.json()["seal"]["requires_ack"])
+            self.assertTrue(self.client.get(_u("SEAL-2", "preventivi"),
+                                            headers=_H).json()["seal"]["requires_ack"])
             self.assertIsNone(tb.get("-1001"))
             self.assertNotIn("SEAL-2/preventivi", w.CONFIG.get("scope_egress_allow", {}))
 
@@ -188,7 +192,7 @@ class SealCapTests(Base):
         self.assertEqual(ack["by"], "davide")
         self.assertTrue(ack["at"])
         # Una volta presa, la presa d'atto non si richiede più.
-        r2 = self.client.get("/internal/topics/SEAL-2/preventivi/telegram-link",
+        r2 = self.client.get(_u("SEAL-2", "preventivi"),
                              headers=_H)
         self.assertFalse(r2.json()["seal"]["requires_ack"])
         self.assertEqual(r2.json()["seal"]["ack"]["by"], "davide")
@@ -197,12 +201,12 @@ class SealCapTests(Base):
         from . import whitelist as w
         with patch.object(w, "CONFIG", {}), patch.object(w, "save_config", lambda: None):
             self._connect(accept_seal_downgrade=True)
-            self.client.post("/internal/topics/SEAL-2/preventivi/telegram-link",
+            self.client.post(_u("SEAL-2", "preventivi"),
                              headers=_H, json={"action": "disconnect"})
         meta = self.svc.open("SEAL-2", "preventivi")["meta"]
         self.assertNotIn("channel_seal_ack", meta)
         # E la prossima connessione torna a chiedere.
-        r = self.client.get("/internal/topics/SEAL-2/preventivi/telegram-link",
+        r = self.client.get(_u("SEAL-2", "preventivi"),
                             headers=_H)
         self.assertTrue(r.json()["seal"]["requires_ack"])
 
@@ -240,3 +244,16 @@ class SealAckScopeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from .connectors import first_party_fixture as _first_party
+
+
+def setUpModule() -> None:
+    # The first-party packs, installed as on every instance: since the switch
+    # was retired (#526) the tables pinned here are theirs, not the gateway's.
+    _first_party.install()
+
+
+def tearDownModule() -> None:
+    _first_party.uninstall()

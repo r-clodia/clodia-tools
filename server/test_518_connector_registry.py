@@ -8,8 +8,9 @@ Three things are asserted here, and the first is the one that matters:
   connector-specific were still hardcoded in `egress.py`, `main.py` or
   `taint.py`, these tests would keep answering `mailto:` with an empty registry;
 * **the gateway's own connectors are declared like anybody's**, in
-  `builtin_manifests/`, and win against a pack that claims the same vocabulary
-  while the native implementation is still the thing doing the sending;
+  `builtin_manifests/` (since #526 only `core` and `datastore`: mail,
+  Telegram, Google and GitHub are first-party packs', installed here as on
+  every instance), and win against a pack that claims the same vocabulary;
 * **the two review criteria of clodia-tools#353** that come alive here: a form
   matches the whole value, and a pack-supplied regex cannot cost the event loop.
 
@@ -23,6 +24,7 @@ from unittest.mock import patch
 
 from . import egress, main, taint
 from .connectors import builtin, normalise, resolved
+from .connectors import first_party_fixture as _first_party
 from .connectors.manifest import (
     MANIFEST_VERSION,
     NORMALISERS,
@@ -125,10 +127,11 @@ class BuiltinConnectorsTests(unittest.TestCase):
         reg = resolved.registry()
         self.assertEqual(resolved.problems(), ())
         ids = {c.id for c in reg.connectors if c.builtin}
-        # Google is four connectors, one per verb namespace, one switch (#524).
-        self.assertEqual(ids, {"core", "mail", "telegram", "google",
-                               "google-sheets", "google-docs", "google-calendar",
-                               "github", "datastore", "openai-images"})
+        # Only the schema-only ones since #526; the rest are the packs'.
+        self.assertEqual(ids, {"core", "datastore"})
+        self.assertEqual(ids, builtin.SCHEMA_ONLY_CONNECTORS)
+        dei_pack = {c.id: c.pack for c in reg.connectors if not c.builtin}
+        self.assertEqual(dei_pack, builtin.RELEASED_TO)
 
     def test_only_the_core_file_declares_the_platform_schemes(self):
         """The issue's own words: «Only platform-intrinsic schemes stay in a core
@@ -141,19 +144,19 @@ class BuiltinConnectorsTests(unittest.TestCase):
                   if c.builtin and c.id != "core" for s in c.schemes}
         self.assertEqual(others & core, set())
 
-    def test_a_pack_cannot_declare_a_scheme_the_gateway_still_implements(self):
+    def test_a_pack_cannot_declare_a_scheme_the_gateway_implements(self):
         """Refused on its own, and not fatal to the registry: one installed pack
         must not be able to unmap everybody else's verbs."""
         pack = {"name": "rogue-pack", "connectors": [{
             "id": "rogue", "manifest_version": 1, "namespace": "rogue",
-            "schemes": [{"scheme": "mailto", "direction": "egress"}]}]}
+            "schemes": [{"scheme": "datastore", "direction": "source"}]}]}
         reg = build_registry({**builtin.manifests(), "rogue-pack": pack},
                              builtin=builtin.names())
         self.assertNotIn("rogue", [c.id for c in reg.connectors])
         self.assertTrue(reg.refused)
-        self.assertIn("mailto", reg.refused[0])
-        # and the mail vocabulary still works
-        self.assertIn("mailto", reg.scheme_names("egress"))
+        self.assertIn("datastore", reg.refused[0])
+        # and the gateway's vocabulary still works
+        self.assertIn("datastore", reg.scheme_names("source"))
 
     def test_a_pack_may_use_a_vocabulary_it_does_not_own(self):
         """Using is not owning: a pack that sends mail is checked against the
@@ -162,8 +165,8 @@ class BuiltinConnectorsTests(unittest.TestCase):
             "id": "courier", "manifest_version": 1, "namespace": "courier",
             "verbs": [{"verb": "courier.send", "direction": "egress",
                        "scheme": "mailto", "arg": "to", "dtype": "email"}]}]}
-        reg = build_registry({**builtin.manifests(), "courier-pack": pack},
-                             builtin=builtin.names())
+        reg = build_registry({**builtin.manifests(), **_first_party.manifests(),
+                              "courier-pack": pack}, builtin=builtin.names())
         self.assertEqual(reg.refused, ())
         self.assertIn("courier", [c.id for c in reg.connectors])
 
@@ -172,7 +175,8 @@ class BuiltinConnectorsTests(unittest.TestCase):
         touch the tables at all because they were Python. That has to stay true
         now that they are manifests: a pack with a typo loses ITS mappings, not
         everybody's."""
-        with patch.object(resolved, "manifests", lambda: {"shadow-pack": {
+        with patch.object(resolved, "manifests", lambda: {
+                **_first_party.manifests(), "shadow-pack": {
                 "name": "shadow-pack", "connectors": [{
                     "id": "shadow", "manifest_version": 1, "namespace": "shadow",
                     "verbs": [{"verb": "email.send", "direction": "egress",
@@ -342,3 +346,13 @@ class BoundedRegexCostTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+def setUpModule() -> None:
+    # The first-party packs, installed as on every instance: since the switch
+    # was retired (#526) the tables pinned here are theirs, not the gateway's.
+    _first_party.install()
+
+
+def tearDownModule() -> None:
+    _first_party.uninstall()

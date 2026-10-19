@@ -11,7 +11,8 @@
 - `host.audit_decision`: a decision record; `AuditUnavailable` when the trail
   cannot be written (fail-closed callers refuse on it);
 - `host.tool_allowed`, `host.current_topic`;
-- the `mailbox_` scope follows the `mail` switch, for comms-pack only.
+- the `mailbox_` scope is comms-pack's only (the `mail` switch that used to
+  gate it is retired, #526).
 """
 from __future__ import annotations
 
@@ -104,9 +105,10 @@ class ServiceLookupTests(_Profile, unittest.TestCase):
 
     def test_none_when_the_callee_is_not_serving(self) -> None:
         h = _host(COMMS)
-        self.position(mail="pack", google="native")      # google-pack on standby
+        self.position(mail="pack", google="native")      # ignored (#526)
+        self.assertIsNotNone(h.service("google-pack", "mail_exec"))
+        loader._STATES[GOOGLE.key].status = "failed"
         self.assertIsNone(h.service("google-pack", "mail_exec"))
-        self.position(mail="pack", google="pack")
         loader.reset()
         self.assertIsNone(h.service("google-pack", "mail_exec"))
 
@@ -117,12 +119,11 @@ class ServiceLookupTests(_Profile, unittest.TestCase):
 
 
 class MailboxScopeTests(_Profile, unittest.TestCase):
-    def test_follows_the_mail_switch_for_comms_pack_only(self) -> None:
-        self.position(mail="pack")
-        self.assertEqual(trust.credential_problem(COMMS, "mailbox_"), "")
-        self.position(mail="native")
-        self.assertIn("mail", trust.credential_problem(COMMS, "mailbox_"))
-        self.position(mail="pack")
+    def test_comms_packs_only_whatever_the_profile_says(self) -> None:
+        for mode in ("pack", "native"):
+            with self.subTest(mode=mode):
+                self.position(mail=mode)
+                self.assertEqual(trust.credential_problem(COMMS, "mailbox_"), "")
         other = _component("google-pack", "google", credentials=("mailbox_",))
         self.assertTrue(trust.credential_problem(other, "mailbox_"))
 
@@ -138,8 +139,9 @@ class MailboxScopeTests(_Profile, unittest.TestCase):
             self.assertTrue(creds.has("mailbox_studio"))
             with self.assertRaises(HostError):
                 creds.has("google_studio")
-            self.position(mail="native")
-            with self.assertRaises(HostError):
+            # The connector handed to another pack: revoked at the next access.
+            with patch.dict(builtin.RELEASED_TO, {"mail": "other-pack"}), \
+                    self.assertRaises(HostError):
                 creds.has("mailbox_studio")
 
 

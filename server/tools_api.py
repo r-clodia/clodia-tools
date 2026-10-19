@@ -201,10 +201,9 @@ def _describe_folder(account: str, fid: str) -> dict:
     Un id di 33 caratteri non è verificabile a occhio: senza il nome, l'unico
     errore possibile — confinare alla cartella sbagliata — è anche invisibile.
 
-    Answered by whichever side implements Google on this instance
-    (`google_switch`, #558): the component's `describe_folder` in `pack`
-    position. A component that is not serving is a folder that cannot be
-    confirmed — refused like an unreachable one.
+    Answered by google-pack's component (`google_switch`, #558): its
+    `describe_folder`. A component that is not serving is a folder that cannot
+    be confirmed — refused like an unreachable one.
     """
     from .tools import google_switch
     try:
@@ -290,7 +289,8 @@ async def gdrive_confinement_set(request: Request):
 
 
 def _connector_guard(cid: str):
-    """Gating dei connettori nativi dal profilo (integrations.connectors)."""
+    """The edition's gating (`integrations.connectors`) of connector `cid`,
+    as a 403 response or None (`instance_profile.connector_check`)."""
     try:
         instance_profile.connector_check(cid)
         return None
@@ -327,22 +327,17 @@ def connectors_snapshot() -> list[dict]:
             for row in google_rows if not row["operational"]
         ],
     }]
-    # The mailboxes from the side in charge of mail (#558): on `mail: pack`
-    # comms-pack's component reads `mailbox_*`, and says nothing if absent.
+    # The mailboxes from comms-pack's component (#558), which reads
+    # `mailbox_*`, and says nothing if absent.
     from .tools import mail_switch
     mailbox_issue = []
-    if mail_switch.in_pack():
-        mailbox_rows = [row for row in mail_switch.credential_diagnostics()
-                        if row["kind"] == "mailbox"]
-        try:
-            mail_switch.service("diagnostics")
-        except mail_switch.ComponentUnavailable:
-            mailbox_issue = [{"account": "-", "missing": [],
-                              "error": "component_unavailable"}]
-    else:
-        # `native`: no mail implementation any more (#523) — nothing operational.
-        mailbox_rows = []
-        mailbox_issue = [{"account": "-", "missing": [], "error": "native_removed"}]
+    mailbox_rows = [row for row in mail_switch.credential_diagnostics()
+                    if row["kind"] == "mailbox"]
+    try:
+        mail_switch.service("diagnostics")
+    except mail_switch.ComponentUnavailable:
+        mailbox_issue = [{"account": "-", "missing": [],
+                          "error": "component_unavailable"}]
     mailbox_accounts = sorted(row["account"] for row in mailbox_rows if row["operational"])
     connectors.append({
         "id": "mailboxes",
@@ -456,12 +451,13 @@ def connectors_snapshot() -> list[dict]:
                          "(packs.install_pip)",
             }]
         connectors.append(row)
-    allowed = instance_profile.connectors_allowed()
-    if allowed is not None:
-        # backup/topic-storage/mcp non sono connettori nativi gated
-        keep = set(allowed) | {"topic-storage"}
-        connectors = [c for c in connectors
-                      if c.get("provider") == "mcp" or c.get("id") in keep]
+    # The edition's gating (#526): the same decision as the registry's, on
+    # the snapshot's ids (`mailboxes` is `mail`). Topic storage and the MCP
+    # backends are not connectors of the edition (`integrations` governs the
+    # latter).
+    connectors = [c for c in connectors
+                  if c.get("provider") == "mcp" or c.get("id") == "topic-storage"
+                  or instance_profile.connector_allowed(str(c.get("id") or ""))]
     return connectors
 
 
@@ -594,24 +590,23 @@ def _core_entry_released(entry: dict, pack: str = "",
 
     clodia-platform#525. `github_connect` mounted the official GitHub MCP
     backend as `github`, unstamped — it belonged to the core, not to a pack.
-    With `connectors: {github: pack}` it-pack declares the connector and
-    mounts that backend itself; without this its import would get the 409 for
-    «already mounted by an administrator» and the switch could never complete.
+    it-pack declares the connector and mounts that backend itself; without
+    this its import would get the 409 for «already mounted by an
+    administrator» and the hand-over could never complete.
 
-    Narrow on purpose: only in `pack` position, only an UNSTAMPED entry, only
-    a backend the core mounts (`resolved._CORE_BACKEND_CONNECTORS`), and only
-    in the exact shape the native handler wrote (http, the official URL). An
-    admin mount that merely shares the name is not the core's, and stays
-    protected by the 409.
+    Narrow on purpose: only an UNSTAMPED entry, only a backend the core
+    mounted (`resolved._CORE_BACKEND_CONNECTORS`), and only in the exact shape
+    the native handler wrote (http, the official URL). An admin mount that
+    merely shares the name is not the core's, and stays protected by the 409.
     """
     from .connectors import resolved as _resolved
     if not isinstance(entry, dict) or entry.get("pack"):
         return False
     cid = _resolved._CORE_BACKEND_CONNECTORS.get(
         _resolved.norm_name(str(entry.get("name") or "")))
-    if cid is None or instance_profile.connector_mode(cid) != "pack":
+    if cid is None:
         return False
-    # Only the pack the connector is switched TO, and only to mount the same
+    # Only the pack the connector belongs to, and only to mount the same
     # official endpoint: otherwise any pack imported first replaced the
     # official mount with its own URL, carrying the PAT (review of #379).
     from .connectors import builtin as _builtin
@@ -883,8 +878,8 @@ async def mcp_oauth_complete(request: Request):
     """POST /tools/mcp/{name}/oauth/complete {state, code} → consenso concluso.
 
     `code` accetta sia il parametro nudo sia la URL intera su cui il browser è
-    atterrato: incollare la URL è ciò che si fa davvero (stessa scelta di
-    `google_connect`). Il token finisce nella vault e NON torna nella risposta.
+    atterrato: incollare la URL è ciò che si fa davvero (stessa scelta della
+    rotta `connect` di google-pack). Il token finisce nella vault e NON torna nella risposta.
     """
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -942,62 +937,6 @@ async def mcp_disconnect(request: Request):
     return JSONResponse(res)
 
 
-async def _google_component_route(request: Request, path: str):
-    """`/tools/google/<path>` in `pack` position (#558): the same route of
-    google-pack's gateway component (`/tools/google-pack/<path>`), with ITS
-    authentication (a human admin or the trusted core), method check and
-    audit — so the Tools page keeps calling the URL it knows. The component
-    not serving is a 503 that says why, never the native handler."""
-    from . import components_api
-    from .tools import google_switch
-    from . import components
-    spec = components.route(google_switch.PACK, path)
-    if spec is None:
-        try:
-            google_switch.service("accounts")      # raises with the reason
-        except google_switch.ComponentUnavailable as e:
-            return JSONResponse({"error": "component_unavailable", "detail": str(e)},
-                                status_code=503)
-        return JSONResponse({"error": "component_unavailable",
-                             "detail": f"google-pack's component has no route '{path}'"},
-                            status_code=503)
-    return await components_api.serve(request, spec)
-
-
-def _google_native_removed() -> JSONResponse:
-    """`connectors: {google: native}`: no implementation answers any more (#524)."""
-    from .tools import google_switch
-    return JSONResponse({"error": "native_removed", "detail": google_switch.NATIVE_REMOVED},
-                        status_code=409)
-
-
-def _google_in_pack() -> bool:
-    from .tools import google_switch
-    return google_switch.in_pack()
-
-
-async def google_auth(request: Request):
-    """Avvia il consenso Google UNIFICATO (Gmail + Drive + Docs + Calendar)."""
-    g = _connector_guard("google")
-    if g is not None:
-        return g
-    if _google_in_pack():
-        return await _google_component_route(request, "auth")
-    return _google_native_removed()
-
-
-async def google_connect(request: Request):
-    """Scambia il code del consenso unificato → un solo refresh token con TUTTI
-    gli scope, salvato come google_<account>. I tool email.* e gdrive/gdocs/
-    gcalendar.* leggono questa credenziale (fallback ai legacy gmail_/gworkspace_)."""
-    g = _connector_guard("google")
-    if g is not None:
-        return g
-    if _google_in_pack():
-        return await _google_component_route(request, "connect")
-    return _google_native_removed()
-
-
 async def openai_connect(request: Request):
     g = _connector_guard("openai-images")
     if g is not None:
@@ -1028,27 +967,6 @@ async def openai_connect(request: Request):
     return JSONResponse({"connected": True})
 
 
-async def google_app_status(request: Request):
-    """L'app OAuth Google (client_id/secret) è configurata nel vault?"""
-    if _google_in_pack():
-        return await _google_component_route(request, "app")
-    return _google_native_removed()
-
-
-async def google_app_config(request: Request):
-    """Deposita la credenziale d'app OAuth Google. Body: {client_json} (il JSON
-    scaricato da Google Cloud) oppure {client_id, client_secret, redirect_uri}."""
-    if _google_in_pack():
-        return await _google_component_route(request, "app")
-    return _google_native_removed()
-
-
-def _mail_native_removed() -> JSONResponse:
-    """`connectors: {mail: native}`: no implementation answers any more (#523)."""
-    from .tools import mail_switch
-    return JSONResponse({"error": mail_switch.NATIVE_REMOVED}, status_code=409)
-
-
 def _mail_component_unavailable(e: Exception) -> JSONResponse:
     return JSONResponse({"error": "component_unavailable", "detail": str(e)},
                         status_code=503)
@@ -1057,18 +975,16 @@ def _mail_component_unavailable(e: Exception) -> JSONResponse:
 async def email_mailboxes(request: Request):
     """GET → lista delle caselle generiche (mailbox_*) nel vault (solo nomi).
 
-    On `mail: pack` (#558) the list is comms-pack's component's (service
-    `mailboxes_list`); this URL, its authentication and its answer stay."""
+    The list is comms-pack's component's (service `mailboxes_list`, #558);
+    this URL, its authentication and its answer stay."""
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     from .tools import mail_switch
-    if mail_switch.in_pack():
-        try:
-            return JSONResponse(await asyncio.to_thread(
-                mail_switch.call, "mailboxes_list"))
-        except mail_switch.ComponentUnavailable as e:
-            return _mail_component_unavailable(e)
-    return _mail_native_removed()
+    try:
+        return JSONResponse(await asyncio.to_thread(
+            mail_switch.call, "mailboxes_list"))
+    except mail_switch.ComponentUnavailable as e:
+        return _mail_component_unavailable(e)
 
 
 async def email_mailbox_add(request: Request):
@@ -1085,18 +1001,16 @@ async def email_mailbox_add(request: Request):
     except Exception:
         return JSONResponse({"error": "bad_json"}, status_code=400)
     from .tools import mail_switch
-    if mail_switch.in_pack():
-        # #558: what a mailbox is (shape, validation, the deposit under
-        # `mailbox_<acct>`) is comms-pack's component's; the URL, the guard,
-        # the authentication and the parsing stay here.
-        if not isinstance(b, dict):
-            b = {}
-        try:
-            out = await asyncio.to_thread(mail_switch.call, "mailbox_add", b)
-        except mail_switch.ComponentUnavailable as e:
-            return _mail_component_unavailable(e)
-        return JSONResponse(out["body"], status_code=int(out["status"]))
-    return _mail_native_removed()
+    # #558: what a mailbox is (shape, validation, the deposit under
+    # `mailbox_<acct>`) is comms-pack's component's; the URL, the guard, the
+    # authentication and the parsing stay here.
+    if not isinstance(b, dict):
+        b = {}
+    try:
+        out = await asyncio.to_thread(mail_switch.call, "mailbox_add", b)
+    except mail_switch.ComponentUnavailable as e:
+        return _mail_component_unavailable(e)
+    return JSONResponse(out["body"], status_code=int(out["status"]))
 
 
 async def email_mailbox_remove(request: Request):
@@ -1116,17 +1030,14 @@ async def email_mailbox_remove(request: Request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     account = request.path_params["account"]
     from .tools import mail_switch
-    if mail_switch.in_pack():
-        # #558: the credential is removed by comms-pack's component, which
-        # reads the address first; the whitelist entries are withdrawn HERE,
-        # by the gateway that owns the lists.
-        try:
-            info = await asyncio.to_thread(mail_switch.call, "mailbox_remove", account)
-        except mail_switch.ComponentUnavailable as e:
-            return _mail_component_unavailable(e)
-        indirizzo, removed = info.get("email"), bool(info.get("removed"))
-    else:
-        return _mail_native_removed()
+    # #558: the credential is removed by comms-pack's component, which reads
+    # the address first; the whitelist entries are withdrawn HERE, by the
+    # gateway that owns the lists.
+    try:
+        info = await asyncio.to_thread(mail_switch.call, "mailbox_remove", account)
+    except mail_switch.ComponentUnavailable as e:
+        return _mail_component_unavailable(e)
+    indirizzo, removed = info.get("email"), bool(info.get("removed"))
     from . import egress as eg
     pulizia = eg.forget_mailbox(indirizzo or "")
     if pulizia["scopes"] or pulizia["global"]:
@@ -1152,8 +1063,8 @@ def _telegram_status() -> dict:
     except Exception as e:  # noqa: BLE001 — a status, never a failure
         return {"configured": configured, "last_error": str(e)[:200]}
     return {"configured": configured,
-            "note": "Telegram is served by comms-pack's gateway component "
-                    "(connectors: {telegram: pack}); it is not serving now"}
+            "note": "Telegram is served by comms-pack's gateway component; "
+                    "it is not serving now"}
 
 
 async def telegram_status(request: Request):
@@ -1173,12 +1084,10 @@ async def github_connect(request: Request):
     Il PAT non transita mai dal modello: il proxy lo risolve via ${VAULT:github_pat}.
 
     Reached through the generic connector route (`connectors_api._delegate`),
-    no longer at a route of its own (#525). On `native` it still mounts the
-    official backend unstamped, so the backend's own `github.*` tools keep
-    working; the four git verbs need `pack` either way.
+    no longer at a route of its own (#525).
 
-    In `pack` position (`connectors: {github: pack}`, clodia-platform#525) the
-    backend is it-pack's own mount, so this handler deposits the PAT only —
+    The backend is it-pack's own mount (clodia-platform#525), so this handler
+    deposits the PAT only —
     same entry, same `{"value": pat}` shape, which the pack's mount reads as
     `${VAULT:github_pat.value}` — and keeps the grant to clodia. It mounts
     nothing, and it never touches the pack's stamped mount: what it removes is
@@ -1203,27 +1112,15 @@ async def github_connect(request: Request):
             instance_profile.integrations_check("github")
         except PermissionError as e:
             return JSONResponse({"error": str(e)}, status_code=403)
-    in_pack = instance_profile.connector_mode("github") == "pack"
-    if in_pack:
-        backends = [b for b in (whitelist.CONFIG.get("mcp_backends") or [])
-                    if not (b.get("name") == "github" and not b.get("pack"))]
-    else:
-        backends = [b for b in (whitelist.CONFIG.get("mcp_backends") or [])
-                    if b.get("name") != "github"]
+    backends = [b for b in (whitelist.CONFIG.get("mcp_backends") or [])
+                if not (b.get("name") == "github" and not b.get("pack"))]
     if not pat:
         vault.remove("github_pat")
         whitelist.CONFIG["mcp_backends"] = backends
         whitelist.save_config(); whitelist.reload_config(); proxy.clear_cache()
-        LOG.info("github_connect: disconnesso (cred%s rimossi)",
-                 "" if in_pack else " + backend")
+        LOG.info("github_connect: disconnesso (cred rimossa)")
         return JSONResponse({"connected": False})
     vault.deposit("github_pat", {"value": pat}, cred_type="mcp_secret", grant_agents=[])
-    if not in_pack:
-        backends.append({
-            "name": "github", "label": "GitHub", "transport": "http",
-            "url": GITHUB_MCP_URL,
-            "headers": {"Authorization": "Bearer ${VAULT:github_pat}"},
-        })
     whitelist.CONFIG["mcp_backends"] = backends
     # I verbi che il collegamento concede a clodia, per NOME. Prima qui c'era
     # `github.*`, e una wildcard sul namespace di un backend esterno concede
@@ -1249,9 +1146,8 @@ async def github_connect(request: Request):
         if v not in ct:
             ct.append(v)
     whitelist.save_config(); whitelist.reload_config(); proxy.clear_cache()
-    LOG.info("github_connect: PAT depositato%s (len=%d)",
-             " (backend: quello del pack)" if in_pack
-             else " + backend github registrato", len(pat))
+    LOG.info("github_connect: PAT depositato (backend: quello del pack, len=%d)",
+             len(pat))
     return JSONResponse({"connected": True})
 
 
@@ -1388,17 +1284,13 @@ def _test_connector(cid: str) -> dict:
 
         if cid in ("google", "gworkspace", "gmail"):
             from .tools import google_switch
-            if google_switch.in_pack():
-                # #558: the unified card is google-pack's component's.
-                return google_switch.component_test_connection()
-            return {"ok": False, "detail": google_switch.NATIVE_REMOVED}
+            # #558: the unified card is google-pack's component's.
+            return google_switch.component_test_connection()
 
         if cid == "mailboxes":
             from .tools import mail_switch
-            if mail_switch.in_pack():
-                # #558: the mailboxes card is comms-pack's component's.
-                return mail_switch.component_test_mailboxes()
-            return {"ok": False, "detail": mail_switch.NATIVE_REMOVED}
+            # #558: the mailboxes card is comms-pack's component's.
+            return mail_switch.component_test_mailboxes()
 
         if cid == "topic-storage":
             return {"ok": True, "detail": "storage locale sempre disponibile"}
@@ -1430,10 +1322,6 @@ routes = [
     Route("/tools/email/mailboxes", email_mailboxes, methods=["GET"]),
     Route("/tools/email/mailboxes", email_mailbox_add, methods=["POST"]),
     Route("/tools/email/mailboxes/{account}", email_mailbox_remove, methods=["DELETE"]),
-    Route("/tools/google/app", google_app_status, methods=["GET"]),
-    Route("/tools/google/app", google_app_config, methods=["POST"]),
-    Route("/tools/google/auth", google_auth, methods=["GET"]),
-    Route("/tools/google/connect", google_connect, methods=["POST"]),
     Route("/tools/telegram/status", telegram_status, methods=["GET"]),
     Route("/tools/backup/config", backup_configure, methods=["POST"]),
     Route("/tools/backup/status", backup_status, methods=["GET"]),

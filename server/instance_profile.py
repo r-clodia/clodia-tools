@@ -11,10 +11,10 @@ vivono dal suo lato del confine:
   fixed = whitelist chiusa (`integrations.allowed`); full = self-service.
 - `topics: single` — creazione topic limitata al workspace unico (i DM
   restano permessi: sono la webchat, non topic di lavoro).
-- `connectors: {<id>: native|pack}` — CHI implementa un connettore su questa
-  istanza: il gateway (come sempre) o il pack che lo dichiara. È
-  l'interruttore della transizione dell'epic clodia-platform#527: vedi
-  `connector_mode`.
+- `connectors: {<id>: native|pack}` — RETIRED (clodia-platform#526): the
+  connectors of the epic #527 are always served by their first-party pack.
+  The key is still read so that an old profile keeps loading; a `native`
+  value is ignored with one boot warning (`retired_connector_switch`).
 
 Regole: file assente = FULL; file invalido = fallback FULL con warning
 prominente (availability-first, rischio documentato in spec). Loader
@@ -51,16 +51,10 @@ _TRISTATE = {"topics": ("off", "single", "full"),
              "rag": ("off", "single", "full"),
              "integrations": ("off", "fixed", "full")}
 
-#: Le due posizioni dell'interruttore di migrazione (clodia-platform#522,
-#: decisione G3 dell'epic #527). `native`: il connettore è codice del gateway,
-#: cioè tutto quello che è sempre stato. `pack`: il gateway si fa da parte —
-#: non espone i verbi nativi di quel namespace, non carica il proprio manifest
-#: builtin e libera namespace e prefisso di vault — e il connettore che il pack
-#: installato dichiara diventa quello vero.
-CONNECTOR_MODES = ("native", "pack")
-#: Default DELIBERATO: senza una riga nel profilo non cambia niente. Una
-#: migrazione si accende, non si subisce.
-CONNECTOR_DEFAULT = "native"
+#: The value the retired switch used to accept for "the gateway implements
+#: it" (clodia-platform#522–#526). Nothing implements it any more: a profile
+#: still saying so is reported once (`retired_connector_switch`) and ignored.
+RETIRED_CONNECTOR_MODE = "native"
 
 _CACHE: Optional[dict] = None
 
@@ -121,16 +115,13 @@ def load(force: bool = False) -> dict:
                 sec = raw.get(section)
                 if isinstance(sec, dict):
                     prof[section].update(sec)
-            for cid, mode in prof["connectors"].items():
-                # Convalidato qui e non al punto d'uso: un valore storpiato
-                # ricade sul profilo FULL, dove `connectors` è vuoto e ogni
-                # connettore resta NATIVO. Tollerarlo al punto d'uso
-                # significherebbe scegliere fra «nativo» e «pack» leggendo una
-                # parola che nessuno ha scritto.
-                if str(mode) not in CONNECTOR_MODES:
-                    raise ValueError(
-                        f"connectors.{cid}: valore '{mode}' non valido "
-                        f"(ammessi: {', '.join(CONNECTOR_MODES)})")
+            if prof["connectors"]:
+                # The switch is retired (#526): every connector it named is
+                # pack-served. Kept, never validated — an old profile must
+                # keep loading, and an invalid value here would throw the
+                # WHOLE profile back to FULL over a key that decides nothing.
+                LOG.info("profile.yaml: `connectors:` is retired (#526) and "
+                         "ignored: %s", sorted(map(str, prof["connectors"])))
             LOG.info("profilo istanza '%s' caricato da %s", prof["edition"], path)
         except Exception as e:  # noqa: BLE001
             LOG.error(
@@ -189,9 +180,10 @@ def integrations_check(slug: str) -> None:
 
 
 def connectors_allowed() -> list[str] | None:
-    """Connettori NATIVI dell'edizione (gmail, mailboxes, …).
-    None = tutti (storico); lista = solo quelli (terraformazione, gap-1
-    edizione acme-min, 6 lug)."""
+    """The connectors of the edition (`integrations.connectors`, written by
+    clodia-build: `[mailboxes]`, `[]`, …), as written. None = all (the
+    historical default). Read through `connector_allowed`, never compared
+    directly: the names written there are not all registry ids."""
     conf = load()["integrations"]
     val = conf.get("connectors")
     if val is None:
@@ -199,52 +191,67 @@ def connectors_allowed() -> list[str] | None:
     return [str(x) for x in (val or [])]
 
 
-def connector_mode(cid: str) -> str:
-    """Chi implementa il connettore `cid` su questa istanza: `native` o `pack`.
+#: Names an edition profile may use for a connector, mapped to the registry id
+#: (clodia-platform#526). `integrations.connectors` predates the registry and
+#: speaks the ids of the Tools card snapshot: `mailboxes` is the `mail`
+#: connector, and its topic button `mailbox-link`.
+CONNECTOR_ALIASES: dict[str, str] = {
+    "mailboxes": "mail",
+    "gmail": "mail-gmail",
+    "gworkspace": "google",
+    "openai": "openai-images",
+}
 
-    L'interruttore della transizione di clodia-platform#522. Il gateway e il
-    pack non convivono sullo stesso connettore — due implementazioni dello
-    stesso verbo sarebbero due PDP, due lease e due code di inbound — quindi la
-    domanda ha una sola risposta per istanza, e la dà l'owner nel profilo.
 
-    Fail-safe verso `native` per costruzione: un profilo assente, illeggibile o
-    con un valore che questo lettore non capisce ricade sul profilo FULL, dove
-    `connectors` è vuoto.
+def canonical_connector(cid: str) -> str:
+    """The registry id behind a profile or snapshot name (`CONNECTOR_ALIASES`)."""
+    return CONNECTOR_ALIASES.get(str(cid), str(cid))
 
-    Eccezione dal gateway 2.118.0 (clodia-platform#525): `github` (i quattro
-    verbi git) e `openai-images` non hanno più un'implementazione nativa. Su
-    `native` quelle funzioni NON sono servite — i verbi rispondono DENIED
-    nominando lo switch, la generazione immagini fallisce nominando il
-    componente, e il boot lo segnala (`runtime_configuration_warnings`).
+
+def connector_allowed(cid: str) -> bool:
+    """Does the edition admit connector `cid` (a registry id or an alias)?
+
+    The ONE decision behind every surface of a connector (#526): the Tools
+    snapshot, the registry listing, the connect route, topic actions and the
+    routes of the pack's gateway component. Never filtered: the schema-only
+    builtins (`core`, `datastore`), whose schemes every whitelist is written
+    in. A family member is admitted with its head (`builtin.CONNECTOR_FAMILY`:
+    `google` admits google-sheets/docs/calendar and `mail-gmail`).
     """
-    try:
-        val = (load().get("connectors") or {}).get(cid)
-    except Exception:  # noqa: BLE001 — in dubbio, il gateway resta quello di ieri
-        return CONNECTOR_DEFAULT
-    mode = str(val or CONNECTOR_DEFAULT)
-    return mode if mode in CONNECTOR_MODES else CONNECTOR_DEFAULT
+    allowed = connectors_allowed()
+    if allowed is None:
+        return True
+    from .connectors import builtin as _builtin
+    cid = canonical_connector(cid)
+    if cid in _builtin.SCHEMA_ONLY_CONNECTORS:
+        return True
+    names = {canonical_connector(a) for a in allowed}
+    return cid in names or _builtin.CONNECTOR_FAMILY.get(cid) in names
 
 
-def packaged_connectors() -> frozenset[str]:
-    """Gli id dei connettori che su questa istanza li serve un PACK.
+def retired_connector_switch() -> list[str]:
+    """The connector ids the profile still puts on `native`, sorted.
 
-    Un insieme e non una domanda per id perché chi deve farsi da parte —
-    l'elenco dei manifest builtin, i Tool nativi, i namespace riservati — deve
-    poter guardare la propria lista e sottrarre, senza sapere quali connettori
-    esistano.
+    The switch of clodia-platform#522 is retired (#526): those connectors have
+    no native implementation and are served by their pack whatever the profile
+    says. Read for the ONE boot warning that says so; never an exception.
     """
     try:
         conf = load().get("connectors") or {}
     except Exception:  # noqa: BLE001
-        return frozenset()
-    return frozenset(cid for cid in conf if connector_mode(cid) == "pack")
+        return []
+    if not isinstance(conf, dict):
+        return []
+    return sorted(str(cid) for cid, mode in conf.items()
+                  if str(mode) == RETIRED_CONNECTOR_MODE)
 
 
 def connector_check(cid: str) -> None:
-    allowed = connectors_allowed()
-    if allowed is not None and cid not in allowed:
+    """`connector_allowed` as a `PermissionError`."""
+    if not connector_allowed(cid):
         raise PermissionError(
-            f"connettore '{cid}' non previsto dall'edizione (connectors: {allowed})")
+            f"connettore '{cid}' non previsto dall'edizione "
+            f"(connectors: {connectors_allowed()})")
 
 
 def topic_default_participants() -> list[str]:

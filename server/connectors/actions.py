@@ -94,6 +94,12 @@ def options_for(field: ActionField) -> list[dict] | None:
 # --------------------------------------------------------------------------
 
 def find(connector_id: str, action_id: str) -> tuple[Connector, TopicAction]:
+    from .. import instance_profile
+    if not instance_profile.connector_allowed(connector_id):
+        # The edition's gating (#526): a connector the profile excludes has
+        # no topic button, and no request reaches its action either.
+        raise ConnectorNotAllowed(
+            f"connettore '{connector_id}' non previsto dall'edizione")
     reg = _resolved.registry()
     connector = reg.by_id(connector_id)
     if connector is None:
@@ -405,6 +411,10 @@ def apply(connector: Connector, action: TopicAction, tier: str, name: str, *,
 
 class TopicMissing(ActionError):
     """The topic an action would write into does not exist."""
+
+
+class ConnectorNotAllowed(ActionError):
+    """The edition's profile excludes the connector (`integrations.connectors`)."""
 
 
 def _prepare_channel(connector: Connector, tier: str, name: str,

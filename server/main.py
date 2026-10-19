@@ -69,8 +69,9 @@ def _topics() -> TopicService:
 
 
 #: The eight `email.*` verbs. Their native implementation is gone
-#: (clodia-platform#523): comms-pack's gateway component serves them on
-#: `connectors: {mail: pack}`. The names stay for the refusal on `native`.
+#: (clodia-platform#523): comms-pack's gateway component serves them, and only
+#: it — a mounted backend exposing `email.*` is never a fallback
+#: (`_check_component`).
 _EMAIL_VERB_NAMES: frozenset[str] = frozenset({
     "email.send",
     "email.folders",
@@ -1590,21 +1591,12 @@ _TELEGRAM_TOOLS: list[Tool] = [
 
 
 def _packaged_namespaces() -> frozenset[str]:
-    """I namespace di cui, su questa istanza, il gateway non è più il padrone.
+    """The namespaces of the connectors first-party packs serve (`email`,
+    `telegram`, `github`, `gdrive`, …): the gateway is not their owner, their
+    verbs come from the pack's gateway component (#522–#526).
 
-    Quando il profilo mette un connettore su `pack` (clodia-platform#522,
-    `instance_profile.connector_mode`), i verbi di quel namespace arrivano dal
-    backend MCP del pack e il gateway smette di esporli e di servirli.
-
-    Derivati dal MANIFEST builtin del connettore (`builtin.released()`), non da
-    una lista Python scritta qui: è il manifest a dire quale namespace quel
-    connettore occupa, e un elenco di gruppi `_*_TOOLS` lascerebbe indietro i
-    verbi che stanno altrove — `telegram.roster` è dichiarato dentro
-    `_TOPIC_TOOLS`, e una migrazione che lo dimenticasse lo lascerebbe servito
-    dal gateway mentre il pack lo dichiara suo. Non darebbe errore: funzionerebbe
-    dalla parte sbagliata.
-
-    Mai un'eccezione: in dubbio non si sposta niente, che è il gateway di ieri.
+    Derived from `builtin.released()`, never a second list here. Never raises:
+    in doubt, nothing.
     """
     try:
         from .connectors import builtin as _builtin
@@ -1613,47 +1605,22 @@ def _packaged_namespaces() -> frozenset[str]:
         return frozenset()
 
 
-#: Verbs of a packaged namespace that the GATEWAY keeps serving in `pack`
-#: position. They manage the gateway's own registry of channel bindings (and
-#: the join-by-link tokens of #549), which a pack must never write: moving
-#: them into the pack would either lose them or hand the binding registry to a
-#: pack process (review of clodia-logic#527).
+#: Verbs of a pack's namespace that the GATEWAY keeps serving. They manage
+#: the gateway's own registry of channel bindings (and the join-by-link tokens
+#: of #549), which a pack must never write: moving them into the pack would
+#: either lose them or hand the binding registry to a pack process (review of
+#: clodia-logic#527).
 #:
-#: NOT `email.*` any more (clodia-platform#558, superseding the transport
-#: design of #523). With `connectors: {mail: pack}` the eight verbs LEAVE the
-#: native catalogue: comms-pack's GATEWAY COMPONENT registers them and takes,
-#: inside the reference monitor and per call, the decisions they carry — the
-#: account's mailbox whitelist, strict ingress and its audit record (#503),
-#: topic attachments in and out with their taint, the reply recipient (its
-#: `pdp_arguments` service). The dispatcher runs them through this same
-#: `call_tool` path. On `native` nothing serves them: the native mail code is
-#: gone (#523).
+#: Not `email.*` (#558), not the four git verbs of `github` (#525), not the 24
+#: Google verbs (#558): those are registered by the gateway component of their
+#: pack (comms-pack, it-pack, google-pack) and run through this same
+#: `call_tool` path — whitelist, deny, unattended block, gates, the egress PDP
+#: on the pack's mappings, taint, audit — with the reference-monitor facts
+#: (room, perimeter, credentials) reached through the host.
 #:
-#: NOT the four git verbs of `github` any more (clodia-platform#525). With
-#: `connectors: {github: pack}` they leave the native catalogue: it-pack's
-#: GATEWAY COMPONENT registers them and runs git in-process, and the
-#: reference-monitor facts stay the gateway's, reached through the host — the
-#: room from the signed claim (`host.current_topic`), the per-scope repository
-#: perimeter (`host.perimeter.require_approved_repo`), the scope-then-platform
-#: credential (`host.git_credential`), the per-spawn scratch
-#: (`host.scratch_path`). The push destination the PDP judges comes from the
-#: component's `pdp_arguments` service (the origin it reads, never the
-#: caller's). On `native` they are not served at all: the native
-#: implementation is gone (`_check_component` says so).
-#:
-#: NOT the 24 Google verbs any more (clodia-platform#558, superseding the
-#: transport design of #524). With `connectors: {google: pack}` they LEAVE the
-#: native catalogue like Telegram's did: google-pack's GATEWAY COMPONENT
-#: registers them (`server.components`), with the folder/calendar perimeter,
-#: and the dispatcher runs them through this same `call_tool` path —
-#: whitelist, deny, unattended block, gates, the egress PDP on google-pack's
-#: mappings (and the pre-PDP parent lookup of `gdrive.update`, a component
-#: service), taint, audit. The credential stays in the vault, reached through
-#: the host. On `native` the gateway's own modules serve them, as before.
 #: The 24 Google verbs. Their native implementation is gone
-#: (clodia-platform#524): google-pack's gateway component serves them on
-#: `connectors: {google: pack}`. The names stay for the refusal on `native`
-#: and the namespace reservation (`_RETIRED_NATIVE_VERBS`).
+#: (clodia-platform#524): only google-pack's gateway component serves them
+#: (`_check_component`).
 _GOOGLE_NATIVE_NAMES: frozenset[str] = frozenset({
     "gdrive.list",
     "gdrive.search",
@@ -1681,43 +1648,18 @@ _GOOGLE_NATIVE_NAMES: frozenset[str] = frozenset({
     "gsheets.write_range",
 })
 
-_EMAIL_NATIVE_NAMES: frozenset[str] = _EMAIL_VERB_NAMES
-
-#: Verbs the gateway no longer implements but whose namespace it keeps
-#: reserved while the switch is on `native` (`manifest.core_namespaces`).
-_RETIRED_NATIVE_VERBS: frozenset[str] = (_EMAIL_VERB_NAMES | _GITHUB_NATIVE_NAMES
-                                         | _GOOGLE_NATIVE_NAMES) | frozenset({
-    "telegram.inbox", "telegram.lease_acquire", "telegram.poll", "telegram.send",
-    "telegram.send_file", "telegram.lease_release", "telegram.roster",
-    "telegram.status"})
-
 _GATEWAY_RETAINED_VERBS = frozenset({
     "telegram.listen", "telegram.unlisten", "telegram.join_link",
 })
 
 
 def _is_packaged_verb(name: str) -> bool:
-    """Questo verbo lo implementa un pack, non più il gateway.
-
-    Interrogato dal dispatch PRIMA del ramo nativo: senza, i Tool sparirebbero
-    dall'elenco ma il ramo `name.startswith("telegram.")` continuerebbe a
-    servirli, e l'interruttore spegnerebbe la vetrina lasciando acceso il
-    negozio.
-    """
+    """This verb is a pack's, not the gateway's (its namespace is a
+    pack-served connector's and it is not one the gateway retains)."""
     if name in _GATEWAY_RETAINED_VERBS:
         return False
     ns = name.split(NS_SEP_DOT, 1)[0] if NS_SEP_DOT in name else ""
     return bool(ns) and ns in _packaged_namespaces()
-
-
-def _migrated_away(tools: list[Tool]) -> list[Tool]:
-    """`tools` meno i verbi dei namespace passati a un pack."""
-    packaged = _packaged_namespaces()
-    if not packaged:
-        return list(tools)
-    return [t for t in tools
-            if t.name in _GATEWAY_RETAINED_VERBS
-            or t.name.split(NS_SEP_DOT, 1)[0] not in packaged]
 
 
 # memory.* — seed memory scrivibile dell'agente (universale, non richiede grant).
@@ -2154,20 +2096,9 @@ def _native_tool_namespaces() -> list[str]:
              + _copybrain.TOOLS + _NATIVE_CONSENT_TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
-    # The gateway-retained binding verbs do not keep a packaged namespace
-    # native: in `pack` position `telegram` belongs to the pack's backend.
-    # Unless the gateway retains the WHOLE namespace (`github`'s git verbs):
-    # dropping it here would make the gateway's own verbs ungrantable.
-    def _ns(name: str) -> str:
-        return name.split(NS_SEP_DOT, 1)[0]
-    not_retained = {_ns(t.name) for t in tools
-                    if t.name not in _GATEWAY_RETAINED_VERBS}
-    whole = {_ns(t.name) for t in tools} - not_retained
-    ns = sorted({_ns(t.name) for t in _migrated_away(tools)
-                 if t.name not in _GATEWAY_RETAINED_VERBS
-                 or not _is_packaged_namespace(t.name)
-                 or _ns(t.name) in whole})
-    return ns
+    # `telegram` is listed for the binding verbs the gateway retains there:
+    # without it they would be ungrantable.
+    return sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in tools})
 
 
 def _is_packaged_namespace(name: str) -> bool:
@@ -2200,11 +2131,10 @@ def runtime_configuration_warnings() -> list[str]:
                     "ma non esposto da tool nativi o backend MCP"
                 )
     from .tools import mail_switch as _mail_switch
-    if _mail_switch.in_pack():
-        try:
-            _mail_switch.service("diagnostics")
-        except _mail_switch.ComponentUnavailable as e:
-            warnings.append(f"email: {e}")
+    try:
+        _mail_switch.service("diagnostics")
+    except _mail_switch.ComponentUnavailable as e:
+        warnings.append(f"email: {e}")
     for row in _mail_switch.credential_diagnostics():
         if row["operational"]:
             continue
@@ -2228,18 +2158,14 @@ def runtime_configuration_warnings() -> list[str]:
             f"({', '.join(gap['missing'])}) — server MCP interessati: {servers}. "
             "Reinstallale con packs.install_pip (finiscono nel venv persistente)"
         )
-    # The native GitHub git verbs and image client are gone (#525): on
-    # `native` those features are simply not served, and the boot says so.
-    for cid, what in (("github", "i verbi git github.clone/pull/push/pull_request"),
-                      ("openai-images", "la generazione immagini"),
-                      ("mail", "i verbi email.*"),
-                      ("google", "i verbi gdrive/gcalendar/gdocs/gsheets"),
-                      ("telegram", "i verbi Telegram degli agenti")):
-        if instance_profile.connector_mode(cid) != "pack":
-            warnings.append(
-                f"connettore '{cid}' su `native`: {what} non hanno più "
-                f"un'implementazione nativa — servono `connectors: {{{cid}: pack}}` "
-                "nel profilo e il pack che lo serve")
+    # The `native|pack` switch is retired (#526): a profile still putting a
+    # connector on `native` is obeyed no more, and says so once.
+    retired = instance_profile.retired_connector_switch()
+    if retired:
+        warnings.append(
+            f"profile.yaml: `connectors:` puts {retired} on `native`, but the "
+            "switch is retired (clodia-platform#526): those connectors are "
+            "always served by their pack; the key is ignored and can be removed")
     return warnings
 
 
@@ -2779,13 +2705,7 @@ def _all_native_tools() -> list:
                   + _copybrain.TOOLS + _NATIVE_CONSENT_TOOLS)
     if instance_profile.rag_enabled():
         native += list(_EU_CORPUS_TOOLS + _RAG_TOOLS)
-    # I connettori passati a un pack (#522) escono dal CATALOGO dei verbi
-    # nativi, non solo dall'elenco che un agente vede: da qui discendono
-    # `all_native_verb_names()` e quindi i namespace che `core_namespaces()`
-    # riserva ai pack. Senza questa sottrazione il connettore del pack
-    # resterebbe rifiutato per collisione con il gateway che ha appena smesso
-    # di implementarlo.
-    return _migrated_away(native)
+    return native
 
 
 def _component_tools() -> list:
@@ -4553,18 +4473,17 @@ class _PackVerbRefused(PermissionError):
 
 
 def _check_pack_connector_held(name: str) -> None:
-    """In `pack` position, refuse a verb whose pack connector is not held.
+    """Refuse a pack verb whose pack connector is not held.
 
     If comms-pack's connector is refused (bad manifest, clash) while its
     backend stays mounted, the call would reach the pack without its declared
     context or egress mapping — e.g. a forged `agent` taking over another
     agent's lease. Fail closed (review of clodia-tools#374).
 
-    The verbs the gateway RETAINS in a packaged namespace are refused too
-    (#523). The gateway serves them, but in `pack` position the builtin
-    manifest is released and the mappings the PDP reads for them come from
-    the pack's connector: without it such a verb would be unmapped, i.e. a
-    call nobody checks."""
+    The verbs the gateway RETAINS in a pack's namespace are refused too
+    (#523). The gateway serves them, but the mappings the PDP reads for them
+    come from the pack's connector: without it such a verb would be
+    unmapped, i.e. a call nobody checks."""
     if not (_is_packaged_verb(name)
             or (name in _GATEWAY_RETAINED_VERBS and _is_packaged_namespace(name))):
         return
@@ -4607,11 +4526,10 @@ def _check_component(name: str) -> None:
     """Refuse a verb of a disabled gateway component, or one whose pack
     connector is not held right now (#558). Unknown state: refused too.
 
-    And a verb of a namespace moved to a pack that NOTHING serves — no
-    component verb, no mounted backend: the native code stepped aside, and
-    without this the call would end as «unknown tool» instead of saying that
-    the pack's implementation is missing (e.g. google-pack < 2.0.0 on
-    `google: pack`)."""
+    And a verb of a pack's namespace that NOTHING serves — no component
+    verb, no mounted backend: without this the call would end as «unknown
+    tool» instead of saying that the pack's implementation is missing (e.g.
+    google-pack < 2.0.0)."""
     try:
         from . import components as _components
         why = _components.refusal(name)
@@ -4627,48 +4545,25 @@ def _check_component(name: str) -> None:
             why = (f"'{name}' is implemented by a pack on this instance, but no "
                    "gateway component and no mounted backend of that pack serves "
                    "it (see GET /internal/components)")
-    if (not why and name in _GOOGLE_NATIVE_NAMES and _is_packaged_verb(name)
-            and _component_verb(name) is None):
-        why = (f"'{name}' is served on `google: pack` by google-pack's gateway "
-               "component, which is not serving it now (see GET /internal/components)")
-    if not why and name in _GOOGLE_NATIVE_NAMES and not _is_packaged_verb(name):
-        why = (f"'{name}' has no native implementation any more "
-               "(clodia-platform#524): it is served by google-pack's gateway "
-               "component with `connectors: {google: pack}` in the instance profile")
-    if (not why and name in _EMAIL_VERB_NAMES and _is_packaged_verb(name)
-            and _component_verb(name) is None):
-        # Only comms-pack's component serves mail (#523): a mounted backend
-        # exposing `email.*` is never a fallback.
-        why = (f"'{name}' is served on `mail: pack` by comms-pack's gateway "
-               "component, which is not serving it now (see GET /internal/components)")
-    if not why and name in _EMAIL_VERB_NAMES and not _is_packaged_verb(name):
-        why = (f"'{name}' has no native implementation any more "
-               "(clodia-platform#523): it is served by comms-pack's gateway "
-               "component with `connectors: {mail: pack}` in the instance profile")
-    if (not why and name.startswith("telegram.") and name not in _GATEWAY_RETAINED_VERBS
-            and _is_packaged_verb(name) and _component_verb(name) is None):
-        # Same rule as GitHub's: only comms-pack's component serves Telegram
-        # (#522); a mounted backend of that namespace is never a fallback.
-        why = (f"'{name}' is served on `telegram: pack` by comms-pack's gateway "
-               "component (comms-pack ≥ 2.2.0), which is not serving it now "
-               "(see GET /internal/components)")
-    if (not why and name.startswith("telegram.") and name not in _GATEWAY_RETAINED_VERBS
-            and not _is_packaged_verb(name)):
-        why = (f"'{name}' has no native implementation any more "
-               "(clodia-platform#522): it is served by comms-pack's gateway "
-               "component with `connectors: {telegram: pack}` in the instance profile")
-    if not why and name in _GITHUB_NATIVE_NAMES and not _is_packaged_verb(name):
-        why = (f"'{name}' has no native implementation any more "
-               "(clodia-platform#525): it is served by it-pack's gateway component "
-               "with `connectors: {github: pack}` in the instance profile")
-    if (not why and name in _GITHUB_NATIVE_NAMES and _is_packaged_verb(name)
-            and _component_verb(name) is None):
-        # The GitHub MCP backend shares the namespace, so `served` above is
-        # true for it: without this the git verb would be proxied to a backend
-        # that has no such tool (#525). Only it-pack's component serves it.
-        why = (f"'{name}' is served on `github: pack` by it-pack's gateway "
-               "component (it-pack ≥ 0.20.0), which is not serving it now "
-               "(see GET /internal/components)")
+    # Mail, Google, Telegram and the git verbs are served by their pack's
+    # gateway component and by nothing else: a mounted backend that shares
+    # the namespace (the GitHub MCP backend) or exposes the same names is
+    # never a fallback.
+    if not why and _component_verb(name) is None:
+        if name in _GOOGLE_NATIVE_NAMES:
+            why = (f"'{name}' is served by google-pack's gateway component, "
+                   "which is not serving it now (see GET /internal/components)")
+        elif name in _EMAIL_VERB_NAMES:
+            why = (f"'{name}' is served by comms-pack's gateway component, "
+                   "which is not serving it now (see GET /internal/components)")
+        elif name.startswith("telegram.") and name not in _GATEWAY_RETAINED_VERBS:
+            why = (f"'{name}' is served by comms-pack's gateway component "
+                   "(comms-pack ≥ 2.2.0), which is not serving it now "
+                   "(see GET /internal/components)")
+        elif name in _GITHUB_NATIVE_NAMES:
+            why = (f"'{name}' is served by it-pack's gateway component "
+                   "(it-pack ≥ 0.20.0), which is not serving it now "
+                   "(see GET /internal/components)")
     if why:
         raise _PackVerbRefused(why)
 

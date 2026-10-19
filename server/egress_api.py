@@ -160,7 +160,7 @@ async def _labels(uris: list) -> dict:
     import asyncio
     from .tools import google_switch
     try:
-        # Native module or google-pack's component, per the switch (#558).
+        # google-pack's component (#558); `{}` when it is not serving.
         return await asyncio.to_thread(google_switch.folder_labels, uris)
     except Exception:  # noqa: BLE001
         return {}
