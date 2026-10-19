@@ -340,7 +340,11 @@ def connectors_snapshot() -> list[dict]:
                           "error": "component_unavailable"}]
     mailbox_accounts = sorted(row["account"] for row in mailbox_rows if row["operational"])
     connectors.append({
-        "id": "mailboxes",
+        # The registry's id (comms-pack's `mail`), not the historical
+        # `mailboxes` (#526): the Tools page merges this row with the
+        # registry's card by id, and a different name drew the card twice.
+        # `mailboxes` stays a valid profile name (`CONNECTOR_ALIASES`).
+        "id": "mail",
         "label": "Email mailboxes",
         "provider": "email",
         "connected": bool(mailbox_accounts),
@@ -1287,7 +1291,7 @@ def _test_connector(cid: str) -> dict:
             # #558: the unified card is google-pack's component's.
             return google_switch.component_test_connection()
 
-        if cid == "mailboxes":
+        if cid in ("mail", "mailboxes"):
             from .tools import mail_switch
             # #558: the mailboxes card is comms-pack's component's.
             return mail_switch.component_test_mailboxes()

@@ -51,9 +51,9 @@ class IntegrationsListTest(unittest.TestCase):
         rows = self._run()["connectors"]
         by_id = {r["id"]: r for r in rows}
         self.assertIn("google", by_id)
-        self.assertIn("mailboxes", by_id)
+        self.assertIn("mail", by_id)
         self.assertTrue(by_id["google"]["connected"])
-        self.assertEqual(by_id["mailboxes"]["provider"], "email")
+        self.assertEqual(by_id["mail"]["provider"], "email")
         self.assertFalse(by_id["github"]["connected"])
 
     def test_projects_only_id_label_provider_connected(self):

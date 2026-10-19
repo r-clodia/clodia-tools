@@ -55,9 +55,9 @@ class ToolsEmailStatusTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(connectors["google"]["connected"])
         self.assertFalse(connectors["google"]["operational"])
         self.assertEqual(connectors["google"]["issues"][0]["account"], "broken")
-        self.assertTrue(connectors["mailboxes"]["connected"])
-        self.assertTrue(connectors["mailboxes"]["operational"])
-        self.assertEqual(connectors["mailboxes"]["accounts"], ["studio"])
+        self.assertTrue(connectors["mail"]["connected"])
+        self.assertTrue(connectors["mail"]["operational"])
+        self.assertEqual(connectors["mail"]["accounts"], ["studio"])
 
 
 if __name__ == "__main__":

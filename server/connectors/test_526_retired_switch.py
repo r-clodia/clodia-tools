@@ -197,8 +197,9 @@ class SnapshotTests(unittest.TestCase):
         return [c["id"] for c in tools_api.connectors_snapshot()]
 
     def test_acme_min_keeps_the_mailboxes_card_only(self):
+        # The registry's id, so the Tools page draws ONE card for it.
         self.assertEqual(set(self._ids(["mailboxes"])) - {"topic-storage"},
-                         {"mailboxes"})
+                         {"mail"})
 
     def test_an_empty_list_keeps_no_connector_card(self):
         self.assertEqual(set(self._ids([])) - {"topic-storage"}, set())

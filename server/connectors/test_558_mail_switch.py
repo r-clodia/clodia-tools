@@ -356,7 +356,7 @@ class FailClosedTests(_Istanza):
             self.assertEqual(actions._mailbox_options(), [])
             self.assertFalse(tools_api._test_connector("mailboxes")["ok"])
             card = [c for c in tools_api.connectors_snapshot()
-                    if c["id"] == "mailboxes"][0]
+                    if c["id"] == "mail"][0]
             self.assertEqual(card["accounts"], [])
             self.assertFalse(card["operational"])
             self.assertEqual(card["issues"][-1]["error"], "component_unavailable")

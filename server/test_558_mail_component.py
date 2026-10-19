@@ -754,13 +754,13 @@ class RouteTests(_OnComponent, unittest.TestCase):
             self.assertEqual(r.status_code, 503)
             self.assertIn("comms-pack", json.loads(r.body)["detail"])
         self.assertFalse(tools_api._test_connector("mailboxes")["ok"])
-        card = [c for c in tools_api.connectors_snapshot() if c["id"] == "mailboxes"][0]
+        card = [c for c in tools_api.connectors_snapshot() if c["id"] == "mail"][0]
         self.assertFalse(card["operational"])
         self.assertEqual(card["issues"][-1]["error"], "component_unavailable")
 
     def test_the_tools_card_test_is_the_components(self):
         from . import tools_api
-        self.assertEqual(tools_api._test_connector("mailboxes"),
+        self.assertEqual(tools_api._test_connector("mail"),
                          {"ok": None, "detail": "nessuna casella configurata"})
 
 
