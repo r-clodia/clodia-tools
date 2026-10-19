@@ -350,11 +350,22 @@ def room_sender_rules(scope: str | None) -> list[str]:
 
 
 def room_declares_sender(address: str, scope: str | None) -> bool:
-    """Is `address` declared by the room's own `mailfrom:` entries (#576)?
-    No room, no address or no entry → False: nothing is delivered."""
-    addr = address_of(address or "") or (address or "").strip()
-    if not (scope and addr and "@" in addr):
+    """Is the sender `address` — a raw `From:` header or a bare address —
+    declared by the room's own `mailfrom:` entries (#576)?
+
+    Exactly ONE address must parse out of the header, read as it was sent:
+    no address, two addresses, or a header whose display name decodes into
+    an address (`=?utf-8?b?…?= <evil@x.it>`) never fall back to the raw text
+    (review of clodia-tools#411). No room or no entry → False."""
+    from email.utils import getaddresses
+    if not scope:
         return False
+    found = [a.strip().lower() for _n, a in getaddresses([str(address or "")])
+             if a and a.strip()]
+    if len(found) != 1 or found[0].count("@") != 1 or any(
+            c in found[0] for c in " <>,;\"\t\r\n"):
+        return False
+    addr = found[0]
     return any(_matches(f"mailfrom:{addr}", r) for r in room_sender_rules(scope))
 
 

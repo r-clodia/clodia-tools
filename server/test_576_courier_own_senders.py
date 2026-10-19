@@ -59,6 +59,26 @@ class RoomDeclaresSenderTests(unittest.TestCase):
         self.assertFalse(self._ask(_cfg(own=["mailfrom:mario@foo.bar"]), "mario@foo.bar",
                                    scope=None))
 
+    def test_no_parsable_address_never_falls_back_to_the_raw_text(self):
+        """Review of #411 (B1): an unparsable header compared as raw text
+        matched `mailfrom:*@declared.it`."""
+        cfg = _cfg(own=["mailfrom:*@declared.it"])
+        for header in ("evil@x.it <@declared.it", "", "nessuno", "<>"):
+            with self.subTest(header=header):
+                self.assertFalse(self._ask(cfg, header))
+
+    def test_an_encoded_display_name_is_not_an_address(self):
+        """B2: the header as SENT — its encoded display name decodes into a
+        declared address, the real address is the attacker's."""
+        cfg = _cfg(own=["mailfrom:ok@declared.it"])
+        self.assertFalse(self._ask(cfg, "=?utf-8?b?PG9rQGRlY2xhcmVkLml0Piw=?= <evil@x.it>"))
+        self.assertTrue(self._ask(cfg, "=?utf-8?b?T2s=?= <ok@declared.it>"))
+
+    def test_two_addresses_are_refused(self):
+        cfg = _cfg(own=["mailfrom:ok@declared.it"])
+        self.assertFalse(self._ask(cfg, "<ok@declared.it>, <evil@x.it>"))
+        self.assertFalse(self._ask(cfg, "ok@declared.it, evil@x.it"))
+
     def test_a_wildcard_entry_works_like_elsewhere(self):
         cfg = _cfg(own=["mailfrom:*@foo.bar"])
         self.assertTrue(self._ask(cfg, "anyone@foo.bar"))
