@@ -125,5 +125,21 @@ class ChannelDeliverTests(unittest.TestCase):
         self.assertIn("account", out)
 
 
+    def test_a_failed_file_after_the_text_names_the_partial_delivery(self):
+        env = _Env(self, egress_scope=("tg:-100123",))
+        real = M._component_verb
+
+        def _verb(n):
+            v = real(n)
+            if n == "telegram.send_file":
+                return NS(**{**vars(v), "handler": lambda a: {"error": "file troppo grande"}})
+            return v
+        with patch.object(M, "_component_verb", _verb):
+            out = env.call("channel.deliver", {"destination": "tg:-100123", "text": "ciao",
+                                               "attachments": ["files/a.png"]})
+        self.assertTrue(out.startswith("ERROR"), out)
+        self.assertIn("file troppo grande", out)
+        self.assertIn("già consegnato: telegram.send", out)
+
 if __name__ == "__main__":
     unittest.main()

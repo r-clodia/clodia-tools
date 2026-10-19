@@ -1518,8 +1518,8 @@ _EGRESS_ADMIN_TOOLS: list[Tool] = [
 #: The topic's outbound verb (clodia-platform#531): what the messaggero agent
 #: did, now a verb any agent of the room may hold. It runs the destination's own
 #: verb (`email.send`, `telegram.send`, `telegram.send_file`) through the same
-#: `call_tool` path — origin chain, egress PDP, gates (the in-channel admin
-#: approval of outbound mail included), taint, audit — with the caller's grant
+#: `call_tool` path — origin chain, egress PDP, gates, taint, audit — with the
+#: caller's grant
 #: on `channel.deliver` standing in for a grant on that verb only.
 _CHANNEL_TOOLS: list[Tool] = [
     Tool(name="channel.deliver",
@@ -1935,14 +1935,25 @@ async def _dispatch_channel_deliver(a: dict) -> dict:
         finally:
             _DELIVER_VIA.reset(tok)
         testo = out[0].text if out else ""
-        if testo.startswith("DENIED"):
-            raise PermissionError(testo[len("DENIED:"):].strip() or testo)
-        if testo.startswith("ERROR"):
-            raise ValueError(testo[len("ERROR:"):].strip() or testo)
         try:
-            risultati.append({"via": verb, "result": json.loads(testo)})
+            parsed = json.loads(testo)
         except ValueError:
-            risultati.append({"via": verb, "result": testo})
+            parsed = testo
+        # Anything that is not a plain success stops the delivery: a refusal
+        # word (DENIED, ERROR, CONFLICT, …) or a JSON `{"error": …}`. What
+        # already went out is named, so a partial delivery is never silent.
+        head = testo.split(":", 1)[0].strip()
+        failed = (head.isupper() and head.isalpha() and len(head) <= 16) \
+            or (isinstance(parsed, dict) and parsed.get("error"))
+        if failed:
+            gia = ", ".join(r["via"] for r in risultati)
+            nota = f" (già consegnato: {gia})" if gia else ""
+            msg = (testo[len(head) + 1:].strip() if not isinstance(parsed, dict)
+                   else str(parsed.get("error"))) or testo
+            if head == "DENIED":
+                raise PermissionError(f"{verb}: {msg}{nota}")
+            raise ValueError(f"{verb}: {msg}{nota}")
+        risultati.append({"via": verb, "result": parsed})
     return {"ok": True, "destination": destinazione, "deliveries": risultati}
 
 
