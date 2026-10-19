@@ -1515,6 +1515,34 @@ _EGRESS_ADMIN_TOOLS: list[Tool] = [
 #: the join-by-link tokens (#549). The agent verbs (`inbox`, `send`, `poll`,
 #: `roster`, …) are comms-pack's gateway component's; their native
 #: implementation is gone (clodia-platform#522).
+#: The topic's outbound verb (clodia-platform#531): what the messaggero agent
+#: did, now a verb any agent of the room may hold. It runs the destination's own
+#: verb (`email.send`, `telegram.send`, `telegram.send_file`) through the same
+#: `call_tool` path — origin chain, egress PDP, gates, taint, audit — with the
+#: caller's grant
+#: on `channel.deliver` standing in for a grant on that verb only.
+_CHANNEL_TOOLS: list[Tool] = [
+    Tool(name="channel.deliver",
+         description=("Consegna un messaggio FUORI dal topic, a una destinazione già "
+                      "dichiarata nelle uscite della stanza: `mailto:<indirizzo>` (o "
+                      "l'indirizzo nudo) per la posta, `tg:<chat_id>` per Telegram. Il "
+                      "testo parte com'è scritto; gli allegati sono file del topic "
+                      "(`attachments: [\"files/x.pdf\"]`). Valgono le stesse regole "
+                      "dell'invio diretto: destinazioni non dichiarate negate, "
+                      "approvazione dove serve. Per la posta la casella mittente è "
+                      "quella della stanza (`account` se ce n'è più d'una)."),
+         inputSchema={"type": "object", "properties": {
+             "destination": {"type": "string", "description": "mailto:x@y.it | x@y.it | tg:<chat_id>"},
+             "text": {"type": "string"},
+             "subject": {"type": "string", "description": "solo posta; default: il titolo del topic"},
+             "attachments": {"type": "array", "items": {"type": "string"},
+                             "description": "file del topic, es. files/offerta.pdf"},
+             "account": {"type": "string", "description": "solo posta, se la stanza ha più caselle"},
+             "thread_id": {"type": "integer", "description": "solo Telegram: thread del forum"}},
+             "required": ["destination", "text"]}),
+]
+
+
 _TELEGRAM_TOOLS: list[Tool] = [
     Tool(name="telegram.listen",
          description=("Collega una chat Telegram a un topic: da ora il messaggero ne "
@@ -1865,6 +1893,91 @@ def _dispatch_egress_admin(name: str, a: dict):
     raise ValueError(f"unknown {ns} verb: {name}")
 
 
+async def _dispatch_channel_deliver(a: dict) -> dict:
+    """`channel.deliver` (#531): the destination's own verb, run through
+    `call_tool` with every check, the caller's grant on this verb standing in
+    for a grant on that one verb only."""
+    tier, tname = _current_topic()
+    if not tier:
+        raise ValueError("channel.deliver consegna DA un topic: questa chiamata "
+                         "non arriva da un canale")
+    destinazione = str(a.get("destination") or "").strip()
+    text = str(a.get("text") or "")
+    if not text.strip():
+        raise ValueError("'text' non può essere vuoto")
+    allegati = [str(x) for x in (a.get("attachments") or []) if str(x).strip()]
+    if destinazione.lower().startswith("tg:"):
+        chat = destinazione[3:].strip()
+        calls = [("telegram.send", {"chat_id": chat, "text": text,
+                                    **({"thread_id": a["thread_id"]} if a.get("thread_id") else {})})]
+        calls += [("telegram.send_file", {"chat_id": chat, "path": p, "tier": tier,
+                                          "name": tname,
+                                          **({"thread_id": a["thread_id"]} if a.get("thread_id") else {})})
+                  for p in allegati]
+    else:
+        addr = destinazione[len("mailto:"):] if destinazione.lower().startswith("mailto:") else destinazione
+        addr = addr.strip()
+        if "@" not in addr:
+            raise ValueError(f"destinazione '{destinazione}' non riconosciuta: usa "
+                             "mailto:<indirizzo> oppure tg:<chat_id>")
+        account = str(a.get("account") or "").strip() or _room_outbox_account(tier, tname)
+        meta = (_topics().open(tier, tname) or {}).get("meta") or {}
+        args = {"to": addr, "subject": str(a.get("subject") or meta.get("title") or tname),
+                "body": text, "account": account}
+        if allegati:
+            args.update({"topic_files": allegati, "tier": tier, "name": tname})
+        calls = [("email.send", args)]
+    risultati = []
+    for verb, args in calls:
+        tok = _DELIVER_VIA.set(frozenset({verb}))
+        try:
+            out = await call_tool(verb, args)
+        finally:
+            _DELIVER_VIA.reset(tok)
+        testo = out[0].text if out else ""
+        try:
+            parsed = json.loads(testo)
+        except ValueError:
+            parsed = testo
+        # Anything that is not a plain success stops the delivery: a refusal
+        # word (DENIED, ERROR, CONFLICT, …) or a JSON `{"error": …}`. What
+        # already went out is named, so a partial delivery is never silent.
+        head = testo.split(":", 1)[0].strip()
+        failed = (head.isupper() and head.isalpha() and len(head) <= 16) \
+            or (isinstance(parsed, dict) and parsed.get("error"))
+        if failed:
+            gia = ", ".join(r["via"] for r in risultati)
+            nota = f" (già consegnato: {gia})" if gia else ""
+            msg = (testo[len(head) + 1:].strip() if not isinstance(parsed, dict)
+                   else str(parsed.get("error"))) or testo
+            if head == "DENIED":
+                raise PermissionError(f"{verb}: {msg}{nota}")
+            raise ValueError(f"{verb}: {msg}{nota}")
+        risultati.append({"via": verb, "result": parsed})
+    return {"ok": True, "destination": destinazione, "deliveries": risultati}
+
+
+def _room_outbox_account(tier: str, tname: str) -> str:
+    """The mailbox the room sends from: the one of its OWN `outbox:` entries
+    that the instance has. None or several → ask for `account`."""
+    from . import egress as _eg
+    from .tools import mail_switch
+    boxes = {str(r.get("email") or "").strip().lower(): str(r.get("account") or "")
+             for r in mail_switch.system_mailboxes()}
+    own = [boxes[u[len("outbox:"):].strip().lower()]
+           for u in _eg.scope_uris("egress", f"{tier}/{tname}")
+           if str(u).startswith("outbox:") and u[len("outbox:"):].strip().lower() in boxes]
+    own = sorted(set(own))
+    if len(own) == 1:
+        return own[0]
+    if not own:
+        raise ValueError(f"il topic {tier}/{tname} non ha una casella in uscita "
+                         "(voce outbox: della stanza): chiedi all'owner di "
+                         "autorizzarne una, o passa 'account'")
+    raise ValueError(f"il topic {tier}/{tname} ha più caselle in uscita ({', '.join(own)}): "
+                     "indica quale con 'account'")
+
+
 def _telegram_bot_username() -> str:
     """The bot's @username: as stored with its credential, else as
     comms-pack's component knows it (`telegram_status`, which asks `getMe`
@@ -2035,7 +2148,7 @@ def _native_tool_namespaces() -> list[str]:
     soppiatto: clodia-platform#140.
     """
     tools = (_FS_TOOLS + _WEB_TOOLS + _DATASTORE_TOOLS + _LOGS_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
-             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS
+             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _CHANNEL_TOOLS + _MEMORY_TOOLS
              + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS
              + _PACKS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS
              + _copybrain.TOOLS + _NATIVE_CONSENT_TOOLS)
@@ -2660,7 +2773,7 @@ def _all_native_tools() -> list:
     """
     native = list(_FS_TOOLS + _WEB_TOOLS + _DATASTORE_TOOLS + _LOGS_TOOLS
                   + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS
-                  + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _MEMORY_TOOLS
+                  + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _CHANNEL_TOOLS + _MEMORY_TOOLS
                   + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS + _PACKS_TOOLS
                   + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS
                   + _copybrain.TOOLS + _NATIVE_CONSENT_TOOLS)
@@ -4020,6 +4133,11 @@ def _gate_effect_reason(name: str, arguments: dict) -> str:
 # are content (#425 §1.6, minimisation).
 import contextvars as _contextvars
 
+#: The verbs `channel.deliver` is running right now on the caller's behalf
+#: (#531): the per-agent whitelist admits exactly these, for this call only.
+_DELIVER_VIA: "_contextvars.ContextVar[frozenset]" = _contextvars.ContextVar(
+    "clodia_deliver_via", default=frozenset())
+
 _AUDIT_PARENT: "_contextvars.ContextVar[str | None]" = _contextvars.ContextVar(
     "audit_parent_span", default=None)
 #: Per call: what crossed the perimeter (hash + size of each file that left)
@@ -4667,7 +4785,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                     f"tool '{name}' fuori dal token di '{current_principal()}': "
                     f"questo token concede {sorted(current_scoped_tools())}. "
                     f"Il ruolo non c'entra — è il token a essere ristretto.")
-        elif not _is_super(_ag) and not _agent_tool_reachable(name, _ag):
+        elif not _is_super(_ag) and not _agent_tool_reachable(name, _ag) \
+                and name not in _DELIVER_VIA.get():
             raise PermissionError(
                 f"tool '{name}' non in whitelist per agent '{_ag}'")
         # DENY PER-AGENTE (#104 §8). Prima di tutto il resto: è una sottrazione
@@ -5113,6 +5232,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             _entry = _datastore_authorize(str(arguments.get("datastore") or ""), write=True)
             result = await asyncio.to_thread(
                 datastore_sql.write, _entry, arguments, agent=_ag or "")
+        elif name == "channel.deliver":
+            result = await _dispatch_channel_deliver(arguments)
         elif name == "web.post":
             result = await asyncio.to_thread(web_post.post, arguments, agent=_ag or "")
         elif name == "logs.tail":
