@@ -1312,7 +1312,24 @@ async def test_connector(request: Request):
     if r["ok"] is None and cid in {b.get("name") for b in (whitelist.CONFIG.get("mcp_backends") or [])}:
         # non è uno dei provider nativi sopra: prova come backend MCP montato
         r = await proxy.test_backend(cid)
+        tools = r.pop("tools", None)
+        if r.get("ok") and tools is not None:
+            r = {**r, "verbs": _backend_verbs(tools)}
     return JSONResponse(r)
+
+
+def _backend_verbs(tools: list[dict]) -> list[dict]:
+    """The backend's tools as verbs, each with the gateway's own answer to
+    «can it be reached at all» (#575): enabled ones first, by name."""
+    from . import main as _main
+    out = []
+    for t in tools:
+        why = _main.proxied_verb_refusal(t["name"])
+        row = {"name": t["name"], "description": t["description"], "enabled": not why}
+        if why:
+            row["reason"] = why[:300]
+        out.append(row)
+    return sorted(out, key=lambda v: (not v["enabled"], v["name"]))
 
 
 routes = [

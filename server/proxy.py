@@ -308,10 +308,16 @@ def is_proxied(name: str) -> bool:
 TEST_TIMEOUT_S = 15
 
 
+#: Cap on a tool description returned by the backend test (#575): it is a
+#: third party's text, shown to the owner as plain text, never a payload.
+TEST_DESCRIPTION_MAX = 300
+
+
 async def test_backend(name: str) -> dict:
     """Verifica REALE di un backend MCP montato: apre una sessione (i secret
     ${VAULT:cred} sono risolti qui, come per ogni chiamata proxied) e lista i
-    tool esposti. Mai il segreto nel risultato — solo ok/detail."""
+    tool esposti. Mai il segreto nel risultato — solo ok/detail, e i NOMI dei
+    tool con la loro descrizione (`tools`, #575): nessuno schema di input."""
     b = _backends().get(name)
     if b is None:
         return {"ok": None, "detail": "backend non montato"}
@@ -320,7 +326,10 @@ async def test_backend(name: str) -> dict:
             async with _session(b) as s:
                 return await s.list_tools()
         res = await asyncio.wait_for(_probe(), timeout=TEST_TIMEOUT_S)
-        return {"ok": True, "detail": f"{len(res.tools)} tool esposti"}
+        tools = [{"name": f"{name}{NS_SEP}{t.name}",
+                  "description": str(t.description or "")[:TEST_DESCRIPTION_MAX]}
+                 for t in res.tools]
+        return {"ok": True, "detail": f"{len(res.tools)} tool esposti", "tools": tools}
     except TimeoutError:
         return {"ok": False, "detail": f"nessuna risposta entro {TEST_TIMEOUT_S}s"}
     except Exception as e:  # noqa: BLE001 — qualunque guasto del backend è un esito, non un crash della API
