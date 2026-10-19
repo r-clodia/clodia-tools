@@ -340,6 +340,35 @@ def is_vetted_source(uri: str, scope: str | None = None) -> bool:
     return any(_matches(uri, r) for r in ingress_rules(scope))
 
 
+def room_sender_rules(scope: str | None) -> list[str]:
+    """The `mailfrom:` entries of the room `scope` ITSELF (#576): what the mail
+    courier delivers there. Global entries and participants are left out on
+    purpose — the same mailbox feeds many rooms, and an instance-wide sender
+    would fan its mail out to all of them."""
+    return [u for u in scope_uris("ingress", scope)
+            if str(u).strip().lower().startswith("mailfrom:")]
+
+
+def room_declares_sender(address: str, scope: str | None) -> bool:
+    """Is the sender `address` — a raw `From:` header or a bare address —
+    declared by the room's own `mailfrom:` entries (#576)?
+
+    Exactly ONE address must parse out of the header, read as it was sent:
+    no address, two addresses, or a header whose display name decodes into
+    an address (`=?utf-8?b?…?= <evil@x.it>`) never fall back to the raw text
+    (review of clodia-tools#411). No room or no entry → False."""
+    from email.utils import getaddresses
+    if not scope:
+        return False
+    found = [a.strip().lower() for _n, a in getaddresses([str(address or "")])
+             if a and a.strip()]
+    if len(found) != 1 or found[0].count("@") != 1 or any(
+            c in found[0] for c in " <>,;\"\t\r\n"):
+        return False
+    addr = found[0]
+    return any(_matches(f"mailfrom:{addr}", r) for r in room_sender_rules(scope))
+
+
 def perimeter_addresses(scope: str | None = None) -> set[str]:
     """Recapiti email di chi appartiene allo scope: owner e partecipanti.
 

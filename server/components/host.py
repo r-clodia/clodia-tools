@@ -295,6 +295,15 @@ class Perimeter:
         scope = egress._scope_of_call()
         return scope if scope and egress.ingress_strict(scope) else None
 
+    def room_declares_sender(self, header: str) -> bool:
+        """Is the sender `header` (`Nome <a@b.it>` or `a@b.it`) declared by the
+        CURRENT room's own `mailfrom:` entries (#576)? The room comes from the
+        signed claim, never an argument; outside a room → False. What the mail
+        courier delivers into a topic: global entries and participants do not
+        count."""
+        from .. import egress
+        return bool(egress.room_declares_sender(header or "", egress._scope_of_call()))
+
     def address_of(self, header: str) -> str:
         """The address of a `From:`-like header (`Nome <a@b.it>` → `a@b.it`),
         "" when it does not parse: the PDP's own parser."""
