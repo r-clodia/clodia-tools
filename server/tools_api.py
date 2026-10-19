@@ -1314,7 +1314,8 @@ async def test_connector(request: Request):
         r = await proxy.test_backend(cid)
         tools = r.pop("tools", None)
         if r.get("ok") and tools is not None:
-            r = {**r, "verbs": _backend_verbs(tools)}
+            # Off the event loop: the checks read manifests and mounts.
+            r = {**r, "verbs": await asyncio.to_thread(_backend_verbs, tools)}
     return JSONResponse(r)
 
 
@@ -1322,8 +1323,11 @@ def _backend_verbs(tools: list[dict]) -> list[dict]:
     """The backend's tools as verbs, each with the gateway's own answer to
     «can it be reached at all» (#575): enabled ones first, by name."""
     from . import main as _main
-    out = []
+    out, seen = [], set()
     for t in tools:
+        if t["name"] in seen:  # a backend listing a name twice: once is enough
+            continue
+        seen.add(t["name"])
         why = _main.proxied_verb_refusal(t["name"])
         row = {"name": t["name"], "description": t["description"], "enabled": not why}
         if why:

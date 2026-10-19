@@ -4578,6 +4578,14 @@ def proxied_verb_refusal(name: str) -> str:
     if _component_verb(name) is not None or name in _GATEWAY_RETAINED_VERBS:
         return ("a gateway verb of the same name is served instead: this "
                 "backend's tool is never reached")
+    # A backend named after a native namespace (`jobs`, `memory`, …): the
+    # dispatch takes the native branch by prefix, so nothing of it is reached
+    # (review of #410). A pack's namespace is not native: its rules follow.
+    ns = name.split(NS_SEP_DOT, 1)[0]
+    if ns in {t.name.split(NS_SEP_DOT, 1)[0] for t in _all_native_tools()} \
+            and not _is_packaged_namespace(name):
+        return (f"'{ns}' is a namespace of the gateway's own verbs: this "
+                "backend's tool is never reached")
     try:
         _check_not_transport(name)
         _check_pack_connector_held(name)

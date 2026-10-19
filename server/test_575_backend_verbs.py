@@ -90,6 +90,10 @@ class BackendVerbsTests(unittest.TestCase):
         self.assertNotIn("inputSchema", blob)
         self.assertEqual(set(r["verbs"][0]), {"name", "description", "enabled"})
 
+    def test_a_name_listed_twice_appears_once(self):
+        r = self._run([_T("a", "first"), _T("a", "second")])
+        self.assertEqual([v["name"] for v in r["verbs"]], ["buffer.a"])
+
     def test_a_long_description_is_capped(self):
         r = self._run([_T("a", "x" * 5000)])
         self.assertEqual(len(r["verbs"][0]["description"]), proxy.TEST_DESCRIPTION_MAX)
@@ -121,6 +125,16 @@ class RefusalIsTheCallPathsTests(unittest.TestCase):
     def test_a_name_served_by_a_component_shadows_the_backend(self):
         with patch.object(main, "_component_verb", lambda n: object()):
             self.assertIn("never reached", main.proxied_verb_refusal("x.y"))
+
+    def test_a_gateway_retained_verb_shadows_the_backend(self):
+        name = next(iter(main._GATEWAY_RETAINED_VERBS))
+        with patch.object(main, "_component_verb", lambda n: None):
+            self.assertIn("never reached", main.proxied_verb_refusal(name))
+
+    def test_a_backend_named_after_a_native_namespace_is_not_reached(self):
+        with patch.object(main, "_component_verb", lambda n: None):
+            why = main.proxied_verb_refusal("jobs.something_else")
+        self.assertIn("namespace of the gateway's own verbs", why)
 
     def test_an_ordinary_tool_is_enabled(self):
         with patch.object(main, "_component_verb", lambda n: None), \
