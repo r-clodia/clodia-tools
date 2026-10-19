@@ -107,6 +107,18 @@ RELEASED_NAMESPACES: dict[str, str] = {
 }
 
 
+#: The address schemes of the pack-served connectors (#526, review of #409):
+#: as much theirs as the namespace. A foreign pack declaring `mailto` or `tg`
+#: under a namespace of its own would otherwise, installed first, knock the
+#: first-party connector out in the scheme clash and set that scheme's
+#: canonicalisation and warnings.
+RELEASED_SCHEMES: dict[str, tuple[str, ...]] = {
+    "mail": ("mailto", "mailfrom", "inbox", "outbox"),
+    "telegram": ("tg",),
+    "google": ("gdrive", "gsheets", "gcal"),
+}
+
+
 #: The vault entry the gateway's own declaration gave a connector, which its
 #: pack adopts as is (#568): the credential that pack's backend may read even
 #: before its connector is held. Mail and Google have none: their credentials
@@ -214,14 +226,18 @@ def released_vault_entries(pack: str) -> set[str]:
 
 
 def expected_claims() -> dict[str, str]:
-    """`{connector id or "ns:"+namespace: pack}` for every connector of
-    `RELEASED_TO`: the only pack that may declare it.
+    """`{connector id, "ns:"+namespace or "sch:"+scheme: pack}` for every
+    connector of `RELEASED_TO`: the only pack that may declare it.
 
-    Both keys, because a foreign pack could claim the vocabulary under another
-    connector id but the same namespace."""
+    Three keys, because a foreign pack could claim the vocabulary under another
+    connector id but the same namespace, or the same addresses (`mailto:`)
+    under a namespace of its own."""
     out: dict[str, str] = dict(RELEASED_TO)
     for cid, ns in RELEASED_NAMESPACES.items():
         out["ns:" + ns] = RELEASED_TO[cid]
+    for cid, schemes in RELEASED_SCHEMES.items():
+        for sch in schemes:
+            out["sch:" + sch] = RELEASED_TO[cid]
     return out
 
 

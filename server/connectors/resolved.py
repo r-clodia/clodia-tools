@@ -409,6 +409,15 @@ def _strip_foreign_claims(installed: dict) -> tuple[dict, list[str]]:
             if isinstance(e, Mapping):
                 atteso = claims.get(str(e.get("id") or "")) or \
                     claims.get("ns:" + str(e.get("namespace") or ""))
+                if not atteso:
+                    # Or the addresses: a first-party scheme under a namespace
+                    # of the intruder's own (review of #409).
+                    for s in e.get("schemes") or []:
+                        nome = str((s or {}).get("scheme") or "") \
+                            if isinstance(s, Mapping) else ""
+                        if claims.get("sch:" + nome, pack) != pack:
+                            atteso = claims["sch:" + nome]
+                            break
                 if atteso and atteso != pack:
                     refused.append(
                         f"pack '{pack}', connector '{e.get('id')}': that "

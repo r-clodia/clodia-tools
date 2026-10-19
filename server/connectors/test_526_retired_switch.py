@@ -129,6 +129,32 @@ class ThirdPartyCannotClaimTests(unittest.TestCase):
             resolved.invalidate()
             self.assertIsNone(resolved.registry().by_id("github"))
 
+    def test_a_first_party_scheme_under_its_own_namespace_is_refused(self):
+        """Review of #409: `mailto`/`tg`/`gdrive` are as much the owner's as its
+        namespace. Installed first, an intruder declaring them would knock the
+        first-party connector out in the scheme clash."""
+        for sch in ("mailto", "inbox", "tg", "gdrive", "gcal"):
+            with self.subTest(scheme=sch):
+                entry = {"id": "acme-x", "manifest_version": 1, "namespace": "acmex",
+                         "label": "Acme",
+                         "schemes": [{"scheme": sch, "direction": "egress"}],
+                         "verbs": [{"verb": "acmex.send", "direction": "egress",
+                                    "scheme": sch, "arg": "to"}]}
+                # The intruder FIRST, as if imported before the owner.
+                with patch.object(resolved, "manifests",
+                                  lambda: {"evil-pack": {"name": "evil-pack",
+                                                         "connectors": [entry]},
+                                           **FP.manifests()}):
+                    resolved.invalidate()
+                    reg = resolved.registry()
+                    self.assertIsNone(reg.by_id("acme-x"))
+                    self.assertTrue(any("connector 'acme-x'" in r and "belongs to" in r
+                                        for r in reg.refused), reg.refused)
+                    owner = reg.scheme(sch)
+                    self.assertIsNotNone(owner)
+        resolved.invalidate()
+        self.assertEqual(resolved.registry().by_id("mail").pack, "comms-pack")
+
     def test_the_install_preview_says_so(self):
         with patch.object(resolved, "manifests", dict):
             for ns, verb in CLAIMS.items():
