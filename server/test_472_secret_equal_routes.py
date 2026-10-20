@@ -20,6 +20,17 @@ def _req(value: bytes) -> Request:
                     "headers": [(b"x-orchestrator-secret", value)], "query_string": b""})
 
 
+class UiTokenTests(unittest.TestCase):
+    def test_the_ui_token_is_compared_as_bytes(self):
+        from . import tools_api
+        self.assertTrue(tools_api._bearer_is("Bearer s3cret", "s3cret"))
+        self.assertTrue(tools_api._bearer_is("bearer s3cret ", "s3cret"))
+        self.assertFalse(tools_api._bearer_is("Bearer s3cre", "s3cret"))
+        self.assertFalse(tools_api._bearer_is("Bearer sè3cret", "s3cret"))
+        self.assertFalse(tools_api._bearer_is("s3cret", "s3cret"))
+        self.assertFalse(tools_api._bearer_is("Bearer ", ""))
+
+
 class InternalSecretTests(unittest.TestCase):
     def test_a_non_ascii_secret_is_refused_not_a_crash(self):
         for mod in ROUTES:
@@ -50,8 +61,19 @@ class InternalSecretTests(unittest.TestCase):
             if path.name.startswith("test_") or path.parts[-2:] == ("audit", "trace.py"):
                 continue
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                if isinstance(node, ast.Attribute) and node.attr == "compare_digest":
+                if (isinstance(node, ast.Attribute) and node.attr == "compare_digest") or (
+                        isinstance(node, ast.Name) and node.id == "compare_digest") or (
+                        isinstance(node, ast.ImportFrom) and any(
+                            a.name == "compare_digest" for a in node.names)):
                     offenders.append(str(path.relative_to(root)))
+                # A bearer secret compared with ==/!= (timing leak, #472 review).
+                if isinstance(node, ast.Compare) and any(
+                        isinstance(op, (ast.Eq, ast.NotEq)) for op in node.ops):
+                    for side in [node.left, *node.comparators]:
+                        if isinstance(side, ast.JoinedStr) and any(
+                                isinstance(v, ast.Constant) and "Bearer " in str(v.value)
+                                for v in side.values):
+                            offenders.append(f"{path.relative_to(root)}:{node.lineno}")
         self.assertEqual(offenders, [], "use audit.trace.secret_equal")
 
 

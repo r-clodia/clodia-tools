@@ -54,7 +54,7 @@ def _audit_route(request: Request, spec, status: int) -> None:
         from . import tools_api
         principal = ""
         hdr = request.headers.get("authorization", "")
-        if tools_api._UI_TOKEN and hdr == f"Bearer {tools_api._UI_TOKEN}":
+        if tools_api._UI_TOKEN and tools_api._bearer_is(hdr, tools_api._UI_TOKEN):
             principal = "trusted-core"
         elif hdr.lower().startswith("bearer "):
             try:

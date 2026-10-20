@@ -77,6 +77,14 @@ def _replace_placeholder(obj, name: str, repl: str):
 
 _UI_TOKEN = os.environ.get("CLODIA_TOOLS_UI_TOKEN")
 
+
+def _bearer_is(header: str, token: str) -> bool:
+    """`Authorization: Bearer <token>`, compared in constant time and as bytes
+    (#472): `==` leaked the matching prefix through timing."""
+    from .audit.trace import secret_equal
+    h = (header or "").strip()
+    return h[:7].lower() == "bearer " and secret_equal(h[7:].strip(), token)
+
 _ADMIN_ROLES = ("superadmin", "admin")
 
 
@@ -130,7 +138,7 @@ def _authorized(request: Request) -> bool:
     primo è un'ampiezza di verbi, il secondo è una responsabilità.
     """
     hdr = request.headers.get("authorization", "")
-    if _UI_TOKEN and hdr == f"Bearer {_UI_TOKEN}":
+    if _UI_TOKEN and _bearer_is(hdr, _UI_TOKEN):
         return True  # trusted-core (chiamanti interni/headless)
     token = hdr[7:] if hdr.lower().startswith("bearer ") else ""
     if not token:
@@ -160,7 +168,7 @@ def _authorized_owner(request: Request) -> bool:
     che un agente non può impersonare perché non ha il token).
     """
     hdr = request.headers.get("authorization", "")
-    if _UI_TOKEN and hdr == f"Bearer {_UI_TOKEN}":
+    if _UI_TOKEN and _bearer_is(hdr, _UI_TOKEN):
         return True
     token = hdr[7:] if hdr.lower().startswith("bearer ") else ""
     if not token:
