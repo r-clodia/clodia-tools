@@ -183,6 +183,38 @@ def runtime_env(base: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+#: The gateway variables a pack's MCP server process may see (#540). An
+#: allowlist, never a list of what to remove: a list of exclusions forgets the
+#: next secret someone adds to the gateway's environment. Locale, certificates
+#: and proxies are how a process talks to the world; `CLODIA_DATA` is where
+#: first-party servers find their own data (e.g. contabilita, leads). What a
+#: backend needs beyond these it declares in its own `env` (vault references
+#: included), where the admin who mounts it sees it.
+MCP_ENV_PASSTHROUGH = frozenset({
+    "PATH", "HOME", "LANG", "LANGUAGE", "TZ", "TMPDIR",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+    "PYTHONUNBUFFERED", "PYTHONIOENCODING", "PYTHONDONTWRITEBYTECODE",
+    "CLODIA_DATA",
+})
+MCP_ENV_PASSTHROUGH_PREFIXES = ("LC_",)
+
+
+def mcp_backend_env(source: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment of a pack's MCP server process, BUILT FROM ZERO (#540).
+
+    Until #540 it was `runtime_env()` on top of `os.environ`: every server of
+    every pack inherited the whole gateway environment —
+    `CLODIA_ORCHESTRATOR_SECRET`, `CLODIA_VAULT_DIR`, tokens. Now only
+    `MCP_ENV_PASSTHROUGH` crosses, plus the pack runtime's PATH/PYTHONPATH;
+    the backend's declared `env` is added by the caller."""
+    src = os.environ if source is None else source
+    base = {k: v for k, v in src.items()
+            if k in MCP_ENV_PASSTHROUGH or k.startswith(MCP_ENV_PASSTHROUGH_PREFIXES)}
+    return runtime_env(base)
+
+
 def _canonical(name: str) -> str:
     """Nome di distribuzione normalizzato (PEP 503): `Pillow` e `pillow` sono
     lo stesso pacchetto, e `requires.pip` è scritto a mano nei manifest."""

@@ -251,11 +251,14 @@ async def session(b: dict, *, oauth_handlers: tuple | None = None):
         # erano installate sul volume ma invisibili al processo che doveva
         # usarle, e il pack funzionava solo finché la stessa libreria era anche
         # nell'immagine del gateway — che ogni rebuild azzera
-        # (clodia-platform#451). L'`env` del backend resta l'ultima parola.
+        # (clodia-platform#451). Da #540 la base è costruita da zero
+        # (`mcp_backend_env`): nessun segreto del gateway arriva al processo di
+        # un pack. L'`env` del backend resta l'ultima parola.
         params = StdioServerParameters(
             command=b["command"],
             args=b.get("args", []),
-            env={**pack_runtime.runtime_env(), **(b.get("env") or {})},
+            # From zero, not the gateway's own environment (#540).
+            env={**pack_runtime.mcp_backend_env(), **(b.get("env") or {})},
         )
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as s:
