@@ -75,15 +75,34 @@ def _ensure_venv() -> Path:
     return pip
 
 
+#: Installer configuration that may legitimately come from the gateway's
+#: environment (a private index, a registry, a proxy): `pip` and `npm` read
+#: these, and nothing else of the gateway reaches the installer (#540).
+_INSTALLER_PREFIXES = ("PIP_", "npm_config_", "NPM_CONFIG_")
+
+
+def _installer_env() -> dict[str, str]:
+    """The environment of `pip install` / `npm install`, BUILT FROM ZERO
+    (#540, review of clodia-tools#414): a source distribution runs its
+    `setup.py`, an npm package its `postinstall` — pack code, which must not
+    see `CLODIA_ORCHESTRATOR_SECRET` or the vault's path any more than a
+    pack's MCP server. The same allowlist, plus the installers' own
+    configuration (`_INSTALLER_PREFIXES`)."""
+    return {k: v for k, v in os.environ.items()
+            if k in MCP_ENV_PASSTHROUGH or k.startswith(MCP_ENV_PASSTHROUGH_PREFIXES)
+            or k.startswith(_INSTALLER_PREFIXES)}
+
+
 def _install_env() -> dict[str, str]:
-    """Ambiente per `pip install`: quello del gateway MENO `PYTHONPATH`.
+    """Ambiente per `pip install`: l'allowlist dell'installer (#540), SENZA
+    `PYTHONPATH`.
 
     Se il PYTHONPATH di runtime (site-packages del venv + dell'immagine)
     arrivasse a pip, pip considererebbe soddisfatto ciò che sta nell'immagine e
     non lo installerebbe nel venv: stessa perdita al rebuild del flag
     `--system-site-packages`, per un'altra strada.
     """
-    env = dict(os.environ)
+    env = _installer_env()
     env.pop("PYTHONPATH", None)
     return env
 
@@ -119,7 +138,7 @@ def install_npm(packages: list[str]) -> dict:
         raise RuntimeError("npm non disponibile nel container gateway")
     _NPM_PREFIX.mkdir(parents=True, exist_ok=True)
     _NPM_CACHE.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
+    env = _installer_env()          # from zero: postinstall is pack code (#540)
     env["npm_config_cache"] = str(_NPM_CACHE)
     res = _run([npm, "install", "-g", "--prefix", str(_NPM_PREFIX), *specs], env=env)
     return {
@@ -181,6 +200,38 @@ def runtime_env(base: dict[str, str] | None = None) -> dict[str, str]:
     if parts:
         env["PYTHONPATH"] = os.pathsep.join(parts)
     return env
+
+
+#: The gateway variables a pack's MCP server process may see (#540). An
+#: allowlist, never a list of what to remove: a list of exclusions forgets the
+#: next secret someone adds to the gateway's environment. Locale, certificates
+#: and proxies are how a process talks to the world; `CLODIA_DATA` is where
+#: first-party servers find their own data (e.g. contabilita, leads). What a
+#: backend needs beyond these it declares in its own `env` (vault references
+#: included), where the admin who mounts it sees it.
+MCP_ENV_PASSTHROUGH = frozenset({
+    "PATH", "HOME", "LANG", "LANGUAGE", "TZ", "TMPDIR",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+    "PYTHONUNBUFFERED", "PYTHONIOENCODING", "PYTHONDONTWRITEBYTECODE",
+    "CLODIA_DATA",
+})
+MCP_ENV_PASSTHROUGH_PREFIXES = ("LC_",)
+
+
+def mcp_backend_env(source: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment of a pack's MCP server process, BUILT FROM ZERO (#540).
+
+    Until #540 it was `runtime_env()` on top of `os.environ`: every server of
+    every pack inherited the whole gateway environment —
+    `CLODIA_ORCHESTRATOR_SECRET`, `CLODIA_VAULT_DIR`, tokens. Now only
+    `MCP_ENV_PASSTHROUGH` crosses, plus the pack runtime's PATH/PYTHONPATH;
+    the backend's declared `env` is added by the caller."""
+    src = os.environ if source is None else source
+    base = {k: v for k, v in src.items()
+            if k in MCP_ENV_PASSTHROUGH or k.startswith(MCP_ENV_PASSTHROUGH_PREFIXES)}
+    return runtime_env(base)
 
 
 def _canonical(name: str) -> str:
