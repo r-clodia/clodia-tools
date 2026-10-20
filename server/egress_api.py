@@ -18,13 +18,14 @@ contacts into the context of whatever renders the score.
 """
 from __future__ import annotations
 
-import hmac
 import logging
 import os
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
+
+from .audit.trace import secret_equal
 
 LOG = logging.getLogger("clodia-tools.egress-api")
 
@@ -34,7 +35,8 @@ def _authorized(request: Request) -> bool:
     if not expected:
         return False  # fail-closed
     got = (request.headers.get("x-orchestrator-secret") or "").strip()
-    return bool(got) and hmac.compare_digest(got, expected)
+    # Bytes, never str: a non-ASCII header is a 401, not a 500 (#472).
+    return secret_equal(got, expected)
 
 
 def _shape(uris: list) -> dict:
