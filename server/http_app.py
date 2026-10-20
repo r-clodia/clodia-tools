@@ -78,6 +78,10 @@ class _AuthMiddleware:
 
 @asynccontextmanager
 async def _lifespan(_app):
+    # No credential from a query string in the access log (#511); installed
+    # here because uvicorn configures its loggers when it starts.
+    from . import log_redact
+    log_redact.install()
     async with _sm.run():
         LOG.info("clodia-tools MCP HTTP: session manager attivo")
         # OFFLOAD + WATCHDOG (clodia-platform#316). `asyncio.to_thread` — che
