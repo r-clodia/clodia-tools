@@ -157,6 +157,16 @@ def _colony_rooms(existing: list[dict]) -> list[dict]:
     acct, addr = colony_mailbox()
     if not acct:
         return []
+    # Only a comms-pack that FILTERS by tag may be handed a tagged row: an
+    # older one would ignore the tag and deliver every declared sender's mail
+    # of the colony mailbox to every topic (second review of #416). The
+    # capability is a service only comms-pack ≥ 2.5.0 registers.
+    try:
+        from .components import loader as _components
+        if _components.service("comms-pack", "courier_message_box") is None:
+            return []
+    except Exception:  # noqa: BLE001 — unknown → off
+        return []
     already = {(r["tier"], r["name"]) for r in existing if r.get("address") == addr}
     out = []
     try:

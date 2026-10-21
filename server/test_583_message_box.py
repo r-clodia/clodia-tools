@@ -109,8 +109,17 @@ class ColonyRoomsTests(unittest.TestCase):
         with patch.object(whitelist, "CONFIG", cfg), \
                 patch("server.tools.mail_switch.system_mailboxes", return_value=BOXES), \
                 patch.object(C, "_topic_exists", lambda t, n: True), \
+                patch("server.components.loader.service",
+                      lambda pack, name: object() if self.capable else None), \
                 patch("server.main._topics", lambda: fake):
             return C.rooms()
+
+    capable = True
+
+    def test_an_older_comms_pack_gets_no_tagged_row(self):
+        self.capable = False
+        self.assertEqual(self._rooms({"SEAL-2/titulon": ["mailfrom:a@b.it"]},
+                                     {"DJ56K": ("SEAL-2", "titulon")}), [])
 
     def test_a_topic_with_a_code_and_a_sender_is_reached_by_tag(self):
         out = self._rooms({"SEAL-2/titulon": ["mailfrom:*@brightnode.io"]},
