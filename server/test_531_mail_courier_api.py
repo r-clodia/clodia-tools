@@ -118,7 +118,8 @@ class InRoomTests(unittest.TestCase):
         self.assertEqual(paths, {"/internal/mail/courier/rooms",
                                  "/internal/mail/courier/envelopes",
                                  "/internal/mail/courier/attachment",
-                                 "/internal/mail/courier/eml"})
+                                 "/internal/mail/courier/eml",
+                                 "/internal/mail/courier/box"})
 
 
 if __name__ == "__main__":

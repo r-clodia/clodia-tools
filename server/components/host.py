@@ -287,7 +287,8 @@ class Perimeter:
         from .. import egress
         if direction == "inbox" and self.courier_tag():
             # The courier's message-box call (#583): the colony mailbox, and
-            # only it, for a row `rooms()` offered with this room's code.
+            # only it, for a row `rooms()` offered with this room's code — or
+            # for the one index search of every code (#585).
             from ..mail_courier_api import colony_mailbox
             _acct, colony = colony_mailbox()
             return bool(colony) and (address or "").strip().lower() == colony
@@ -323,8 +324,11 @@ class Perimeter:
         count only on a message-box call (`courier_tag()` set, #585), where the
         subaddress already names the one room."""
         from .. import egress
-        return bool(egress.room_declares_sender(header or "", egress._scope_of_call(),
-                                                with_global=bool(self.courier_tag())))
+        from ..mail_courier_api import BOX_INDEX_TAG
+        tag = self.courier_tag()
+        return bool(egress.room_declares_sender(
+            header or "", egress._scope_of_call(),
+            with_global=bool(tag) and tag != BOX_INDEX_TAG))
 
     def address_of(self, header: str) -> str:
         """The address of a `From:`-like header (`Nome <a@b.it>` → `a@b.it`),

@@ -1,5 +1,5 @@
 """#585 — global `mailfrom:` entries count for the topic's message box, not for
-a linked mailbox.
+a linked mailbox — and only with comms-pack's one-search index.
 
 | mail reaches the room through      | global | room's own |
 |------------------------------------|--------|------------|
@@ -103,6 +103,67 @@ class PerimeterTests(unittest.TestCase):
             tok = C.COURIER_TAG.set("UD54G")
             try:
                 self.assertTrue(per.room_declares_sender("dcarboni@gmail.com"))
+            finally:
+                C.COURIER_TAG.reset(tok)
+
+
+class IndexGateTests(unittest.TestCase):
+    """Global senders make every topic with a code a row: only with the
+    one-search index of comms-pack ≥ 2.6.0 (the 2.128.0 lesson)."""
+
+    def _rooms(self, cfg, services):
+        fake = type("T", (), {"mailbox_codes": lambda self: {"UD54G": ("SEAL-1", "tomato-blogging")}})()
+        with patch.object(whitelist, "CONFIG", cfg), \
+                patch("server.tools.mail_switch.system_mailboxes", return_value=BOXES), \
+                patch.object(C, "_topic_exists", lambda t, n: True), \
+                patch("server.components.loader.service",
+                      lambda pack, name: object() if name in services else None), \
+                patch("server.main._topics", lambda: fake):
+            return C.rooms()
+
+    def test_without_the_index_global_senders_do_not_count(self):
+        cfg = _cfg(glob=["mailfrom:dcarboni@gmail.com"])
+        self.assertEqual(self._rooms(cfg, {"courier_message_box"}), [])
+        (row,) = self._rooms(_cfg(own=["mailfrom:a@b.it"]), {"courier_message_box"})
+        self.assertIs(row["indexed"], False)
+
+    def test_with_the_index_the_row_says_so(self):
+        cfg = _cfg(glob=["mailfrom:dcarboni@gmail.com"])
+        (row,) = self._rooms(cfg, {"courier_message_box", "courier_box_index"})
+        self.assertIs(row["indexed"], True)
+
+
+class BoxIndexTests(unittest.TestCase):
+    def test_one_call_under_the_index_tag_codes_upper_case(self):
+        seen = {}
+
+        def call(name, args):
+            seen["name"], seen["args"], seen["tag"] = name, args, C.COURIER_TAG.get()
+            return {"tags": {"ud54g": ["k1"], "YZ5AV": []}}
+        with patch.object(C, "colony_mailbox", lambda: ("devnullboxx", "devnullboxx@gmail.com")), \
+                patch("server.tools.mail_switch.call", call):
+            out = C.box_index({"agent": "clodia"})
+        self.assertEqual(seen, {"name": "courier_box_index",
+                                "args": {"account": "devnullboxx"}, "tag": "*"})
+        self.assertEqual(out["tags"], {"UD54G": ["k1"], "YZ5AV": []})
+        self.assertEqual(C.COURIER_TAG.get(), "")
+
+    def test_no_colony_no_search(self):
+        with patch.object(C, "colony_mailbox", lambda: ("", "")), \
+                patch("server.tools.mail_switch.call", lambda *a: self.fail("searched")):
+            self.assertEqual(C.box_index({}), {"account": "", "tags": {}})
+
+    def test_the_index_tag_is_never_an_offered_row(self):
+        from .topics.service import MAILBOX_CODE_ALPHABET
+        self.assertNotIn(C.BOX_INDEX_TAG, MAILBOX_CODE_ALPHABET)
+
+    def test_under_the_index_tag_global_senders_do_not_count(self):
+        cfg = _cfg(glob=["mailfrom:dcarboni@gmail.com"])
+        with patch.object(whitelist, "CONFIG", cfg), \
+                patch.object(egress, "_scope_of_call", lambda: ROOM):
+            tok = C.COURIER_TAG.set(C.BOX_INDEX_TAG)
+            try:
+                self.assertFalse(Perimeter().room_declares_sender("dcarboni@gmail.com"))
             finally:
                 C.COURIER_TAG.reset(tok)
 
