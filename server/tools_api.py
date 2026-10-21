@@ -1344,6 +1344,45 @@ def _backend_verbs(tools: list[dict]) -> list[dict]:
     return sorted(out, key=lambda v: (not v["enabled"], v["name"]))
 
 
+async def colony_mailbox_get(request: Request):
+    """The colony mailbox (#583): which of the instance's mailboxes carries the
+    topics' message boxes. Address only, never a credential."""
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from .mail_courier_api import COLONY_KEY, colony_mailbox
+    acct, addr = colony_mailbox()
+    return JSONResponse({"account": acct or None, "address": addr or None,
+                         "configured": str(whitelist.CONFIG.get(COLONY_KEY) or "") or None})
+
+
+async def colony_mailbox_set(request: Request):
+    """Set (or clear, with `account: null`) the colony mailbox. A HUMAN admin
+    only: choosing which mailbox all topics read from is an instance decision,
+    and an agent able to make it would pick its own source (#583)."""
+    if not _authorized_owner(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    acct = str((body or {}).get("account") or "").strip()
+    from .mail_courier_api import COLONY_KEY, colony_mailbox
+    from .tools import mail_switch
+    if acct:
+        rows = await asyncio.to_thread(mail_switch.system_mailboxes)
+        ok = any(str(r.get("account") or "") == acct and not r.get("send_only")
+                 for r in rows or [])
+        if not ok:
+            return JSONResponse({"error": f"'{acct}' non è una casella in lettura "
+                                          "di questa istanza"}, status_code=400)
+        whitelist.CONFIG[COLONY_KEY] = acct
+    else:
+        whitelist.CONFIG.pop(COLONY_KEY, None)
+    await asyncio.to_thread(whitelist.save_config)
+    a, addr = colony_mailbox()
+    return JSONResponse({"account": a or None, "address": addr or None})
+
+
 routes = [
     Route("/tools/gdrive/confinement", gdrive_confinement, methods=["GET"]),
     Route("/tools/gdrive/confinement", gdrive_confinement_set, methods=["POST"]),
@@ -1352,6 +1391,8 @@ routes = [
     Route("/clodia/delegations/revoke", delegation_revoke, methods=["POST"]),
     Route("/tools", list_tools, methods=["GET"]),
     Route("/tools/{id}/test", test_connector, methods=["POST"]),
+    Route("/tools/colony-mailbox", colony_mailbox_get, methods=["GET"]),
+    Route("/tools/colony-mailbox", colony_mailbox_set, methods=["POST"]),
     Route("/tools/email/mailboxes", email_mailboxes, methods=["GET"]),
     Route("/tools/email/mailboxes", email_mailbox_add, methods=["POST"]),
     Route("/tools/email/mailboxes/{account}", email_mailbox_remove, methods=["DELETE"]),

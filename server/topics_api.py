@@ -220,6 +220,13 @@ async def open_topic(request: Request):
         st = _t.status(f"{tier}/{name}")
         data["taint"] = {"tainted": st["tainted"], "since": st.get("since"),
                          "sources": st.get("sources") or []}
+        # The topic's message box (#583): its code, and the address that
+        # reaches it — "" while the colony mailbox is not set (feature off).
+        from .mail_courier_api import message_box_address
+        code = str(((data.get("meta") or {}).get("mailbox_code")) or "")
+        if code:
+            data["message_box"] = {"code": code,
+                                   "address": message_box_address(code)}
         if _reader(request):
             from .audit import reads as _reads
             _reads.safe(_reads.view, _reader(request), tier, name)

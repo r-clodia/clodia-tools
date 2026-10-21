@@ -516,6 +516,36 @@ def _unique_name(voluto: str, presi: set) -> str:
     return f"{base}-{i}"
 
 
+#: The topic's message-box code (clodia-platform#583): the plus sub-address of
+#: the colony mailbox that routes a mail to this topic (`colony+DJ56K@…`).
+#: RANDOM, not a hash of the codename — the owner's decision: a hash is
+#: computable by anyone who knows the name and would change with it. No
+#: ambiguous characters (0/O, 1/I/L): a code is read aloud and typed by hand.
+MAILBOX_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+MAILBOX_CODE_LEN = 5
+MAILBOX_CODE_KEY = "mailbox_code"
+
+
+def new_mailbox_code(taken: set) -> str:
+    """A fresh code not in `taken` (31^5 ≈ 28.6 M codes: a collision is rare,
+    and it is retried, never accepted)."""
+    import secrets as _secrets
+    for _ in range(1000):
+        code = "".join(_secrets.choice(MAILBOX_CODE_ALPHABET)
+                       for _ in range(MAILBOX_CODE_LEN))
+        if code not in taken:
+            return code
+    raise TopicError("nessun codice di message box libero dopo 1000 tentativi")
+
+
+def normalize_mailbox_code(code: str) -> str:
+    """`dj56k` → `DJ56K`; "" when it is not a well-formed code."""
+    c = str(code or "").strip().upper()
+    if len(c) == MAILBOX_CODE_LEN and all(ch in MAILBOX_CODE_ALPHABET for ch in c):
+        return c
+    return ""
+
+
 def normalize_meta_v2(meta: dict, tier: str) -> dict:
     """Normalizza un meta al formato v2 in modo TOLLERANTE: usato sul read-path
     (open/list/_read_meta) e in migrazione → non deve MAI sollevare per valori
@@ -1116,6 +1146,10 @@ class TopicService:
         # on the Mac side, attached only through the gated `local_folder_add`.
         # Accepted here, an agent could name any folder of the shared root.
         meta.pop("local_folders", None)
+        # The message-box code (#583) is the platform's, never the creator's:
+        # a chosen code could take another topic's mail.
+        meta.pop(MAILBOX_CODE_KEY, None)
+        meta[MAILBOX_CODE_KEY] = new_mailbox_code(self.mailbox_codes())
         meta.setdefault("title", name)
         meta.setdefault("type", "progetto")
         # tier = unica classe del topic + livello di privacy per l'enforcement.
@@ -3061,6 +3095,58 @@ class TopicService:
         meta["status"] = "archived"
         self._write_meta(tier, name, meta, base_version=ver)
         return {"status": "archived"}
+
+    # ── Message box (clodia-platform#583) ─────────────────────────────────────
+
+    def _meta_refs(self):
+        """`(tier, name)` of every topic, archived included."""
+        for tr in VALID_TIER:
+            for e in self.s.list(tr):
+                if e.kind == "dir" and self.s.exists(self._meta_p(tr, e.name)):
+                    yield tr, e.name
+
+    def mailbox_codes(self) -> dict:
+        """`{code: (tier, name)}` of every topic that has one."""
+        out: dict = {}
+        for tr, nm in self._meta_refs():
+            try:
+                meta, _ = self._read_meta(tr, nm)
+            except TopicError:
+                continue
+            code = normalize_mailbox_code(meta.get(MAILBOX_CODE_KEY))
+            if code:
+                out[code] = (tr, nm)
+        return out
+
+    def by_mailbox_code(self, code: str) -> tuple[str, str] | None:
+        """The topic a code belongs to, or None."""
+        c = normalize_mailbox_code(code)
+        return self.mailbox_codes().get(c) if c else None
+
+    def ensure_mailbox_codes(self) -> int:
+        """Give a code to every topic that has none (existing topics, once).
+        Returns how many were assigned. A topic whose meta changes in the
+        meantime is skipped (optimistic lock) and gets its code next time."""
+        taken = set(self.mailbox_codes())
+        assigned = 0
+        for tr, nm in list(self._meta_refs()):
+            try:
+                meta, version = self._read_meta(tr, nm)
+            except TopicError:
+                continue
+            if normalize_mailbox_code(meta.get(MAILBOX_CODE_KEY)):
+                continue
+            code = new_mailbox_code(taken)
+            meta[MAILBOX_CODE_KEY] = code
+            try:
+                self._write_meta(tr, nm, meta, version)
+            except Exception as e:  # noqa: BLE001 — retried at the next boot
+                LOG.warning("message box: codice non assegnato a %s/%s (%s)",
+                            tr, nm, type(e).__name__)
+                continue
+            taken.add(code)
+            assigned += 1
+        return assigned
 
     def list(self, tier: str | None = None, include_archived: bool = False) -> list[dict]:
         """Elenco topic con riga sintetica. In P1 legge i meta dallo storage."""
