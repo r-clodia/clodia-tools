@@ -149,7 +149,7 @@ def rooms() -> list[dict]:
 
 def _colony_rooms(existing: list[dict]) -> list[dict]:
     """One row per topic reachable through the colony mailbox (#583): it has a
-    message-box code and at least one sender, its own or global (#585). A room that
+    message-box code and declares at least one sender of its own. A room that
     already reads the colony mailbox through its own `inbox:` gets no second
     row (the same mail would arrive twice)."""
     from . import egress
@@ -178,7 +178,7 @@ def _colony_rooms(existing: list[dict]) -> list[dict]:
         if (tier, name) in already:
             continue
         # Cheap check first: the senders are config, opening a topic is not.
-        sig = _senders(f"{tier}/{name}", with_global=True)
+        sig = _senders(f"{tier}/{name}")
         if not sig["senders"] or not _topic_exists(tier, name):
             continue
         out.append({"tier": tier, "name": name, "account": acct, "address": addr,
@@ -187,16 +187,14 @@ def _colony_rooms(existing: list[dict]) -> list[dict]:
     return out
 
 
-def _senders(scope: str, with_global: bool = False) -> dict:
+def _senders(scope: str) -> dict:
     """How many `mailfrom:` entries the room declares, and a signature of the
     set (#576): when it changes the courier records what is already in the
     mailbox instead of delivering it — a sender added today brings its mail
-    from today, like a mailbox linked today. `with_global` for a message-box
-    row (#585): the global entries count there, so they are in the signature."""
+    from today, like a mailbox linked today."""
     import hashlib
     from . import egress
-    regole = sorted(str(r).strip().lower()
-                    for r in egress.room_sender_rules(scope, with_global))
+    regole = sorted(str(r).strip().lower() for r in egress.room_sender_rules(scope))
     return {"senders": len(regole),
             "senders_sig": hashlib.sha256("\n".join(regole).encode()).hexdigest()[:16]}
 
