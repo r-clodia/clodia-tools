@@ -126,7 +126,7 @@ class RoutesTests(unittest.TestCase):
                         "email_id": "7", "path": "../x"}
         with patch.object(C, "_authorize", lambda r: ({"agent": "clodia"}, None)), \
                 patch.object(C, "_topic_exists", lambda t, n: True), \
-                patch.object(C, "rooms", lambda: [{"tier": "SEAL-2", "name": "preventivi",
+                patch.object(C, "rooms", lambda *a: [{"tier": "SEAL-2", "name": "preventivi",
                                                    "account": "info"}]), \
                 patch.object(whitelist, "CONFIG", {"agents": {"clodia": {}}}), \
                 patch("server.tools.mail_switch.call", call):

@@ -156,7 +156,7 @@ class TagIsPartOfThePairTests(unittest.TestCase):
             return {"envelopes": []}
         with patch.object(C, "_authorize", lambda r: ({"agent": "clodia"}, None)), \
                 patch.object(C, "_topic_exists", lambda t, n: True), \
-                patch.object(C, "rooms", lambda: offered), \
+                patch.object(C, "rooms", lambda *a: offered), \
                 patch.object(whitelist, "CONFIG", {"agents": {"clodia": {}}}), \
                 patch("server.tools.mail_switch.call", call):
             r = asyncio.run(C.envelopes_route(self._Req(body)))

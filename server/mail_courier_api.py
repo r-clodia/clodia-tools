@@ -15,6 +15,11 @@ list, and on a strict room (#503) only declared senders pass.
 - `POST /internal/mail/courier/envelopes`   {tier, name, account, folder?, limit?, skip?}
 - `POST /internal/mail/courier/attachment`  {tier, name, account, email_id, filename, folder?}
 - `POST /internal/mail/courier/eml`         {tier, name, account, email_id, folder?}
+- `POST /internal/mail/courier/box`         {}  → `{account, tags: {CODE: [keys]}}`
+
+The message box (#583/#585): one search per cycle on the colony mailbox lists
+which codes have recent mail (`box`), so the courier calls `envelopes` only for
+those rooms, and only for the keys the index named (`only`).
 
 Only mail from a sender the room itself declares (`mailfrom:` among its OWN
 ingress entries) is delivered (#576): a room with no declared sender gets
@@ -45,6 +50,11 @@ COURIER = "courier"
 #: that room — and comms-pack keeps only the mail addressed to `box+TAG@…`.
 COURIER_TAG: contextvars.ContextVar[str] = contextvars.ContextVar(
     "courier_tag", default="")
+
+#: The courier tag of the message-box INDEX call (#585): the colony mailbox,
+#: read once per cycle for every code at once. Never a topic's code (codes are
+#: drawn from an alphabet without `*`), so `_room_call` never accepts it.
+BOX_INDEX_TAG = "*"
 
 #: Config key naming the colony's mailbox (#583): an ACCOUNT of the instance's
 #: mailboxes. An instance setting, never hard-coded — `devnullboxx` is the
@@ -115,7 +125,7 @@ def _topic_exists(tier: str, name: str) -> bool:
         return False
 
 
-def rooms() -> list[dict]:
+def rooms(indexed: bool = False) -> list[dict]:
     """The rooms with a mailbox in their OWN `inbox:` list, one row per
     mailbox the instance has. Global entries are not a room: the courier
     posts only where a room declared the mailbox."""
@@ -143,13 +153,13 @@ def rooms() -> list[dict]:
                    **_senders(f"{tier}/{name}")}
             if addr in boxes and row not in out:
                 out.append(row)
-    out.extend(_colony_rooms(out))
+    out.extend(_colony_rooms(out, indexed))
     return out
 
 
-def _colony_rooms(existing: list[dict]) -> list[dict]:
+def _colony_rooms(existing: list[dict], indexed_ok: bool = False) -> list[dict]:
     """One row per topic reachable through the colony mailbox (#583): it has a
-    message-box code and declares at least one sender of its own. A room that
+    message-box code and at least one sender, its own or global (#585). A room that
     already reads the colony mailbox through its own `inbox:` gets no second
     row (the same mail would arrive twice)."""
     from . import egress
@@ -165,6 +175,13 @@ def _colony_rooms(existing: list[dict]) -> list[dict]:
         from .components import loader as _components
         if _components.service("comms-pack", "courier_message_box") is None:
             return []
+        # Global senders count on the message box (#585), but they make EVERY
+        # topic with a code a row: only when BOTH sides read through the
+        # one-search index — comms-pack ≥ 2.6.0 and a courier that asked for
+        # indexed rows (`indexed_ok`). An older courier would search each row
+        # (review of clodia-logic#558).
+        indexed = bool(indexed_ok) and _components.service(
+            "comms-pack", "courier_box_index") is not None
     except Exception:  # noqa: BLE001 — unknown → off
         return []
     already = {(r["tier"], r["name"]) for r in existing if r.get("address") == addr}
@@ -178,23 +195,25 @@ def _colony_rooms(existing: list[dict]) -> list[dict]:
         if (tier, name) in already:
             continue
         # Cheap check first: the senders are config, opening a topic is not.
-        sig = _senders(f"{tier}/{name}")
+        sig = _senders(f"{tier}/{name}", with_global=indexed)
         if not sig["senders"] or not _topic_exists(tier, name):
             continue
         out.append({"tier": tier, "name": name, "account": acct, "address": addr,
                     "strict": bool(egress.ingress_strict(f"{tier}/{name}")),
-                    **sig, "tag": code})
+                    **sig, "tag": code, "indexed": indexed})
     return out
 
 
-def _senders(scope: str) -> dict:
+def _senders(scope: str, with_global: bool = False) -> dict:
     """How many `mailfrom:` entries the room declares, and a signature of the
     set (#576): when it changes the courier records what is already in the
     mailbox instead of delivering it — a sender added today brings its mail
-    from today, like a mailbox linked today."""
+    from today, like a mailbox linked today. `with_global` for a message-box
+    row (#585): the global entries count there, so they are in the signature."""
     import hashlib
     from . import egress
-    regole = sorted(str(r).strip().lower() for r in egress.room_sender_rules(scope))
+    regole = sorted(str(r).strip().lower()
+                    for r in egress.room_sender_rules(scope, with_global))
     return {"senders": len(regole),
             "senders_sig": hashlib.sha256("\n".join(regole).encode()).hexdigest()[:16]}
 
@@ -216,7 +235,8 @@ async def rooms_route(request: Request):
     if err:
         return err
     try:
-        return JSONResponse({"rooms": await asyncio.to_thread(rooms)})
+        indexed = request.query_params.get("indexed") == "1"
+        return JSONResponse({"rooms": await asyncio.to_thread(rooms, indexed)})
     except Exception as e:  # noqa: BLE001
         LOG.warning("courier rooms: %s", type(e).__name__)
         return JSONResponse({"error": str(e)[:200]}, status_code=502)
@@ -241,7 +261,8 @@ async def _room_call(request: Request, service: str, keys: tuple[str, ...]):
     # room (review of #406).
     account = str(body.get("account") or "")
     tag = str(body.get("tag") or "")
-    offerte = await asyncio.to_thread(rooms)
+    # The widest offer: a pair an indexed courier may have been given.
+    offerte = await asyncio.to_thread(rooms, True)
     # The tag is part of the pair: a colony row is offered WITH its topic's
     # code, and only that exact (room, mailbox, tag) is accepted (#583).
     if not any(r["tier"] == tier and r["name"] == name and r["account"] == account
@@ -266,7 +287,52 @@ async def _room_call(request: Request, service: str, keys: tuple[str, ...]):
 
 async def envelopes_route(request: Request):
     return await _room_call(request, "courier_envelopes",
-                            ("account", "folder", "limit", "skip", "keys_only"))
+                            ("account", "folder", "limit", "skip", "keys_only", "only"))
+
+
+def box_index(payload: dict) -> dict:
+    """Which message-box codes have recent mail on the colony mailbox, and the
+    keys of that mail (#585): ONE search for every topic, instead of one per
+    topic. Keys only — hashes, never a sender, subject or body — to the
+    agent-server, which then asks `envelopes` for the rooms named here."""
+    from .claims import ClaimsContext
+    from .tools import mail_switch
+    acct, _addr = colony_mailbox()
+    if not acct:
+        return {"account": "", "tags": {}}
+    claims = {"agent": str((payload or {}).get("agent") or ""), "chat": "courier-box",
+              "principal": (payload or {}).get("principal") or "",
+              "execution_id": f"{COURIER}-box"}
+    tok = COURIER_TAG.set(BOX_INDEX_TAG)
+    try:
+        with ClaimsContext(claims, ""):
+            out = mail_switch.call("courier_box_index", {"account": acct})
+    finally:
+        COURIER_TAG.reset(tok)
+    tags = (out or {}).get("tags") if isinstance(out, dict) else None
+    return {"account": acct,
+            "tags": {str(k).upper(): [str(x) for x in (v or [])]
+                     for k, v in (tags or {}).items()}}
+
+
+async def box_route(request: Request):
+    payload, err = _authorize(request)
+    if err:
+        return err
+    try:
+        from .components import loader as _components
+        if _components.service("comms-pack", "courier_box_index") is None:
+            return JSONResponse({"error": "comms-pack has no courier_box_index"},
+                                status_code=404)
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "components unavailable"}, status_code=404)
+    try:
+        return JSONResponse(await asyncio.to_thread(box_index, payload))
+    except PermissionError as e:
+        return JSONResponse({"error": str(e)[:300]}, status_code=403)
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("courier box: %s", type(e).__name__)
+        return JSONResponse({"error": str(e)[:200]}, status_code=502)
 
 
 async def attachment_route(request: Request):
@@ -275,11 +341,12 @@ async def attachment_route(request: Request):
 
 
 async def eml_route(request: Request):
-    return await _room_call(request, "courier_eml", ("account", "email_id", "folder"))
+    return await _room_call(request, "courier_eml", ("account", "email_id", "folder", "key"))
 
 
 routes = [
     Route("/internal/mail/courier/eml", eml_route, methods=["POST"]),
+    Route("/internal/mail/courier/box", box_route, methods=["POST"]),
     Route("/internal/mail/courier/rooms", rooms_route, methods=["GET"]),
     Route("/internal/mail/courier/envelopes", envelopes_route, methods=["POST"]),
     Route("/internal/mail/courier/attachment", attachment_route, methods=["POST"]),
