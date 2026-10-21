@@ -23,6 +23,7 @@ nothing, and `rooms()` says how many senders each room declares.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 
 from starlette.requests import Request
@@ -38,10 +39,61 @@ LOG = logging.getLogger("clodia-tools.mail_courier")
 #: privileged principal declared in the gateway's config), never a new one.
 COURIER = "courier"
 
+#: The message-box tag of the courier call in progress (#583): set ONLY by
+#: `_in_room` for a row `rooms()` offered with a tag, never from a token or an
+#: argument. While it is set, and only then, the colony mailbox may be read for
+#: that room — and comms-pack keeps only the mail addressed to `box+TAG@…`.
+COURIER_TAG: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "courier_tag", default="")
+
+#: Config key naming the colony's mailbox (#583): an ACCOUNT of the instance's
+#: mailboxes. An instance setting, never hard-coded — `devnullboxx` is the
+#: owner's temporary choice, not a platform mailbox.
+COLONY_KEY = "colony_mailbox"
+
+
+def colony_mailbox() -> tuple[str, str]:
+    """`(account, address)` of the colony mailbox, or `("", "")` when unset or
+    not one of the instance's receiving mailboxes (feature off)."""
+    from . import whitelist
+    from .tools import mail_switch
+    acct = str((whitelist.CONFIG.get(COLONY_KEY) or "")).strip()
+    if not acct:
+        return "", ""
+    try:
+        rows = mail_switch.system_mailboxes()
+    except Exception:  # noqa: BLE001
+        return "", ""
+    for row in rows or []:
+        if str(row.get("account") or "") == acct and not row.get("send_only"):
+            return acct, str(row.get("email") or "").strip().lower()
+    return "", ""
+
+
+def message_box_address(code: str) -> str:
+    """`local+CODE@domain` on the colony mailbox, "" when the feature is off."""
+    _acct, addr = colony_mailbox()
+    local, at, domain = addr.partition("@")
+    if not (code and at):
+        return ""
+    return f"{local}+{code}@{domain}"
+
 
 def _authorize(request: Request):
+    """The courier is the AGENT-SERVER, never an agent: the routes require the
+    service role (`role: agent-server`, clodia-platform#539 §1), which only
+    the agent-server can mint behind the bootstrap secret. A spawn of
+    `clodia` carries a token whose `agent` is `clodia` too — without the role
+    it could pull any topic's whole message through `/eml` (review of #416)."""
     payload, err = internal_auth.authorize(request, log=LOG)
-    return payload, err
+    if err:
+        return payload, err
+    from .pki_mint import ROLE_AGENT_SERVER
+    if (payload or {}).get("role") != ROLE_AGENT_SERVER:
+        LOG.warning("courier: richiesta senza il ruolo di servizio rifiutata (agent=%s)",
+                    (payload or {}).get("agent"))
+        return None, JSONResponse({"error": "forbidden"}, status_code=403)
+    return payload, None
 
 
 def _room_claims(tier: str, name: str, payload: dict) -> dict:
@@ -91,6 +143,47 @@ def rooms() -> list[dict]:
                    **_senders(f"{tier}/{name}")}
             if addr in boxes and row not in out:
                 out.append(row)
+    out.extend(_colony_rooms(out))
+    return out
+
+
+def _colony_rooms(existing: list[dict]) -> list[dict]:
+    """One row per topic reachable through the colony mailbox (#583): it has a
+    message-box code and declares at least one sender of its own. A room that
+    already reads the colony mailbox through its own `inbox:` gets no second
+    row (the same mail would arrive twice)."""
+    from . import egress
+    from . import main
+    acct, addr = colony_mailbox()
+    if not acct:
+        return []
+    # Only a comms-pack that FILTERS by tag may be handed a tagged row: an
+    # older one would ignore the tag and deliver every declared sender's mail
+    # of the colony mailbox to every topic (second review of #416). The
+    # capability is a service only comms-pack ≥ 2.5.0 registers.
+    try:
+        from .components import loader as _components
+        if _components.service("comms-pack", "courier_message_box") is None:
+            return []
+    except Exception:  # noqa: BLE001 — unknown → off
+        return []
+    already = {(r["tier"], r["name"]) for r in existing if r.get("address") == addr}
+    out = []
+    try:
+        codes = main._topics().mailbox_codes()
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("courier colony: codes unavailable (%s)", type(e).__name__)
+        return []
+    for code, (tier, name) in sorted(codes.items()):
+        if (tier, name) in already:
+            continue
+        # Cheap check first: the senders are config, opening a topic is not.
+        sig = _senders(f"{tier}/{name}")
+        if not sig["senders"] or not _topic_exists(tier, name):
+            continue
+        out.append({"tier": tier, "name": name, "account": acct, "address": addr,
+                    "strict": bool(egress.ingress_strict(f"{tier}/{name}")),
+                    **sig, "tag": code})
     return out
 
 
@@ -106,11 +199,16 @@ def _senders(scope: str) -> dict:
             "senders_sig": hashlib.sha256("\n".join(regole).encode()).hexdigest()[:16]}
 
 
-def _in_room(tier: str, name: str, payload: dict, service: str, args: dict):
+def _in_room(tier: str, name: str, payload: dict, service: str, args: dict,
+             tag: str = ""):
     from .claims import ClaimsContext
     from .tools import mail_switch
-    with ClaimsContext(_room_claims(tier, name, payload), ""):
-        return mail_switch.call(service, dict(args))
+    tok = COURIER_TAG.set(tag or "")
+    try:
+        with ClaimsContext(_room_claims(tier, name, payload), ""):
+            return mail_switch.call(service, dict(args))
+    finally:
+        COURIER_TAG.reset(tok)
 
 
 async def rooms_route(request: Request):
@@ -142,9 +240,12 @@ async def _room_call(request: Request, service: str, keys: tuple[str, ...]):
     # mailbox. A global entry would let the caller pull a mailbox into any
     # room (review of #406).
     account = str(body.get("account") or "")
+    tag = str(body.get("tag") or "")
     offerte = await asyncio.to_thread(rooms)
+    # The tag is part of the pair: a colony row is offered WITH its topic's
+    # code, and only that exact (room, mailbox, tag) is accepted (#583).
     if not any(r["tier"] == tier and r["name"] == name and r["account"] == account
-               for r in offerte):
+               and str(r.get("tag") or "") == tag for r in offerte):
         return JSONResponse({"error": f"mailbox '{account}' is not in the inbox: list "
                                       f"of {tier}/{name}"}, status_code=403)
     args = {k: body[k] for k in keys if k in body}
@@ -155,7 +256,7 @@ async def _room_call(request: Request, service: str, keys: tuple[str, ...]):
             args.pop("limit")
     try:
         return JSONResponse(await asyncio.to_thread(_in_room, tier, name, payload,
-                                                    service, args))
+                                                    service, args, tag))
     except PermissionError as e:
         return JSONResponse({"error": str(e)[:300]}, status_code=403)
     except Exception as e:  # noqa: BLE001

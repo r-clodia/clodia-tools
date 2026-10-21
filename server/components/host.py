@@ -285,7 +285,27 @@ class Perimeter:
         `inbox:`/`outbox:` entries, global plus the room's, strict ingress
         included."""
         from .. import egress
+        if direction == "inbox" and self.courier_tag():
+            # The courier's message-box call (#583): the colony mailbox, and
+            # only it, for a row `rooms()` offered with this room's code.
+            from ..mail_courier_api import colony_mailbox
+            _acct, colony = colony_mailbox()
+            return bool(colony) and (address or "").strip().lower() == colony
         return bool(egress.mailbox_allowed(direction, address, scope))
+
+    def colony_address(self) -> str:
+        """The colony mailbox's address (#583), "" while unset. Mail on it
+        addressed to `local+X@` belongs to the topics' message boxes ONLY: a
+        component hides it from every other read (review of #416)."""
+        from ..mail_courier_api import colony_mailbox
+        return colony_mailbox()[1]
+
+    def courier_tag(self) -> str:
+        """The message-box code of the courier call in progress (#583), "" for
+        any other call. Set by the gateway's courier route, never by a caller:
+        a component filters the colony mailbox's mail to `box+TAG@…` with it."""
+        from ..mail_courier_api import COURIER_TAG
+        return COURIER_TAG.get()
 
     def strict_scope(self) -> str | None:
         """The room of the current call IF it is a strict-ingress channel

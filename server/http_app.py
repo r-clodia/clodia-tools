@@ -82,6 +82,15 @@ async def _lifespan(_app):
     # here because uvicorn configures its loggers when it starts.
     from . import log_redact
     log_redact.install()
+    # Every topic gets its message-box code (#583): new ones at creation,
+    # existing ones here, once. Best effort — a failure is retried next boot.
+    try:
+        from . import main as _main
+        n = await asyncio.to_thread(_main._topics().ensure_mailbox_codes)
+        if n:
+            LOG.info("message box: codice assegnato a %d topic esistenti", n)
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("message box: codici non assegnati al boot (%s)", type(e).__name__)
     async with _sm.run():
         LOG.info("clodia-tools MCP HTTP: session manager attivo")
         # OFFLOAD + WATCHDOG (clodia-platform#316). `asyncio.to_thread` — che
