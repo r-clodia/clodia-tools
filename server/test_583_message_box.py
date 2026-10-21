@@ -48,6 +48,20 @@ class CodeTests(unittest.TestCase):
         code = self.svc._read_meta("SEAL-1", "vecchio")[0][MAILBOX_CODE_KEY]
         self.assertEqual(self.svc.by_mailbox_code(code.lower()), ("SEAL-1", "vecchio"))
 
+    def test_a_shared_code_delivers_to_nobody_and_is_reassigned(self):
+        a = self.svc.new("SEAL-1", "uno")
+        self.svc.new("SEAL-3", "due")
+        meta, ver = self.svc._read_meta("SEAL-3", "due")
+        meta[MAILBOX_CODE_KEY] = a[MAILBOX_CODE_KEY]        # an imported copy
+        self.svc._write_meta("SEAL-3", "due", meta, ver)
+        self.assertIsNone(self.svc.by_mailbox_code(a[MAILBOX_CODE_KEY]))
+        self.assertEqual(self.svc.ensure_mailbox_codes(), 2)
+        c1 = self.svc._read_meta("SEAL-1", "uno")[0][MAILBOX_CODE_KEY]
+        c2 = self.svc._read_meta("SEAL-3", "due")[0][MAILBOX_CODE_KEY]
+        self.assertNotEqual(c1, c2)
+        self.assertNotIn(a[MAILBOX_CODE_KEY], (c1, c2))
+        self.assertEqual(self.svc.by_mailbox_code(c1), ("SEAL-1", "uno"))
+
     def test_a_taken_code_is_never_reused(self):
         taken = {c1 + c2 + c3 + c4 + c5 for c1 in "AB" for c2 in "AB" for c3 in "AB"
                  for c4 in "AB" for c5 in "AB"}
@@ -170,6 +184,24 @@ class PerimeterTests(unittest.TestCase):
             finally:
                 C.COURIER_TAG.reset(tok)
             self.assertEqual(per.courier_tag(), "")
+
+
+class CourierRoleTests(unittest.TestCase):
+    """Review of #416: only the agent-server (service role) is the courier."""
+
+    def _auth(self, payload):
+        with patch.object(C.internal_auth, "authorize", lambda r, log=None: (payload, None)):
+            return C._authorize(object())
+
+    def test_a_clodia_spawn_token_is_refused(self):
+        p, err = self._auth({"agent": "clodia", "execution_id": "clodia-636"})
+        self.assertIsNone(p)
+        self.assertEqual(err.status_code, 403)
+
+    def test_the_agent_server_passes(self):
+        p, err = self._auth({"agent": "clodia", "role": "agent-server"})
+        self.assertIsNone(err)
+        self.assertEqual(p["role"], "agent-server")
 
 
 if __name__ == "__main__":

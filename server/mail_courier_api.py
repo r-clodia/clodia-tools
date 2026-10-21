@@ -80,8 +80,20 @@ def message_box_address(code: str) -> str:
 
 
 def _authorize(request: Request):
+    """The courier is the AGENT-SERVER, never an agent: the routes require the
+    service role (`role: agent-server`, clodia-platform#539 §1), which only
+    the agent-server can mint behind the bootstrap secret. A spawn of
+    `clodia` carries a token whose `agent` is `clodia` too — without the role
+    it could pull any topic's whole message through `/eml` (review of #416)."""
     payload, err = internal_auth.authorize(request, log=LOG)
-    return payload, err
+    if err:
+        return payload, err
+    from .pki_mint import ROLE_AGENT_SERVER
+    if (payload or {}).get("role") != ROLE_AGENT_SERVER:
+        LOG.warning("courier: richiesta senza il ruolo di servizio rifiutata (agent=%s)",
+                    (payload or {}).get("agent"))
+        return None, JSONResponse({"error": "forbidden"}, status_code=403)
+    return payload, None
 
 
 def _room_claims(tier: str, name: str, payload: dict) -> dict:
@@ -153,10 +165,11 @@ def _colony_rooms(existing: list[dict]) -> list[dict]:
         LOG.warning("courier colony: codes unavailable (%s)", type(e).__name__)
         return []
     for code, (tier, name) in sorted(codes.items()):
-        if (tier, name) in already or not _topic_exists(tier, name):
+        if (tier, name) in already:
             continue
+        # Cheap check first: the senders are config, opening a topic is not.
         sig = _senders(f"{tier}/{name}")
-        if not sig["senders"]:
+        if not sig["senders"] or not _topic_exists(tier, name):
             continue
         out.append({"tier": tier, "name": name, "account": acct, "address": addr,
                     "strict": bool(egress.ingress_strict(f"{tier}/{name}")),

@@ -915,6 +915,10 @@ def _snapshot_meta_bytes(raw: bytes, tier: str) -> bytes:
     # folder of THIS instance's shared root, maybe another topic's. It is
     # attached again, through the gated `topic.local_folder_add`.
     meta.pop("local_folders", None)
+    # Nor the message-box code (#583, review of #416): an archive could carry
+    # another topic's code and take its mail. The boot backfill gives the
+    # restored topic a fresh one.
+    meta.pop("mailbox_code", None)
     return json.dumps(meta, ensure_ascii=False, indent=2).encode()
 
 

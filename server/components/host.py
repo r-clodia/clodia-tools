@@ -293,6 +293,13 @@ class Perimeter:
             return bool(colony) and (address or "").strip().lower() == colony
         return bool(egress.mailbox_allowed(direction, address, scope))
 
+    def colony_address(self) -> str:
+        """The colony mailbox's address (#583), "" while unset. Mail on it
+        addressed to `local+X@` belongs to the topics' message boxes ONLY: a
+        component hides it from every other read (review of #416)."""
+        from ..mail_courier_api import colony_mailbox
+        return colony_mailbox()[1]
+
     def courier_tag(self) -> str:
         """The message-box code of the courier call in progress (#583), "" for
         any other call. Set by the gateway's courier route, never by a caller:

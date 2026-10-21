@@ -3105,8 +3105,8 @@ class TopicService:
                 if e.kind == "dir" and self.s.exists(self._meta_p(tr, e.name)):
                     yield tr, e.name
 
-    def mailbox_codes(self) -> dict:
-        """`{code: (tier, name)}` of every topic that has one."""
+    def _mailbox_holders(self) -> dict:
+        """`{code: [(tier, name), …]}`: every topic holding each code."""
         out: dict = {}
         for tr, nm in self._meta_refs():
             try:
@@ -3115,7 +3115,20 @@ class TopicService:
                 continue
             code = normalize_mailbox_code(meta.get(MAILBOX_CODE_KEY))
             if code:
-                out[code] = (tr, nm)
+                out.setdefault(code, []).append((tr, nm))
+        return out
+
+    def mailbox_codes(self) -> dict:
+        """`{code: (tier, name)}` of every UNAMBIGUOUS code. A code held by two
+        topics (a restored archive, a race) delivers to neither — fail closed
+        (review of #416) — until `ensure_mailbox_codes` reassigns it."""
+        out: dict = {}
+        for code, holders in self._mailbox_holders().items():
+            if len(holders) == 1:
+                out[code] = holders[0]
+            else:
+                LOG.warning("message box: codice %s condiviso da %d topic, nessuna "
+                            "consegna finché non è riassegnato", code, len(holders))
         return out
 
     def by_mailbox_code(self, code: str) -> tuple[str, str] | None:
@@ -3127,14 +3140,19 @@ class TopicService:
         """Give a code to every topic that has none (existing topics, once).
         Returns how many were assigned. A topic whose meta changes in the
         meantime is skipped (optimistic lock) and gets its code next time."""
-        taken = set(self.mailbox_codes())
+        holders = self._mailbox_holders()
+        taken = set(holders)
+        # A code held by several topics is reassigned on ALL of them: which one
+        # "really" owned it cannot be told, and guessing would hand a topic's
+        # mail to an impostor.
+        shared = {ref for code, refs in holders.items() if len(refs) > 1 for ref in refs}
         assigned = 0
         for tr, nm in list(self._meta_refs()):
             try:
                 meta, version = self._read_meta(tr, nm)
             except TopicError:
                 continue
-            if normalize_mailbox_code(meta.get(MAILBOX_CODE_KEY)):
+            if normalize_mailbox_code(meta.get(MAILBOX_CODE_KEY)) and (tr, nm) not in shared:
                 continue
             code = new_mailbox_code(taken)
             meta[MAILBOX_CODE_KEY] = code
