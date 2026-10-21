@@ -317,14 +317,12 @@ class Perimeter:
 
     def room_declares_sender(self, header: str) -> bool:
         """Is the sender `header` (`Nome <a@b.it>` or `a@b.it`) declared by the
-        CURRENT room's `mailfrom:` entries (#576)? The room comes from the
+        CURRENT room's own `mailfrom:` entries (#576)? The room comes from the
         signed claim, never an argument; outside a room → False. What the mail
-        courier delivers into a topic: participants never count; global entries
-        count only on a message-box call (`courier_tag()` set, #585), where the
-        subaddress already names the one room."""
+        courier delivers into a topic: global entries and participants do not
+        count."""
         from .. import egress
-        return bool(egress.room_declares_sender(header or "", egress._scope_of_call(),
-                                                with_global=bool(self.courier_tag())))
+        return bool(egress.room_declares_sender(header or "", egress._scope_of_call()))
 
     def address_of(self, header: str) -> str:
         """The address of a `From:`-like header (`Nome <a@b.it>` → `a@b.it`),
