@@ -59,7 +59,7 @@ class InRoomTests(unittest.TestCase):
             return {"envelopes": []}
         with patch.object(C, "_authorize", lambda r: ({"agent": "clodia"}, None)), \
                 patch.object(C, "_topic_exists", lambda t, n: True), \
-                patch.object(C, "rooms", lambda: [{"tier": "SEAL-2", "name": "preventivi",
+                patch.object(C, "rooms", lambda *a: [{"tier": "SEAL-2", "name": "preventivi",
                                                    "account": "info"}]), \
                 patch.object(whitelist, "CONFIG", {"agents": {"clodia": {}}}), \
                 patch("server.tools.mail_switch.call", call):
@@ -78,7 +78,7 @@ class InRoomTests(unittest.TestCase):
             raise PermissionError("la casella non è nella whitelist inbox")
         with patch.object(C, "_authorize", lambda r: ({"agent": "clodia"}, None)), \
                 patch.object(C, "_topic_exists", lambda t, n: True), \
-                patch.object(C, "rooms", lambda: [{"tier": "SEAL-2", "name": "x",
+                patch.object(C, "rooms", lambda *a: [{"tier": "SEAL-2", "name": "x",
                                                    "account": "info"}]), \
                 patch("server.tools.mail_switch.call", call):
             r = asyncio.run(C.attachment_route(_Req({
@@ -98,7 +98,7 @@ class InRoomTests(unittest.TestCase):
     def test_a_mailbox_the_room_does_not_list_is_refused_before_the_component(self):
         with patch.object(C, "_authorize", lambda r: ({"agent": "clodia"}, None)), \
                 patch.object(C, "_topic_exists", lambda t, n: True), \
-                patch.object(C, "rooms", lambda: [{"tier": "SEAL-2", "name": "a",
+                patch.object(C, "rooms", lambda *a: [{"tier": "SEAL-2", "name": "a",
                                                    "account": "info"}]), \
                 patch("server.tools.mail_switch.call",
                       lambda *a: self.fail("component called")):

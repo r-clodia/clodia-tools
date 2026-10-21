@@ -76,7 +76,7 @@ class ColonyRowTests(unittest.TestCase):
                 patch.object(C, "_topic_exists", lambda t, n: True), \
                 patch("server.components.loader.service", lambda pack, name: object()), \
                 patch("server.main._topics", lambda: fake):
-            return C.rooms()
+            return C.rooms(True)
 
     def test_a_global_sender_alone_opens_the_tagged_row(self):
         (row,) = self._rooms(_cfg(glob=["mailfrom:dcarboni@gmail.com"]))
@@ -119,7 +119,16 @@ class IndexGateTests(unittest.TestCase):
                 patch("server.components.loader.service",
                       lambda pack, name: object() if name in services else None), \
                 patch("server.main._topics", lambda: fake):
-            return C.rooms()
+            return C.rooms(self.indexed)
+
+    indexed = True
+
+    def test_an_older_courier_that_does_not_ask_gets_no_global_rows(self):
+        """Review of clodia-logic#558: a new gateway and comms-pack with an old
+        agent-server must not bring back one search per topic."""
+        self.indexed = False
+        cfg = _cfg(glob=["mailfrom:dcarboni@gmail.com"])
+        self.assertEqual(self._rooms(cfg, {"courier_message_box", "courier_box_index"}), [])
 
     def test_without_the_index_global_senders_do_not_count(self):
         cfg = _cfg(glob=["mailfrom:dcarboni@gmail.com"])

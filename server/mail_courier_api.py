@@ -125,7 +125,7 @@ def _topic_exists(tier: str, name: str) -> bool:
         return False
 
 
-def rooms() -> list[dict]:
+def rooms(indexed: bool = False) -> list[dict]:
     """The rooms with a mailbox in their OWN `inbox:` list, one row per
     mailbox the instance has. Global entries are not a room: the courier
     posts only where a room declared the mailbox."""
@@ -153,11 +153,11 @@ def rooms() -> list[dict]:
                    **_senders(f"{tier}/{name}")}
             if addr in boxes and row not in out:
                 out.append(row)
-    out.extend(_colony_rooms(out))
+    out.extend(_colony_rooms(out, indexed))
     return out
 
 
-def _colony_rooms(existing: list[dict]) -> list[dict]:
+def _colony_rooms(existing: list[dict], indexed_ok: bool = False) -> list[dict]:
     """One row per topic reachable through the colony mailbox (#583): it has a
     message-box code and at least one sender, its own or global (#585). A room that
     already reads the colony mailbox through its own `inbox:` gets no second
@@ -176,9 +176,12 @@ def _colony_rooms(existing: list[dict]) -> list[dict]:
         if _components.service("comms-pack", "courier_message_box") is None:
             return []
         # Global senders count on the message box (#585), but they make EVERY
-        # topic with a code a row: only with the one-search index (comms-pack
-        # ≥ 2.6.0) — without it each row is one IMAP search per cycle.
-        indexed = _components.service("comms-pack", "courier_box_index") is not None
+        # topic with a code a row: only when BOTH sides read through the
+        # one-search index — comms-pack ≥ 2.6.0 and a courier that asked for
+        # indexed rows (`indexed_ok`). An older courier would search each row
+        # (review of clodia-logic#558).
+        indexed = bool(indexed_ok) and _components.service(
+            "comms-pack", "courier_box_index") is not None
     except Exception:  # noqa: BLE001 — unknown → off
         return []
     already = {(r["tier"], r["name"]) for r in existing if r.get("address") == addr}
@@ -232,7 +235,8 @@ async def rooms_route(request: Request):
     if err:
         return err
     try:
-        return JSONResponse({"rooms": await asyncio.to_thread(rooms)})
+        indexed = request.query_params.get("indexed") == "1"
+        return JSONResponse({"rooms": await asyncio.to_thread(rooms, indexed)})
     except Exception as e:  # noqa: BLE001
         LOG.warning("courier rooms: %s", type(e).__name__)
         return JSONResponse({"error": str(e)[:200]}, status_code=502)
@@ -257,7 +261,8 @@ async def _room_call(request: Request, service: str, keys: tuple[str, ...]):
     # room (review of #406).
     account = str(body.get("account") or "")
     tag = str(body.get("tag") or "")
-    offerte = await asyncio.to_thread(rooms)
+    # The widest offer: a pair an indexed courier may have been given.
+    offerte = await asyncio.to_thread(rooms, True)
     # The tag is part of the pair: a colony row is offered WITH its topic's
     # code, and only that exact (room, mailbox, tag) is accepted (#583).
     if not any(r["tier"] == tier and r["name"] == name and r["account"] == account
@@ -336,7 +341,7 @@ async def attachment_route(request: Request):
 
 
 async def eml_route(request: Request):
-    return await _room_call(request, "courier_eml", ("account", "email_id", "folder"))
+    return await _room_call(request, "courier_eml", ("account", "email_id", "folder", "key"))
 
 
 routes = [
