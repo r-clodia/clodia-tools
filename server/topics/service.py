@@ -2063,10 +2063,31 @@ class TopicService:
             raise TopicError(f"path non valido: {relpath}")
         if self._is_data_path(meta, rel):
             store, base, sub, _mount = self._resolve_data_path(tier, name, rel, meta)
-            return store.read(f"{base}/{sub}".strip("/"))
+            target = f"{base}/{sub}".strip("/")
+            try:
+                return store.read(target)
+            except NotFound:
+                self._refuse_folder_read(store, target, rel)
+                raise
         # Fuori dai mount: control-plane (summary.md, meta.json, AGENTS.md), che
         # si legge ma non si naviga come dato.
         return self.s.read(f"{self._dir(tier, name)}/{rel}")
+
+    @staticmethod
+    def _refuse_folder_read(store, target: str, rel: str) -> None:
+        """TopicError when `target` is a folder, so `read_file` on it does not
+        answer a bare NotFound (clodia-platform#597). «non trovato» on an
+        existing folder read as «the folder is not there»: an agent reported
+        to Davide that a folder he had just filled did not exist. Checked only
+        after the read failed, so a normal read pays nothing for it."""
+        try:
+            st = store.stat(target)
+        except Exception:  # noqa: BLE001 — the original NotFound still stands
+            return
+        if st is not None and getattr(st, "kind", None) == "dir":
+            raise TopicError(
+                f"`{rel.strip('/')}` è una cartella, non un file: per vederne il "
+                f"contenuto usa topic.files con subpath='{rel.strip('/')}'.")
 
     def save_summary(self, tier: str, name: str, text: str,
                      base_version: str | None) -> dict:

@@ -610,11 +610,13 @@ _TOPIC_TOOLS: list[Tool] = [
                      "kind (file|dir), size, mtime. I file caricati stanno di norma in "
                      "'files/'. Per vedere il CONTENUTO di una sottocartella passa il suo "
                      "path come subpath (es. subpath='files/expenses'). Usa il `path` "
-                     "ritornato con topic.read_file."),
+                     "ritornato con topic.read_file. `path` è accettato come sinonimo di "
+                     "`subpath`: il `path` di una voce `dir` si ripassa così com'è."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
             "subpath": {"type": "string", "description": "cartella da elencare, relativa alla root del topic (es. 'files' o 'files/expenses'); vuoto = root"},
+            "path": {"type": "string", "description": "sinonimo di `subpath` (stesso valore del `path` di una voce `dir`)"},
         }, "required": ["tier", "name"]},
     ),
     Tool(
@@ -6369,6 +6371,24 @@ def _extract_document_text(filename: str, data: bytes) -> tuple[str, int | None]
     return data.decode("utf-8", errors="replace"), None
 
 
+def _files_subpath(a: dict) -> str:
+    """The folder `topic.files` lists: `subpath`, or `path` as its synonym
+    (clodia-platform#597).
+
+    `topic.read_file` takes `path` and every entry `topic.files` returns has a
+    `path`, so an agent passes `path` back. It used to be dropped without a
+    word and the ROOT came back instead: the agent saw `local`/`shared` only
+    and told Davide that a folder with five files did not exist. Both given
+    and different is refused — guessing which one was meant is the same
+    silence in another form."""
+    sub, path = a.get("subpath"), a.get("path")
+    if sub and path and sub.strip("/") != path.strip("/"):
+        raise TopicError(
+            f"`subpath` ({sub!r}) e `path` ({path!r}) indicano cartelle diverse: "
+            "passane uno solo.")
+    return sub or path or ""
+
+
 def _dispatch_topic(name: str, a: dict):
     svc = _topics()
     verb = name.split(".", 1)[1]
@@ -6503,7 +6523,7 @@ def _dispatch_topic(name: str, a: dict):
                  if verb == "list" else svc.search(a["query"], a.get("mode", "lexical")))
         return _visible_topic_rows(righe, agent_name())
     if verb == "files":
-        return svc.list_files(a["tier"], a["name"], a.get("subpath", ""))
+        return svc.list_files(a["tier"], a["name"], _files_subpath(a))
     if verb == "read_file":
         data = _read_topic_file(svc, a)
         # Testo o binario si decide sul file INTERO, non sulla finestra: un
