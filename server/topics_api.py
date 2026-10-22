@@ -551,6 +551,16 @@ async def data_catalog_route(request: Request):
             out = await asyncio.to_thread(cat.update, str(body.get("kind") or ""),
                                           str(body.get("resource") or ""),
                                           tier=body.get("tier"), importers=body.get("importers"))
+        elif action == "set_mode":
+            # #596: `legacy` → `topic` once the migration is applied (and back,
+            # if it must be undone). Written like the other admin config keys.
+            from . import whitelist as _wl
+            m = str(body.get("mode") or "").strip().lower()
+            if m not in ("legacy", "topic"):
+                return JSONResponse({"error": "mode: legacy | topic"}, status_code=400)
+            _wl.CONFIG["data_access"] = m
+            _wl.save_config()
+            out = {"data_access": m}
         elif action == "retire":
             out = {"retired": await asyncio.to_thread(cat.retire, str(body.get("kind") or ""),
                                                       str(body.get("resource") or ""))}

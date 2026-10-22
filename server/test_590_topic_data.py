@@ -221,5 +221,34 @@ class SnapshotTests(unittest.TestCase):
         self.assertNotIn("data", json.loads(_snapshot_meta_bytes(raw, "SEAL-2")))
 
 
+class RoutesTests(unittest.TestCase):
+    """The admin catalog route and the owner data route, through Starlette."""
+
+    def _client(self, payload):
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+        from . import topics_api
+
+        def fake_authorize(request):
+            request.state.auth_payload = payload
+            return payload.get("principal") or payload.get("agent"), None
+        self.addCleanup(patch.stopall)
+        patch.object(topics_api, "_authorize", fake_authorize).start()
+        return TestClient(Starlette(routes=topics_api.routes))
+
+    def test_only_admins_or_the_agent_server_write_the_catalog(self):
+        saved = {}
+        patch.object(whitelist, "CONFIG", {}).start()
+        patch.object(whitelist, "save_config", lambda: saved.update(ok=True)).start()
+        c = self._client({"agent": "clodia"})
+        self.assertEqual(c.post("/internal/data-catalog",
+                                json={"action": "set_mode", "mode": "topic"}).status_code, 403)
+        c = self._client({"agent": "clodia", "role": "agent-server"})
+        r = c.post("/internal/data-catalog", json={"action": "set_mode", "mode": "topic"})
+        self.assertEqual((r.status_code, whitelist.CONFIG.get("data_access")), (200, "topic"))
+        self.assertEqual(c.post("/internal/data-catalog",
+                                json={"action": "set_mode", "mode": "x"}).status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()
