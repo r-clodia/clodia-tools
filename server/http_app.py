@@ -91,6 +91,12 @@ async def _lifespan(_app):
             LOG.info("message box: codice assegnato a %d topic esistenti", n)
     except Exception as e:  # noqa: BLE001
         LOG.warning("message box: codici non assegnati al boot (%s)", type(e).__name__)
+    # The data catalog (#590): what exists and is not listed yet. Best effort.
+    try:
+        from . import data_catalog
+        await asyncio.to_thread(data_catalog.sync)
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("data catalog: sync al boot fallita (%s)", type(e).__name__)
     async with _sm.run():
         LOG.info("clodia-tools MCP HTTP: session manager attivo")
         # OFFLOAD + WATCHDOG (clodia-platform#316). `asyncio.to_thread` — che

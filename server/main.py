@@ -6029,6 +6029,23 @@ def _rag_authorize(collection: str, write: bool) -> None:
     è strutturale e vale per tutti. Solleva PermissionError su violazione."""
     instance_profile.rag_check_collection(collection)
     ag = agent_name()
+    from . import topic_data
+    if topic_data.mode() == "topic":
+        # #590 D4: the topic of the signed claim decides — imported there,
+        # granted there. Super-agents included; the one exception is the
+        # provisioner's WRITE (create/ingest on behalf of a pack), checked on
+        # clearance as before.
+        if write and ag in _rag_provisioners():
+            tier = eu_corpus.collection_tier(collection)
+            if _rank(current_clearance()) < _rank(tier):
+                raise PermissionError(
+                    f"agent '{ag}': clearance insufficiente per la collection "
+                    f"'{collection}' (tier {tier})")
+            return
+        from .egress import _scope_of_call
+        topic_data.authorize("rag", collection, write=write, agent=ag,
+                             clearance=current_clearance(), scope=_scope_of_call())
+        return
     if _is_super(ag):
         return
     if write and ag in _rag_provisioners():
@@ -6097,6 +6114,14 @@ def _datastore_authorize(key: str, *, write: bool) -> dict:
     if is_on_behalf():
         return _datastore_authorize_human(entry, key, write=write)
     ag = agent_name()
+    from . import topic_data
+    if topic_data.mode() == "topic":
+        # #590 D4: imported in the signed topic and granted there; the seed
+        # list no longer decides, for anyone.
+        from .egress import _scope_of_call
+        topic_data.authorize("datastore", f"{pack}/{dsname}", write=write, agent=ag,
+                             clearance=current_clearance(), scope=_scope_of_call())
+        return entry
     if not (_is_super(ag) or ag in (entry["seeds"] or [])):
         raise PermissionError(
             f"agent '{ag}' non è nell'elenco seed del datastore '{key}'")
@@ -6162,7 +6187,14 @@ def _dispatch_rag(name: str, a: dict):
             only = instance_profile.load()["rag"].get("collection") or ""
             res = {"collections": [c for c in res.get("collections", [])
                                    if c.get("collection") == only]}
-        if not _is_super(agent_name()):
+        from . import topic_data
+        if topic_data.mode() == "topic" and agent_name() not in _rag_provisioners():
+            # #590: the collections this agent may read in ITS topic.
+            from .egress import _scope_of_call
+            mine = topic_data.visible("rag", agent=agent_name(), scope=_scope_of_call())
+            res = {"collections": [c for c in res.get("collections", [])
+                                   if c.get("collection") in mine]}
+        elif not _is_super(agent_name()):
             if agent_name() in _rag_provisioners():
                 res = {"collections": [
                     c for c in res.get("collections", [])
@@ -6191,11 +6223,19 @@ def _dispatch_rag(name: str, a: dict):
             raise PermissionError(
                 f"agent '{agent_name()}': clearance insufficiente per creare "
                 f"collection tier {tier}")
-        return eu_corpus.create_collection(
+        out = eu_corpus.create_collection(
             collection,
             tier=tier,
             description=a.get("description"),
         )
+        # #590 D1: a created collection is an instance resource from now on.
+        try:
+            from . import data_catalog
+            data_catalog.register("rag", collection, tier=tier, owner=agent_name(),
+                                  source=f"rag.create_collection:{agent_name()}")
+        except Exception as e:  # noqa: BLE001 — the next boot sync lists it
+            LOG.warning("data catalog: %s non registrata (%s)", collection, type(e).__name__)
+        return out
     collection = a["collection"]
     if verb == "search":
         _rag_authorize(collection, write=False)

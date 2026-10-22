@@ -2448,6 +2448,9 @@ class TopicService:
             mappa.pop(agent, None)
             meta["participants"] = {k: val for k, val in mappa.items()
                                     if k != meta.get("owner")}
+            # #590 D3: an agent that leaves the channel keeps no grant on its data.
+            from ..topic_data import drop_agent
+            drop_agent(meta, agent)
             self._write_meta(tier, name, meta, v)
             from ..audit import control as _control
             _control.safe(_control.emit, "participants", "remove", f"{tier}/{name}",

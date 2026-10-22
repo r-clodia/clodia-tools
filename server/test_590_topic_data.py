@@ -1,0 +1,225 @@
+"""#590 — topic-scoped data: the instance catalog (D1), topic imports (D2),
+per-agent grants (D3) and the gateway's decision on the signed topic (D4)."""
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from . import data_catalog as cat, topic_data as td, whitelist
+from .topics.local_fs import LocalFsStorage
+from .topics.service import TopicError, TopicService
+
+DS = [{"pack": "tomato-pack", "name": "clienti", "clearance": "SEAL-2",
+       "abs_path": "/x", "seeds": ["vecchio"]}]
+
+
+class _Base(unittest.TestCase):
+    def setUp(self):
+        d = Path(tempfile.mkdtemp(prefix="cat-"))
+        self.svc = TopicService(LocalFsStorage(tempfile.mkdtemp(prefix="topics-")))
+        self.patches = [
+            patch.object(cat, "_path", lambda: d / "data-catalog.json"),
+            patch("server.datastores.declared", lambda: list(DS)),
+            patch("server.tools.eu_corpus.collections",
+                  lambda: {"collections": [{"collection": "eu-normativa", "tier": "SEAL-0"}]}),
+            patch("server.tools.eu_corpus.collection_tier", lambda c: "SEAL-0"),
+            patch.object(td, "_svc", lambda: self.svc),
+            patch.object(whitelist, "CONFIG", {"data_access": "topic"}),
+        ]
+        for p in self.patches:
+            p.start()
+            self.addCleanup(p.stop)
+        cat.sync()
+        self.svc.new("SEAL-2", "commerciale", {"owner": "davide",
+                                               "participants": ["davide", "tomato.commerciale", "clodia"]})
+        self.svc.new("SEAL-1", "blog", {"owner": "davide", "participants": ["davide", "clodia"]})
+
+    def imp(self, tier="SEAL-2", name="commerciale", kind="datastore",
+            res="tomato-pack/clienti", who="davide", admin=True, clearance="SEAL-3"):
+        return td.import_resource(tier, name, kind, res, principal=who, is_admin=admin,
+                                  clearance=clearance)
+
+    def auth(self, agent, write=False, scope="SEAL-2/commerciale", clearance="SEAL-2",
+             kind="datastore", res="tomato-pack/clienti"):
+        return td.authorize(kind, res, write=write, agent=agent, clearance=clearance, scope=scope)
+
+
+class CatalogTests(_Base):
+    def test_sync_lists_what_exists_once(self):
+        keys = {e["key"] for e in cat.entries()}
+        self.assertEqual(keys, {"datastore:tomato-pack/clienti", "rag:eu-normativa"})
+        self.assertEqual(cat.sync(), 0)
+        e = cat.get("datastore", "tomato-pack/clienti")
+        self.assertEqual((e["tier"], e["importers"]), ("SEAL-2", ["@admin"]))
+
+    def test_the_tier_can_be_raised_never_lowered_below_the_data(self):
+        cat.update("datastore", "tomato-pack/clienti", tier="SEAL-0")
+        self.assertEqual(cat.effective_tier(cat.get("datastore", "tomato-pack/clienti")), "SEAL-2")
+        cat.update("datastore", "tomato-pack/clienti", tier="SEAL-3")
+        self.assertEqual(cat.effective_tier(cat.get("datastore", "tomato-pack/clienti")), "SEAL-3")
+
+    def test_retiring_keeps_nothing_reachable(self):
+        self.imp()
+        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
+                 "tomato.commerciale", "read")
+        self.assertTrue(cat.retire("datastore", "tomato-pack/clienti"))
+        with patch("server.datastores.declared", lambda: []):
+            with self.assertRaises(PermissionError):
+                self.auth("tomato.commerciale")
+
+
+class ImportTests(_Base):
+    def test_one_resource_many_topics(self):
+        self.svc.new("SEAL-3", "bilancio", {"owner": "davide", "participants": ["davide"]})
+        self.imp()
+        self.imp(tier="SEAL-3", name="bilancio")
+        self.assertEqual(self.imp()["already"], True)
+
+    def test_data_never_moves_down_a_level(self):
+        with self.assertRaises(PermissionError) as c:
+            self.imp(tier="SEAL-1", name="blog")
+        self.assertIn("tier del topic", str(c.exception))
+
+    def test_only_allowed_importers_with_clearance(self):
+        with self.assertRaises(PermissionError):
+            self.imp(who="mario", admin=False)
+        with self.assertRaises(PermissionError):
+            self.imp(clearance="SEAL-1")
+        with self.assertRaises(PermissionError):
+            self.imp(clearance=None)
+        cat.update("datastore", "tomato-pack/clienti", importers=["mario"])
+        self.assertTrue(self.imp(who="mario", admin=False)["ok"])
+
+    def test_unknown_resource(self):
+        with self.assertRaises(td.DataError):
+            self.imp(res="tomato-pack/fantasma")
+
+    def test_a_topic_cannot_go_below_its_data(self):
+        self.imp()
+        meta = self.svc._read_meta("SEAL-2", "commerciale")[0]
+        with self.assertRaises(td.DataError):
+            td.check_retier(meta, "SEAL-1")
+        td.check_retier(meta, "SEAL-3")
+
+
+class GrantTests(_Base):
+    def setUp(self):
+        super().setUp()
+        self.imp()
+
+    def test_default_none_then_read_then_write(self):
+        with self.assertRaises(PermissionError):
+            self.auth("tomato.commerciale")
+        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
+                 "tomato.commerciale", "read")
+        self.auth("tomato.commerciale")
+        with self.assertRaises(PermissionError):
+            self.auth("tomato.commerciale", write=True)
+        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
+                 "tomato.commerciale", "write")
+        self.auth("tomato.commerciale", write=True)
+        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
+                 "tomato.commerciale", None)
+        with self.assertRaises(PermissionError):
+            self.auth("tomato.commerciale")
+
+    def test_only_participants(self):
+        with self.assertRaises(td.DataError):
+            td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti", "estraneo", "read")
+
+    def test_a_participant_who_leaves_keeps_no_grant(self):
+        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
+                 "tomato.commerciale", "write")
+        self.svc.remove_participant("SEAL-2", "commerciale", "tomato.commerciale")
+        meta = self.svc._read_meta("SEAL-2", "commerciale")[0]
+        self.assertEqual(td.imports(meta)[0]["grants"], {})
+
+    def test_the_grant_is_per_topic(self):
+        self.svc.new("SEAL-2", "altro", {"owner": "davide",
+                                         "participants": ["davide", "tomato.commerciale"]})
+        self.imp(name="altro")
+        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
+                 "tomato.commerciale", "write")
+        td.grant("SEAL-2", "altro", "datastore", "tomato-pack/clienti",
+                 "tomato.commerciale", "read")
+        self.auth("tomato.commerciale", write=True)
+        with self.assertRaises(PermissionError):
+            self.auth("tomato.commerciale", write=True, scope="SEAL-2/altro")
+        self.auth("tomato.commerciale", scope="SEAL-2/altro")
+
+    def test_no_topic_no_access_and_clearance_still_counts(self):
+        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
+                 "tomato.commerciale", "read")
+        with self.assertRaises(PermissionError):
+            self.auth("tomato.commerciale", scope=None)
+        with self.assertRaises(PermissionError):
+            self.auth("tomato.commerciale", clearance="SEAL-1")
+
+    def test_listing_shows_only_granted_imports(self):
+        self.imp(kind="rag", res="eu-normativa")
+        self.assertEqual(td.visible("rag", agent="clodia", scope="SEAL-2/commerciale"), set())
+        td.grant("SEAL-2", "commerciale", "rag", "eu-normativa", "clodia", "read")
+        self.assertEqual(td.visible("rag", agent="clodia", scope="SEAL-2/commerciale"),
+                         {"eu-normativa"})
+
+
+class GatewayTests(_Base):
+    """The two reference monitors in `main` follow the switch."""
+
+    def setUp(self):
+        super().setUp()
+        self.imp()
+        from . import main
+        self.main = main
+
+    def call_ds(self, agent, write=False, scope="SEAL-2/commerciale", clearance="SEAL-2"):
+        m = self.main
+        with patch.object(m, "agent_name", lambda: agent), \
+                patch.object(m, "is_on_behalf", lambda: False), \
+                patch.object(m, "current_clearance", lambda: clearance), \
+                patch("server.egress._scope_of_call", lambda: scope), \
+                patch("server.datastores.find", lambda p, n: dict(DS[0])):
+            return m._datastore_authorize("tomato-pack/clienti", write=write)
+
+    def test_topic_mode_ignores_the_seed_list(self):
+        with self.assertRaises(PermissionError):
+            self.call_ds("vecchio")              # in the manifest's seeds, not granted here
+        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti", "clodia", "read")
+        self.assertEqual(self.call_ds("clodia")["name"], "clienti")
+
+    def test_legacy_mode_keeps_todays_rules(self):
+        with patch.object(whitelist, "CONFIG", {"data_access": "legacy"}):
+            self.assertEqual(self.call_ds("vecchio")["name"], "clienti")
+            with self.assertRaises(PermissionError):
+                self.call_ds("clodia")
+
+    def test_rag_in_topic_mode(self):
+        self.imp(kind="rag", res="eu-normativa")
+        m = self.main
+        with patch.object(m, "agent_name", lambda: "clodia"), \
+                patch.object(m, "current_clearance", lambda: "SEAL-2"), \
+                patch("server.egress._scope_of_call", lambda: "SEAL-2/commerciale"), \
+                patch.object(m.instance_profile, "rag_check_collection", lambda c: None):
+            with self.assertRaises(PermissionError):
+                m._rag_authorize("eu-normativa", write=False)
+            td.grant("SEAL-2", "commerciale", "rag", "eu-normativa", "clodia", "read")
+            m._rag_authorize("eu-normativa", write=False)
+            with self.assertRaises(PermissionError):
+                m._rag_authorize("eu-normativa", write=True)
+            with patch.object(m, "agent_name", lambda: "sysadmin"):
+                m._rag_authorize("eu-normativa", write=True)   # the provisioner's ingest
+
+
+class SnapshotTests(unittest.TestCase):
+    def test_an_archive_carries_no_import(self):
+        import json
+        from .topics_api import _snapshot_meta_bytes
+        raw = json.dumps({"schema_version": 2, "tier": "SEAL-2", "title": "x",
+                          "data": [{"kind": "datastore", "name": "a/b", "grants": {"x": "write"}}]}).encode()
+        self.assertNotIn("data", json.loads(_snapshot_meta_bytes(raw, "SEAL-2")))
+
+
+if __name__ == "__main__":
+    unittest.main()
