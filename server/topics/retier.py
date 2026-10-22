@@ -73,6 +73,13 @@ def apply(svc, tier: str, name: str, new_tier: str, *, by: str, reason: str) -> 
     from .. import whitelist as wl
     from ..tools import telegram_bindings as tb
     from .. import taint
+    # #590: a topic cannot go below the level of the data it imports.
+    from ..topic_data import DataError, check_retier
+    try:
+        check_retier((svc._read_meta(tier, name)[0]), new_tier)
+    except DataError as e:
+        from .service import TopicError
+        raise TopicError(str(e)) from e
     wl.reload_config()
     cfg_prima = copy.deepcopy({k: wl.CONFIG.get(k) for k in ("scope_source_allow",
                                                            "scope_egress_allow")})

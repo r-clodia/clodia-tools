@@ -1150,6 +1150,10 @@ class TopicService:
         # a chosen code could take another topic's mail.
         meta.pop(MAILBOX_CODE_KEY, None)
         meta[MAILBOX_CODE_KEY] = new_mailbox_code(self.mailbox_codes())
+        # Data imports and their grants (#590) are made AFTER creation, by the
+        # owner through `topic_data`: a creator — maybe an agent — never brings
+        # a ready-made list that skips the importer, tier and grant checks.
+        meta.pop("data", None)
         meta.setdefault("title", name)
         meta.setdefault("type", "progetto")
         # tier = unica classe del topic + livello di privacy per l'enforcement.
@@ -2448,6 +2452,9 @@ class TopicService:
             mappa.pop(agent, None)
             meta["participants"] = {k: val for k, val in mappa.items()
                                     if k != meta.get("owner")}
+            # #590 D3: an agent that leaves the channel keeps no grant on its data.
+            from ..topic_data import drop_agent
+            drop_agent(meta, agent)
             self._write_meta(tier, name, meta, v)
             from ..audit import control as _control
             _control.safe(_control.emit, "participants", "remove", f"{tier}/{name}",

@@ -470,6 +470,140 @@ async def set_channel(request: Request):
         return JSONResponse({"error": str(e)[:200]}, status_code=400)
 
 
+def _actor(request: Request, body: dict) -> tuple[str, bool, str | None]:
+    """Who imports, as the gateway can know it (#590): the signed on-behalf
+    human, or — on the agent-server's door, which has checked owner/admin —
+    the person it names (`by`, `by_admin`, `by_clearance`)."""
+    p = getattr(request.state, "auth_payload", None) or {}
+    if p.get("on_behalf"):
+        return (str(p.get("principal") or ""), (p.get("human_role") or "user") == "admin",
+                p.get("clearance"))
+    return (str(body.get("by") or ""), bool(body.get("by_admin")),
+            body.get("by_clearance") or None)
+
+
+async def topic_data_route(request: Request):
+    """POST /internal/topics/{tier}/{name}/data {action, kind, resource, agent?, mode?}
+    (#590): import | remove | grant. Owner (or admin) only."""
+    from . import topic_data
+    _, err = _authorize_topic_owner(request)
+    if err:
+        return err
+    tier = request.path_params["tier"]; name = request.path_params["name"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    action = body.get("action")
+    kind, resource = str(body.get("kind") or ""), str(body.get("resource") or "")
+    try:
+        if action == "import":
+            who, admin, clearance = _actor(request, body)
+            if not who:
+                return JSONResponse({"error": "chi importa non è noto"}, status_code=400)
+            out = await asyncio.to_thread(topic_data.import_resource, tier, name, kind,
+                                          resource, principal=who, is_admin=admin,
+                                          clearance=clearance)
+        elif action == "remove":
+            out = await asyncio.to_thread(topic_data.remove, tier, name, kind, resource)
+        elif action == "grant":
+            out = await asyncio.to_thread(topic_data.grant, tier, name, kind, resource,
+                                          str(body.get("agent") or ""), body.get("mode"))
+        else:
+            return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
+    except PermissionError as e:
+        return JSONResponse({"error": str(e)[:300]}, status_code=403)
+    except (TopicError, ValueError, KeyError) as e:
+        return JSONResponse({"error": str(e)[:300]}, status_code=400)
+    except VersionConflict as e:
+        return JSONResponse({"error": f"il topic è cambiato nel frattempo, riprova ({e})"[:300]},
+                            status_code=409)
+    from .audit import control as _control
+    _control.safe(_control.emit, "topic_data", str(action), f"{tier}/{name}",
+                  kind=kind, resource=resource, agent=body.get("agent"), mode=body.get("mode"),
+                  by=_actor(request, body)[0])
+    _invalidate_list_cache()
+    return JSONResponse(out)
+
+
+async def data_catalog_route(request: Request):
+    """GET  /internal/data-catalog → {entries, data_access}
+    POST /internal/data-catalog {action, ...} (#590 D1).
+    Reading: a person (on-behalf) or the agent-server; `importing_topics` only
+    for an admin or the agent-server (which filters for non-admins). Writing: a
+    platform admin (on-behalf) or the agent-server, which checks admin first."""
+    from . import data_catalog as cat, topic_data
+    from .pki_mint import ROLE_AGENT_SERVER
+    who, err = _authorize(request)
+    if err:
+        return err
+    p = getattr(request.state, "auth_payload", None) or {}
+    if not (p.get("on_behalf") or p.get("role") == ROLE_AGENT_SERVER):
+        # Not an agent's business (review of #420): the catalog names every
+        # resource and, with `importing_topics`, the topics that import it.
+        return JSONResponse({"error": "riservato alle persone e all'agent-server"},
+                            status_code=403)
+    if request.method == "GET":
+        full = p.get("role") == ROLE_AGENT_SERVER or \
+            (p.get("on_behalf") and (p.get("human_role") or "") == "admin")
+
+        def _rows():
+            rows = cat.entries()
+            if full:            # topic names are not every person's business
+                used = topic_data.importing_topics()
+                for r in rows:
+                    r["importing_topics"] = used.get(r["key"], [])
+            return rows
+        rows = await asyncio.to_thread(_rows)
+        return JSONResponse({"entries": rows, "data_access": topic_data.mode()})
+    if not ((p.get("on_behalf") and (p.get("human_role") or "") == "admin")
+            or p.get("role") == ROLE_AGENT_SERVER):
+        return JSONResponse({"error": "riservato agli admin"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    action = body.get("action")
+    try:
+        if action == "sync":
+            out = {"added": await asyncio.to_thread(cat.sync)}
+        elif action == "update":
+            out = await asyncio.to_thread(cat.update, str(body.get("kind") or ""),
+                                          str(body.get("resource") or ""),
+                                          tier=body.get("tier"), importers=body.get("importers"))
+        elif action == "migration_plan":
+            from . import data_migration
+            out = await asyncio.to_thread(data_migration.plan)
+        elif action == "migration_apply":
+            from . import data_migration
+            who, admin, clearance = _actor(request, body)
+            if not who:
+                return JSONResponse({"error": "chi applica non è noto"}, status_code=400)
+            out = await asyncio.to_thread(data_migration.apply, body.get("items") or [],
+                                          by=who, is_admin=admin, clearance=clearance)
+        elif action == "set_mode":
+            # #596: `legacy` → `topic` once the migration is applied (and back,
+            # if it must be undone). Written like the other admin config keys.
+            from . import whitelist as _wl
+            m = str(body.get("mode") or "").strip().lower()
+            if m not in ("legacy", "topic"):
+                return JSONResponse({"error": "mode: legacy | topic"}, status_code=400)
+            _wl.CONFIG["data_access"] = m
+            _wl.save_config()
+            out = {"data_access": m}
+        elif action == "retire":
+            out = {"retired": await asyncio.to_thread(cat.retire, str(body.get("kind") or ""),
+                                                      str(body.get("resource") or ""))}
+        else:
+            return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
+    except (ValueError, KeyError) as e:
+        return JSONResponse({"error": str(e)[:300]}, status_code=400)
+    from .audit import control as _control
+    _control.safe(_control.emit, "data_catalog", str(action), str(body.get("resource") or "*"),
+                  kind=body.get("kind"), tier=body.get("tier"))
+    return JSONResponse(out)
+
+
 async def drive_folder(request: Request):
     """POST /internal/topics/{tier}/{name}/drive-folder {action, ...}.
 
@@ -919,6 +1053,9 @@ def _snapshot_meta_bytes(raw: bytes, tier: str) -> bytes:
     # another topic's code and take its mail. The boot backfill gives the
     # restored topic a fresh one.
     meta.pop("mailbox_code", None)
+    # Nor the data imports (#590): they name resources of THIS instance's
+    # catalog, imported by an owner with the right to; an archive is neither.
+    meta.pop("data", None)
     return json.dumps(meta, ensure_ascii=False, indent=2).encode()
 
 
@@ -1177,6 +1314,8 @@ routes = [
     Route("/internal/topics/{tier}/{name}/participants", participants, methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/data", topic_data_route, methods=["POST"]),
+    Route("/internal/data-catalog", data_catalog_route, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/local-folder", local_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/link", topic_link, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/tier", topic_tier, methods=["POST"]),
