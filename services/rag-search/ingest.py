@@ -165,7 +165,7 @@ def ensure_schema(cur):
                 "NOT NULL DEFAULT 'trusted'")
     cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS source text")
     cur.connection.commit()
-    _SCHEMA_DONE = True
+    _SCHEMA_DONE = True                     # only after the commit
 
 
 def _ensure_collection(cur, collection, tier="SEAL-0"):

@@ -127,9 +127,20 @@ def _bound_elsewhere(svc, collection: str, key: str) -> bool:
     t, _, n = other.partition("/")
     try:
         m = svc._read_meta(t, n)[0]
-    except Exception:  # noqa: BLE001 — the old key is gone (re-tier, deletion)
-        return False
-    return settings(m)["collection"] == collection
+        return settings(m)["collection"] == collection
+    except Exception:  # noqa: BLE001 — the old key is gone: is it live elsewhere?
+        pass
+    # Fail closed (second review of #422): the binding follows only when no
+    # live topic names this collection — a re-tiered topic is found by name.
+    for row in svc.list(include_archived=True):
+        if row["name"] != n or f"{row['tier']}/{row['name']}" == key:
+            continue
+        try:
+            if settings(svc._read_meta(row["tier"], row["name"])[0])["collection"] == collection:
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+    return False
 
 
 def settings(meta: dict) -> dict:

@@ -152,7 +152,15 @@ def search(
     sql += " ORDER BY c.embedding <=> %s::vector LIMIT %s"
     params += [emb, k]
     with _db() as conn, conn.cursor() as cur:
-        cur.execute(sql, params)
+        try:
+            cur.execute(sql, params)
+        except psycopg.errors.UndefinedColumn:
+            # The startup migration did not run (Postgres not ready at boot):
+            # run it now, once, and retry (review of #422).
+            conn.rollback()
+            ingest_mod._SCHEMA_DONE = False
+            ingest_mod.ensure_schema(cur)
+            cur.execute(sql, params)
         rows = cur.fetchall()
     return {
         "query": q,
@@ -257,7 +265,7 @@ def remove(
     """Rimuove un documento (o una sua versione) da una collection. Token-gated."""
     if not _INGEST_TOKEN:
         raise HTTPException(503, "remove disabilitato (EU_RAG_INGEST_TOKEN non impostato)")
-    if authorization != f"Bearer {_INGEST_TOKEN}":
+    if not _authorized(authorization):
         raise HTTPException(401, "token non valido")
     res = ingest_mod.remove_document(name, version, collection)
     return {"status": "ok", **res}
@@ -279,7 +287,7 @@ async def ingest(
     `provenance`: l'etichetta del file d'origine (#602)."""
     if not _INGEST_TOKEN:
         raise HTTPException(503, "ingest disabilitato (EU_RAG_INGEST_TOKEN non impostato)")
-    if authorization != f"Bearer {_INGEST_TOKEN}":
+    if not _authorized(authorization):
         raise HTTPException(401, "token di ingest non valido")
     if _model is None:
         raise HTTPException(503, "modello non ancora caricato")

@@ -42,7 +42,8 @@ def _authorize(request: Request) -> tuple[str | None, JSONResponse | None]:
 
 def _sees_topic_indexes(request: Request) -> bool:
     """A topic's index (`topic-*`, #599) names its topic's files and days: only
-    the agent-server (which filters for the page) or an on-behalf admin."""
+    an on-behalf admin, or a caller with the agent-server's service role. The
+    Databases page lists topic indexes through the data catalog instead."""
     from .pki_mint import ROLE_AGENT_SERVER
     p = getattr(request.state, "rag_payload", None) or {}
     return p.get("role") == ROLE_AGENT_SERVER or (
