@@ -140,12 +140,139 @@ def chunk_pdf(path):
 
 DEFAULT_COLLECTION = "eu-normativa"
 
+#: Provenance of a document (clodia-platform#600): what reading it means for the
+#: taint of the session that retrieves it. Same labels as the topic files.
+PROVENANCES = ("trusted", "untrusted", "agent")
+
+#: Collections whose content is private to a topic (#599): read only with the
+#: service token. The EU corpus stays public on the LAN, as before.
+PRIVATE_PREFIX = "topic-"
+
+
+def is_private(collection):
+    return str(collection or "").startswith(PRIVATE_PREFIX)
+
+
+_SCHEMA_DONE = False
+
+
+def ensure_schema(cur):
+    """Additive migration, idempotent: provenance and source per document."""
+    global _SCHEMA_DONE
+    if _SCHEMA_DONE:
+        return
+    cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS provenance text "
+                "NOT NULL DEFAULT 'trusted'")
+    cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS source text")
+    _SCHEMA_DONE = True
+
 
 def _ensure_collection(cur, collection, tier="SEAL-0"):
     cur.execute(
         "INSERT INTO collections (name, tier) VALUES (%s,%s) ON CONFLICT (name) DO NOTHING",
         (collection, tier),
     )
+
+
+def set_collection(collection, tier):
+    """Create a collection, or set the tier of an existing one (a topic's
+    collection follows its topic's re-tiering, #599)."""
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO collections (name, tier) VALUES (%s,%s) "
+            "ON CONFLICT (name) DO UPDATE SET tier=EXCLUDED.tier",
+            (collection, tier),
+        )
+        conn.commit()
+    return {"collection": collection, "tier": tier}
+
+
+def drop_collection(collection):
+    """Every document of a collection (chunks by cascade), then the collection."""
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM documents WHERE collection=%s", (collection,))
+        n = cur.fetchone()[0]
+        cur.execute("DELETE FROM documents WHERE collection=%s", (collection,))
+        cur.execute("DELETE FROM collections WHERE name=%s", (collection,))
+        conn.commit()
+    return {"collection": collection, "documents_removed": n}
+
+
+def chunk_text(text, target=CHUNK_TARGET, hard=CHUNK_MAX):
+    """Plain text → chunks of about `target` characters, cut at paragraph,
+    then line, then sentence boundaries; never longer than `hard`."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text or "") if p.strip()]
+    pieces = []
+    for p in paras:
+        if len(p) <= hard:
+            pieces.append(p)
+            continue
+        for part in re.split(r"(?<=[.!?])\s+|\n", p):
+            part = part.strip()
+            while len(part) > hard:
+                pieces.append(part[:hard])
+                part = part[hard:]
+            if part:
+                pieces.append(part)
+    chunks, buf = [], ""
+    for piece in pieces:
+        if buf and len(buf) + 1 + len(piece) > target:
+            chunks.append(buf)
+            buf = piece
+        else:
+            buf = f"{buf}\n{piece}" if buf else piece
+    if buf:
+        chunks.append(buf)
+    return [{"section": None, "page": None, "ordinal": i, "text": c}
+            for i, c in enumerate(chunks)]
+
+
+def ingest_text(collection, name, version, text=None, chunks=None, source=None,
+                provenance="trusted", tier=None, supersede=False, model=None):
+    """Text (or ready chunks [{text, section?}]) → embeddings → pgvector, as one
+    document with its provenance (#600). Idempotent per (collection, name,
+    version). Returns {collection, name, version, chunks, doc_id}."""
+    if provenance not in PROVENANCES:
+        raise ValueError(f"provenance: {', '.join(PROVENANCES)}")
+    if chunks:
+        items = [{"section": c.get("section"), "page": None, "ordinal": i,
+                  "text": str(c.get("text") or "").strip()}
+                 for i, c in enumerate(chunks) if str(c.get("text") or "").strip()]
+    else:
+        items = chunk_text(text or "")
+    if not items:
+        raise ValueError("nessun testo da indicizzare")
+    digest = hashlib.sha256("\n\x00".join(c["text"] for c in items).encode()).hexdigest()
+    if model is None:
+        model = SentenceTransformer(MODEL_NAME)
+    vecs = model.encode([c["text"] for c in items], normalize_embeddings=True, batch_size=32)
+    with _db() as conn, conn.cursor() as cur:
+        ensure_schema(cur)
+        _ensure_collection(cur, collection, tier or "SEAL-4")
+        if supersede:
+            cur.execute("UPDATE documents SET status='superseded' "
+                        "WHERE collection=%s AND name=%s AND version<>%s",
+                        (collection, name, version))
+        cur.execute(
+            """INSERT INTO documents (collection, name, version, source_url, hash, status,
+                                      provenance, source)
+               VALUES (%s,%s,%s,NULL,%s,'active',%s,%s)
+               ON CONFLICT (collection, name, version)
+               DO UPDATE SET hash=EXCLUDED.hash, status='active', ingested_at=now(),
+                             provenance=EXCLUDED.provenance, source=EXCLUDED.source
+               RETURNING id""",
+            (collection, name, version, digest, provenance, source))
+        doc_id = cur.fetchone()[0]
+        cur.execute("DELETE FROM chunks WHERE document_id=%s", (doc_id,))
+        for c, v in zip(items, vecs):
+            emb = "[" + ",".join(f"{x:.6f}" for x in v) + "]"
+            cur.execute(
+                """INSERT INTO chunks (document_id, collection, section, page, ordinal, text, embedding)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s::vector)""",
+                (doc_id, collection, c["section"], c["page"], c["ordinal"], c["text"], emb))
+        conn.commit()
+    return {"collection": collection, "name": name, "version": version,
+            "chunks": len(items), "doc_id": doc_id}
 
 
 def ingest_file(path, name, version, url=None, supersede=False, model=None,
@@ -213,8 +340,10 @@ def list_documents(collection=DEFAULT_COLLECTION):
     """Documenti di una collection: [{name, version, status, chunks,
     source_url, ingested_at}]. Riusabile da CLI e micro-servizio."""
     with _db() as conn, conn.cursor() as cur:
+        ensure_schema(cur)
         cur.execute(
-            """SELECT d.name, d.version, d.status, count(c.id), d.source_url, d.ingested_at
+            """SELECT d.name, d.version, d.status, count(c.id), d.source_url, d.ingested_at,
+                      d.provenance, d.source
                FROM documents d LEFT JOIN chunks c ON c.document_id=d.id
                WHERE d.collection=%s
                GROUP BY d.id ORDER BY d.name, d.version""",
@@ -223,8 +352,9 @@ def list_documents(collection=DEFAULT_COLLECTION):
         rows = cur.fetchall()
     return [
         {"name": n, "version": v, "status": s, "chunks": cnt,
-         "source_url": url, "ingested_at": ts.isoformat() if ts else None}
-        for n, v, s, cnt, url, ts in rows
+         "source_url": url, "ingested_at": ts.isoformat() if ts else None,
+         "provenance": prov, "source": src}
+        for n, v, s, cnt, url, ts, prov, src in rows
     ]
 
 
