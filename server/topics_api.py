@@ -604,6 +604,52 @@ async def data_catalog_route(request: Request):
     return JSONResponse(out)
 
 
+async def topic_index_route(request: Request):
+    """#599/#601: GET /internal/topic-index → the topics to index;
+    POST /internal/topic-index/{tier}/{name} {action: sync|enable|disable}.
+    `sync`: the agent-server only. `enable`/`disable`: the topic's owner
+    (or the agent-server on its behalf, which checks it)."""
+    from . import topic_index
+    from .pki_mint import ROLE_AGENT_SERVER
+    tier = request.path_params.get("tier"); name = request.path_params.get("name")
+    if request.method == "GET":
+        who, err = _authorize(request)
+        if err:
+            return err
+        p = getattr(request.state, "auth_payload", None) or {}
+        if p.get("role") != ROLE_AGENT_SERVER:
+            return JSONResponse({"error": "riservato all'agent-server"}, status_code=403)
+        return JSONResponse({"topics": await asyncio.to_thread(topic_index.topics)})
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    action = (body or {}).get("action")
+    if action == "sync":
+        who, err = _authorize(request)
+        if err:
+            return err
+        p = getattr(request.state, "auth_payload", None) or {}
+        if p.get("role") != ROLE_AGENT_SERVER:
+            return JSONResponse({"error": "riservato all'agent-server"}, status_code=403)
+        try:
+            return JSONResponse(await asyncio.to_thread(topic_index.sync, tier, name))
+        except (TopicError, VersionConflict) as e:
+            return JSONResponse({"error": str(e)[:300]}, status_code=409)
+        except RuntimeError as e:          # the RAG service down: retried next cycle
+            return JSONResponse({"error": str(e)[:300]}, status_code=502)
+    if action in ("enable", "disable"):
+        _, err = _authorize_topic_owner(request)
+        if err:
+            return err
+        out = await asyncio.to_thread(topic_index.set_enabled, tier, name, action == "enable")
+        from .audit import control as _control
+        _control.safe(_control.emit, "topic_index", str(action), f"{tier}/{name}",
+                      by=_actor(request, body)[0])
+        return JSONResponse(out)
+    return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
+
+
 async def drive_folder(request: Request):
     """POST /internal/topics/{tier}/{name}/drive-folder {action, ...}.
 
@@ -1316,6 +1362,8 @@ routes = [
     Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/data", topic_data_route, methods=["POST"]),
     Route("/internal/data-catalog", data_catalog_route, methods=["GET", "POST"]),
+    Route("/internal/topic-index", topic_index_route, methods=["GET"]),
+    Route("/internal/topic-index/{tier}/{name}", topic_index_route, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/local-folder", local_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/link", topic_link, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/tier", topic_tier, methods=["POST"]),

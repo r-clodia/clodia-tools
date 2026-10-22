@@ -31,6 +31,56 @@ def _ingest_token() -> str:
     return tok
 
 
+def _read_headers() -> dict:
+    """The service token on READS too (#600): a topic's collection (`topic-*`)
+    is private on the LAN. Without a token (dev) the public corpus still works."""
+    try:
+        return {"Authorization": f"Bearer {_ingest_token()}"}
+    except RuntimeError:
+        return {}
+
+
+def _get(url: str) -> dict:
+    req = urllib.request.Request(url, headers=_read_headers())
+    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        return json.load(resp)
+
+
+def _post_json(path: str, body: dict, timeout: float | None = None) -> dict:
+    req = urllib.request.Request(
+        f"{_BASE}{path}", data=json.dumps(body).encode(), method="POST",
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {_ingest_token()}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout or _INGEST_TIMEOUT) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"eu-rag {path} HTTP {e.code}: "
+                           f"{e.read().decode('utf-8', 'ignore')[:200]}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"eu-rag {path} irraggiungibile ({_BASE}): {e.reason}")
+
+
+def ingest_text(collection: str, name: str, text: str, *, version: str = "1",
+                source: str = "", provenance: str = "untrusted", tier: str | None = None) -> dict:
+    """Text as one document of `collection`, with its provenance (#600)."""
+    return _post_json("/ingest_text", {"collection": collection, "name": name,
+                                       "version": version, "text": text, "source": source,
+                                       "provenance": provenance, "tier": tier,
+                                       "supersede": True})
+
+
+def set_collection(collection: str, tier: str) -> dict:
+    """Create `collection` or set its tier (follows its topic's tier, #599)."""
+    _tier_cache["at"] = 0.0
+    return _post_json("/collections", {"collection": collection, "tier": tier}, _TIMEOUT)
+
+
+def drop_collection(collection: str) -> dict:
+    _tier_cache["at"] = 0.0
+    return _post_json("/collections/drop", {"collection": collection}, _TIMEOUT)
+
+
 def search(query: str, k: int = 5, doc: str | None = None,
            collection: str = DEFAULT_COLLECTION) -> dict:
     """Cerca in una collection del corpus RAG (semantico, multilingue IT/EN).
@@ -44,8 +94,7 @@ def search(query: str, k: int = 5, doc: str | None = None,
         params["doc"] = doc
     url = f"{_BASE}/search?" + urllib.parse.urlencode(params)
     try:
-        with urllib.request.urlopen(url, timeout=_TIMEOUT) as resp:
-            return json.load(resp)
+        return _get(url)
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"eu-rag-search HTTP {e.code}: {e.read().decode('utf-8', 'ignore')[:200]}")
     except urllib.error.URLError as e:
@@ -56,8 +105,7 @@ def list_documents(collection: str = DEFAULT_COLLECTION) -> dict:
     """Elenca i documenti di una collection (nome, versione, status, n. chunk)."""
     url = f"{_BASE}/documents?" + urllib.parse.urlencode({"collection": collection})
     try:
-        with urllib.request.urlopen(url, timeout=_TIMEOUT) as resp:
-            return json.load(resp)
+        return _get(url)
     except urllib.error.URLError as e:
         raise RuntimeError(f"eu-rag-search irraggiungibile ({_BASE}): {getattr(e, 'reason', e)}")
 
@@ -65,41 +113,16 @@ def list_documents(collection: str = DEFAULT_COLLECTION) -> dict:
 def collections() -> dict:
     """Elenca le collection con tier e conteggi."""
     try:
-        with urllib.request.urlopen(f"{_BASE}/collections", timeout=_TIMEOUT) as resp:
-            return json.load(resp)
+        return _get(f"{_BASE}/collections")
     except urllib.error.URLError as e:
         raise RuntimeError(f"eu-rag-search irraggiungibile ({_BASE}): {getattr(e, 'reason', e)}")
 
 
 def create_collection(collection: str, tier: str = "SEAL-1",
                       description: str | None = None) -> dict:
-    """Crea una collection RAG.
-
-    L'endpoint primario è POST /collections; per compatibilità con deployment
-    precedenti prova anche /collections/create se il servizio risponde 404.
-    """
-    fields = {"collection": collection, "tier": tier, "description": description or ""}
-    data = urllib.parse.urlencode(fields).encode()
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Authorization": f"Bearer {_ingest_token()}",
-    }
-    errors = []
-    for path in ("/collections", "/collections/create"):
-        req = urllib.request.Request(f"{_BASE}{path}", data=data, method="POST",
-                                     headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-                _tier_cache.update(at=0.0, map={})
-                return json.load(resp)
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", "ignore")[:200]
-            errors.append(f"{path} HTTP {e.code}: {body}")
-            if e.code != 404:
-                raise RuntimeError(f"eu-rag create_collection HTTP {e.code}: {body}")
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"eu-rag create_collection irraggiungibile ({_BASE}): {e.reason}")
-    raise RuntimeError("eu-rag create_collection non supportato: " + " | ".join(errors))
+    """Crea una collection RAG (rag-search ≥ 0.4.0: `POST /collections`, JSON).
+    Su una collection esistente ne aggiorna il tier."""
+    return set_collection(collection, tier)
 
 
 _tier_cache: dict = {"at": 0.0, "map": {}}
