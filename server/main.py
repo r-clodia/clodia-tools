@@ -5241,6 +5241,7 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 arguments["doc_name"], arguments["version"],
                 url=arguments.get("url"),
                 supersede=bool(arguments.get("supersede", False)),
+                provenance=svc.provenance_of(tier, tname, path) or "untrusted",
             )
         elif name == "eu_corpus.list":
             _rag_authorize("eu-normativa", write=False)
@@ -6033,8 +6034,14 @@ def _rag_authorize(collection: str, write: bool, verb: str = "") -> None:
     è strutturale e vale per tutti. Solleva PermissionError su violazione."""
     instance_profile.rag_check_collection(collection)
     ag = agent_name()
-    from . import topic_data
-    if topic_data.mode() == "topic":
+    from . import topic_data, topic_index
+    if write and topic_index.is_topic_collection(collection):
+        # A topic's index is written by the indexer alone, through the service
+        # token — never through a verb, by anyone (review of #422, B2).
+        raise PermissionError(
+            f"la collection '{collection}' è l'indice di un topic: la scrive solo "
+            "l'indicizzatore")
+    if topic_data.mode() == "topic" or collection.startswith(topic_index.PREFIX):
         # #590 D4: the topic of the signed claim decides — imported there,
         # granted there. Super-agents included; the one exception is the
         # provisioner's WRITE (create/ingest on behalf of a pack), checked on
@@ -6096,6 +6103,22 @@ def _rag_authorize(collection: str, write: bool, verb: str = "") -> None:
         raise PermissionError(
             f"agent '{ag}': clearance insufficiente per la collection '{collection}' "
             f"(tier {tier})")
+
+
+def _taint_from_hits(collection: str, res: object) -> None:
+    """#602: a hit from untrusted content taints the session, exactly as reading
+    that file would. A topic collection's hit without a label counts as
+    untrusted (an older service, a document indexed before labels)."""
+    from . import topic_index
+    hits = (res or {}).get("results") if isinstance(res, dict) else None
+    bad = []
+    for h in hits or []:
+        prov = (h or {}).get("provenance")
+        if prov == "untrusted" or (prov is None and collection.startswith(topic_index.PREFIX)):
+            bad.append(str((h or {}).get("name") or "?"))
+    if bad:
+        _taint.mark(current_chat(), "verb", f"rag.search:{collection}/{bad[0]}"[:200],
+                    agent_name_safe())
 
 
 def _ingest_source_ok(collection: str, tier: str, name: str) -> None:
@@ -6217,15 +6240,32 @@ def _dispatch_rag(name: str, a: dict):
             only = instance_profile.load()["rag"].get("collection") or ""
             res = {"collections": [c for c in res.get("collections", [])
                                    if c.get("collection") == only]}
-        from . import topic_data
-        if topic_data.mode() == "topic" and agent_name() not in _rag_provisioners():
+        from . import topic_data, topic_index
+        from .egress import _scope_of_call
+        if _is_super(agent_name()):
+            # A super-agent sees every collection but the topics' indexes,
+            # which it reads only where its topic grants them (review of #422).
+            mine = topic_data.visible("rag", agent=agent_name(), scope=_scope_of_call(),
+                                      clearance=current_clearance())
+            res = {"collections": [c for c in res.get("collections", [])
+                                   if not topic_index.is_topic_collection(c.get("collection"))
+                                   or c.get("collection") in mine]}
+        elif topic_data.mode() == "topic" and agent_name() not in _rag_provisioners():
             # #590: the collections this agent may read in ITS topic.
-            from .egress import _scope_of_call
             mine = topic_data.visible("rag", agent=agent_name(), scope=_scope_of_call(),
                                       clearance=current_clearance())
             res = {"collections": [c for c in res.get("collections", [])
                                    if c.get("collection") in mine]}
         elif not _is_super(agent_name()):
+            # A topic collection (#599) follows the topic rules in legacy mode too.
+            mine = topic_data.visible("rag", agent=agent_name(), scope=_scope_of_call(),
+                                      clearance=current_clearance())
+            topic_cols = [c for c in res.get("collections", [])
+                          if str(c.get("collection") or "").startswith(topic_index.PREFIX)
+                          and c.get("collection") in mine]
+            res = {"collections": [c for c in res.get("collections", [])
+                                   if not str(c.get("collection") or "").startswith(
+                                       topic_index.PREFIX)]}
             if agent_name() in _rag_provisioners():
                 res = {"collections": [
                     c for c in res.get("collections", [])
@@ -6245,6 +6285,7 @@ def _dispatch_rag(name: str, a: dict):
                     if _rag_covers(allowed, c.get("collection"))
                     and _rank(current_clearance()) >= _rank(c.get("tier", "SEAL-0"))
                 ]}
+            res = {"collections": res.get("collections", []) + topic_cols}
         return res
     if verb == "create_collection":
         collection = a["collection"]
@@ -6270,8 +6311,10 @@ def _dispatch_rag(name: str, a: dict):
     collection = a["collection"]
     if verb == "search":
         _rag_authorize(collection, write=False)
-        return eu_corpus.search(a["query"], k=a.get("k", 5), doc=a.get("doc"),
-                                collection=collection)
+        res = eu_corpus.search(a["query"], k=a.get("k", 5), doc=a.get("doc"),
+                               collection=collection)
+        _taint_from_hits(collection, res)
+        return res
     if verb == "list":
         _rag_authorize(collection, write=False)
         return eu_corpus.list_documents(collection)
@@ -6286,7 +6329,8 @@ def _dispatch_rag(name: str, a: dict):
         return eu_corpus.ingest_bytes(
             data, filename, a["doc_name"], a["version"],
             url=a.get("url"), supersede=bool(a.get("supersede", False)),
-            collection=collection)
+            collection=collection,
+            provenance=svc.provenance_of(tier, tname, path) or "untrusted")
     if verb == "remove":
         _rag_authorize(collection, write=True)
         return eu_corpus.remove(a["doc_name"], a.get("version"), collection)

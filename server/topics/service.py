@@ -1154,6 +1154,9 @@ class TopicService:
         # owner through `topic_data`: a creator — maybe an agent — never brings
         # a ready-made list that skips the importer, tier and grant checks.
         meta.pop("data", None)
+        # Nor an index (review of #422, B1): naming another topic's collection
+        # would make this topic its reader and its writer.
+        meta.pop("index", None)
         meta.setdefault("title", name)
         meta.setdefault("type", "progetto")
         # tier = unica classe del topic + livello di privacy per l'enforcement.
