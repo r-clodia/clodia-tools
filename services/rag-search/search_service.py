@@ -65,7 +65,10 @@ def _db():
     if not pw:
         raise RuntimeError("EU_RAG_PG_PASSWORD non impostata")
     return psycopg.connect(
-        host="127.0.0.1", port=5433, dbname="eu_corpus", user="clodia", password=pw
+        host=os.environ.get("EU_RAG_PG_HOST", "127.0.0.1"),
+        port=int(os.environ.get("EU_RAG_PG_PORT", "5433")),
+        dbname=os.environ.get("EU_RAG_PG_DB", "eu_corpus"),
+        user=os.environ.get("EU_RAG_PG_USER", "clodia"), password=pw
     )
 
 
