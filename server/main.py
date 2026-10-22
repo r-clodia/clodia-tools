@@ -5226,10 +5226,11 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
         elif name == "eu_corpus.ingest":
             # Legge il PDF dal topic server-side (i byte NON passano dal modello),
             # con controllo participant+clearance, poi lo invia al micro-servizio.
-            _rag_authorize("eu-normativa", write=True)
+            _rag_authorize("eu-normativa", write=True, verb="ingest")
             svc = _topics()
             tier, tname, path = arguments["tier"], arguments["name"], arguments["path"]
             _require_topic_member(svc, tier, tname)
+            _ingest_source_ok("eu-normativa", tier, tname)
             data = svc.read_file(tier, tname, path)
             filename = path.rsplit("/", 1)[-1]
             result = eu_corpus.ingest_bytes(
@@ -6021,7 +6022,7 @@ def _rag_declared_members(collection: str) -> list[str] | None:
     return entry.get("seeds") if entry else None
 
 
-def _rag_authorize(collection: str, write: bool) -> None:
+def _rag_authorize(collection: str, write: bool, verb: str = "") -> None:
     """Reference monitor per-collection: grant read/write (arg-aware, dal
     AgentSpec autorevole nel core) + member list dichiarata dal pack che possiede
     la collection + tiering (clearance ≥ tier della collection).
@@ -6035,7 +6036,9 @@ def _rag_authorize(collection: str, write: bool) -> None:
         # granted there. Super-agents included; the one exception is the
         # provisioner's WRITE (create/ingest on behalf of a pack), checked on
         # clearance as before.
-        if write and ag in _rag_provisioners():
+        # Only CREATING a collection or INGESTING into it (decision 5): a
+        # provisioner's `remove` goes through the topic like anyone's.
+        if write and verb in ("create_collection", "ingest") and ag in _rag_provisioners():
             tier = eu_corpus.collection_tier(collection)
             if _rank(current_clearance()) < _rank(tier):
                 raise PermissionError(
@@ -6090,6 +6093,29 @@ def _rag_authorize(collection: str, write: bool) -> None:
         raise PermissionError(
             f"agent '{ag}': clearance insufficiente per la collection '{collection}' "
             f"(tier {tier})")
+
+
+def _ingest_source_ok(collection: str, tier: str, name: str) -> None:
+    """#590, review of clodia-tools#420: in topic mode, an ingest must not move
+    data down a level. The source file's topic must be the call's own topic
+    (provisioners excepted), and its tier at most the collection's: a SEAL-3
+    file in a SEAL-1 collection is readable by every SEAL-1 importer."""
+    from . import topic_data, data_catalog
+    if topic_data.mode() != "topic":
+        return
+    entry = data_catalog.get("rag", collection)
+    need = data_catalog.effective_tier(entry) if entry else eu_corpus.collection_tier(collection)
+    if data_catalog.rank(tier) > data_catalog.rank(need):
+        raise PermissionError(
+            f"il file viene da un topic {tier}: non entra nella collection '{collection}' "
+            f"({need}), i dati non scendono di livello")
+    if agent_name() not in _rag_provisioners():
+        from .egress import _scope_of_call
+        scope = _scope_of_call()
+        if not scope or data_catalog.norm_tier(scope.partition("/")[0]) != \
+                data_catalog.norm_tier(tier) or scope.partition("/")[2] != name:
+            raise PermissionError(
+                "in modalità topic si ingesta solo un file del topic in cui si lavora")
 
 
 def _datastore_authorize(key: str, *, write: bool) -> dict:
@@ -6191,7 +6217,8 @@ def _dispatch_rag(name: str, a: dict):
         if topic_data.mode() == "topic" and agent_name() not in _rag_provisioners():
             # #590: the collections this agent may read in ITS topic.
             from .egress import _scope_of_call
-            mine = topic_data.visible("rag", agent=agent_name(), scope=_scope_of_call())
+            mine = topic_data.visible("rag", agent=agent_name(), scope=_scope_of_call(),
+                                      clearance=current_clearance())
             res = {"collections": [c for c in res.get("collections", [])
                                    if c.get("collection") in mine]}
         elif not _is_super(agent_name()):
@@ -6217,7 +6244,7 @@ def _dispatch_rag(name: str, a: dict):
         return res
     if verb == "create_collection":
         collection = a["collection"]
-        _rag_authorize(collection, write=True)
+        _rag_authorize(collection, write=True, verb="create_collection")
         tier = a.get("tier", "SEAL-1")
         if _rank(current_clearance()) < _rank(tier):
             raise PermissionError(
@@ -6245,10 +6272,11 @@ def _dispatch_rag(name: str, a: dict):
         _rag_authorize(collection, write=False)
         return eu_corpus.list_documents(collection)
     if verb == "ingest":
-        _rag_authorize(collection, write=True)
+        _rag_authorize(collection, write=True, verb="ingest")
         svc = _topics()
         tier, tname, path = a["tier"], a["name"], a["path"]
         _require_topic_member(svc, tier, tname)
+        _ingest_source_ok(collection, tier, tname)
         data = svc.read_file(tier, tname, path)
         filename = path.rsplit("/", 1)[-1]
         return eu_corpus.ingest_bytes(

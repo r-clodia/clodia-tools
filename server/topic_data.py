@@ -66,7 +66,7 @@ def _write(svc, tier: str, name: str, mutate) -> dict:
 def import_resource(tier: str, name: str, kind: str, resource: str, *,
                     principal: str, is_admin: bool, clearance: str | None) -> dict:
     entry = cat.get(kind, resource)
-    if entry is None:
+    if entry is None and cat.sync_due():
         cat.sync()                      # a pack installed since the last boot
         entry = cat.get(kind, resource)
     if entry is None:
@@ -75,7 +75,7 @@ def import_resource(tier: str, name: str, kind: str, resource: str, *,
     if why:
         raise PermissionError(why)
     need = cat.effective_tier(entry)
-    if cat.rank(tier) < cat.rank(need):
+    if cat.rank_have(tier) < cat.rank(need):
         raise PermissionError(
             f"{kind} '{resource}' è {need}: non entra in un topic {cat.norm_tier(tier)} "
             "(il tier del topic deve essere almeno quello della risorsa)")
@@ -110,8 +110,11 @@ def grant(tier: str, name: str, kind: str, resource: str, agent: str,
     svc = _svc()
 
     def mutate(meta, entries):
-        if mode and agent not in set(meta.get("participants") or []):
+        roles = svc.participants_map(meta)          # owner included, map or list
+        if mode and agent not in roles and agent != meta.get("owner"):
             raise DataError(f"'{agent}' non partecipa a {tier}/{name}: aggiungilo prima")
+        if mode == "write" and roles.get(agent) == "reader":
+            raise DataError(f"'{agent}' è lettore in {tier}/{name}: non può avere la scrittura")
         for e in entries:
             if e["kind"] == kind and e["name"] == resource:
                 if mode:
@@ -138,9 +141,12 @@ def drop_agent(meta: dict, agent: str) -> bool:
 def check_retier(meta: dict, new_tier: str) -> None:
     """A topic cannot go below the level of the data it imports."""
     for e in imports(meta):
-        entry = cat.get(e["kind"], e["name"])
+        try:
+            entry = cat.get(e["kind"], e["name"])
+        except RuntimeError as err:     # unreadable catalog: refuse, do not crash
+            raise DataError(str(err)) from err
         need = cat.effective_tier(entry) if entry else "SEAL-0"
-        if cat.rank(new_tier) < cat.rank(need):
+        if cat.rank_have(new_tier) < cat.rank(need):
             raise DataError(
                 f"il topic importa {e['kind']} '{e['name']}' ({need}): non può scendere a "
                 f"{cat.norm_tier(new_tier)}. Rimuovi prima l'import.")
@@ -163,7 +169,7 @@ def authorize(kind: str, resource: str, *, write: bool, agent: str,
             "(nessun topic in questa chiamata)")
     tier, _, name = scope.partition("/")
     try:
-        meta = (_svc().open(tier, name) or {}).get("meta") or {}
+        meta = _svc()._read_meta(tier, name)[0]     # meta only: this runs on every call
     except Exception as e:  # noqa: BLE001
         raise PermissionError(f"topic {scope} non leggibile: {type(e).__name__}") from e
     imp = _find(meta, kind, resource)
@@ -179,21 +185,47 @@ def authorize(kind: str, resource: str, *, write: bool, agent: str,
             f"su {kind} '{resource}' nel topic {scope} (lo assegna l'owner del topic)")
     need = cat.effective_tier(entry)
     topic_tier = meta.get("tier") or tier
-    if cat.rank(topic_tier) < cat.rank(need):
+    if cat.rank_have(topic_tier) < cat.rank(need):
         raise PermissionError(f"{kind} '{resource}' ({need}) sopra il tier del topic {scope}")
-    if not clearance or cat.rank(clearance) < cat.rank(need):
+    if cat.rank_have(clearance) < cat.rank(need):
         raise PermissionError(
             f"agent '{agent}': clearance insufficiente per {kind} '{resource}' ({need})")
     return entry
 
 
-def visible(kind: str, *, agent: str, scope: str | None) -> set[str]:
-    """Names of `kind` the agent may read in its topic (for listings)."""
+def visible(kind: str, *, agent: str, scope: str | None,
+            clearance: str | None = None) -> set[str]:
+    """Names of `kind` the agent may read in its topic (for listings): the
+    same answer `authorize` would give, without raising."""
     if not scope:
         return set()
+    out = set()
     tier, _, name = scope.partition("/")
     try:
-        meta = (_svc().open(tier, name) or {}).get("meta") or {}
+        meta = _svc()._read_meta(tier, name)[0]
     except Exception:  # noqa: BLE001
         return set()
-    return {e["name"] for e in imports(meta) if e["kind"] == kind and e["grants"].get(agent)}
+    for e in imports(meta):
+        if e["kind"] != kind or not e["grants"].get(agent):
+            continue
+        try:
+            authorize(kind, e["name"], write=False, agent=agent, clearance=clearance, scope=scope)
+        except PermissionError:
+            continue
+        out.add(e["name"])
+    return out
+
+
+def importing_topics() -> dict[str, list[str]]:
+    """`{catalog key: ["SEAL-2/name", ...]}` — which topics import what (the
+    Databases page, #595). Archived topics included: their imports still exist."""
+    svc = _svc()
+    out: dict[str, list[str]] = {}
+    for row in svc.list(include_archived=True):
+        try:
+            meta = svc._read_meta(row["tier"], row["name"])[0]
+        except Exception:  # noqa: BLE001
+            continue
+        for e in imports(meta):
+            out.setdefault(f"{e['kind']}:{e['name']}", []).append(f"{row['tier']}/{row['name']}")
+    return out

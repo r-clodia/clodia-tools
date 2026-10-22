@@ -92,6 +92,11 @@ class ImportTests(_Base):
         cat.update("datastore", "tomato-pack/clienti", importers=["mario"])
         self.assertTrue(self.imp(who="mario", admin=False)["ok"])
 
+    def test_importing_topics(self):
+        self.imp()
+        self.assertEqual(td.importing_topics(),
+                         {"datastore:tomato-pack/clienti": ["SEAL-2/commerciale"]})
+
     def test_unknown_resource(self):
         with self.assertRaises(td.DataError):
             self.imp(res="tomato-pack/fantasma")
@@ -159,10 +164,11 @@ class GrantTests(_Base):
 
     def test_listing_shows_only_granted_imports(self):
         self.imp(kind="rag", res="eu-normativa")
-        self.assertEqual(td.visible("rag", agent="clodia", scope="SEAL-2/commerciale"), set())
+        self.assertEqual(td.visible("rag", agent="clodia", scope="SEAL-2/commerciale",
+                                    clearance="SEAL-2"), set())
         td.grant("SEAL-2", "commerciale", "rag", "eu-normativa", "clodia", "read")
-        self.assertEqual(td.visible("rag", agent="clodia", scope="SEAL-2/commerciale"),
-                         {"eu-normativa"})
+        self.assertEqual(td.visible("rag", agent="clodia", scope="SEAL-2/commerciale",
+                                    clearance="SEAL-2"), {"eu-normativa"})
 
 
 class GatewayTests(_Base):
@@ -209,7 +215,7 @@ class GatewayTests(_Base):
             with self.assertRaises(PermissionError):
                 m._rag_authorize("eu-normativa", write=True)
             with patch.object(m, "agent_name", lambda: "sysadmin"):
-                m._rag_authorize("eu-normativa", write=True)   # the provisioner's ingest
+                m._rag_authorize("eu-normativa", write=True, verb="ingest")   # the provisioner
 
 
 class SnapshotTests(unittest.TestCase):
@@ -235,6 +241,30 @@ class RoutesTests(unittest.TestCase):
         self.addCleanup(patch.stopall)
         patch.object(topics_api, "_authorize", fake_authorize).start()
         return TestClient(Starlette(routes=topics_api.routes))
+
+    def test_s7_agents_do_not_read_the_catalog(self):
+        patch.object(whitelist, "CONFIG", {}).start()
+        c = self._client({"agent": "clodia"})
+        self.assertEqual(c.get("/internal/data-catalog").status_code, 403)
+
+    def test_the_topic_data_route_takes_the_signed_person(self):
+        from . import topics_api, topic_data
+        seen = {}
+        def owner_ok(request):
+            request.state.auth_payload = {"principal": "mario", "on_behalf": True,
+                                          "human_role": "user", "clearance": "SEAL-1"}
+            return "mario", None
+        patch.object(topics_api, "_authorize_topic_owner", owner_ok).start()
+        patch.object(topic_data, "import_resource",
+                     lambda *a, **k: seen.update(k) or {"ok": True}).start()
+        c = self._client({"principal": "mario", "on_behalf": True, "human_role": "user",
+                          "clearance": "SEAL-1"})
+        r = c.post("/internal/topics/SEAL-1/x/data", json={
+            "action": "import", "kind": "rag", "resource": "c",
+            "by": "davide", "by_admin": True, "by_clearance": "SEAL-4"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual((seen["principal"], seen["is_admin"], seen["clearance"]),
+                         ("mario", False, "SEAL-1"))
 
     def test_only_admins_or_the_agent_server_write_the_catalog(self):
         saved = {}
@@ -291,6 +321,102 @@ class MigrationTests(_Base):
         basso = td.imports(self.svc._read_meta("SEAL-1", "basso")[0])
         self.assertNotIn("datastore", {e["kind"] for e in basso})     # SEAL-2 data, SEAL-1 topic
         self.assertEqual(whitelist.CONFIG["data_access"], "legacy")
+
+
+class ReviewFixesTests(_Base):
+    """Review of clodia-tools#420."""
+
+    def test_b1_a_creator_never_brings_imports(self):
+        m = self.svc.new("SEAL-3", "mio", {"owner": "rogue", "participants": ["rogue"],
+                                         "data": [{"kind": "datastore", "name": "tomato-pack/clienti",
+                                                   "grants": {"rogue": "write"}}]})
+        self.assertNotIn("data", m)
+        with self.assertRaises(PermissionError):
+            self.auth("rogue", write=True, scope="SEAL-3/mio", clearance="SEAL-3")
+
+    def test_s2_reader_gets_no_write_and_owner_may_be_granted(self):
+        self.svc.new("SEAL-2", "ruoli", {"owner": "davide", "participants": ["davide"]})
+        meta, ver = self.svc._read_meta("SEAL-2", "ruoli")
+        meta["participants"] = {"lett": "reader", "scrive": "contributor"}
+        self.svc._write_meta("SEAL-2", "ruoli", meta, ver)
+        self.imp(name="ruoli")
+        with self.assertRaises(td.DataError):
+            td.grant("SEAL-2", "ruoli", "datastore", "tomato-pack/clienti", "lett", "write")
+        td.grant("SEAL-2", "ruoli", "datastore", "tomato-pack/clienti", "lett", "read")
+        td.grant("SEAL-2", "ruoli", "datastore", "tomato-pack/clienti", "scrive", "write")
+        td.grant("SEAL-2", "ruoli", "datastore", "tomato-pack/clienti", "davide", "read")
+
+    def test_s3_unknown_levels_have_nothing(self):
+        self.imp()
+        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
+                 "tomato.commerciale", "read")
+        for bogus in ("bogus", "", None):
+            with self.subTest(clearance=bogus):
+                with self.assertRaises(PermissionError):
+                    self.auth("tomato.commerciale", clearance=bogus)
+        self.assertTrue(cat.may_import(cat.get("datastore", "tomato-pack/clienti"), "davide",
+                                       is_admin=True, clearance="x"))
+        with self.assertRaises(ValueError):
+            cat.update("datastore", "tomato-pack/clienti", tier="SEAL-9")
+
+    def test_visible_matches_authorize(self):
+        self.imp(kind="rag", res="eu-normativa")
+        td.grant("SEAL-2", "commerciale", "rag", "eu-normativa", "clodia", "read")
+        self.assertEqual(td.visible("rag", agent="clodia", scope="SEAL-2/commerciale",
+                                    clearance="SEAL-2"), {"eu-normativa"})
+        self.assertEqual(td.visible("rag", agent="clodia", scope="SEAL-2/commerciale",
+                                    clearance=None), set())
+
+
+class IngestTests(_Base):
+    def setUp(self):
+        super().setUp()
+        from . import main
+        self.main = main
+
+    def check(self, agent, scope, src_tier, src_name="x"):
+        m = self.main
+        with patch.object(m, "agent_name", lambda: agent), \
+                patch("server.egress._scope_of_call", lambda: scope):
+            return m._ingest_source_ok("eu-normativa", src_tier, src_name)
+
+    def test_s1_data_never_moves_down_through_an_ingest(self):
+        with self.assertRaises(PermissionError):
+            self.check("sysadmin", None, "SEAL-3")             # SEAL-3 file, SEAL-0 collection
+        self.check("sysadmin", None, "SEAL-0")
+        with self.assertRaises(PermissionError):
+            self.check("clodia", "SEAL-0/altro", "SEAL-0")     # not the call's own topic
+        self.check("clodia", "SEAL-0/x", "SEAL-0")
+
+    def test_legacy_mode_does_not_check(self):
+        with patch.object(whitelist, "CONFIG", {"data_access": "legacy"}):
+            self.check("clodia", None, "SEAL-3")
+
+    def test_s5_the_provisioner_removes_like_anyone(self):
+        m = self.main
+        with patch.object(m, "agent_name", lambda: "sysadmin"), \
+                patch.object(m, "current_clearance", lambda: "SEAL-4"), \
+                patch("server.egress._scope_of_call", lambda: None), \
+                patch.object(m.instance_profile, "rag_check_collection", lambda c: None):
+            m._rag_authorize("eu-normativa", write=True, verb="ingest")
+            with self.assertRaises(PermissionError):
+                m._rag_authorize("eu-normativa", write=True)          # a remove
+
+
+class MigrationReviewTests(_Base):
+    def test_s4_the_plan_never_grants_beyond_the_member_list(self):
+        from . import data_migration as dm
+        cfg = {"data_access": "legacy", "agents": {"clodia": {"allowed_tools": ["*"]},
+                                                     "estraneo": {"allowed_tools": []}}}
+        with patch.object(whitelist, "CONFIG", cfg), \
+                patch("server.main._topics", lambda: self.svc), \
+                patch("server.main._rag_declared_members", lambda c: ["clodia"]), \
+                patch("server.tools.runtime.rag_grants",
+                      lambda a: {"rag_read": {"*"}, "rag_write": set()}):
+            self.svc.new("SEAL-1", "tutti", {"owner": "davide",
+                                            "participants": ["davide", "clodia", "estraneo"]})
+            items = [i for i in dm.plan()["items"] if i["topic"] == "SEAL-1/tutti"]
+        self.assertEqual(items[0]["grants"], {"clodia": "read"})
 
 
 if __name__ == "__main__":

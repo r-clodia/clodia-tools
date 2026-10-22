@@ -47,6 +47,19 @@ def rank(tier: str | None) -> int:
     return _TIERS.index(t) if t in _TIERS else len(_TIERS) - 1   # unknown → highest
 
 
+def rank_have(tier: str | None) -> int:
+    """The rank of a level someone or something HAS (clearance, topic tier):
+    unknown → below everything. `rank` reads a NEED, where unknown is the top."""
+    t = str(tier or "").strip().upper()
+    legacy = {"P0": "SEAL-0", "P1": "SEAL-1", "P2": "SEAL-2", "P3": "SEAL-3"}
+    t = legacy.get(t, t)
+    return _TIERS.index(t) if t in _TIERS else -1
+
+
+def valid_tier(tier: str | None) -> bool:
+    return rank_have(tier) >= 0
+
+
 def norm_tier(tier: str | None) -> str:
     return _TIERS[rank(tier)]
 
@@ -140,6 +153,8 @@ def update(kind: str, name: str, *, tier: str | None = None,
         if k not in data:
             raise KeyError(f"risorsa non in catalogo: {k}")
         if tier is not None:
+            if not valid_tier(tier):
+                raise ValueError(f"tier sconosciuto: '{tier}' (SEAL-0 … SEAL-4)")
             data[k]["tier"] = norm_tier(tier)
         if importers is not None:
             clean = sorted({str(i).strip() for i in importers if str(i).strip()})
@@ -166,10 +181,24 @@ def may_import(entry: dict, principal: str, *, is_admin: bool, clearance: str | 
     if not (principal in allowed or (is_admin and ADMIN in allowed)):
         return f"'{principal}' non è fra chi può importare {entry['kind']} '{entry['name']}'"
     need = effective_tier(entry)
-    if not clearance or rank(clearance) < rank(need):
+    if rank_have(clearance) < rank(need):
         return (f"clearance di '{principal}' ({clearance or 'nessuna'}) insufficiente "
                 f"per {entry['kind']} '{entry['name']}' ({need})")
     return ""
+
+
+_LAST_SYNC = [0.0]
+
+
+def sync_due(every: float = 60.0) -> bool:
+    """At most one on-demand sync a minute (an import of a bogus name must not
+    become a way to hammer the RAG service)."""
+    import time
+    now = time.monotonic()
+    if now - _LAST_SYNC[0] < every:
+        return False
+    _LAST_SYNC[0] = now
+    return True
 
 
 def sync() -> int:

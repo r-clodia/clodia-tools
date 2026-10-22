@@ -49,13 +49,33 @@ def _datastore_agents(name: str) -> dict[str, str]:
     return out
 
 
-def _rag_agents(name: str) -> dict[str, str]:
+_GRANTS: dict[str, dict] = {}
+
+
+def _grants(ag: str) -> dict | None:
+    """`runtime.rag_grants`, once per agent per plan (N agents × M collections
+    calls to the core otherwise)."""
     from .tools import runtime
+    if ag not in _GRANTS:
+        try:
+            _GRANTS[ag] = runtime.rag_grants(ag)
+        except Exception:  # noqa: BLE001 — an agent the core does not know
+            _GRANTS[ag] = None
+    return _GRANTS[ag]
+
+
+def _rag_agents(name: str) -> dict[str, str]:
+    from . import main
+    try:
+        members = main._rag_declared_members(name)     # the pack's own list (#343)
+    except PermissionError:
+        members = []
     out = {}
     for ag in _agents_cfg():
-        try:
-            g = runtime.rag_grants(ag)
-        except Exception:  # noqa: BLE001 — an agent the core does not know
+        if members is not None and ag not in members:
+            continue                    # denied today: the plan grants no more
+        g = _grants(ag)
+        if g is None:
             continue
         w, r = set(g.get("rag_write") or []), set(g.get("rag_read") or [])
         if "*" in w or name in w:
@@ -79,6 +99,7 @@ def _topics() -> list[tuple[str, str, dict]]:
 
 
 def plan() -> dict:
+    _GRANTS.clear()
     items, notes = [], []
     topics = _topics()
     for entry in cat.entries():
@@ -88,7 +109,8 @@ def plan() -> dict:
             continue
         need = cat.effective_tier(entry)
         for tier, tname, meta in topics:
-            parts = set(meta.get("participants") or [])
+            from .topics.service import TopicService
+            parts = set(TopicService.participants_map(meta)) | {meta.get("owner")}
             grants = {a: m for a, m in who.items() if a in parts}
             if not grants:
                 continue
@@ -105,6 +127,8 @@ def plan() -> dict:
     if supers:
         notes.append(f"super-agent senza bypass in modalità topic: {', '.join(supers)} "
                      "(compaiono solo dove un grant li nomina)")
+    notes.append("in modalità topic l'accesso ai dati c'è solo nei turni di canale: "
+                 "job non legati a un topic, Telegram 1:1 e DM non vedono nessun dato")
     return {"items": items, "notes": notes,
             "counts": {s: sum(1 for i in items if i["status"] == s)
                        for s in ("ok", "already", "skipped")}}

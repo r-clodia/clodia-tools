@@ -515,9 +515,13 @@ async def topic_data_route(request: Request):
         return JSONResponse({"error": str(e)[:300]}, status_code=403)
     except (TopicError, ValueError, KeyError) as e:
         return JSONResponse({"error": str(e)[:300]}, status_code=400)
+    except VersionConflict as e:
+        return JSONResponse({"error": f"il topic è cambiato nel frattempo, riprova ({e})"[:300]},
+                            status_code=409)
     from .audit import control as _control
     _control.safe(_control.emit, "topic_data", str(action), f"{tier}/{name}",
-                  kind=kind, resource=resource, agent=body.get("agent"), mode=body.get("mode"))
+                  kind=kind, resource=resource, agent=body.get("agent"), mode=body.get("mode"),
+                  by=_actor(request, body)[0])
     _invalidate_list_cache()
     return JSONResponse(out)
 
@@ -528,14 +532,25 @@ async def data_catalog_route(request: Request):
     (#590 D1). Reading: any internal caller. Writing: a platform admin (on-behalf)
     or the agent-server, which checks admin before forwarding."""
     from . import data_catalog as cat, topic_data
+    from .pki_mint import ROLE_AGENT_SERVER
     who, err = _authorize(request)
     if err:
         return err
-    if request.method == "GET":
-        rows = await asyncio.to_thread(cat.entries)
-        return JSONResponse({"entries": rows, "data_access": topic_data.mode()})
     p = getattr(request.state, "auth_payload", None) or {}
-    from .pki_mint import ROLE_AGENT_SERVER
+    if not (p.get("on_behalf") or p.get("role") == ROLE_AGENT_SERVER):
+        # Not an agent's business (review of #420): the catalog names every
+        # resource and, with `importing_topics`, the topics that import it.
+        return JSONResponse({"error": "riservato alle persone e all'agent-server"},
+                            status_code=403)
+    if request.method == "GET":
+        def _rows():
+            rows = cat.entries()
+            used = topic_data.importing_topics()
+            for r in rows:
+                r["importing_topics"] = used.get(r["key"], [])
+            return rows
+        rows = await asyncio.to_thread(_rows)
+        return JSONResponse({"entries": rows, "data_access": topic_data.mode()})
     if not ((p.get("on_behalf") and (p.get("human_role") or "") == "admin")
             or p.get("role") == ROLE_AGENT_SERVER):
         return JSONResponse({"error": "riservato agli admin"}, status_code=403)
