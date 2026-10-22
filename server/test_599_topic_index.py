@@ -213,6 +213,23 @@ class ReviewTests(_Base):
         self.assertEqual(doc["provenance"], "untrusted")
 
 
+class CatalogLabelTests(_Base):
+    def test_the_catalog_names_the_topic_of_an_index(self):
+        from . import topics_api
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+        ti.ensure("SEAL-2", "vendite")
+
+        def fake_authorize(request):
+            request.state.auth_payload = {"agent": "clodia", "role": "agent-server"}
+            return "clodia", None
+        with patch.object(topics_api, "_authorize", fake_authorize):
+            rows = TestClient(Starlette(routes=topics_api.routes)).get(
+                "/internal/data-catalog").json()["entries"]
+        (row,) = [r for r in rows if r["name"] == self.coll()]
+        self.assertEqual(row["topic"], "SEAL-2/vendite")
+
+
 class TaintTests(unittest.TestCase):
     def test_an_untrusted_hit_taints(self):
         from . import main

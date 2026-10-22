@@ -551,8 +551,14 @@ async def data_catalog_route(request: Request):
             rows = cat.entries()
             if full:            # topic names are not every person's business
                 used = topic_data.importing_topics()
+                from . import topic_index
+                bound = topic_index._bindings()
                 for r in rows:
                     r["importing_topics"] = used.get(r["key"], [])
+                    # A topic's own index (#599) is shown by its topic, not by
+                    # its random id.
+                    if r.get("kind") == "rag" and topic_index.is_topic_collection(r.get("name")):
+                        r["topic"] = bound.get(r["name"], "")
             return rows
         rows = await asyncio.to_thread(_rows)
         return JSONResponse({"entries": rows, "data_access": topic_data.mode()})
