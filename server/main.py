@@ -4605,6 +4605,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         _check_pack_connector_held(name)
         _check_component(name)
         arguments = _fill_declared_context(name, arguments)
+        arguments = _files_path_as_subpath(name, arguments)
     except _PackVerbRefused as e:
         LOG.warning("connectors: %s", e)
         return [TextContent(type="text", text=f"DENIED: {e}")]
@@ -6387,6 +6388,24 @@ def _files_subpath(a: dict) -> str:
             f"`subpath` ({sub!r}) e `path` ({path!r}) indicano cartelle diverse: "
             "passane uno solo.")
     return sub or path or ""
+
+
+def _files_path_as_subpath(name: str, a: dict) -> dict:
+    """`topic.files {path}` rewritten as `{subpath}` at the door (#597).
+
+    The audit reads `a["path"]` of every verb in `_TOPIC_READ_VERBS` as the
+    file that was read: a LISTING called with `path=` would be recorded as an
+    ingress of that path, and pay an `open` + provenance lookup for it. The
+    rewrite keeps the trail what it was before `path` was accepted. A conflict
+    is left as it is: `_files_subpath` refuses it at dispatch."""
+    if name != "topic.files" or not isinstance(a, dict) or "path" not in a:
+        return a
+    if a.get("subpath") and a.get("path") and \
+            str(a["subpath"]).strip("/") != str(a["path"]).strip("/"):
+        return a
+    out = {k: v for k, v in a.items() if k != "path"}
+    out["subpath"] = a.get("subpath") or a.get("path") or ""
+    return out
 
 
 def _dispatch_topic(name: str, a: dict):

@@ -68,6 +68,24 @@ class FilesTakesPath(Base):
         self.assertIn("path", tool.inputSchema["properties"])
 
 
+class TheAuditSeesASubpath(unittest.TestCase):
+    """A listing is not an ingress: `path=` must not reach the audit as the
+    path of a file read."""
+
+    def test_path_becomes_subpath_at_the_door(self):
+        got = M._files_path_as_subpath("topic.files",
+                                       {"tier": "SEAL-1", "name": "acme", "path": "shared/x"})
+        self.assertEqual(got, {"tier": "SEAL-1", "name": "acme", "subpath": "shared/x"})
+
+    def test_other_verbs_keep_path(self):
+        a = {"tier": "SEAL-1", "name": "acme", "path": "local/a.md"}
+        self.assertIs(M._files_path_as_subpath("topic.read_file", a), a)
+
+    def test_a_conflict_is_left_for_dispatch_to_refuse(self):
+        a = {"tier": "SEAL-1", "name": "acme", "subpath": "shared", "path": "local"}
+        self.assertIs(M._files_path_as_subpath("topic.files", a), a)
+
+
 class ReadingAFolder(Base):
     def test_shared_folder_says_it_is_a_folder(self):
         with self.assertRaises(TopicError) as cm:
