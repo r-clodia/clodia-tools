@@ -106,6 +106,8 @@ def grant(tier: str, name: str, kind: str, resource: str, agent: str,
     """Set `agent`'s mode on an imported resource; `mode` None/"" revokes."""
     if mode and mode not in MODES:
         raise DataError(f"modo sconosciuto: '{mode}' (read | write)")
+    if mode == "write" and kind == "rag" and str(resource).startswith("topic-"):
+        raise DataError("l'indice di un topic lo scrive solo l'indicizzatore: si concede in lettura")
     agent = str(agent or "").strip()
     svc = _svc()
 
@@ -139,8 +141,13 @@ def drop_agent(meta: dict, agent: str) -> bool:
 
 
 def check_retier(meta: dict, new_tier: str) -> None:
-    """A topic cannot go below the level of the data it imports."""
+    """A topic cannot go below the level of the data it imports — its OWN
+    index excepted, which follows it (review of #422, B3)."""
+    own = str(((meta or {}).get("index") or {}).get("collection") or "") \
+        if isinstance((meta or {}).get("index"), dict) else ""
     for e in imports(meta):
+        if e["kind"] == "rag" and own and e["name"] == own:
+            continue
         try:
             entry = cat.get(e["kind"], e["name"])
         except RuntimeError as err:     # unreadable catalog: refuse, do not crash

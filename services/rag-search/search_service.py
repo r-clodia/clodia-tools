@@ -12,11 +12,12 @@ Endpoint:
   GET /health                      → {"status":"ok","docs":N,"chunks":M}
   GET /search?q=...&k=5&doc=AGA    → {"query":..,"results":[{name,version,section,page,score,
                                       text,provenance,source}]}
-  POST /ingest_text, /collections, /collections/drop   (token)
+  POST /ingest_text, /collections, /collections/tier, /collections/drop   (token)
 
 Collections named `topic-*` (a topic's own, clodia-platform#599) are private:
 search and documents need the token; their names are hidden from /collections.
 """
+import hmac
 import os
 import tempfile
 
@@ -39,7 +40,8 @@ app = FastAPI(title="eu-rag-search", version="0.4.0")
 
 
 def _authorized(authorization: str | None) -> bool:
-    return bool(_INGEST_TOKEN) and authorization == f"Bearer {_INGEST_TOKEN}"
+    return bool(_INGEST_TOKEN) and hmac.compare_digest(
+        (authorization or "").encode(), f"Bearer {_INGEST_TOKEN}".encode())
 
 
 def _require_token(authorization: str | None) -> None:
@@ -72,6 +74,11 @@ def _load():
     global _model, _route_model
     _model = SentenceTransformer(MODEL_NAME)
     _route_model = SentenceTransformer(ROUTE_MODEL_NAME)
+    try:                                   # the additive migration, once (#600)
+        with _db() as conn, conn.cursor() as cur:
+            ingest_mod.ensure_schema(cur)
+    except Exception:  # noqa: BLE001 — retried lazily by the writers
+        pass
 
 
 def _embed(text: str) -> str:
@@ -132,9 +139,6 @@ def search(
     if _model is None:
         raise HTTPException(status_code=503, detail="modello non ancora caricato")
     emb = _embed(q)
-    with _db() as conn, conn.cursor() as cur:
-        ingest_mod.ensure_schema(cur)
-        conn.commit()
     sql = (
         "SELECT d.name, d.version, c.section, c.page, "
         "1 - (c.embedding <=> %s::vector) AS score, c.text, d.provenance, d.source "
@@ -188,13 +192,26 @@ def collections(authorization: str | None = Header(None)):
 
 @app.post("/collections")
 def create_collection(body: dict = Body(...), authorization: str | None = Header(None)):
-    """Crea una collection o ne aggiorna il tier: {collection, tier}. Token-gated."""
+    """Crea una collection: {collection, tier}. Una collection esistente tiene il
+    suo tier (solo creazione). Token-gated."""
     _require_token(authorization)
     name = str((body or {}).get("collection") or "").strip()
     tier = str((body or {}).get("tier") or "").strip()
     if not name or not tier:
         raise HTTPException(422, "collection e tier richiesti")
-    return {"status": "ok", **ingest_mod.set_collection(name, tier)}
+    return {"status": "ok", **ingest_mod.create_collection(name, tier)}
+
+
+@app.post("/collections/tier")
+def collection_tier(body: dict = Body(...), authorization: str | None = Header(None)):
+    """Imposta il tier di una collection (la crea se manca): {collection, tier}.
+    Lo usa l'indice di un topic che segue la riclassificazione. Token-gated."""
+    _require_token(authorization)
+    name = str((body or {}).get("collection") or "").strip()
+    tier = str((body or {}).get("tier") or "").strip()
+    if not name or not tier:
+        raise HTTPException(422, "collection e tier richiesti")
+    return {"status": "ok", **ingest_mod.set_collection_tier(name, tier)}
 
 
 @app.post("/collections/drop")
@@ -254,10 +271,12 @@ async def ingest(
     url: str | None = Form(None),
     supersede: bool = Form(False),
     collection: str = Form("eu-normativa"),
+    provenance: str = Form("trusted"),
     authorization: str | None = Header(None),
 ):
     """Ingerisce un PDF nel corpus (embedding col modello residente + insert su
-    pgvector). Protetto da bearer token: scrive sulla knowledge base."""
+    pgvector). Protetto da bearer token: scrive sulla knowledge base.
+    `provenance`: l'etichetta del file d'origine (#602)."""
     if not _INGEST_TOKEN:
         raise HTTPException(503, "ingest disabilitato (EU_RAG_INGEST_TOKEN non impostato)")
     if authorization != f"Bearer {_INGEST_TOKEN}":
@@ -281,6 +300,7 @@ async def ingest(
             res = ingest_mod.ingest_file(
                 tmp.name, name, version, url=url, supersede=supersede,
                 model=_model, log=lambda *_: None, collection=collection,
+                provenance=provenance,
             )
         except ValueError as e:
             raise HTTPException(422, str(e))

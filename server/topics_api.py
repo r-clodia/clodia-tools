@@ -1102,6 +1102,7 @@ def _snapshot_meta_bytes(raw: bytes, tier: str) -> bytes:
     # Nor the data imports (#590): they name resources of THIS instance's
     # catalog, imported by an owner with the right to; an archive is neither.
     meta.pop("data", None)
+    meta.pop("index", None)          # the index is made here, not brought (#599)
     return json.dumps(meta, ensure_ascii=False, indent=2).encode()
 
 

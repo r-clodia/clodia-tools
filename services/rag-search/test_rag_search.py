@@ -78,9 +78,17 @@ class AuthTests(unittest.TestCase):
             "/collections", headers={"Authorization": "Bearer t0k"}).json()["collections"]]
         self.assertEqual(names, ["eu-normativa", "topic-abc"])
 
+    def test_the_guard_lets_the_public_corpus_and_the_token_through(self):
+        self.s._guard_read("eu-normativa", None)
+        self.s._guard_read("topic-abc", "Bearer t0k")
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException):
+            self.s._guard_read("topic-abc", "Bearer sbagliato")
+
     def test_writes_need_the_token(self):
         for path, body in (("/ingest_text", {"collection": "topic-abc", "name": "a", "text": "x"}),
                            ("/collections", {"collection": "topic-abc", "tier": "SEAL-3"}),
+                           ("/collections/tier", {"collection": "topic-abc", "tier": "SEAL-3"}),
                            ("/collections/drop", {"collection": "topic-abc"})):
             with self.subTest(path=path):
                 self.assertEqual(self.c.post(path, json=body).status_code, 401)

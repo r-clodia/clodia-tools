@@ -70,10 +70,11 @@ def ingest_text(collection: str, name: str, text: str, *, version: str = "1",
                                        "supersede": True})
 
 
-def set_collection(collection: str, tier: str) -> dict:
-    """Create `collection` or set its tier (follows its topic's tier, #599)."""
+def set_collection_tier(collection: str, tier: str) -> dict:
+    """Set `collection`'s tier, creating it if needed: only the topic index
+    uses it, to follow its topic's tier (#599)."""
     _tier_cache["at"] = 0.0
-    return _post_json("/collections", {"collection": collection, "tier": tier}, _TIMEOUT)
+    return _post_json("/collections/tier", {"collection": collection, "tier": tier}, _TIMEOUT)
 
 
 def drop_collection(collection: str) -> dict:
@@ -121,8 +122,9 @@ def collections() -> dict:
 def create_collection(collection: str, tier: str = "SEAL-1",
                       description: str | None = None) -> dict:
     """Crea una collection RAG (rag-search ≥ 0.4.0: `POST /collections`, JSON).
-    Su una collection esistente ne aggiorna il tier."""
-    return set_collection(collection, tier)
+    Una collection esistente tiene il suo tier: crearla non lo cambia."""
+    _tier_cache["at"] = 0.0
+    return _post_json("/collections", {"collection": collection, "tier": tier}, _TIMEOUT)
 
 
 _tier_cache: dict = {"at": 0.0, "map": {}}
@@ -187,7 +189,8 @@ def _multipart(fields: dict, file_field: str, filename: str, content: bytes) -> 
 
 def ingest_bytes(content: bytes, filename: str, doc_name: str, version: str,
                  url: str | None = None, supersede: bool = False,
-                 collection: str = DEFAULT_COLLECTION) -> dict:
+                 collection: str = DEFAULT_COLLECTION,
+                 provenance: str = "untrusted") -> dict:
     """Invia un PDF (byte) al micro-servizio per l'ingest in una collection.
 
     Chiamato server-side dal gateway dopo aver letto il file dal topic (i byte
@@ -195,7 +198,7 @@ def ingest_bytes(content: bytes, filename: str, doc_name: str, version: str,
     """
     body, boundary = _multipart(
         {"name": doc_name, "version": version, "url": url, "collection": collection,
-         "supersede": "true" if supersede else "false"},
+         "supersede": "true" if supersede else "false", "provenance": provenance},
         "file", filename, content,
     )
     req = urllib.request.Request(

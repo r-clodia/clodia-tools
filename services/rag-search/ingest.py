@@ -164,6 +164,7 @@ def ensure_schema(cur):
     cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS provenance text "
                 "NOT NULL DEFAULT 'trusted'")
     cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS source text")
+    cur.connection.commit()
     _SCHEMA_DONE = True
 
 
@@ -174,9 +175,20 @@ def _ensure_collection(cur, collection, tier="SEAL-0"):
     )
 
 
-def set_collection(collection, tier):
-    """Create a collection, or set the tier of an existing one (a topic's
-    collection follows its topic's re-tiering, #599)."""
+def create_collection(collection, tier):
+    """Create a collection; an existing one keeps its tier (create-only)."""
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO collections (name, tier) VALUES (%s,%s) "
+                    "ON CONFLICT (name) DO NOTHING", (collection, tier))
+        cur.execute("SELECT tier FROM collections WHERE name=%s", (collection,))
+        current = cur.fetchone()[0]
+        conn.commit()
+    return {"collection": collection, "tier": current}
+
+
+def set_collection_tier(collection, tier):
+    """Set a collection's tier, creating it if needed: a topic's collection
+    follows its topic's re-tiering (#599). A separate call from creation."""
     with _db() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO collections (name, tier) VALUES (%s,%s) "
@@ -276,7 +288,7 @@ def ingest_text(collection, name, version, text=None, chunks=None, source=None,
 
 
 def ingest_file(path, name, version, url=None, supersede=False, model=None,
-                log=print, collection=DEFAULT_COLLECTION):
+                log=print, collection=DEFAULT_COLLECTION, provenance="trusted"):
     """Ingerisce un PDF in una collection del corpus. Riusabile da CLI e dal
     micro-servizio (che passa il proprio `model` residente). Ritorna
     {collection, name, version, chunks, doc_id}. ValueError se il PDF è vuoto."""
@@ -297,8 +309,11 @@ def ingest_file(path, name, version, url=None, supersede=False, model=None,
         [c["text"] for c in chunks], normalize_embeddings=True, batch_size=32
     )
 
+    if provenance not in PROVENANCES:
+        raise ValueError(f"provenance: {', '.join(PROVENANCES)}")
     log("[4/4] scrittura su pgvector …")
     with _db() as conn, conn.cursor() as cur:
+        ensure_schema(cur)
         _ensure_collection(cur, collection)
         if supersede:
             cur.execute(
@@ -307,13 +322,15 @@ def ingest_file(path, name, version, url=None, supersede=False, model=None,
                 (collection, name, version),
             )
         cur.execute(
-            """INSERT INTO documents (collection, name, version, source_url, hash, status)
-               VALUES (%s,%s,%s,%s,%s,'active')
+            """INSERT INTO documents (collection, name, version, source_url, hash, status,
+                                      provenance)
+               VALUES (%s,%s,%s,%s,%s,'active',%s)
                ON CONFLICT (collection, name, version)
                DO UPDATE SET source_url=EXCLUDED.source_url, hash=EXCLUDED.hash,
-                             status='active', ingested_at=now()
+                             status='active', ingested_at=now(),
+                             provenance=EXCLUDED.provenance
                RETURNING id""",
-            (collection, name, version, url, digest),
+            (collection, name, version, url, digest, provenance),
         )
         doc_id = cur.fetchone()[0]
         cur.execute("DELETE FROM chunks WHERE document_id=%s", (doc_id,))

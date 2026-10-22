@@ -5241,6 +5241,7 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 arguments["doc_name"], arguments["version"],
                 url=arguments.get("url"),
                 supersede=bool(arguments.get("supersede", False)),
+                provenance=svc.provenance_of(tier, tname, path) or "untrusted",
             )
         elif name == "eu_corpus.list":
             _rag_authorize("eu-normativa", write=False)
@@ -6034,6 +6035,12 @@ def _rag_authorize(collection: str, write: bool, verb: str = "") -> None:
     instance_profile.rag_check_collection(collection)
     ag = agent_name()
     from . import topic_data, topic_index
+    if write and topic_index.is_topic_collection(collection):
+        # A topic's index is written by the indexer alone, through the service
+        # token — never through a verb, by anyone (review of #422, B2).
+        raise PermissionError(
+            f"la collection '{collection}' è l'indice di un topic: la scrive solo "
+            "l'indicizzatore")
     if topic_data.mode() == "topic" or collection.startswith(topic_index.PREFIX):
         # #590 D4: the topic of the signed claim decides — imported there,
         # granted there. Super-agents included; the one exception is the
@@ -6235,7 +6242,15 @@ def _dispatch_rag(name: str, a: dict):
                                    if c.get("collection") == only]}
         from . import topic_data, topic_index
         from .egress import _scope_of_call
-        if topic_data.mode() == "topic" and agent_name() not in _rag_provisioners():
+        if _is_super(agent_name()):
+            # A super-agent sees every collection but the topics' indexes,
+            # which it reads only where its topic grants them (review of #422).
+            mine = topic_data.visible("rag", agent=agent_name(), scope=_scope_of_call(),
+                                      clearance=current_clearance())
+            res = {"collections": [c for c in res.get("collections", [])
+                                   if not topic_index.is_topic_collection(c.get("collection"))
+                                   or c.get("collection") in mine]}
+        elif topic_data.mode() == "topic" and agent_name() not in _rag_provisioners():
             # #590: the collections this agent may read in ITS topic.
             mine = topic_data.visible("rag", agent=agent_name(), scope=_scope_of_call(),
                                       clearance=current_clearance())
@@ -6314,7 +6329,8 @@ def _dispatch_rag(name: str, a: dict):
         return eu_corpus.ingest_bytes(
             data, filename, a["doc_name"], a["version"],
             url=a.get("url"), supersede=bool(a.get("supersede", False)),
-            collection=collection)
+            collection=collection,
+            provenance=svc.provenance_of(tier, tname, path) or "untrusted")
     if verb == "remove":
         _rag_authorize(collection, write=True)
         return eu_corpus.remove(a["doc_name"], a.get("version"), collection)

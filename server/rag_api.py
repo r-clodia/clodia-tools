@@ -36,7 +36,17 @@ LOG = logging.getLogger("clodia-tools.rag_api")
 
 def _authorize(request: Request) -> tuple[str | None, JSONResponse | None]:
     payload, err = internal_auth.authorize(request, log=LOG)
+    request.state.rag_payload = payload or {}
     return (str(payload.get("agent") or "") if payload else None), err
+
+
+def _sees_topic_indexes(request: Request) -> bool:
+    """A topic's index (`topic-*`, #599) names its topic's files and days: only
+    the agent-server (which filters for the page) or an on-behalf admin."""
+    from .pki_mint import ROLE_AGENT_SERVER
+    p = getattr(request.state, "rag_payload", None) or {}
+    return p.get("role") == ROLE_AGENT_SERVER or (
+        bool(p.get("on_behalf")) and (p.get("human_role") or "") == "admin")
 
 
 async def list_collections(request: Request):
@@ -49,6 +59,9 @@ async def list_collections(request: Request):
         # Servizio eu-rag-search irraggiungibile: un errore infra, non
         # un'assenza di dati — la UI deve poterli distinguere.
         return JSONResponse({"error": str(e)}, status_code=502)
+    if not _sees_topic_indexes(request):
+        data = {**data, "collections": [c for c in data.get("collections") or []
+                                        if not str(c.get("collection") or "").startswith("topic-")]}
     return JSONResponse(data)
 
 
@@ -64,6 +77,8 @@ async def list_documents(request: Request):
         # travestito da risposta valida, che è il modo peggiore di sbagliare.
         return JSONResponse({"error": "parametro 'collection' richiesto"},
                             status_code=400)
+    if collection.startswith("topic-") and not _sees_topic_indexes(request):
+        return JSONResponse({"error": "indice di un topic: riservato"}, status_code=403)
     try:
         data = eu_corpus.list_documents(collection)
     except RuntimeError as e:
