@@ -6115,7 +6115,8 @@ def _ingest_source_ok(collection: str, tier: str, name: str) -> None:
         if not scope or data_catalog.norm_tier(scope.partition("/")[0]) != \
                 data_catalog.norm_tier(tier) or scope.partition("/")[2] != name:
             raise PermissionError(
-                "in modalità topic si ingesta solo un file del topic in cui si lavora")
+                "in modalità topic si ingesta solo un file del topic in cui si lavora "
+                "(e del livello della collection: i dati non scendono di livello)")
 
 
 def _datastore_authorize(key: str, *, write: bool) -> dict:

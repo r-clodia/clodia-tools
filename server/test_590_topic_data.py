@@ -130,6 +130,17 @@ class GrantTests(_Base):
         with self.assertRaises(PermissionError):
             self.auth("tomato.commerciale")
 
+    def test_a_participant_demoted_to_reader_loses_write(self):
+        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
+                 "tomato.commerciale", "write")
+        self.auth("tomato.commerciale", write=True)
+        meta, ver = self.svc._read_meta("SEAL-2", "commerciale")
+        meta["participants"] = {"tomato.commerciale": "reader", "clodia": "contributor"}
+        self.svc._write_meta("SEAL-2", "commerciale", meta, ver)
+        with self.assertRaises(PermissionError):
+            self.auth("tomato.commerciale", write=True)
+        self.auth("tomato.commerciale")
+
     def test_only_participants(self):
         with self.assertRaises(td.DataError):
             td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti", "estraneo", "read")

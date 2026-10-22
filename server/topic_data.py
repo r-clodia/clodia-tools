@@ -179,6 +179,11 @@ def authorize(kind: str, resource: str, *, write: bool, agent: str,
     if entry is None:
         raise PermissionError(f"{kind} '{resource}' non è più nel catalogo dei dati")
     granted = imp["grants"].get(agent)
+    if write and granted == "write":
+        # A participant demoted to reader keeps no write (second review of #420).
+        from .topics.service import TopicService
+        if TopicService.participants_map(meta).get(agent) == "reader":
+            granted = "read"
     if granted is None or (write and granted != "write"):
         raise PermissionError(
             f"agent '{agent}' senza permesso di {'SCRITTURA' if write else 'LETTURA'} "

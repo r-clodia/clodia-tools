@@ -528,9 +528,10 @@ async def topic_data_route(request: Request):
 
 async def data_catalog_route(request: Request):
     """GET  /internal/data-catalog → {entries, data_access}
-    POST /internal/data-catalog {action: update|retire|sync, kind, resource, tier?, importers?}
-    (#590 D1). Reading: any internal caller. Writing: a platform admin (on-behalf)
-    or the agent-server, which checks admin before forwarding."""
+    POST /internal/data-catalog {action, ...} (#590 D1).
+    Reading: a person (on-behalf) or the agent-server; `importing_topics` only
+    for an admin or the agent-server (which filters for non-admins). Writing: a
+    platform admin (on-behalf) or the agent-server, which checks admin first."""
     from . import data_catalog as cat, topic_data
     from .pki_mint import ROLE_AGENT_SERVER
     who, err = _authorize(request)
@@ -543,11 +544,15 @@ async def data_catalog_route(request: Request):
         return JSONResponse({"error": "riservato alle persone e all'agent-server"},
                             status_code=403)
     if request.method == "GET":
+        full = p.get("role") == ROLE_AGENT_SERVER or \
+            (p.get("on_behalf") and (p.get("human_role") or "") == "admin")
+
         def _rows():
             rows = cat.entries()
-            used = topic_data.importing_topics()
-            for r in rows:
-                r["importing_topics"] = used.get(r["key"], [])
+            if full:            # topic names are not every person's business
+                used = topic_data.importing_topics()
+                for r in rows:
+                    r["importing_topics"] = used.get(r["key"], [])
             return rows
         rows = await asyncio.to_thread(_rows)
         return JSONResponse({"entries": rows, "data_access": topic_data.mode()})
