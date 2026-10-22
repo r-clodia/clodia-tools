@@ -250,5 +250,48 @@ class RoutesTests(unittest.TestCase):
                                 json={"action": "set_mode", "mode": "x"}).status_code, 400)
 
 
+class MigrationTests(_Base):
+    def setUp(self):
+        super().setUp()
+        from . import data_migration as dm
+        self.dm = dm
+        p = patch("server.main._topics", lambda: self.svc)
+        p.start(); self.addCleanup(p.stop)
+        cfg = {"data_access": "legacy", "agents": {
+            "vecchio": {"allowed_tools": ["datastore.read", "datastore.write"]},
+            "lettore": {"allowed_tools": ["datastore.read"]},
+            "clodia": {"allowed_tools": ["*"]}}}
+        p = patch.object(whitelist, "CONFIG", cfg)
+        p.start(); self.addCleanup(p.stop)
+        DS[0]["seeds"] = ["vecchio", "lettore"]
+        self.addCleanup(lambda: DS[0].__setitem__("seeds", ["vecchio"]))
+        self.svc.new("SEAL-2", "vendite", {"owner": "davide",
+                                           "participants": ["davide", "vecchio", "lettore"]})
+        self.svc.new("SEAL-1", "basso", {"owner": "davide", "participants": ["davide", "vecchio"]})
+        grants = {"clodia": {"rag_read": {"eu-normativa"}, "rag_write": set()}}
+        p = patch("server.tools.runtime.rag_grants",
+                  lambda a: grants.get(a, {"rag_read": set(), "rag_write": set()}))
+        p.start(); self.addCleanup(p.stop)
+
+    def test_the_plan_maps_seed_grants_to_topics(self):
+        plan = self.dm.plan()
+        by = {(i["topic"], i["kind"], i["name"]): i for i in plan["items"]}
+        v = by[("SEAL-2/vendite", "datastore", "tomato-pack/clienti")]
+        self.assertEqual((v["status"], v["grants"]), ("ok", {"vecchio": "write", "lettore": "read"}))
+        self.assertEqual(by[("SEAL-1/basso", "datastore", "tomato-pack/clienti")]["status"], "skipped")
+        self.assertEqual(by[("SEAL-1/blog", "rag", "eu-normativa")]["grants"], {"clodia": "read"})
+        self.assertNotIn(("SEAL-2/commerciale", "datastore", "tomato-pack/clienti"), by)
+
+    def test_apply_writes_only_approved_items_and_never_switches(self):
+        plan = self.dm.plan()
+        out = self.dm.apply(plan["items"], by="davide", is_admin=True, clearance="SEAL-3")
+        self.assertEqual(out["failed"], [])
+        meta = self.svc._read_meta("SEAL-2", "vendite")[0]
+        self.assertEqual(td.imports(meta)[0]["grants"], {"vecchio": "write", "lettore": "read"})
+        basso = td.imports(self.svc._read_meta("SEAL-1", "basso")[0])
+        self.assertNotIn("datastore", {e["kind"] for e in basso})     # SEAL-2 data, SEAL-1 topic
+        self.assertEqual(whitelist.CONFIG["data_access"], "legacy")
+
+
 if __name__ == "__main__":
     unittest.main()

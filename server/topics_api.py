@@ -551,6 +551,16 @@ async def data_catalog_route(request: Request):
             out = await asyncio.to_thread(cat.update, str(body.get("kind") or ""),
                                           str(body.get("resource") or ""),
                                           tier=body.get("tier"), importers=body.get("importers"))
+        elif action == "migration_plan":
+            from . import data_migration
+            out = await asyncio.to_thread(data_migration.plan)
+        elif action == "migration_apply":
+            from . import data_migration
+            who, admin, clearance = _actor(request, body)
+            if not who:
+                return JSONResponse({"error": "chi applica non è noto"}, status_code=400)
+            out = await asyncio.to_thread(data_migration.apply, body.get("items") or [],
+                                          by=who, is_admin=admin, clearance=clearance)
         elif action == "set_mode":
             # #596: `legacy` → `topic` once the migration is applied (and back,
             # if it must be undone). Written like the other admin config keys.
