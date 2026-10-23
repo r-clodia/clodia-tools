@@ -29,6 +29,10 @@ class ChunkTextTests(unittest.TestCase):
         self.assertTrue(all(len(c["text"]) <= 1500 for c in chunks))
         self.assertEqual(sum(len(c["text"]) for c in chunks), 5000)
 
+    def test_nul_bytes_removed(self):
+        chunks = ingest.chunk_text("prima\x00riga\n\nseconda")
+        self.assertNotIn("\x00", "".join(c["text"] for c in chunks))
+
     def test_empty(self):
         self.assertEqual(ingest.chunk_text("  \n\n "), [])
 

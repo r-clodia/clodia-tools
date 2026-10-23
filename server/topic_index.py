@@ -262,6 +262,10 @@ def _eml_text(data: bytes) -> str:
 
 
 def file_text(path: str, data: bytes) -> str:
+    return _file_text(path, data).replace("\x00", "")   # NUL: PostgreSQL refuses it
+
+
+def _file_text(path: str, data: bytes) -> str:
     low = path.lower()
     if low.endswith(TEXT_EXT):
         return data.decode("utf-8", errors="replace")
