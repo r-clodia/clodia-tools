@@ -241,3 +241,32 @@ def importing_topics() -> dict[str, list[str]]:
         for e in imports(meta):
             out.setdefault(f"{e['kind']}:{e['name']}", []).append(f"{row['tier']}/{row['name']}")
     return out
+
+
+#: The verbs a room's data grant brings (#590): the grant, not the seed, says
+#: what an agent may do with the data imported THERE.
+_READ_VERBS = {"rag": ("rag.search", "rag.list", "rag.collections"),
+               "datastore": ("datastore.read",)}
+_WRITE_VERBS = {"datastore": ("datastore.write",)}
+
+
+def room_verbs(agent: str | None, scope: str | None) -> set[str]:
+    """Verbs `agent` gets in the room `scope` from the owner's data grants there.
+    Request-local, like a scoped grant: the seed and the static trifecta score
+    do not change, and outside this room nothing is added. The resource
+    monitors (`_rag_authorize`, `_datastore_authorize`) still decide every call."""
+    if not agent or not scope:
+        return set()
+    tier, _, name = scope.partition("/")
+    try:
+        meta = _svc()._read_meta(tier, name)[0]
+    except Exception:  # noqa: BLE001 — no room, no verbs
+        return set()
+    out: set[str] = set()
+    for e in imports(meta):
+        mode = e["grants"].get(agent)
+        if mode in MODES:
+            out.update(_READ_VERBS.get(e["kind"], ()))
+        if mode == "write":
+            out.update(_WRITE_VERBS.get(e["kind"], ()))
+    return out

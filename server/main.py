@@ -2625,8 +2625,21 @@ def _agent_tool_reachable(name: str, agent: str | None,
     useful denial reason after this reachability check.
     """
     allowed = (resolved if resolved is not None
-               else _declared_tools(agent) | set(current_scoped_tools()))
+               else _declared_tools(agent) | set(current_scoped_tools())
+               | _room_data_verbs(agent))
     return _tool_allowed(name, allowed)
+
+
+def _room_data_verbs(agent: str | None) -> set:
+    """The data verbs the owner's grants give `agent` in the room of this call
+    (#590): an agent granted an imported index can query it even when its seed
+    never declared `rag.*`."""
+    from . import topic_data
+    from .egress import _scope_of_call
+    try:
+        return topic_data.room_verbs(agent, _scope_of_call())
+    except Exception:  # noqa: BLE001
+        return set()
 
 
 
@@ -2921,7 +2934,7 @@ async def list_tools() -> list[Tool]:
         return [t for t in (native + proxied) if not agent_denies(t.name, me)]
     # Risolvi l'albero una volta per discovery: l'archseed viene dal filesystem
     # e rifarlo per ciascun verbo renderebbe la fonte unica inutilmente costosa.
-    resolved = _declared_tools(me) | set(current_scoped_tools())
+    resolved = _declared_tools(me) | set(current_scoped_tools()) | _room_data_verbs(me)
     return [t for t in (native + proxied)
             if _agent_tool_reachable(t.name, me, resolved)
             and not agent_denies(t.name, me)]

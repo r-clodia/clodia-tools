@@ -430,5 +430,35 @@ class MigrationReviewTests(_Base):
         self.assertEqual(items[0]["grants"], {"clodia": "read"})
 
 
+class RoomVerbsTests(_Base):
+    """An agent granted an imported index can query it in that room even when
+    its seed never declared rag.* (tomato.sales-rep, 23 Oct 2026)."""
+
+    def test_the_grant_brings_the_verbs_in_its_room_only(self):
+        self.imp(kind="rag", res="eu-normativa")
+        self.imp()
+        self.assertEqual(td.room_verbs("tomato.commerciale", "SEAL-2/commerciale"), set())
+        td.grant("SEAL-2", "commerciale", "rag", "eu-normativa", "tomato.commerciale", "read")
+        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
+                 "tomato.commerciale", "write")
+        self.assertEqual(td.room_verbs("tomato.commerciale", "SEAL-2/commerciale"),
+                         {"rag.search", "rag.list", "rag.collections",
+                          "datastore.read", "datastore.write"})
+        self.assertEqual(td.room_verbs("tomato.commerciale", "SEAL-1/blog"), set())
+        self.assertEqual(td.room_verbs("tomato.commerciale", None), set())
+
+    def test_reachability_follows_the_room(self):
+        from . import main
+        self.imp(kind="rag", res="eu-normativa")
+        td.grant("SEAL-2", "commerciale", "rag", "eu-normativa", "tomato.commerciale", "read")
+        with patch.object(main, "_declared_tools", lambda a: {"topic.open"}), \
+                patch.object(main, "current_scoped_tools", lambda: ()):
+            with patch("server.egress._scope_of_call", lambda: "SEAL-2/commerciale"):
+                self.assertTrue(main._agent_tool_reachable("rag.search", "tomato.commerciale"))
+                self.assertFalse(main._agent_tool_reachable("datastore.write", "tomato.commerciale"))
+            with patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"):
+                self.assertFalse(main._agent_tool_reachable("rag.search", "tomato.commerciale"))
+
+
 if __name__ == "__main__":
     unittest.main()
