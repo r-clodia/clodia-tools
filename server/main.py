@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
@@ -5980,15 +5981,97 @@ def _visible_topic_rows(rows: list, caller: str) -> list:
     return _scope_rows_to_this_room(righe, caller)
 
 
+def _time_monotonic() -> float:
+    """Istante monotono (`time.monotonic`) — funzione per rendere agganciabile
+    a mock il tempo dei fail-safe che lo usano (snapshot RAG del #500)."""
+    return time.monotonic()
+
+
+#: Pausa, in secondi, fra i tentativi di rilettura live dei grant RAG (retry
+#: con backoff, clodia-platform#500): un guasto transitorio della lettura dal
+#: core — mint PKI in timeout, un ciclo dell'event-loop trattenuto qualche
+#: secondo — NON è un diniego, è di nuovo una domanda. Retry corto: ogni
+#: tentativo in sé ha già i timeout di rete di `runtime._get`, e un core
+#: giù per minuti non si risolve aggiungendo attese.
+_RAG_GRANT_RETRY_PAUSES = (0.25,)
+
+#: Età massima, in secondi, di uno SNAPSHOT di ultimo-buono usato come ripiego
+#: quando la lettura live NON va a termine (clodia-platform#500: «cache breve
+#: dei grant»). Mai un sostituto della live — che resta la decisione, fatta
+#: sempre — solo un ponte sui secondi in cui il core non risponde.
+#: Oltre questa età, o senza snapshot, il comportamento resta quello di oggi:
+#: fail-closed, col messaggio che dice «guasto infrastrutturale».
+_RAG_GRANT_SNAPSHOT_TTL = 120.0
+
+#: Snapshot per agent dell'ultima lettura andata a buon fine: nome →
+#: (istante della lettura (`time.monotonic`), grants). Aggiornato SOLO ai
+#: successi, consultato SOLO quando la live fallisce: una revoca non è mai
+#: mascherata dalla cache, perché la revoca si vede alla prima lettura live
+#: riuscita e la cache non prevale mai su quella.
+_rag_grants_snapshots: dict[str, tuple[float, dict[str, set[str]]]] = {}
+
+
+def _rag_grants_live(agent: str) -> dict[str, set[str]]:
+    """Lettura live dei grant dal core, con retry breve sui guasti
+    transitori (#500). `PermissionError` di `runtime.rag_grants` (agent
+    NON esistente, grant malformati nel suo AgentSpec) è una DECISIONE
+    documentata, non un guasto: passa intatta e senza retry."""
+    attempts = len(_RAG_GRANT_RETRY_PAUSES) + 1
+    error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return runtime.rag_grants(agent)
+        except PermissionError:
+            raise
+        except Exception as e:  # noqa: BLE001 — backend irraggiungibile/malformato
+            error = e
+            if attempt < attempts - 1:
+                time.sleep(_RAG_GRANT_RETRY_PAUSES[attempt])
+    assert error is not None
+    raise error
+
+
 def _rag_grants(agent: str) -> dict[str, set[str]]:
-    """Grant live dal core; qualunque errore nega l'accesso (fail closed)."""
+    """Grant live dal core. Fail-closed COME PRIMA, ma non più fragile
+    (clodia-platform#500):
+
+    - un guasto transitorio della lettura si riprova (retry brevi sopra);
+    - se anche i retry falliscono, un errore può reggersi su uno snapshot di
+      ultimo buono NON PIÙ VECCHIO DI DUE MINUTI di QUESTO agent: la verifica
+      fallita («non so») e il grant assente («non ha») restano cose diverse,
+      e l'accesso ai corpus corre meglio su un consenso concesso pochi
+      minuti prima che su un diniego;
+    - senza snapshot, o con uno scaduto, resta il fail-closed di sempre, col
+      messaggio che DICE che si tratta di un guasto infrastrutturale — distinto
+      da quello di `runtime.rag_grants` per l'agent assente, che passa
+      intatto ("impossibile risolvere i grant RAG…").
+    """
+    now = _time_monotonic()
     try:
-        return runtime.rag_grants(agent)
+        grants = _rag_grants_live(agent)
     except PermissionError:
+        # Decisione di runtime (agent non conosciuto, grant malformati):
+        # nessuna via di scampo, esattamente come prima del #500.
+        _rag_grants_snapshots.pop(agent, None)
         raise
     except Exception as e:  # noqa: BLE001 — backend irraggiungibile/malformato
+        snapshot = _rag_grants_snapshots.get(agent)
+        if snapshot is not None and now - snapshot[0] <= _RAG_GRANT_SNAPSHOT_TTL:
+            import logging as _lg
+            from .tools.logs import REFMON_LOGGER
+            _lg.getLogger(REFMON_LOGGER).warning(
+                "clodia-platform#500 · core non risponde per i grant RAG di "
+                "'%s': uso lo snapshot di %.1f s fa invece di negare "
+                "(guasto: %s: %s)",
+                agent, now - snapshot[0], type(e).__name__, e)
+            return snapshot[1]
         raise PermissionError(
-            f"impossibile verificare i grant RAG dell'agent '{agent}'") from e
+            f"guasto infrastrutturale: impossibile verificare i grant RAG "
+            f"dell'agent '{agent}' (il core non risponde alla lettura live "
+            f"dei grant; rifiuto prudenziale — riprovare; "
+            f"causa: {type(e).__name__}: {e})") from e
+    _rag_grants_snapshots[agent] = (now, grants)
+    return grants
 
 
 def _rag_readable(grants: dict[str, set[str]]) -> set[str]:
