@@ -209,6 +209,15 @@ def canonical(uri: str) -> str:
     return f"{scheme.lower()}{sep}{rest}" if sep else u
 
 
+#: The open web as a SOURCE of one topic (owner, 23 Oct 2026): any `https://`
+#: page reads as trusted there. Only in a topic's own ingress list, only on a
+#: topic with no confidential data (SEAL-0/1, nothing imported above SEAL-0):
+#: with nothing to exfiltrate, untrusted reading has no payoff — the trifecta
+#: needs all three legs. Never global, never egress.
+OPEN_WEB = "https:*"
+OPEN_WEB_MAX_TIER = "SEAL-1"
+
+
 def _matches(dest: str, rule: str) -> bool:
     """Una destinazione (URI) contro una regola (URI).
 
@@ -231,6 +240,8 @@ def _matches(dest: str, rule: str) -> bool:
         return False
     if r == "*":
         return True
+    if r == OPEN_WEB:
+        return d.startswith("https://") and bool(urlsplit(d).hostname)
     # Anche qui, non solo in `allowed_uris`: una regola degenere che arrivasse da
     # un altro chiamante aprirebbe l'intero tipo in silenzio, e la difesa non deve
     # dipendere da quale porta si è usata per entrare.
@@ -1072,6 +1083,10 @@ def check_grantable(direction: str, uri: str) -> str:
     if scheme not in schemes:
         raise ValueError(
             f"schema '{scheme}' non ammesso come {label}: ammessi {', '.join(schemes)}")
+    if u == OPEN_WEB:
+        raise ValueError(
+            f"'{OPEN_WEB}' si concede solo fra gli ingressi di UN topic senza dati "
+            "riservati, mai nella lista globale né in uscita")
     if _is_degenerate(u):
         raise ValueError(
             f"'{u}' non vincola nulla dentro il suo schema: aprirebbe l'intero "
@@ -1147,7 +1162,11 @@ def scope_allow(direction: str, scope: str, uri: str) -> dict:
     vede subito invece di sparire in un warning.
     """
     key = _SCOPE_KEYS[direction]
-    u = check_grantable(direction, uri)
+    if direction == "ingress" and canonical(uri).lower() == OPEN_WEB:
+        open_web_allowed(scope)                     # raises with the reason
+        u = OPEN_WEB
+    else:
+        u = check_grantable(direction, uri)
     chiave = _norm_scope_key(scope)
     from . import whitelist as _wl
     per_scope = dict(_wl.CONFIG.get(key) or {})
@@ -1166,6 +1185,36 @@ def scope_allow(direction: str, scope: str, uri: str) -> dict:
     LOG.warning("%s[%s] · %s %s", key, chiave, "+=" if added else "già presente:", u)
     return {"direction": direction, "scope": chiave, "uri": u,
             "added": added, "total": len(cur)}
+
+
+def has_open_web(scope: str | None) -> bool:
+    return any(canonical(u).lower() == OPEN_WEB for u in scope_uris("ingress", scope))
+
+
+def open_web_allowed(scope: str, tier: str | None = None, meta: dict | None = None) -> None:
+    """`https:*` on `scope` (or on it at `tier`): raises ValueError with the
+    reason when the topic may hold confidential data — tier above SEAL-1, or a
+    resource imported above SEAL-0 other than its own index (#590)."""
+    from . import data_catalog as cat, topic_data as td
+    t, _, name = _norm_scope_key(scope).partition("/")
+    if meta is None:
+        from . import main
+        meta = main._topics()._read_meta(t, name)[0]
+    level = tier or meta.get("tier") or t
+    if cat.rank_have(level) > cat.rank(OPEN_WEB_MAX_TIER) or cat.rank_have(level) < 0:
+        raise ValueError(
+            f"'{OPEN_WEB}' solo su un topic senza dati riservati (fino a {OPEN_WEB_MAX_TIER}): "
+            f"{scope} è {cat.norm_tier(level)}")
+    own = ((meta.get("index") or {}).get("collection") or "") \
+        if isinstance(meta.get("index"), dict) else ""
+    for e in td.imports(meta):
+        if e["kind"] == "rag" and e["name"] == own:
+            continue
+        entry = cat.get(e["kind"], e["name"])
+        if entry is None or cat.rank(cat.effective_tier(entry)) > cat.rank("SEAL-0"):
+            raise ValueError(
+                f"'{OPEN_WEB}' solo su un topic senza dati riservati: {scope} importa "
+                f"{e['kind']} '{e['name']}'. Rimuovi prima l'import.")
 
 
 def scope_revoke(direction: str, scope: str, uri: str) -> dict:

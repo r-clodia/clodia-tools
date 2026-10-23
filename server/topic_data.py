@@ -75,6 +75,11 @@ def import_resource(tier: str, name: str, kind: str, resource: str, *,
     if why:
         raise PermissionError(why)
     need = cat.effective_tier(entry)
+    from . import egress as _eg
+    if cat.rank(need) > cat.rank("SEAL-0") and _eg.has_open_web(f"{tier}/{name}"):
+        raise PermissionError(
+            f"{tier}/{name} legge il web aperto ('{_eg.OPEN_WEB}'): non importa dati "
+            f"sopra SEAL-0 ({kind} '{resource}' è {need})")
     if cat.rank_have(tier) < cat.rank(need):
         raise PermissionError(
             f"{kind} '{resource}' è {need}: non entra in un topic {cat.norm_tier(tier)} "

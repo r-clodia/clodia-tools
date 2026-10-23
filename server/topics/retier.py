@@ -73,6 +73,16 @@ def apply(svc, tier: str, name: str, new_tier: str, *, by: str, reason: str) -> 
     from .. import whitelist as wl
     from ..tools import telegram_bindings as tb
     from .. import taint
+    # The open web as a source (`https:*`) only while the topic holds no
+    # confidential data: going above SEAL-1 needs the entry removed first.
+    from .. import egress as _eg
+    if _eg.has_open_web(f"{tier}/{name}"):
+        try:
+            _eg.open_web_allowed(f"{tier}/{name}", tier=new_tier,
+                                 meta=svc._read_meta(tier, name)[0])
+        except ValueError as e:
+            from .service import TopicError
+            raise TopicError(f"{e} — togli prima '{_eg.OPEN_WEB}' dagli ingressi") from e
     # #590: a topic cannot go below the level of the data it imports.
     from ..topic_data import DataError, check_retier
     try:
