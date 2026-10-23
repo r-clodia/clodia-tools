@@ -24,7 +24,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from . import human_mcp, internal_auth, pki_mint
+from . import human_mcp, internal_auth, pki_mint, room_tools
 from .topics.local_fs import LocalFsStorage
 from .topics.service import (VALID_TIER, MESSAGE_KINDS, SCHEMA_VERSION, TopicError, TopicService,
                              normalize_meta_v2, topic_links)
@@ -523,6 +523,95 @@ async def topic_data_route(request: Request):
                   kind=kind, resource=resource, agent=body.get("agent"), mode=body.get("mode"),
                   by=_actor(request, body)[0])
     _invalidate_list_cache()
+    return JSONResponse(out)
+
+
+async def topic_tools_route(request: Request):
+    """GET  /internal/topics/{tier}/{name}/tools → {enabled, except, enablable}
+    POST /internal/topics/{tier}/{name}/tools {action, verb, agent?} (#605):
+    enable | disable | except | unexcept. Owner (or admin) only, audited.
+
+    Same door as the room's other walls (`_authorize_topic_owner`): enabling a
+    verb for every participant IS a wall, and an agent does not move it.
+    """
+    who, err = _authorize_topic_owner(request)
+    if err:
+        return err
+    tier = request.path_params["tier"]; name = request.path_params["name"]
+    if request.method == "GET":
+        def _read():
+            meta = _service()._read_meta(tier, name)[0]
+            out = room_tools.toolbox(meta)
+            out["enablable"] = room_tools.enablable()
+            return out
+        try:
+            return JSONResponse(await asyncio.to_thread(_read))
+        except TopicError as e:
+            return JSONResponse({"error": str(e)[:200]}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    action = body.get("action")
+    verb = str(body.get("verb") or "")
+    agent = str(body.get("agent") or "")
+    try:
+        if action in ("enable", "disable"):
+            out = await asyncio.to_thread(room_tools.enable, tier, name, verb,
+                                          action == "enable")
+        elif action in ("except", "unexcept"):
+            out = await asyncio.to_thread(room_tools.exception, tier, name, agent, verb,
+                                          action == "except")
+        else:
+            return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
+    except (room_tools.ToolboxError, TopicError, ValueError, KeyError) as e:
+        return JSONResponse({"error": str(e)[:300]}, status_code=400)
+    except VersionConflict as e:
+        return JSONResponse({"error": f"il topic è cambiato nel frattempo, riprova ({e})"[:300]},
+                            status_code=409)
+    from .audit import control as _control
+    _control.safe(_control.emit, "room_tools", str(action), f"{tier}/{name}",
+                  verb=verb, agent=agent or None, by=who or None)
+    _invalidate_list_cache()
+    return JSONResponse(out)
+
+
+async def dm_tools_route(request: Request):
+    """GET  /internal/dm-tools → {enabled, enablable}
+    POST /internal/dm-tools {action: enable|disable, verb} (#605, decisione 5
+    dell'epic #604): i verbi abilitati FUORI da una stanza — un DM, un job non
+    legato a un topic. Nessun topic da cui leggerli, quindi è un'impostazione
+    d'istanza: lettura a una persona o all'agent-server, scrittura a un admin.
+    """
+    from .pki_mint import ROLE_AGENT_SERVER
+    who, err = _authorize(request)
+    if err:
+        return err
+    p = getattr(request.state, "auth_payload", None) or {}
+    if not (p.get("on_behalf") or p.get("role") == ROLE_AGENT_SERVER):
+        return JSONResponse({"error": "riservato alle persone e all'agent-server"},
+                            status_code=403)
+    if request.method == "GET":
+        return JSONResponse({"enabled": room_tools.dm_toolbox(),
+                             "enablable": room_tools.enablable()})
+    if not ((p.get("on_behalf") and (p.get("human_role") or "") == "admin")
+            or p.get("role") == ROLE_AGENT_SERVER):
+        return JSONResponse({"error": "riservato agli admin"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    action = body.get("action")
+    verb = str(body.get("verb") or "")
+    if action not in ("enable", "disable"):
+        return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
+    try:
+        out = await asyncio.to_thread(room_tools.set_dm, verb, action == "enable")
+    except (room_tools.ToolboxError, ValueError) as e:
+        return JSONResponse({"error": str(e)[:300]}, status_code=400)
+    from .audit import control as _control
+    _control.safe(_control.emit, "dm_tools", str(action), verb or "*",
+                  by=str(p.get("principal") or "") or who or None)
     return JSONResponse(out)
 
 
@@ -1108,6 +1197,12 @@ def _snapshot_meta_bytes(raw: bytes, tier: str) -> bytes:
     # Nor the data imports (#590): they name resources of THIS instance's
     # catalog, imported by an owner with the right to; an archive is neither.
     meta.pop("data", None)
+    # Nor the toolbox (#605): it widens what every participant reaches, and it
+    # names the verbs THIS instance serves. Restored, an archive would decide
+    # authority here in the owner's place — and with a namespace this gateway
+    # does not have, it would decide nothing and look enabled. Re-enabled from
+    # the room's panel, like the data imports above.
+    meta.pop(room_tools.FIELD, None)
     meta.pop("index", None)          # the index is made here, not brought (#599)
     return json.dumps(meta, ensure_ascii=False, indent=2).encode()
 
@@ -1368,6 +1463,8 @@ routes = [
     Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/data", topic_data_route, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/tools", topic_tools_route, methods=["GET", "POST"]),
+    Route("/internal/dm-tools", dm_tools_route, methods=["GET", "POST"]),
     Route("/internal/data-catalog", data_catalog_route, methods=["GET", "POST"]),
     Route("/internal/topic-index", topic_index_route, methods=["GET"]),
     Route("/internal/topic-index/{tier}/{name}", topic_index_route, methods=["POST"]),

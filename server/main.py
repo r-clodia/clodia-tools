@@ -2626,7 +2626,7 @@ def _agent_tool_reachable(name: str, agent: str | None,
     """
     allowed = (resolved if resolved is not None
                else _declared_tools(agent) | set(current_scoped_tools())
-               | _room_data_verbs(agent))
+               | _room_data_verbs(agent) | _room_tool_verbs(agent))
     return _tool_allowed(name, allowed)
 
 
@@ -2638,6 +2638,23 @@ def _room_data_verbs(agent: str | None) -> set:
     from .egress import _scope_of_call
     try:
         return topic_data.room_verbs(agent, _scope_of_call())
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _room_tool_verbs(agent: str | None) -> set:
+    """The verbs the ROOM of this call enables for `agent` (#605): every
+    `topic.*` for a participant, plus the owner's toolbox minus this agent's
+    exceptions — or, outside a room, the instance's DM toolbox.
+
+    Additive in R1 like `_room_data_verbs`: it widens what is reachable, never
+    narrows it. The gate, the deny list, the origin chain and the egress PDP
+    decide the call afterwards exactly as before.
+    """
+    from . import room_tools
+    from .egress import _scope_of_call
+    try:
+        return room_tools.verbs_for(agent, _scope_of_call())
     except Exception:  # noqa: BLE001
         return set()
 
@@ -2934,7 +2951,8 @@ async def list_tools() -> list[Tool]:
         return [t for t in (native + proxied) if not agent_denies(t.name, me)]
     # Risolvi l'albero una volta per discovery: l'archseed viene dal filesystem
     # e rifarlo per ciascun verbo renderebbe la fonte unica inutilmente costosa.
-    resolved = _declared_tools(me) | set(current_scoped_tools()) | _room_data_verbs(me)
+    resolved = (_declared_tools(me) | set(current_scoped_tools())
+                | _room_data_verbs(me) | _room_tool_verbs(me))
     return [t for t in (native + proxied)
             if _agent_tool_reachable(t.name, me, resolved)
             and not agent_denies(t.name, me)]
