@@ -94,6 +94,7 @@ def chunk_pdf(path):
         text = " ".join(buf).strip()
         buf = []
         buf_len = 0
+        text = clean_text(text)
         if not text:
             return
         chunks.append(
@@ -213,10 +214,15 @@ def drop_collection(collection):
     return {"collection": collection, "documents_removed": n}
 
 
+def clean_text(text):
+    """PostgreSQL text cannot hold NUL bytes: some PDFs extract with them."""
+    return (text or "").replace("\x00", "")
+
+
 def chunk_text(text, target=CHUNK_TARGET, hard=CHUNK_MAX):
     """Plain text → chunks of about `target` characters, cut at paragraph,
     then line, then sentence boundaries; never longer than `hard`."""
-    paras = [p.strip() for p in re.split(r"\n\s*\n", text or "") if p.strip()]
+    paras = [p.strip() for p in re.split(r"\n\s*\n", clean_text(text)) if p.strip()]
     pieces = []
     for p in paras:
         if len(p) <= hard:
@@ -251,7 +257,7 @@ def ingest_text(collection, name, version, text=None, chunks=None, source=None,
         raise ValueError(f"provenance: {', '.join(PROVENANCES)}")
     if chunks:
         items = [{"section": c.get("section"), "page": None, "ordinal": i,
-                  "text": str(c.get("text") or "").strip()}
+                  "text": clean_text(str(c.get("text") or "")).strip()}
                  for i, c in enumerate(chunks) if str(c.get("text") or "").strip()]
     else:
         items = chunk_text(text or "")
