@@ -3035,6 +3035,11 @@ async def _require_web_source(verb: str, arguments: dict, agent: str) -> None:
     src = _source_url(arguments.get("url"))
     if src and _eg.is_vetted_source(src):
         return
+    # `https:*` in the room's own ingress list: no per-site gate. The page is
+    # still untrusted — taint and the trifecta count follow as for any read.
+    if str(arguments.get("url") or "").strip().lower().startswith("https://") \
+            and _eg.open_web(_eg._scope_of_call()):
+        return
     origin = _web_origin(arguments.get("url"))
     if not origin:
         raise PermissionError(f"{verb}: URL non valido, nessuna lettura")

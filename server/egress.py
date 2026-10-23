@@ -209,6 +209,22 @@ def canonical(uri: str) -> str:
     return f"{scheme.lower()}{sep}{rest}" if sep else u
 
 
+#: The open web for ONE topic (owner, 23 Oct 2026): in a topic's own ingress
+#: list, `https:*` lets its agents read any https page without the per-site
+#: gate (#569). It does NOT make the web a trusted source: what is read still
+#: taints the channel and lights the trifecta's first leg — the risk stays with
+#: the owner, under the trifecta count, as for any other read. Never global,
+#: never egress; consulted only by the web-source gate (`open_web`), never by
+#: `_matches`, so it cannot widen any other list.
+OPEN_WEB = "https:*"
+
+
+def open_web(scope: str | None) -> bool:
+    """Does the room `scope` read the open web without a per-site gate?"""
+    return bool(scope) and any(canonical(u).lower() == OPEN_WEB
+                               for u in scope_uris("ingress", scope))
+
+
 def _matches(dest: str, rule: str) -> bool:
     """Una destinazione (URI) contro una regola (URI).
 
@@ -1072,6 +1088,14 @@ def check_grantable(direction: str, uri: str) -> str:
     if scheme not in schemes:
         raise ValueError(
             f"schema '{scheme}' non ammesso come {label}: ammessi {', '.join(schemes)}")
+    if u == OPEN_WEB:
+        raise ValueError(
+            f"'{OPEN_WEB}' si concede solo fra gli ingressi di UN topic (lettura del "
+            "web senza approvazione sito per sito), mai nella lista globale né in uscita")
+    if u.lower() in ("https://*", "https://*/", "http://*", "http://*/"):
+        raise ValueError(
+            f"'{u}' non combacerebbe con nessun sito: per il web aperto in un topic "
+            f"si scrive '{OPEN_WEB}' fra i suoi ingressi")
     if _is_degenerate(u):
         raise ValueError(
             f"'{u}' non vincola nulla dentro il suo schema: aprirebbe l'intero "
@@ -1147,7 +1171,10 @@ def scope_allow(direction: str, scope: str, uri: str) -> dict:
     vede subito invece di sparire in un warning.
     """
     key = _SCOPE_KEYS[direction]
-    u = check_grantable(direction, uri)
+    if direction == "ingress" and canonical(uri).lower() == OPEN_WEB:
+        u = OPEN_WEB                    # the open web for this room only
+    else:
+        u = check_grantable(direction, uri)
     chiave = _norm_scope_key(scope)
     from . import whitelist as _wl
     per_scope = dict(_wl.CONFIG.get(key) or {})
