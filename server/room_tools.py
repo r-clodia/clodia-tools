@@ -140,6 +140,24 @@ def enablable() -> dict[str, list[str]]:
             if ns not in _NOT_ENABLABLE}
 
 
+def gated() -> list[str]:
+    """I verbi che la stanza può abilitare e che restano GATED (#609).
+
+    Decisione 3 dell'epic #604: incluso ≠ senza gate. L'owner deve leggerlo
+    dove abilita, non scoprirlo alla prima card — quindi il pannello lo marca,
+    e il marchio esce da `enablable()` ∩ `gate.is_gated`, non da una seconda
+    lista scritta a mano: quella resterebbe indietro al primo verbo che entra
+    in `gate._DEFAULT_GATED_EXACT`.
+
+    Un `ns.*` non compare: a quel livello il pannello legge da sé se qualcuno
+    dei verbi del namespace è in questa lista. I backend MCP montati non
+    enumerano i propri verbi, quindi per loro qui non c'è nulla da dire.
+    """
+    from . import gate
+    return sorted(v for verbs in enablable().values() for v in verbs
+                  if gate.is_gated(v))
+
+
 def check(entry: str) -> str:
     """Normalizza una voce da abilitare, o la rifiuta DICENDO perché."""
     e = " ".join(str(entry or "").split())

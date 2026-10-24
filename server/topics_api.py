@@ -527,7 +527,7 @@ async def topic_data_route(request: Request):
 
 
 async def topic_tools_route(request: Request):
-    """GET  /internal/topics/{tier}/{name}/tools → {enabled, except, enablable}
+    """GET  /internal/topics/{tier}/{name}/tools → {enabled, except, enablable, gated}
     POST /internal/topics/{tier}/{name}/tools {action, verb, agent?} (#605):
     enable | disable | except | unexcept. Owner (or admin) only, audited.
 
@@ -543,6 +543,7 @@ async def topic_tools_route(request: Request):
             meta = _service()._read_meta(tier, name)[0]
             out = room_tools.toolbox(meta)
             out["enablable"] = room_tools.enablable()
+            out["gated"] = room_tools.gated()
             return out
         try:
             return JSONResponse(await asyncio.to_thread(_read))
@@ -581,7 +582,7 @@ async def topic_tools_route(request: Request):
 
 
 async def dm_tools_route(request: Request):
-    """GET  /internal/dm-tools → {enabled, enablable}
+    """GET  /internal/dm-tools → {enabled, enablable, gated}
     POST /internal/dm-tools {action: enable|disable, verb} (#605, decisione 5
     dell'epic #604): i verbi abilitati FUORI da una stanza — un DM, un job non
     legato a un topic. Nessun topic da cui leggerli, quindi è un'impostazione
@@ -597,7 +598,8 @@ async def dm_tools_route(request: Request):
                             status_code=403)
     if request.method == "GET":
         return JSONResponse({"enabled": room_tools.dm_toolbox(),
-                             "enablable": room_tools.enablable()})
+                             "enablable": room_tools.enablable(),
+                             "gated": room_tools.gated()})
     from .human import _ADMIN_ROLES
     if not ((p.get("on_behalf") and (p.get("human_role") or "") in _ADMIN_ROLES)
             or p.get("role") == ROLE_AGENT_SERVER):
