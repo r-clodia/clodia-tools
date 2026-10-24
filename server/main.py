@@ -5638,20 +5638,14 @@ def _token_is_bound_to_a_room() -> bool:
 
 
 def _require_person_of_this_room(meta, tier, name, tier_t, mutating: bool) -> None:
-    """Gli stessi tre assi di un agente, letti sulla PERSONA: compartimento
-    (partecipa?), ruolo (reader non muta), livello (clearance ≥ tier)."""
+    """Gli stessi assi di un agente, letti sulla PERSONA: compartimento
+    (partecipa?) e livello (clearance ≥ tier). Il ruolo `reader` è abolito."""
     chi = current_principal() or ""
     if not _topic_is_member(meta, chi):
         raise PermissionError(
             f"accesso negato al topic {tier}/{name}: '{chi or 'ignoto'}' non è "
             "partecipante. Il token resta valido: è la stanza che non è sua. "
             "Chi ti ha invitato può aggiungerti dai partecipanti del topic.")
-    if mutating:
-        from .topics.service import TopicService as _T
-        if _T.participant_role(meta, chi) == _T.ROLE_READER:
-            raise PermissionError(
-                f"'{chi}' è reader in {tier_t}/{name}: può leggere e parlare, "
-                "non modificare.")
     if _rank(current_clearance()) < _rank(tier_t):
         raise PermissionError(
             f"'{chi}': clearance insufficiente per il tier {tier_t} di "
@@ -5728,20 +5722,8 @@ def _require_topic_member(svc, tier, name, mutating: bool = False) -> None:
             "partecipante (compartimento need-to-know; il cross-topic richiede "
             "il grant 'crosstopic', concedibile solo a clodia/sysadmin e solo "
             "per lo spawn a cui viene approvato)")
-    # asse RUOLO: un reader non muta. Fino al 7 ago 2026 il ruolo era applicato
-    # solo sul percorso UMANO (gli endpoint della webui); un agente passa da qui,
-    # quindi metterlo a `reader` non aveva alcun effetto — poteva comunque
-    # chiamare `topic.put` o `save_summary`. Il ruolo esisteva e nessuno lo
-    # guardava dove serviva di più: un agente reader è precisamente il caso
-    # dell'osservatore che deve poter guardare e commentare senza toccare.
-    if mutating and agent_ok:
-        from .topics.service import TopicService as _T
-        if _T.participant_role(meta, caller) == _T.ROLE_READER:
-            raise PermissionError(
-                f"'{caller}' è reader in {tier_t}/{name}: può leggere e parlare, "
-                "non modificare. Chiedi all'owner del topic di cambiargli ruolo. "
-                "(Il consenso puntuale per una singola modifica arriverà col "
-                "modello a gate: oggi è un rifiuto.)")
+    # asse RUOLO: abolito il 24 ott 2026 (epic #604) — ogni partecipante
+    # della stanza ha gli stessi verbi; restano compartimento e livello.
     # asse livello: clearance ≥ tier (difesa in profondità oltre al compartimento).
     if _rank(current_clearance()) < _rank(tier_t):
         raise PermissionError(

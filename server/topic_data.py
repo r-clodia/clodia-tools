@@ -115,8 +115,6 @@ def grant(tier: str, name: str, kind: str, resource: str, agent: str,
         roles = svc.participants_map(meta)          # owner included, map or list
         if mode and agent not in roles and agent != meta.get("owner"):
             raise DataError(f"'{agent}' non partecipa a {tier}/{name}: aggiungilo prima")
-        if mode == "write" and roles.get(agent) == "reader":
-            raise DataError(f"'{agent}' è lettore in {tier}/{name}: non può avere la scrittura")
         for e in entries:
             if e["kind"] == kind and e["name"] == resource:
                 if mode:
@@ -186,11 +184,6 @@ def authorize(kind: str, resource: str, *, write: bool, agent: str,
     if entry is None:
         raise PermissionError(f"{kind} '{resource}' non è più nel catalogo dei dati")
     granted = imp["grants"].get(agent)
-    if write and granted == "write":
-        # A participant demoted to reader keeps no write (second review of #420).
-        from .topics.service import TopicService
-        if TopicService.participants_map(meta).get(agent) == "reader":
-            granted = "read"
     if granted is None or (write and granted != "write"):
         raise PermissionError(
             f"agent '{agent}' senza permesso di {'SCRITTURA' if write else 'LETTURA'} "

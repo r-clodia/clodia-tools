@@ -130,16 +130,16 @@ class GrantTests(_Base):
         with self.assertRaises(PermissionError):
             self.auth("tomato.commerciale")
 
-    def test_a_participant_demoted_to_reader_loses_write(self):
+    def test_a_former_reader_keeps_write(self):
+        """The reader role is abolished (24 Oct 2026, epic #604): a `reader`
+        left in a meta reads as contributor and keeps its write grant."""
         td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
                  "tomato.commerciale", "write")
         self.auth("tomato.commerciale", write=True)
         meta, ver = self.svc._read_meta("SEAL-2", "commerciale")
         meta["participants"] = {"tomato.commerciale": "reader", "clodia": "contributor"}
         self.svc._write_meta("SEAL-2", "commerciale", meta, ver)
-        with self.assertRaises(PermissionError):
-            self.auth("tomato.commerciale", write=True)
-        self.auth("tomato.commerciale")
+        self.auth("tomato.commerciale", write=True)
 
     def test_only_participants(self):
         with self.assertRaises(td.DataError):
@@ -345,15 +345,13 @@ class ReviewFixesTests(_Base):
         with self.assertRaises(PermissionError):
             self.auth("rogue", write=True, scope="SEAL-3/mio", clearance="SEAL-3")
 
-    def test_s2_reader_gets_no_write_and_owner_may_be_granted(self):
+    def test_s2_a_former_reader_may_get_write_and_owner_may_be_granted(self):
         self.svc.new("SEAL-2", "ruoli", {"owner": "davide", "participants": ["davide"]})
         meta, ver = self.svc._read_meta("SEAL-2", "ruoli")
         meta["participants"] = {"lett": "reader", "scrive": "contributor"}
         self.svc._write_meta("SEAL-2", "ruoli", meta, ver)
         self.imp(name="ruoli")
-        with self.assertRaises(td.DataError):
-            td.grant("SEAL-2", "ruoli", "datastore", "tomato-pack/clienti", "lett", "write")
-        td.grant("SEAL-2", "ruoli", "datastore", "tomato-pack/clienti", "lett", "read")
+        td.grant("SEAL-2", "ruoli", "datastore", "tomato-pack/clienti", "lett", "write")
         td.grant("SEAL-2", "ruoli", "datastore", "tomato-pack/clienti", "scrive", "write")
         td.grant("SEAL-2", "ruoli", "datastore", "tomato-pack/clienti", "davide", "read")
 

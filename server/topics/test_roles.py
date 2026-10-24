@@ -1,4 +1,8 @@
-"""Appartenenza graduata: owner, contributor, reader.
+"""Appartenenza graduata: owner, contributor (reader abolito il 24 ott 2026).
+
+AGGIORNAMENTO 24 ott 2026 (epic #604, decisione dell'owner): il ruolo `reader`
+è abolito — in una stanza ogni partecipante ha gli stessi verbi. Un `reader`
+già scritto si legge `contributor`; un invito come reader è rifiutato.
 
 Fino al 7 ago 2026 era BINARIA — dieci endpoint, una guardia sola, owner e
 partecipante trattati allo stesso modo. Un invitato poteva azzerare la memoria
@@ -66,14 +70,15 @@ class RoleTests(Base):
         r = self.svc.add_participant("SEAL-1", "acme", "matteo")
         self.assertEqual(r["role"], "contributor")
 
-    def test_a_reader_can_be_declared(self):
-        self.svc.add_participant("SEAL-1", "acme", "matteo", role="reader")
-        self.assertEqual(TopicService.participant_role(self.meta(), "matteo"), "reader")
+    def test_a_reader_can_no_longer_be_declared(self):
+        with self.assertRaises(TopicError) as cm:
+            self.svc.add_participant("SEAL-1", "acme", "matteo", role="reader")
+        self.assertIn("abolito", str(cm.exception))
+        self.assertIsNone(TopicService.participant_role(self.meta(), "matteo"))
 
-    def test_a_role_can_be_changed_without_re_inviting(self):
-        self.svc.add_participant("SEAL-1", "acme", "matteo", role="contributor")
-        self.svc.add_participant("SEAL-1", "acme", "matteo", role="reader")
-        self.assertEqual(TopicService.participant_role(self.meta(), "matteo"), "reader")
+    def test_a_reader_written_before_reads_as_contributor(self):
+        meta = dict(self.meta(), participants={"matteo": "reader"})
+        self.assertEqual(TopicService.participant_role(meta, "matteo"), "contributor")
 
     def test_an_unknown_role_is_refused(self):
         with self.assertRaises(TopicError):
@@ -88,12 +93,12 @@ class RoleTests(Base):
         self.assertIn("owner", str(cm.exception))
 
     def test_the_first_change_converts_the_list_to_a_map(self):
-        self.svc.add_participant("SEAL-1", "acme", "matteo", role="reader")
+        self.svc.add_participant("SEAL-1", "acme", "matteo")
         self.assertIsInstance(self.meta().get("participants"), dict)
 
     def test_conversion_preserves_everyone_else(self):
         """La conversione non deve perdere per strada chi c'era."""
-        self.svc.add_participant("SEAL-1", "acme", "matteo", role="reader")
+        self.svc.add_participant("SEAL-1", "acme", "matteo")
         m = TopicService.participants_map(self.meta())
         self.assertEqual(m.get("clodia"), "contributor")
         self.assertEqual(m.get("giovanni"), "contributor")
@@ -104,9 +109,9 @@ class MutationTests(Base):
         self.assertTrue(TopicService.may_mutate(self.meta(), "davide"))
         self.assertTrue(TopicService.may_mutate(self.meta(), "clodia"))
 
-    def test_a_reader_may_not(self):
-        self.svc.add_participant("SEAL-1", "acme", "matteo", role="reader")
-        self.assertFalse(TopicService.may_mutate(self.meta(), "matteo"))
+    def test_a_former_reader_may(self):
+        meta = dict(self.meta(), participants={"matteo": "reader"})
+        self.assertTrue(TopicService.may_mutate(meta, "matteo"))
 
     def test_an_outsider_may_not(self):
         self.assertFalse(TopicService.may_mutate(self.meta(), "sconosciuto"))
@@ -136,7 +141,7 @@ class CompatibilityTests(Base):
     def test_membership_checks_keep_working_on_a_map(self):
         """`caller in meta['participants']` guarda le chiavi di un dict: i
         controlli esistenti non vanno toccati."""
-        self.svc.add_participant("SEAL-1", "acme", "matteo", role="reader")
+        self.svc.add_participant("SEAL-1", "acme", "matteo")
         parts = self.meta()["participants"]
         self.assertIn("matteo", parts)
         self.assertIn("clodia", parts)

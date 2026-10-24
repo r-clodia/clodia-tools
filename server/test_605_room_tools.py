@@ -330,9 +330,124 @@ class RoutesTests(_Base):
             self.assertEqual(r.json()["dm_tools"], ["web.fetch"])
             self.assertTrue(any(x[:2] == ("dm_tools", "enable") for x, _ in self.events))
 
+    def test_a_superadmin_writes_the_dm_list(self):
+        with patch.object(whitelist, "CONFIG", {}), \
+                patch.object(whitelist, "save_config", lambda: None), \
+                patch.object(whitelist, "reload_config", lambda: None):
+            c = self._client({"principal": "davide", "on_behalf": True,
+                              "human_role": "superadmin"})
+            r = c.post("/internal/dm-tools", json={"action": "enable", "verb": "web.fetch"})
+            self.assertEqual(r.status_code, 200, r.text)
+
+    def test_a_missing_topic_is_404(self):
+        """An admin passes the owner's door; the topic that is not there is a
+        404, not a malformed request (review N3)."""
+        c = self._client({"principal": "davide", "on_behalf": True, "human_role": "admin"})
+        r = c.post("/internal/topics/SEAL-1/inesistente/tools",
+                   json={"action": "enable", "verb": "web.fetch"})
+        self.assertEqual(r.status_code, 404, r.text)
+
+
     def test_an_agent_does_not_read_the_dm_list(self):
         c = self._client({"agent": "redattore"})
         self.assertEqual(c.get("/internal/dm-tools").status_code, 403)
+
+
+class ReviewB1Tests(_Base):
+    """Review of #429, B1: a toolbox written by anything but the owner's route
+    — `topic.new` with a ready-made `tools`, or a hand-edited meta — must not
+    give a single verb that the route would have refused."""
+
+    def test_a_creator_never_brings_a_toolbox(self):
+        self.svc.new("SEAL-1", "x", {"owner": "davide", "participants": ["sales-rep"],
+                                     "tools": {"enabled": ["*", "packs.*", "web.fetch"]}})
+        self.assertNotIn("tools", self.meta(name="x"))
+        self.assertEqual(rt.verbs_for("sales-rep", "SEAL-1/x"), {"topic.*"})
+
+    def test_a_hand_written_toolbox_gives_only_what_a_room_may_give(self):
+        meta = {"tools": {"enabled": ["*", "packs.*", "agents.grant_tool", "runtime.*",
+                                      "*.*", "web.f*", "topic.delete_file", "web.fetch"]}}
+        self.assertEqual(rt.toolbox(meta)["enabled"], ["web.fetch"])
+
+    def test_through_dispatch_the_bare_star_reaches_nothing(self):
+        meta, ver = self.svc._read_meta("SEAL-1", "blog")
+        meta["tools"] = {"enabled": ["*", "packs.*", "agents.*"]}
+        self.svc._write_meta("SEAL-1", "blog", meta, base_version=ver)
+        with patch.object(main, "_declared_tools", lambda a: set()), \
+                patch.object(main, "current_scoped_tools", lambda: ()), \
+                patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"):
+            for verb in ("packs.import_url", "agents.grant_tool", "copybrain.ask",
+                         "runtime.status"):
+                self.assertFalse(main._agent_tool_reachable(verb, "redattore"), verb)
+            self.assertTrue(main._agent_tool_reachable("topic.write_file", "redattore"))
+
+    def test_the_dm_list_is_filtered_the_same_way(self):
+        with patch.object(whitelist, "CONFIG", {"dm_tools": ["*", "packs.*", "web.fetch"]}):
+            self.assertEqual(rt.dm_toolbox(), ["web.fetch"])
+
+
+class WildcardExceptionTests(_Base):
+    """Review of #429, S1: an exception bites by name, by namespace or on all."""
+
+    def test_a_namespace_exception_removes_the_namespace(self):
+        rt.enable("SEAL-1", "blog", "web.*")
+        rt.exception("SEAL-1", "blog", "fact-checker", "web.*")
+        v = rt.verbs_for("fact-checker", "SEAL-1/blog")
+        self.assertFalse({x for x in v if x.startswith("web.")}, v)
+        self.assertIn("web.*", rt.verbs_for("redattore", "SEAL-1/blog"))
+
+    def test_it_also_bites_point_verbs_of_that_namespace(self):
+        rt.enable("SEAL-1", "blog", "web.fetch")
+        rt.exception("SEAL-1", "blog", "fact-checker", "web.*")
+        self.assertNotIn("web.fetch", rt.verbs_for("fact-checker", "SEAL-1/blog"))
+
+    def test_an_exception_on_topic_star_removes_the_floor_for_that_agent(self):
+        rt.exception("SEAL-1", "blog", "fact-checker", "topic.*")
+        self.assertEqual(rt.verbs_for("fact-checker", "SEAL-1/blog"), set())
+        self.assertIn("topic.*", rt.verbs_for("redattore", "SEAL-1/blog"))
+
+    def test_star_removes_everything_the_room_gives(self):
+        rt.enable("SEAL-1", "blog", "web.fetch")
+        rt.exception("SEAL-1", "blog", "fact-checker", "*")
+        self.assertEqual(rt.verbs_for("fact-checker", "SEAL-1/blog"), set())
+
+    def test_a_namespace_exception_on_an_unenumerable_backend(self):
+        with patch.object(rt, "_catalogue", lambda: {"backend": set()}):
+            self.assertEqual(rt._minus({"backend.*"}, {"backend.*"}), set())
+
+    def test_an_exception_that_would_change_nothing_is_refused(self):
+        for bad in ("packs.*", "jobs.run", "rag.search", "web.fetchh", "web", "**", "inesistente.*"):
+            with self.assertRaises(rt.ToolboxError, msg=bad):
+                rt.exception("SEAL-1", "blog", "fact-checker", bad)
+        self.assertEqual(rt.toolbox(self.meta())["except"], {})
+
+    def test_a_hand_written_malformed_exception_is_dropped(self):
+        meta = {"tools": {"except": {"a": ["web.*", "*", "web f", "x.y*"]}}}
+        self.assertEqual(rt.toolbox(meta)["except"], {"a": ["*", "web.*"]})
+
+
+class ArchivedRoomTests(_Base):
+    def test_an_archived_room_keeps_the_floor_and_drops_the_toolbox(self):
+        rt.enable("SEAL-1", "blog", "web.fetch")
+        meta, ver = self.svc._read_meta("SEAL-1", "blog")
+        meta["status"] = "archived"
+        self.svc._write_meta("SEAL-1", "blog", meta, base_version=ver)
+        self.assertEqual(rt.verbs_for("redattore", "SEAL-1/blog"), {"topic.*"})
+
+
+class ReaderAbolishedTests(_Base):
+    """Owner's decision, 24 Oct 2026: there is no read-only participant."""
+
+    def test_a_reader_written_before_reads_as_contributor(self):
+        meta = {"owner": "davide", "participants": {"redattore": "reader"}}
+        self.assertEqual(TopicService.participant_role(meta, "redattore"), "contributor")
+        self.assertTrue(TopicService.may_mutate(meta, "redattore"))
+
+    def test_nobody_is_invited_as_reader_any_more(self):
+        from .topics.service import TopicError
+        with self.assertRaises(TopicError) as e:
+            self.svc.add_participant("SEAL-1", "blog", "nuovo", role="reader")
+        self.assertIn("abolito", str(e.exception))
 
 
 if __name__ == "__main__":

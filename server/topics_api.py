@@ -564,7 +564,11 @@ async def topic_tools_route(request: Request):
                                           action == "except")
         else:
             return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
-    except (room_tools.ToolboxError, TopicError, ValueError, KeyError) as e:
+    except TopicError as e:
+        # A missing topic is a 404, not a malformed request (review #429, N3).
+        missing = str(e).startswith("topic non trovato")
+        return JSONResponse({"error": str(e)[:300]}, status_code=404 if missing else 400)
+    except (room_tools.ToolboxError, ValueError, KeyError) as e:
         return JSONResponse({"error": str(e)[:300]}, status_code=400)
     except VersionConflict as e:
         return JSONResponse({"error": f"il topic è cambiato nel frattempo, riprova ({e})"[:300]},
@@ -594,7 +598,8 @@ async def dm_tools_route(request: Request):
     if request.method == "GET":
         return JSONResponse({"enabled": room_tools.dm_toolbox(),
                              "enablable": room_tools.enablable()})
-    if not ((p.get("on_behalf") and (p.get("human_role") or "") == "admin")
+    from .human import _ADMIN_ROLES
+    if not ((p.get("on_behalf") and (p.get("human_role") or "") in _ADMIN_ROLES)
             or p.get("role") == ROLE_AGENT_SERVER):
         return JSONResponse({"error": "riservato agli admin"}, status_code=403)
     try:
@@ -651,7 +656,8 @@ async def data_catalog_route(request: Request):
             return rows
         rows = await asyncio.to_thread(_rows)
         return JSONResponse({"entries": rows, "data_access": topic_data.mode()})
-    if not ((p.get("on_behalf") and (p.get("human_role") or "") == "admin")
+    from .human import _ADMIN_ROLES
+    if not ((p.get("on_behalf") and (p.get("human_role") or "") in _ADMIN_ROLES)
             or p.get("role") == ROLE_AGENT_SERVER):
         return JSONResponse({"error": "riservato agli admin"}, status_code=403)
     try:

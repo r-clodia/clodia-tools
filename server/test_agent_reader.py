@@ -1,4 +1,9 @@
-"""Un agente reader legge e parla, non muta.
+"""Un agente reader legge e parla, non muta — fino al 24 ott 2026.
+
+AGGIORNAMENTO 24 ott 2026: il ruolo `reader` è ABOLITO (decisione dell'owner,
+epic #604): in una stanza ogni partecipante ha gli stessi verbi. Un `reader`
+ancora scritto in un meta si legge `contributor`. Il resto di questo file resta
+come storia della decisione precedente.
 
 Domanda di Davide, 7 ago 2026: «cosa succede se metto reader come ruolo ad un
 agent ai?». Risposta misurata: **niente**. Il ruolo era applicato solo sul
@@ -55,21 +60,11 @@ class ReaderTests(Base):
             M._require_topic_member(_Svc(), "SEAL-1", "acme", mutating=False)
         self.run_with(_env("osservatore"), go)
 
-    def test_a_reader_agent_may_not_mutate(self):
-        """Il difetto che questo file esiste per chiudere."""
+    def test_a_former_reader_agent_may_now_mutate(self):
+        """Il ruolo `reader` è abolito (24 ott 2026, epic #604): un `reader`
+        scritto prima si legge `contributor`."""
         def go():
-            with self.assertRaises(PermissionError) as cm:
-                M._require_topic_member(_Svc(), "SEAL-1", "acme", mutating=True)
-            self.assertIn("reader", str(cm.exception))
-        self.run_with(_env("osservatore"), go)
-
-    def test_the_refusal_says_who_can_change_it(self):
-        """Un rifiuto che non indica la strada insegna solo che il sistema dice
-        di no."""
-        def go():
-            with self.assertRaises(PermissionError) as cm:
-                M._require_topic_member(_Svc(), "SEAL-1", "acme", mutating=True)
-            self.assertIn("owner", str(cm.exception))
+            M._require_topic_member(_Svc(), "SEAL-1", "acme", mutating=True)
         self.run_with(_env("osservatore"), go)
 
 

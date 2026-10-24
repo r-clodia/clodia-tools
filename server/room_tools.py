@@ -158,56 +158,129 @@ def check(entry: str) -> str:
     return e
 
 
+def check_exception(entry: str) -> str:
+    """Normalizza un'eccezione, o la rifiuta DICENDO perché.
+
+    Si toglie ciò che la stanza dà: la toolbox e il pavimento `topic.*`. Un
+    namespace che la stanza non dà mai (governance, per-seed, dati) non ha nulla
+    da togliere — accettarlo mostrerebbe all'owner un divieto senza effetto.
+    """
+    e = _exceptable(entry)
+    if e is None:
+        raise ToolboxError(f"'{entry}': serve `namespace.verbo`, `namespace.*` oppure `*`")
+    if e == WILDCARD:
+        return e
+    ns, _, verb = e.partition(".")
+    if ns != TOPIC_NS and ns in _NOT_ENABLABLE:
+        raise ToolboxError(f"'{e}' non lo dà la stanza, quindi non si toglie qui — "
+                           f"{_NOT_ENABLABLE[ns]}")
+    cat = _catalogue()
+    if ns not in cat:
+        raise ToolboxError(f"namespace sconosciuto: '{ns}'")
+    if verb != WILDCARD and cat[ns] and e not in cat[ns]:
+        raise ToolboxError(f"verbo sconosciuto: '{e}'")
+    return e
+
+
 # ---------------------------------------------------------------- the room's toolbox
 
+def _shape(entry) -> str | None:
+    """`ns.verbo` o `ns.*`, normalizzato; `None` per qualunque altra forma.
+
+    Un `*` nudo, un namespace vuoto o un verbo che contiene spazi non sono una
+    voce di toolbox: nessuna delle due rotte li scrive, quindi se compaiono nel
+    meta li ha scritti qualcun altro (review #429, B1).
+    """
+    e = " ".join(str(entry or "").split())
+    ns, sep, verb = e.partition(".")
+    if not ns or not sep or not verb or WILDCARD in ns or " " in e:
+        return None
+    if WILDCARD in verb and verb != WILDCARD:
+        return None
+    return e
+
+
+def _grantable(entry) -> str | None:
+    """Una voce che la stanza può davvero DARE: la forma giusta e un namespace
+    abilitabile. Filtro di LETTURA, indipendente da `check()` alla scrittura:
+    il meta non è scritto solo dalle rotte di questo modulo, e una voce
+    `packs.*` o `*` arrivata da un'altra porta non deve concedere nulla."""
+    e = _shape(entry)
+    if e is None or e.partition(".")[0] in _NOT_ENABLABLE:
+        return None
+    return e
+
+
+def _exceptable(entry) -> str | None:
+    """Un'eccezione: `ns.verbo`, `ns.*` o `*` (tutto ciò che la stanza dà)."""
+    e = " ".join(str(entry or "").split())
+    return WILDCARD if e == WILDCARD else _shape(e)
+
+
 def toolbox(meta: dict) -> dict:
-    """Il contenuto di `meta["tools"]`, qualunque cosa ci sia scritta.
+    """Il contenuto di `meta["tools"]`, ridotto a ciò che una stanza può dare.
 
     Letto come `topic_data.imports`: voci che non si capiscono vengono scartate,
     non interpretate — una toolbox illeggibile non deve diventare permissiva.
     """
     raw = (meta or {}).get(FIELD)
     raw = raw if isinstance(raw, dict) else {}
-    enabled = sorted({" ".join(str(x).split()) for x in (raw.get("enabled") or [])
-                      if str(x).strip()}) if isinstance(raw.get("enabled"), list) else []
+    lst = raw.get("enabled") if isinstance(raw.get("enabled"), list) else []
+    enabled = sorted({e for e in map(_grantable, lst) if e})
     exc_raw = raw.get("except") if isinstance(raw.get("except"), dict) else {}
     exc: dict[str, list[str]] = {}
     for agent, lst in exc_raw.items():
         if not isinstance(lst, list):
             continue
-        verbs = sorted({" ".join(str(v).split()) for v in lst if str(v).strip()})
+        verbs = sorted({v for v in map(_exceptable, lst) if v})
         if verbs:
             exc[str(agent)] = verbs
     return {"enabled": enabled, "except": exc}
 
 
+def _bites(verb: str, excepted: set[str]) -> bool:
+    """Un'eccezione colpisce `verb` per nome esatto, per `ns.*` o per `*`."""
+    ns = verb.partition(".")[0]
+    return (WILDCARD in excepted or verb in excepted
+            or f"{ns}.{WILDCARD}" in excepted)
+
+
 def _minus(entries: set[str], excepted: set[str]) -> set[str]:
     """`entries` meno le eccezioni di QUESTO agente.
 
-    Un `ns.*` si mangerebbe la propria eccezione — `email.*` continua ad
-    ammettere `email.send` — quindi un wildcard il cui namespace è toccato da
-    un'eccezione viene ESPANSO nei verbi che il gateway serve, e la sottrazione
-    morde su quelli. Se il catalogo non sa nominarli (un backend MCP montato,
-    verbi non enumerabili da qui) il wildcard viene TOLTO: un dono che non si
-    può tagliare dove l'owner ha chiesto non si fa.
+    Un'eccezione morde per nome, per namespace (`web.*`) o su tutto (`*`). Fino
+    alla review di #429 si sottraeva come stringa: `web.*` tra le eccezioni
+    lasciava passare `web.fetch`, e il pannello mostrava un divieto che non
+    c'era.
+
+    Un `ns.*` abilitato si mangerebbe un'eccezione puntuale — `email.*`
+    continua ad ammettere `email.send` — quindi un wildcard il cui namespace è
+    toccato da un'eccezione puntuale viene ESPANSO nei verbi che il gateway
+    serve, e la sottrazione morde su quelli. Se il catalogo non sa nominarli (un
+    backend MCP montato, verbi non enumerabili da qui) il wildcard viene TOLTO:
+    un dono che non si può tagliare dove l'owner ha chiesto non si fa.
     """
     if not excepted:
         return entries
-    touched = {v.partition(".")[0] for v in excepted}
-    cat = _catalogue()
+    touched = {v.partition(".")[0] for v in excepted if v != WILDCARD}
+    cat = None
     out: set[str] = set()
     for e in entries:
         ns, _, verb = e.partition(".")
+        if _bites(e, excepted):
+            continue
         if verb != WILDCARD or ns not in touched:
             out.add(e)
             continue
+        if cat is None:
+            cat = _catalogue()
         verbs = cat.get(ns) or set()
         if not verbs:
             LOG.warning("toolbox: '%s' tolto — c'è un'eccezione su '%s' e i suoi "
                         "verbi non sono enumerabili da qui", e, ns)
             continue
-        out |= verbs
-    return out - excepted
+        out |= {v for v in verbs if not _bites(v, excepted)}
+    return out
 
 
 def _svc():
@@ -239,7 +312,11 @@ def verbs_for(agent: str | None, scope: str | None) -> set[str]:
     if agent not in svc.participants_map(meta):
         return set()
     tb = toolbox(meta)
-    entries = {f"{TOPIC_NS}.{WILDCARD}"} | set(tb["enabled"])
+    entries = {f"{TOPIC_NS}.{WILDCARD}"}
+    # Una stanza archiviata tiene il pavimento (leggerla resta possibile) ma non
+    # dà più la toolbox: nessuno lavora più lì (review #429, N2).
+    if str(meta.get("status") or "").strip().lower() != "archived":
+        entries |= set(tb["enabled"])
     return _minus(entries, set(tb["except"].get(agent, ())))
 
 
@@ -279,7 +356,7 @@ def exception(tier: str, name: str, agent: str, verb: str, on: bool = True) -> d
     proprio seed continua ad averlo. Toglierlo è #610.
     """
     a = " ".join(str(agent or "").split())
-    v = " ".join(str(verb or "").split())
+    v = check_exception(verb) if on else " ".join(str(verb or "").split())
     if not a:
         raise ToolboxError("serve l'agente dell'eccezione")
     if not v:
@@ -312,7 +389,7 @@ def dm_toolbox() -> list[str]:
     raw = (_wl.CONFIG or {}).get(DM_KEY)
     if not isinstance(raw, list):
         return []
-    return sorted({" ".join(str(x).split()) for x in raw if str(x).strip()})
+    return sorted({e for e in map(_grantable, raw) if e})
 
 
 def dm_verbs() -> set[str]:
