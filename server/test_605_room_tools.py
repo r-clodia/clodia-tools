@@ -339,6 +339,22 @@ class RoutesTests(_Base):
             r = c.post("/internal/dm-tools", json={"action": "enable", "verb": "web.fetch"})
             self.assertEqual(r.status_code, 200, r.text)
 
+    def test_the_panel_knows_which_verbs_still_ask(self):
+        """#609: enabling is not ungating (epic decision 3), so the panel marks
+        the gated verbs."""
+        body = self._owner().get("/internal/topics/SEAL-1/blog/tools").json()
+        self.assertIn("web.post", body["gated"])
+        self.assertNotIn("web.fetch", body["gated"])
+
+    def test_the_agent_server_names_the_person_in_the_audit(self):
+        from .pki_mint import ROLE_AGENT_SERVER
+        c = self._client({"role": ROLE_AGENT_SERVER, "agent": "agent-server"})
+        r = c.post("/internal/topics/SEAL-1/blog/tools",
+                   json={"action": "enable", "verb": "web.fetch", "by": "davide"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(any(k.get("by") == "davide" for a, k in self.events
+                            if a[:2] == ("room_tools", "enable")))
+
     def test_a_missing_topic_is_404(self):
         """An admin passes the owner's door; the topic that is not there is a
         404, not a malformed request (review N3)."""

@@ -182,6 +182,14 @@ def check_exception(entry: str) -> str:
     return e
 
 
+def gated_of(enablable: dict[str, list[str]]) -> list[str]:
+    """I verbi abilitabili che chiedono comunque una conferma (#609): il
+    pannello li marca, perché abilitare non è togliere il gate (decisione 3
+    dell'epic #604)."""
+    from . import gate
+    return sorted(v for verbs in enablable.values() for v in verbs if gate.is_gated(v))
+
+
 # ---------------------------------------------------------------- the room's toolbox
 
 def _shape(entry) -> str | None:
