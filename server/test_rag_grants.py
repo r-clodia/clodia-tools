@@ -7,6 +7,11 @@ from . import main
 
 
 class RagGrantEnforcementTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # lo snapshot di ultimo-buono del #500 è stato di modulo: ogni test
+        # decide in isolamento il proprio scenario core su / core giù
+        main._rag_grants_snapshots.clear()
+
     def _base_patches(self):
         return (
             patch.object(main, "agent_name", return_value="esperto-bandi"),
@@ -114,6 +119,9 @@ class RagWildcardGrantTests(unittest.TestCase):
     quindi la configurazione che sembra concedere tutto concedeva zero. Il
     tiering resta a valle e invariato — la wildcard non alza la clearance.
     """
+
+    def setUp(self) -> None:
+        main._rag_grants_snapshots.clear()
 
     def _gate(self, *, read=frozenset(), write=frozenset(),
               clearance="SEAL-2", tier="SEAL-1"):
