@@ -543,6 +543,7 @@ async def topic_tools_route(request: Request):
             meta = _service()._read_meta(tier, name)[0]
             out = room_tools.toolbox(meta)
             out["enablable"] = room_tools.enablable()
+            out["gated"] = room_tools.gated_of(out["enablable"])
             return out
         try:
             return JSONResponse(await asyncio.to_thread(_read))
@@ -574,8 +575,11 @@ async def topic_tools_route(request: Request):
         return JSONResponse({"error": f"il topic è cambiato nel frattempo, riprova ({e})"[:300]},
                             status_code=409)
     from .audit import control as _control
+    # On the agent-server's door the person is named in the body (#609), as
+    # for the data routes: `who` would only say «agent-server».
     _control.safe(_control.emit, "room_tools", str(action), f"{tier}/{name}",
-                  verb=verb, agent=agent or None, by=who or None)
+                  verb=verb, agent=agent or None,
+                  by=_actor(request, body)[0] or who or None)
     _invalidate_list_cache()
     return JSONResponse(out)
 
@@ -596,8 +600,10 @@ async def dm_tools_route(request: Request):
         return JSONResponse({"error": "riservato alle persone e all'agent-server"},
                             status_code=403)
     if request.method == "GET":
+        enablable = room_tools.enablable()
         return JSONResponse({"enabled": room_tools.dm_toolbox(),
-                             "enablable": room_tools.enablable()})
+                             "enablable": enablable,
+                             "gated": room_tools.gated_of(enablable)})
     from .human import _ADMIN_ROLES
     if not ((p.get("on_behalf") and (p.get("human_role") or "") in _ADMIN_ROLES)
             or p.get("role") == ROLE_AGENT_SERVER):
@@ -616,7 +622,7 @@ async def dm_tools_route(request: Request):
         return JSONResponse({"error": str(e)[:300]}, status_code=400)
     from .audit import control as _control
     _control.safe(_control.emit, "dm_tools", str(action), verb or "*",
-                  by=str(p.get("principal") or "") or who or None)
+                  by=str(p.get("principal") or "") or _actor(request, body)[0] or who or None)
     return JSONResponse(out)
 
 
