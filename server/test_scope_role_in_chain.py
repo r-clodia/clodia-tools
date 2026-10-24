@@ -64,33 +64,27 @@ class Base(unittest.TestCase):
             [c.stop() for c in ctx]
 
 
-class ReaderTests(Base):
-    def test_a_reader_may_not_mutate_even_with_the_profile_allowing_it(self):
-        """Il cuore del terzo termine: il profilo dice sì, la stanza dice no."""
+class FormerReaderTests(Base):
+    """Il ruolo `reader` è abolito (24 ott 2026, epic #604): il terzo termine
+    non restringe più nulla, e un `reader` scritto prima si legge contributor."""
+
+    def test_a_former_reader_may_mutate_when_the_profile_allows_it(self):
         def go():
             with _Chat(CANALE):
-                self.assertFalse(origin.principal_may("human", "giovanni", "topic.put"))
+                self.assertTrue(origin.principal_may("human", "giovanni", "topic.put"))
         self.run_with(_env(), go)
 
-    def test_a_reader_may_read(self):
+    def test_a_former_reader_may_send_out_when_the_profile_allows_it(self):
         def go():
             with _Chat(CANALE):
-                self.assertTrue(origin.principal_may("human", "giovanni", "topic.read_file"))
+                self.assertTrue(origin.principal_may("human", "giovanni", "email.send"))
         self.run_with(_env(), go)
 
-    def test_a_reader_may_speak(self):
-        """Parlare non è mutare: è il punto del ruolo."""
+    def test_the_profile_still_bounds_a_former_reader(self):
         def go():
             with _Chat(CANALE):
-                self.assertTrue(origin.principal_may("human", "giovanni", "topic.post_message"))
-        self.run_with(_env(), go)
-
-    def test_a_reader_may_not_send_anything_out_of_the_room(self):
-        """Fuori dai verbi `topic.*` il criterio è l'uscita."""
-        def go():
-            with _Chat(CANALE):
-                self.assertFalse(origin.principal_may("human", "giovanni", "email.send"))
-        self.run_with(_env(), go)
+                self.assertFalse(origin.principal_may("human", "giovanni", "packs.import_url"))
+        self.run_with(_env(profilo_consente=False), go)
 
 
 class ContributorTests(Base):
@@ -150,19 +144,13 @@ class OutsideAScopeTests(Base):
 
 
 class DenialMessageTests(Base):
-    def test_the_refusal_says_which_of_the_two_blocked(self):
-        """I rimedi sono persone diverse: un admin per il profilo, l'owner del
-        topic per il ruolo."""
+    def test_a_former_reader_is_not_refused_by_the_room(self):
+        """Senza il ruolo `reader` la stanza non rifiuta più: resta il profilo."""
         def go():
             with _Chat(CANALE):
                 v = origin.evaluate([("human", "giovanni"), ("agent", "clodia")],
                                     "topic.put")
-                self.assertEqual(v["action"], "deny")
-                self.assertEqual(v["reason"], "ruolo-nello-scope")
-                msg = origin.denial_message(v)
-                self.assertIn("reader", msg)
-                self.assertIn("owner del topic", msg)
-                self.assertIn("non con un admin", msg)
+                self.assertNotEqual(v.get("reason"), "ruolo-nello-scope")
         self.run_with(_env(), go)
 
     def test_a_profile_refusal_still_points_at_an_admin(self):

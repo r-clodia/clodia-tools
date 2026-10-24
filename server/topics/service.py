@@ -1157,6 +1157,11 @@ class TopicService:
         # Nor an index (review of #422, B1): naming another topic's collection
         # would make this topic its reader and its writer.
         meta.pop("index", None)
+        # Nor a toolbox (review of #429, B1): the verbs a room gives every
+        # participant are the owner's to enable, through the owner's route. A
+        # creator — maybe an agent — with `tools: {"enabled": ["*"]}` would
+        # otherwise hand itself every verb of the instance.
+        meta.pop("tools", None)
         meta.setdefault("title", name)
         meta.setdefault("type", "progetto")
         # tier = unica classe del topic + livello di privacy per l'enforcement.
@@ -2305,20 +2310,21 @@ class TopicService:
     # lo stesso indirizzo chiesto quattordici volte, qui sarebbero 156 topic per N
     # persone, e nessuno saprebbe più dire cosa può fare qualcuno senza aprire 156
     # file. Un insieme di tre si legge; una lista no.
+    #
+    # Il ruolo `reader` è ABOLITO (decisione dell'owner, 24 ott 2026, epic #604):
+    # in una stanza ogni partecipante lavora con gli stessi verbi. Un `reader`
+    # ancora scritto in un meta si legge `contributor` — nessuna migrazione dei
+    # file, e nessun partecipante resta a metà.
     ROLE_OWNER = "owner"
     ROLE_CONTRIBUTOR = "contributor"
-    ROLE_READER = "reader"
-    ROLES = (ROLE_OWNER, ROLE_CONTRIBUTOR, ROLE_READER)
+    ROLES = (ROLE_OWNER, ROLE_CONTRIBUTOR)
 
     @staticmethod
     def participants_map(meta: dict) -> dict:
         """`{nome: ruolo}` dai partecipanti, qualunque forma abbiano nel meta.
 
-        Una LISTA legacy diventa tutta `contributor`, non `reader`. La direzione
-        conta: `reader` sarebbe più stretta ma toglierebbe di colpo a ogni
-        partecipante di ogni topic la possibilità di scrivere — una rottura
-        silenziosa mascherata da irrigidimento. Il comportamento resta quello di
-        oggi, e la novità è poter DICHIARARE un lettore.
+        Una LISTA legacy diventa tutta `contributor`; così ogni ruolo che non è
+        `owner`, compreso un `reader` scritto prima dell'abolizione.
         """
         raw = meta.get("participants")
         owner = meta.get("owner")
@@ -2345,12 +2351,8 @@ class TopicService:
 
     @staticmethod
     def may_mutate(meta: dict, chi: str | None) -> bool:
-        """Può MUTARE qualcosa dentro lo scope? Owner e contributor sì.
-
-        Un reader parla ma non muta (voce 26): la sua richiesta viene comunque
-        risposta, e se implica una mutazione diventa un gate rivolto all'owner —
-        non un rifiuto secco, che sarebbe scortese verso una richiesta legittima.
-        """
+        """Può MUTARE qualcosa dentro lo scope? Ogni partecipante (il ruolo
+        `reader` è abolito dal 24 ott 2026)."""
         return TopicService.participant_role(meta, chi) in (
             TopicService.ROLE_OWNER, TopicService.ROLE_CONTRIBUTOR)
 
@@ -2442,6 +2444,10 @@ class TopicService:
         meta, v = self._read_meta(tier, name)
         self._assert_content_available(meta)
         r = (role or self.ROLE_CONTRIBUTOR).strip().lower()
+        if r == "reader":
+            raise TopicError(
+                "il ruolo reader è stato abolito (24 ott 2026): in una stanza ogni "
+                "partecipante lavora con gli stessi verbi. Invita come contributor.")
         if r not in self.ROLES:
             raise TopicError(f"ruolo non valido: {role} (ammessi: {', '.join(self.ROLES)})")
         if r == self.ROLE_OWNER:

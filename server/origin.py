@@ -191,20 +191,11 @@ def _scope_allows(name: str, verb: str) -> bool:
     trasformerebbe un termine in un secondo controllo di appartenenza, con due
     posti che possono divergere.
     """
-    r = _scope_role_of(name)
-    if r is None:
-        return True
-    from .topics.service import TopicService as _T
-    if r != _T.ROLE_READER:
-        return True
-    from . import main as _m
-    ns, _, tail = verb.partition(".")
-    if ns == "topic":
-        return tail not in _m._TOPIC_MUTATING_VERBS
-    # Fuori dai verbi `topic.*` il criterio è l'uscita: un reader non fa uscire
-    # nulla dalla stanza. Leggere e parlare restano suoi.
-    from . import egress as _eg
-    return _eg.spec_for(verb) is None
+    # Dal 24 ott 2026 (epic #604) il ruolo `reader` è abolito: ogni ruolo che
+    # resta (owner, contributor) consente ogni verbo della stanza, quindi questo
+    # termine non restringe più nulla. Resta come punto unico dell'intersezione
+    # se un ruolo dovesse tornare.
+    return True
 
 
 def principal_may(kind: str, name: str, verb: str) -> bool:

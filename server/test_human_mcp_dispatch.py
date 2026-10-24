@@ -209,10 +209,10 @@ class WhoMayBeThereTests(unittest.TestCase):
             self._apri("estraneo")
         self.assertIn("non è partecipante", str(e.exception))
 
-    def test_a_reader_may_read_and_speak_but_not_change(self):
-        self._apri("matteo")                                   # leggere: sì
-        with self.assertRaises(PermissionError):
-            self._apri("matteo", mutating=True)                # cambiare: no
+    def test_a_former_reader_may_read_and_change(self):
+        """Il ruolo `reader` è abolito (24 ott 2026, epic #604)."""
+        self._apri("matteo")
+        self._apri("matteo", mutating=True)
 
     def test_clearance_still_bounds_the_person(self):
         """Il compartimento non sostituisce il livello: partecipare a una stanza
