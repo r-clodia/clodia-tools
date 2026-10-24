@@ -183,9 +183,11 @@ def check_exception(entry: str) -> str:
 
 
 def gated_of(enablable: dict[str, list[str]]) -> list[str]:
-    """I verbi abilitabili che chiedono comunque una conferma (#609): il
+    """I verbi abilitabili che POSSONO chiedere una conferma (#609): il
     pannello li marca, perché abilitare non è togliere il gate (decisione 3
-    dell'epic #604)."""
+    dell'epic #604). «Possono», non «chiedono sempre»: `needs_consent` decide
+    per chiamata (un push verso un repository censito non chiede), e i gate
+    per agente non sono qui."""
     from . import gate
     return sorted(v for verbs in enablable.values() for v in verbs if gate.is_gated(v))
 
