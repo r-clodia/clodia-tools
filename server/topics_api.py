@@ -605,6 +605,56 @@ async def authz_shadow_route(request: Request):
     return JSONResponse(await asyncio.to_thread(authz_shadow.summary, limit))
 
 
+async def authz_route(request: Request):
+    """GET  /internal/authz → {mode, tuples, problems}
+    POST /internal/authz {action: plan, days?} | {action: apply, plan} |
+         {action: rollback, backup} | {action: set_mode, mode}   (#617)
+    An admin, or the agent-server for the webui; every change audited."""
+    from .pki_mint import ROLE_AGENT_SERVER
+    from .human import _ADMIN_ROLES
+    from . import authz_migration as _mig, authz_runtime as _azr, authz_shadow as _azs
+    who, err = _authorize(request)
+    if err:
+        return err
+    p = getattr(request.state, "auth_payload", None) or {}
+    if not ((p.get("on_behalf") and (p.get("human_role") or "") in _ADMIN_ROLES)
+            or p.get("role") == ROLE_AGENT_SERVER):
+        return JSONResponse({"error": "riservato agli admin"}, status_code=403)
+    if request.method == "GET":
+        def _read():
+            ts, bad = _azs.global_tuples()
+            return {"mode": _azr.mode(), "tuples": [vars(t) | {"rule": [vars(c) for c in t.rule]}
+                                                     for t in ts], "problems": bad}
+        return JSONResponse(await asyncio.to_thread(_read))
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    action = body.get("action")
+    actor = str(p.get("principal") or "") or str(body.get("by") or "") or who or "?"
+    try:
+        if action == "plan":
+            out = await asyncio.to_thread(_mig.plan, int(body.get("days") or 30))
+        elif action == "apply":
+            plan = body.get("plan")
+            if not isinstance(plan, dict):
+                return JSONResponse({"error": "serve il piano approvato (`plan`)"}, status_code=400)
+            out = await asyncio.to_thread(_mig.apply, plan, by=actor)
+        elif action == "rollback":
+            out = await asyncio.to_thread(_mig.rollback, str(body.get("backup") or ""), by=actor)
+        elif action == "set_mode":
+            out = await asyncio.to_thread(_mig.set_mode, str(body.get("mode") or ""))
+        else:
+            return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
+    except (ValueError, FileNotFoundError) as e:
+        return JSONResponse({"error": str(e)[:300]}, status_code=400)
+    from .audit import control as _control
+    if action != "plan":
+        _control.safe(_control.emit, "authz", str(action), "global",
+                      by=actor, mode=body.get("mode"), backup=body.get("backup"))
+    return JSONResponse(out)
+
+
 async def dm_tools_route(request: Request):
     """GET  /internal/dm-tools → {enabled, enablable}
     POST /internal/dm-tools {action: enable|disable, verb} (#605, decisione 5
@@ -1236,6 +1286,7 @@ def _snapshot_meta_bytes(raw: bytes, tier: str) -> bytes:
     # does not have, it would decide nothing and look enabled. Re-enabled from
     # the room's panel, like the data imports above.
     meta.pop(room_tools.FIELD, None)
+    meta.pop("authz", None)          # nor the room's A·V·R·Q rules (#617)
     meta.pop("index", None)          # the index is made here, not brought (#599)
     return json.dumps(meta, ensure_ascii=False, indent=2).encode()
 
@@ -1499,6 +1550,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/tools", topic_tools_route, methods=["GET", "POST"]),
     Route("/internal/dm-tools", dm_tools_route, methods=["GET", "POST"]),
     Route("/internal/authz/shadow", authz_shadow_route, methods=["GET"]),
+    Route("/internal/authz", authz_route, methods=["GET", "POST"]),
     Route("/internal/data-catalog", data_catalog_route, methods=["GET", "POST"]),
     Route("/internal/topic-index", topic_index_route, methods=["GET"]),
     Route("/internal/topic-index/{tier}/{name}", topic_index_route, methods=["POST"]),

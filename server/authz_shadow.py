@@ -60,10 +60,15 @@ _READ_WORDS = frozenset({"list", "read", "get", "search", "show", "open", "statu
                          "history", "info", "query", "find", "lookup"})
 
 
-def mode() -> str:
+def mode_raw() -> str:
     from . import whitelist as _wl
-    m = str((_wl.CONFIG or {}).get(MODE_KEY) or "shadow").strip().lower()
-    return m if m in MODES else "shadow"
+    return str((_wl.CONFIG or {}).get(MODE_KEY) or "shadow").strip().lower()
+
+
+def mode() -> str:
+    """`off` or `shadow` for the recorder: in `enforce` it keeps recording."""
+    m = mode_raw()
+    return "shadow" if m == "enforce" else (m if m in MODES else "shadow")
 
 
 # ── the call's facts ────────────────────────────────────────────────────────
@@ -135,7 +140,7 @@ def derived(agent: str, verb: str, scope: Optional[str], f: dict) -> list[A.Tupl
     from . import gate as _gate
     from . import main as _m
     from . import whitelist as _wl
-    if not _m._agent_tool_reachable(verb, agent) or _wl.agent_denies(verb, agent):
+    if not _m._legacy_reachable(verb, agent) or _wl.agent_denies(verb, agent):
         return []
     gated = _gate.is_gated(verb)
     rule: list[dict] = []
@@ -183,8 +188,14 @@ def derived(agent: str, verb: str, scope: Optional[str], f: dict) -> list[A.Tupl
 def decide(agent: str, verb: str, arguments: dict, scope: Optional[str],
            tainted: bool) -> tuple[A.Decision, dict]:
     f = facts(verb, arguments)
-    g, _ = global_tuples()
-    t, _ = topic_tuples(scope)
+    if mode_raw() == "enforce":
+        # Enforced, the tuples decide the call: the shadow then measures what
+        # the PREVIOUS rules would have said, so `would_allow` lists what the
+        # migration closed.
+        g, t = [], None
+    else:
+        g, _ = global_tuples()
+        t, _ = topic_tuples(scope)
     d = A.decide(g + derived(agent, verb, scope, f), t, agent=agent, verb=verb,
                  resource=f["resource"], targets=f["targets"], kind=f["kind"],
                  tainted=tainted)

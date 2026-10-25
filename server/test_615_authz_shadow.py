@@ -52,7 +52,7 @@ class FactsTests(_State):
 class DerivedTests(_State):
     def _derive(self, verb, args, reachable=True, uris=(), gated=False, perimeter=True,
                 egress_mode="gate"):
-        with patch.object(main, "_agent_tool_reachable", lambda v, a: reachable), \
+        with patch.object(main, "_legacy_reachable", lambda v, a: reachable), \
                 patch.object(egress, "effective_uris", lambda d, s=None: list(uris)), \
                 patch.object(egress, "mode", lambda: egress_mode), \
                 patch.object(gate, "is_gated", lambda v: gated), \

@@ -1162,6 +1162,9 @@ class TopicService:
         # creator — maybe an agent — with `tools: {"enabled": ["*"]}` would
         # otherwise hand itself every verb of the instance.
         meta.pop("tools", None)
+        # Nor A·V·R·Q tuples (#617): a creator — maybe an agent — never brings
+        # the rules of the room it creates.
+        meta.pop("authz", None)
         meta.setdefault("title", name)
         meta.setdefault("type", "progetto")
         # tier = unica classe del topic + livello di privacy per l'enforcement.

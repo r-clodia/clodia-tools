@@ -76,10 +76,10 @@ class PlanTests(_Audit):
         glob = {(t["agent"], t["verb"]) for t in p["global"]}
         self.assertIn(("clodia", "copybrain.call"), glob)
         self.assertIn(("clodia", "packs.list"), glob)
+        # Data grants are read as tuples at runtime (authz_runtime): the plan
+        # writes none, and a generic `rag.search` used in the room is not one.
         topic = p["topics"]["SEAL-1/fatture"]
-        rag = [t for t in topic if t["verb"].startswith("rag.")]
-        self.assertTrue(rag and all(t["resource"] == "rag:topic-abc" and t["agent"] == "*"
-                                    for t in rag))
+        self.assertFalse([t for t in topic if t["verb"].startswith("rag.")])
 
     def test_unused_seed_verbs_are_listed_as_dropped(self):
         self.assertIn("web.post", self._plan()["dropped"]["clodia"])

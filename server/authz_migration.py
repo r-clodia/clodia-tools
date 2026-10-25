@@ -237,13 +237,20 @@ def plan(days: int = 30) -> dict:
         if scope is None or ns in PER_AGENT:
             outside[(a, verb)].update(u["targets"])
     for (a, verb), observed in sorted(outside.items()):
-        glob.append({"id": tid("g"), "agent": a, "verb": verb, "resource": "*",
-                     "rule": _clauses(verb, None, observed),
-                     "why": f"usato fuori dai canali (DM o job) negli ultimi {days} giorni"})
+        own = verb.split(".", 1)[0] in PER_AGENT
+        row = {"id": tid("g"), "agent": a, "verb": verb, "resource": "*",
+               "rule": _clauses(verb, None, observed),
+               "why": ("strumento proprio dell'agente: globale" if own else
+                       f"usato fuori dai canali (DM o job) negli ultimi {days} giorni")}
+        if not own:
+            # What an agent does in the owner's DMs is not what it does in
+            # every room (#614 §1 `where`).
+            row["where"] = "outside"
+        glob.append(row)
 
     from . import room_tools as _rt
-    from . import topic_data as _td
     from .topics.service import drive_folders
+    drive_unlinked: dict[str, set] = {}
     for tier, name, meta in _topics():
         scope = f"{tier}/{name}"
         rows: list[dict] = []
@@ -257,6 +264,13 @@ def plan(days: int = 30) -> dict:
             if s != scope or not u["ok"] or verb.startswith(("topic.", "memory.")) \
                     or ns in GOVERNANCE or ns in PER_AGENT or ns in BY_DATA:
                 continue
+            if ns == "gdrive":
+                # Drive in a room is granted through its linked folder (read at
+                # runtime, writes below): a `gdrive.list` used without one would
+                # become «the whole account», the case of 24 Oct.
+                if not drive_folders(meta):
+                    drive_unlinked.setdefault(scope, set()).add(a)
+                continue
             who = a if _schemes_of(verb)[0] or not _reads(verb) else "*"
             per_verb[(who, verb)].update(u["targets"])
             reasons[(who, verb)].add(f"usato da {a}")
@@ -267,35 +281,17 @@ def plan(days: int = 30) -> dict:
             rows.append({"id": tid("t"), "agent": who, "verb": verb, "resource": "*",
                          "rule": _clauses(verb, scope, per_verb[(who, verb)]),
                          "why": "; ".join(sorted(reasons[(who, verb)]))})
+        # Linked Drive folders grant reading at runtime (`authz_runtime`): only
+        # the writes observed there need a tuple.
         for f in drive_folders(meta):
             folder = f"gdrive:folder/{f['folder']}"
-            res = f"google:{f.get('account') or 'default'}"
             wrote = any(s == scope and v in DRIVE_WRITE and u["ok"]
                         for (s, _a, v), u in used.items())
-            for v in DRIVE_READ + (DRIVE_WRITE if wrote else ()):
-                rows.append({"id": tid("t"), "agent": "*", "verb": v, "resource": res,
+            for v in (DRIVE_WRITE if wrote else ()):
+                rows.append({"id": tid("t"), "agent": "*", "verb": v, "resource": "*",
                              "rule": [{"effect": "allow", "match": folder}],
-                             "why": "cartella Drive collegata al topic"
-                                    + ("" if v in DRIVE_READ else " (scritture osservate)")})
-        from .topics.service import TopicService as _TS
-        ai = {p for p in _TS.participants_map(meta) if p != meta.get("owner")}
-        for imp in _td.imports(meta):
-            grants = imp["grants"]
-            modes = set(grants.values())
-            # Everyone with the same mode — the topic's own index (#600) is the
-            # common case — is ONE tuple for `*`, not one per participant.
-            if len(modes) == 1 and set(grants) >= ai and len(grants) > 1:
-                holders = [("*", modes.pop())]
-            else:
-                holders = sorted(grants.items())
-            for agent, mode in holders:
-                verbs = _td._READ_VERBS.get(imp["kind"], ()) + (
-                    _td._WRITE_VERBS.get(imp["kind"], ()) if mode == "write" else ())
-                for v in verbs:
-                    rows.append({"id": tid("t"), "agent": agent, "verb": v,
-                                 "resource": f"{imp['kind']}:{imp['name']}",
-                                 "rule": [{"effect": "allow", "match": "*"}],
-                                 "why": f"dato importato nel topic, permesso {mode}"})
+                             "why": "cartella Drive collegata al topic, scritture osservate"})
+        # Data grants (#590) are read as tuples at runtime: nothing to write.
         if rows:
             topics[scope] = rows
 
@@ -309,6 +305,7 @@ def plan(days: int = 30) -> dict:
             dropped[a] = unused
     return {"generated_at": time.time(), "days": days, "global": glob, "topics": topics,
             "dropped": dropped,
+            "drive_unlinked": {k: sorted(v) for k, v in sorted(drive_unlinked.items())},
             "stats": {"calls": sum(u["calls"] for u in used.values()),
                       "global_tuples": len(glob),
                       "topic_tuples": sum(len(v) for v in topics.values()),
@@ -326,13 +323,119 @@ def markdown(p: dict) -> str:
              f"in {p['stats']['topics']} topic.", "", "## Globali", "",
              "| agente | verbo | risorsa | regola | perché |", "|---|---|---|---|---|"]
     for t in p["global"]:
-        lines.append(f"| {t['agent']} | `{t['verb']}` | {t['resource']} | {rule(t['rule'])} | {t['why']} |")
+        dove = " (solo fuori dai canali)" if t.get("where") == "outside" else ""
+        lines.append(f"| {t['agent']} | `{t['verb']}`{dove} | {t['resource']} | {rule(t['rule'])} | {t['why']} |")
     for scope, rows in sorted(p["topics"].items()):
         lines += ["", f"## {scope}", "", "| agente | verbo | risorsa | regola | perché |",
                   "|---|---|---|---|---|"]
         for t in rows:
             lines.append(f"| {t['agent']} | `{t['verb']}` | {t['resource']} | {rule(t['rule'])} | {t['why']} |")
+    if p.get("drive_unlinked"):
+        lines += ["", "## Stanze che hanno usato Drive senza cartella collegata", "",
+                  "Dopo la migrazione Drive non è disponibile qui finché non si collega "
+                  "una cartella (lettura) o si abilita la scrittura.", ""]
+        for scope, who in p["drive_unlinked"].items():
+            lines.append(f"- **{scope}** — usato da " + ", ".join(who))
     lines += ["", "## Verbi tolti dai seed senza sostituto (mai usati nel periodo)", ""]
     for a, vs in sorted(p["dropped"].items()):
         lines.append(f"- **{a}**: " + ", ".join(f"`{v}`" for v in vs))
     return "\n".join(lines) + "\n"
+
+
+# ── applying an approved plan ───────────────────────────────────────────────
+
+BACKUP_PREFIX = "authz-backup-"
+
+
+def _validate(p: dict) -> list[str]:
+    bad = []
+    _ok, b = A.parse_tuples(p.get("global") or [], level=A.GLOBAL)
+    bad += [f"globale: {x}" for x in b]
+    for scope, rows in (p.get("topics") or {}).items():
+        _ok, b = A.parse_tuples(rows, level=A.TOPIC)
+        bad += [f"{scope}: {x}" for x in b]
+    return bad
+
+
+def apply(p: dict, *, by: str) -> dict:
+    """Write an APPROVED plan: the global tuples and every topic's `meta.authz`.
+
+    All or nothing on validation: one invalid tuple and nothing is written. The
+    state before is saved first (`authz-backup-<ts>.json`), and `rollback` puts
+    it back. The mode is not touched: enforcing is a separate, explicit act.
+    """
+    bad = _validate(p)
+    if bad:
+        raise A.AuthzError("piano non valido, nulla scritto: " + "; ".join(bad[:5]))
+    from . import authz_shadow as _s
+    from . import main as _m
+    from . import state_paths
+    svc = _m._topics()
+    gpath = _s._global_path()
+    before = {"global": json.loads(gpath.read_text()) if gpath.exists() else None,
+              "topics": {}}
+    for scope in p.get("topics") or {}:
+        tier, _, name = scope.partition("/")
+        try:
+            before["topics"][scope] = svc._read_meta(tier, name)[0].get("authz")
+        except Exception:  # noqa: BLE001
+            before["topics"][scope] = None
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    backup = state_paths.state_path(f"{BACKUP_PREFIX}{ts}.json")
+    backup.write_text(json.dumps(before, ensure_ascii=False))
+    stamp = {"by": by, "at": time.time()}
+    gpath.write_text(json.dumps({"tuples": [{**t, **stamp} for t in p.get("global") or []],
+                                 "applied_by": by, "applied_at": stamp["at"]},
+                                ensure_ascii=False, indent=1))
+    written, failed = 0, []
+    for scope, rows in (p.get("topics") or {}).items():
+        tier, _, name = scope.partition("/")
+        try:
+            meta, ver = svc._read_meta(tier, name)
+            meta["authz"] = [{**r, **stamp} for r in rows]
+            svc._write_meta(tier, name, meta, base_version=ver)
+            written += 1
+        except Exception as e:  # noqa: BLE001
+            failed.append(f"{scope}: {type(e).__name__}: {e}"[:200])
+    return {"ok": not failed, "backup": backup.name, "global": len(p.get("global") or []),
+            "topics_written": written, "failed": failed}
+
+
+def rollback(backup_name: str, *, by: str) -> dict:
+    """Put back the global tuples and the topics' `meta.authz` of a backup."""
+    from . import authz_shadow as _s
+    from . import main as _m
+    from . import state_paths
+    if not backup_name.startswith(BACKUP_PREFIX) or "/" in backup_name:
+        raise A.AuthzError(f"backup sconosciuto: {backup_name!r}")
+    before = json.loads(state_paths.state_path(backup_name).read_text())
+    gpath = _s._global_path()
+    if before.get("global") is None:
+        gpath.unlink(missing_ok=True)
+    else:
+        gpath.write_text(json.dumps(before["global"], ensure_ascii=False, indent=1))
+    svc = _m._topics()
+    restored = 0
+    for scope, prev in (before.get("topics") or {}).items():
+        tier, _, name = scope.partition("/")
+        try:
+            meta, ver = svc._read_meta(tier, name)
+            if prev is None:
+                meta.pop("authz", None)
+            else:
+                meta["authz"] = prev
+            svc._write_meta(tier, name, meta, base_version=ver)
+            restored += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return {"ok": True, "restored_topics": restored, "by": by}
+
+
+def set_mode(m: str) -> dict:
+    from . import whitelist as _wl
+    if m not in ("off", "shadow", "enforce"):
+        raise A.AuthzError(f"authz_mode: off | shadow | enforce, non {m!r}")
+    _wl.reload_config()
+    _wl.CONFIG["authz_mode"] = m
+    _wl.save_config()
+    return {"ok": True, "authz_mode": m}
