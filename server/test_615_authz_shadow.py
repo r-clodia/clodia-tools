@@ -82,12 +82,22 @@ class DerivedTests(_State):
 
 
 class RecordTests(_State):
-    def _observe(self, actual, effect=A.ALLOW, available=True):
+    def _observe(self, actual, effect=A.ALLOW, available=True, *, targets=("https://x/",),
+                 mapped=True, denial=None, on_behalf=False):
         d = A.Decision(effect, available, [], "r")
-        with patch.object(S, "decide", lambda *a, **k: (d, {"resource": "web", "kind": "read",
-                                                             "targets": ["https://x/"]})):
+        f = {"resource": "web", "kind": "read", "targets": list(targets), "mapped": mapped}
+        with patch.object(S, "decide", lambda *a, **k: (d, f)):
             return S.observe("web.fetch", {}, actual, agent="fact-checker",
-                             scope="SEAL-1/x", tainted=False)
+                             scope="SEAL-1/x", denial=denial, on_behalf=on_behalf)
+
+    def test_what_the_engine_cannot_judge_is_not_a_divergence(self):
+        """Review of #433: a mapped verb without targets in its arguments, a
+        person's call, a refusal by a check outside A·V·R·Q."""
+        self.assertIsNone(self._observe("ok", A.ASK, targets=())["divergence"])
+        self.assertIsNone(self._observe("ok", A.DENY, on_behalf=True)["divergence"])
+        self.assertIsNone(self._observe("denied", A.ALLOW, denial="unattended")["divergence"])
+        self.assertEqual(self._observe("denied", A.ALLOW, denial="egress")["divergence"],
+                         "would_allow")
 
     def test_classes(self):
         self.assertEqual(self._observe("ok", A.DENY)["divergence"], "would_block")
@@ -110,8 +120,7 @@ class RecordTests(_State):
         self.assertIsNone(self._observe("ok"))
         whitelist.CONFIG[S.MODE_KEY] = "shadow"
         with patch.object(S, "decide", side_effect=RuntimeError("boom")):
-            self.assertIsNone(S.observe("web.fetch", {}, "ok", agent="x", scope=None,
-                                        tainted=False))
+            self.assertIsNone(S.observe("web.fetch", {}, "ok", agent="x", scope=None))
 
     def test_explicit_global_tuples_are_read_and_a_bad_file_grants_nothing(self):
         S._global_path().write_text('{"tuples": [{"id": "g", "agent": "*", "verb": "web.fetch",'
@@ -125,3 +134,28 @@ class RecordTests(_State):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HookTests(unittest.IsolatedAsyncioTestCase):
+    """Review of #433: the decision is taken on the state BEFORE the call, and
+    the record never makes the call wait."""
+
+    async def test_decided_before_recorded_after_in_the_background(self):
+        import asyncio
+        seen = []
+        with patch.object(S, "mode", lambda: "shadow"), \
+                patch.object(main, "agent_name", lambda: "clodia"), \
+                patch.object(S, "decide_now", lambda *a, **k: seen.append("decide") or {"x": 1}), \
+                patch.object(S, "record", lambda pre, status, **k: seen.append(("record", status,
+                                                                                 k.get("denial")))):
+            pre = main._authz_shadow_start("web.fetch", {"url": "https://x/"})
+            await asyncio.sleep(0.05)
+            self.assertEqual(seen, ["decide"])
+            main._authz_shadow_record(pre, "denied", "egress")
+            await asyncio.sleep(0.05)
+        self.assertEqual(seen[-1], ("record", "denied", "egress"))
+
+    async def test_off_starts_nothing(self):
+        with patch.object(S, "mode", lambda: "off"):
+            self.assertIsNone(main._authz_shadow_start("web.fetch", {}))
+            main._authz_shadow_record(None, "ok", None)

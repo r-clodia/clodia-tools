@@ -38,6 +38,27 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(len(bad), 3)
 
 
+class ReviewParseTests(unittest.TestCase):
+    """Review of #433."""
+
+    def test_real_verb_names_parse(self):
+        for v in ("ns.list-invoices", "x.getDoc", "normattiva-mirror.search", "a.b.c"):
+            with self.subTest(v=v):
+                T("t", verb=v)
+
+    def test_governance_is_not_a_topic_decision(self):
+        with self.assertRaises(A.AuthzError):
+            A.parse_tuple({"id": "t", "agent": "*", "verb": "packs.import_url", "resource": "*",
+                           "rule": [{"effect": "allow", "match": "*"}]}, level=A.TOPIC)
+        A.parse_tuple({"id": "t", "agent": "*", "verb": "packs.import_url", "resource": "*",
+                       "rule": [{"effect": "allow", "match": "*"}]}, level=A.GLOBAL)
+
+    def test_a_match_that_can_never_match_is_refused(self):
+        for m in ("mailto:", "nonuri", "https:*", "https://"):
+            with self.subTest(m=m), self.assertRaises(A.AuthzError):
+                A.parse_clause({"effect": "deny", "match": m})
+
+
 class OneLevelTests(unittest.TestCase):
     def test_the_most_specific_clause_wins(self):
         g = [T("g", rule=[{"effect": "deny", "match": "*"},

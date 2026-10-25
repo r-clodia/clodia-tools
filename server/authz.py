@@ -45,8 +45,16 @@ NO_TARGET = ""
 
 GLOBAL, TOPIC = "global", "topic"
 
+#: Platform/governance namespaces: global tuples only (#614 §7.3). A room does
+#: not decide who installs packs or grants verbs.
+GOVERNANCE = frozenset({"agents", "egress", "ingress", "integrations", "jobs", "logs",
+                        "mcp", "native", "packs", "profile", "providers", "runtime",
+                        "settings", "vault", "pki"})
+
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,62}$")
-_VERB = re.compile(r"^(?:\*|[a-z0-9_]+\.(?:\*|[a-z0-9_]+))$")
+#: Verb names as the gateway serves them: MCP backends and third-party tools
+#: name verbs with dashes, capitals and dots (`ns.list-invoices`, `x.getDoc`).
+_VERB = re.compile(r"^(?:\*|[A-Za-z0-9_-]+\.(?:\*|[A-Za-z0-9_][A-Za-z0-9_.-]*))$")
 _RESOURCE = re.compile(r"^(?:\*|web|topic|[a-z0-9_]+:[^\s]{1,200})$")
 
 
@@ -78,7 +86,9 @@ class Tuple:
 
     def specificity(self) -> tuple[int, int, int]:
         """Named agent over `*`, exact verb over `ns.*` over `*`, named
-        resource over `*` — the tie-break after the clause's own specificity."""
+        resource over `*` — the tie-break after the clause's own specificity,
+        compared in that order (agent first): who the rule is about is the
+        strongest statement, then what, then with what."""
         verb = 2 if "*" not in self.verb else (1 if self.verb != ANY else 0)
         return (int(self.agent != ANY), verb, int(self.resource != ANY))
 
@@ -98,6 +108,13 @@ def parse_clause(raw) -> Clause:
     match = " ".join(str(raw.get("match") or "").split())
     if not match:
         raise AuthzError("una clausola deve dire su che cosa vale (`match`)")
+    if match != ANY:
+        # A rule that can never match is refused, not stored: under enforcement
+        # a `deny` that never fires would read as protection.
+        from . import egress as _eg
+        if ":" not in match or _eg._is_degenerate(_eg.canonical(match).lower()):
+            raise AuthzError(f"match {match!r}: serve `*` o un URI (`schema:valore`) "
+                             "che possa combaciare con qualcosa")
     trust = raw.get("trust")
     if trust is not None and trust not in (TRUSTED, UNTRUSTED):
         raise AuthzError(f"trust deve essere trusted o untrusted: {trust!r}")
@@ -125,6 +142,9 @@ def parse_tuple(raw, *, level: str = GLOBAL) -> Tuple:
         raise AuthzError(f"verb: `ns.verbo`, `ns.*` o `*`, non {verb!r}")
     if not _RESOURCE.match(resource):
         raise AuthzError(f"resource: `<tipo>:<id>`, `web`, `topic` o `*`, non {resource!r}")
+    if level == TOPIC and (verb == ANY or verb.split(".", 1)[0] in GOVERNANCE):
+        raise AuthzError(f"{tid}: {verb!r} non si decide in un topic (verbi di "
+                         "governance: solo regole globali)")
     rule = raw.get("rule")
     if not isinstance(rule, list) or not rule:
         raise AuthzError(f"{tid}: la regola Q è una lista non vuota di clausole")

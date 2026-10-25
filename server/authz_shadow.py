@@ -55,8 +55,9 @@ _RESOURCE_KIND = {
     "web": ("web", None), "topic": ("topic", None), "artifact": ("topic", None),
 }
 
-_READ_TAILS = ("list", "read", "get", "search", "show", "open", "status", "fetch",
-               "download", "collections", "files", "messages", "history", "info")
+_READ_WORDS = frozenset({"list", "read", "get", "search", "show", "open", "status",
+                         "fetch", "download", "collections", "files", "messages",
+                         "history", "info", "query", "find", "lookup"})
 
 
 def mode() -> str:
@@ -91,8 +92,9 @@ def facts(verb: str, arguments: dict) -> dict:
     elif reads:
         kind = A.READ
     else:
-        tail = verb.split(".", 1)[-1]
-        kind = A.READ if tail.startswith(_READ_TAILS) else A.WRITE
+        # The verb's first word, not a prefix: `telegram.listen` is not a list.
+        word = verb.split(".", 1)[-1].replace("-", "_").split("_", 1)[0].lower()
+        kind = A.READ if word in _READ_WORDS else A.WRITE
     return {"resource": resource_of(verb, arguments), "kind": kind,
             "targets": list(dict.fromkeys(out)), "mapped": writes or reads}
 
@@ -132,7 +134,8 @@ def derived(agent: str, verb: str, scope: Optional[str], f: dict) -> list[A.Tupl
     from . import egress as _eg
     from . import gate as _gate
     from . import main as _m
-    if not _m._agent_tool_reachable(verb, agent):
+    from . import whitelist as _wl
+    if not _m._agent_tool_reachable(verb, agent) or _wl.agent_denies(verb, agent):
         return []
     gated = _gate.is_gated(verb)
     rule: list[dict] = []
@@ -151,11 +154,18 @@ def derived(agent: str, verb: str, scope: Optional[str], f: dict) -> list[A.Tupl
         rule = [{"effect": "ask" if gated else "allow", "match": "*"}]
     if not rule:
         # Nothing listed: the verb's default decides every target (§4.1),
-        # which is what an empty list means today.
-        rule = [{"effect": "ask" if f["kind"] == A.WRITE else "allow",
-                 "match": "derived:none"}]
-    ok, _bad = A.parse_tuples([{"id": f"derived:{verb}", "agent": agent, "verb": verb,
-                                "resource": "*", "rule": rule}])
+        # which is what an empty list means today. A tuple must exist for the
+        # verb to be available, so it carries the default as a `*` clause.
+        rule = [{"effect": "ask" if f["kind"] == A.WRITE else "allow", "match": "*"}]
+    rule = [c for c in rule if c["match"] == "*" or ":" in c["match"]]
+    ok, bad = A.parse_tuples([{"id": f"derived:{verb}", "agent": agent, "verb": verb,
+                               "resource": "*", "rule": rule or [
+                                   {"effect": "ask" if f["kind"] == A.WRITE else "allow",
+                                    "match": "*"}]}])
+    if bad:
+        # Never silent: a dropped tuple would read as «not available» and flood
+        # would_block with calls that work.
+        LOG.warning("authz shadow: tupla derivata di %s scartata: %s", verb, bad[0][:200])
     return ok
 
 
@@ -172,7 +182,13 @@ def decide(agent: str, verb: str, arguments: dict, scope: Optional[str],
 
 # ── recording ───────────────────────────────────────────────────────────────
 
-def divergence(d: A.Decision, actual: str) -> Optional[str]:
+#: Refusals decided by checks outside A·V·R·Q (#614 §7 and the runtime): they
+#: are not the engine's to agree or disagree with.
+_OUT_OF_MODEL = frozenset({"unattended", "clearance", "version_conflict", "other"})
+
+
+def divergence(d: A.Decision, actual: str, *, denial: Optional[str] = None,
+               facts_ok: bool = True, on_behalf: bool = False) -> Optional[str]:
     """The class of a disagreement worth reading, or None.
 
     - `would_block`: the engine denies (or the verb is not available) and the
@@ -183,6 +199,10 @@ def divergence(d: A.Decision, actual: str) -> Optional[str]:
       (it may be one the gateway already asked: the gate's consent is in the
       audit next to it).
     """
+    if on_behalf or not facts_ok:
+        return None
+    if actual == "denied" and denial in _OUT_OF_MODEL:
+        return None
     if actual == "ok" and (not d.available or d.effect == A.DENY):
         return "would_block"
     if actual == "denied" and d.available and d.effect == A.ALLOW:
@@ -207,23 +227,65 @@ def _append(entry: dict) -> None:
             fh.write(line)
 
 
-def observe(verb: str, arguments: dict, actual: str, *, agent: Optional[str],
-            scope: Optional[str], tainted: bool) -> Optional[dict]:
-    """Decide in shadow and record it. Never raises."""
+def decide_now(verb: str, arguments: dict, *, agent: Optional[str],
+               scope: Optional[str], chat: Optional[str]) -> Optional[dict]:
+    """The shadow decision on the state BEFORE the call (a gate approval adds
+    the destination to the room's list during the call). Never raises."""
     if mode() == "off" or not agent:
         return None
     try:
+        from . import taint as _taint
+        tainted = bool(_taint.status(chat).get("tainted"))
         d, f = decide(agent, verb, arguments or {}, scope, tainted)
-        entry = {"ts": time.time(), "agent": agent, "verb": verb, "scope": scope,
-                 "resource": f["resource"], "kind": f["kind"],
-                 "targets": f["targets"][:5], "effect": d.effect,
-                 "available": d.available, "reason": d.reason[:300],
-                 "actual": actual, "divergence": divergence(d, actual)}
+        # A mapped verb whose targets are not in its arguments (a component
+        # resolves them: email.reply, gdrive.update) is not judged on a guess.
+        facts_ok = not (f["mapped"] and not f["targets"])
+        return {"agent": agent, "verb": verb, "scope": scope, "resource": f["resource"],
+                "kind": f["kind"], "targets": f["targets"][:5], "facts_ok": facts_ok,
+                "tainted": tainted, "decision": d}
+    except Exception as e:  # noqa: BLE001 — shadow must never change a call
+        _warn(verb, e)
+        return None
+
+
+def record(pre: Optional[dict], actual: str, *, denial: Optional[str] = None,
+           on_behalf: bool = False) -> Optional[dict]:
+    """Write the pre-call decision next to the outcome. Never raises."""
+    if not pre:
+        return None
+    try:
+        d: A.Decision = pre["decision"]
+        entry = {k: v for k, v in pre.items() if k != "decision"}
+        entry.update({"ts": time.time(), "effect": d.effect, "available": d.available,
+                      "reason": d.reason[:300], "actual": actual, "denial": denial,
+                      "on_behalf": on_behalf,
+                      "divergence": divergence(d, actual, denial=denial,
+                                               facts_ok=pre["facts_ok"], on_behalf=on_behalf)})
         _append(entry)
         return entry
-    except Exception as e:  # noqa: BLE001 — shadow must never change a call
-        LOG.warning("authz shadow: %s non valutato (%s: %s)", verb, type(e).__name__, e)
+    except Exception as e:  # noqa: BLE001
+        _warn(pre.get("verb", "?"), e)
         return None
+
+
+def observe(verb: str, arguments: dict, actual: str, *, agent: Optional[str],
+            scope: Optional[str], tainted: bool = False, chat: Optional[str] = None,
+            denial: Optional[str] = None, on_behalf: bool = False) -> Optional[dict]:
+    """Decide and record in one go (tests and synchronous callers)."""
+    return record(decide_now(verb, arguments, agent=agent, scope=scope, chat=chat),
+                  actual, denial=denial, on_behalf=on_behalf)
+
+
+_last_warn = [0.0]
+
+
+def _warn(verb: str, e: Exception) -> None:
+    """One warning per minute at most: a read-only state dir must not turn
+    every call into a log line."""
+    now = time.monotonic()
+    if now - _last_warn[0] > 60:
+        _last_warn[0] = now
+        LOG.warning("authz shadow: %s non valutato (%s: %s)", verb, type(e).__name__, e)
 
 
 def summary(limit: int = 50) -> dict:
