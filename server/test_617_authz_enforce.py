@@ -104,6 +104,26 @@ class DispatchTests(_Env):
             out = await main._call_tool_unaudited("zz.verbo_finto", {})
         return out[0].text, gate_mock
 
+    def test_judged_targets_supersede_the_egress_whitelist(self):
+        """A destination A·V·R·Q judged (and the owner approved) is not refused
+        again by the legacy egress PDP, nor asked twice (gdrive.upload into a
+        quote folder, 25 Oct). With no readable target the PDP still refuses."""
+        import asyncio
+        from . import egress
+        refused = {"checked": True, "allowed": False, "action": "deny",
+                   "destinations": [egress.UNKNOWN], "type": "drive",
+                   "reason": "destinazione non leggibile dalla chiamata"}
+        with patch.object(egress, "check", lambda *a, **k: dict(refused)), \
+                patch.object(main, "_verb_implemented", lambda n: True):
+            ask = A.Decision(A.ASK, True, [A.TargetDecision(
+                "gdrive:folder/F1", A.ASK, A.TOPIC)], "ask")
+            text, g = asyncio.run(self._call(ask))
+            self.assertEqual(g.await_count, 1)          # A·V·R·Q's consent only
+            self.assertNotIn("non leggibile", text)
+            blind = A.Decision(A.ASK, True, [A.TargetDecision(None, A.ASK, A.TOPIC)], "ask")
+            text, g = asyncio.run(self._call(blind))
+            self.assertIn("non leggibile", text)
+
     def test_deny_ask_and_unattended(self):
         import asyncio
         deny = A.Decision(A.DENY, True, [], "deny su mailto:x@y.it")
