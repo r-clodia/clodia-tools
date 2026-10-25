@@ -82,10 +82,10 @@ DRIVE_READ = ("gdrive.list", "gdrive.search", "gdrive.download")
 
 
 def _drive_tuples(meta: dict) -> list[A.Tuple]:
-    """Read the linked folders — and only them: any other Drive target is
-    denied (a read would otherwise take the default allow, review of #435
-    B1). A call with no target (a search) is confined by the topic's Drive
-    perimeter (`gdrive_root.roots_for_call`), the second line."""
+    """Read the linked folders — and no other folder (a read would otherwise
+    take the default allow, review of #435 B1). Files and calls with no target
+    (a search) are confined by the topic's Drive perimeter
+    (`gdrive_root.roots_for_call`), the second line."""
     from .topics.service import drive_folders
     folders = [f"gdrive:folder/{f['folder']}" for f in drive_folders(meta)]
     if not folders:
@@ -94,7 +94,12 @@ def _drive_tuples(meta: dict) -> list[A.Tuple]:
     for v in DRIVE_READ:
         raw.append({"id": f"drive:{v}", "agent": "*", "verb": v, "resource": "*",
                     "rule": [{"effect": "allow", "match": f} for f in folders]
-                    + [{"effect": "deny", "match": "gdrive:*"}]})
+                    # Other FOLDERS are denied. A file (`gdrive:file/<id>`) is
+                    # not judged here — inside or outside a linked folder is a
+                    # question of its parents, which the topic's Drive
+                    # perimeter answers (second line) until the ancestry
+                    # resolver of #614 §3 exists.
+                    + [{"effect": "deny", "match": "gdrive:folder/*"}]})
     ok, _bad = A.parse_tuples(raw, level=A.TOPIC)
     return ok
 

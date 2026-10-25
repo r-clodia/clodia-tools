@@ -141,6 +141,10 @@ class ReviewOf435Tests(_Env):
         dec = A.decide(g, t, agent="clodia", verb="gdrive.list", resource="google:default",
                        targets=["gdrive:folder/F1"], kind=A.READ)
         self.assertEqual(dec.effect, A.ALLOW)
+        # A file is left to the Drive perimeter (its parents), not refused here.
+        dec = A.decide(g, t, agent="clodia", verb="gdrive.download", resource="google:default",
+                       targets=["gdrive:file/DENTRO"], kind=A.READ)
+        self.assertEqual(dec.effect, A.ALLOW)
 
     def test_the_room_gives_nothing_to_outsiders_or_once_archived(self):
         self.meta_set(tools={"enabled": ["web.*"]})

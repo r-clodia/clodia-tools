@@ -392,10 +392,13 @@ def _restore(state: dict) -> list[str]:
     from . import authz_shadow as _s
     from . import main as _m
     gpath = _s._global_path()
-    if state.get("global") is None:
+    prev = state.get("global")
+    if prev is None:
         gpath.unlink(missing_ok=True)
     else:
-        _atomic_write(gpath, state["global"])
+        # A backup of an earlier format holds the parsed object.
+        _atomic_write(gpath, prev if isinstance(prev, str)
+                      else json.dumps(prev, ensure_ascii=False, indent=1))
     svc = _m._topics()
     failed = []
     for scope, prev in (state.get("topics") or {}).items():
