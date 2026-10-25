@@ -76,6 +76,13 @@ class DerivedTests(_State):
                           gated=True, perimeter=False)
         self.assertEqual(ts[0].rule[0].effect, A.ASK)
 
+    def test_one_unmatchable_list_entry_does_not_drop_the_verb(self):
+        """Second review of #433: the room's open web `https:*` sits in its
+        ingress list; the verb must stay available."""
+        ts = self._derive("email.read", {"uid": "1"}, uris=["https:*", "mailfrom:*@cliente.it"])
+        self.assertEqual(len(ts), 1)
+        self.assertEqual([c.match for c in ts[0].rule], ["mailfrom:*@cliente.it"])
+
     def test_report_mode_lets_everything_out_as_today(self):
         ts = self._derive("email.send", {"to": "a@b.it"}, egress_mode="report")
         self.assertEqual((ts[0].rule[0].effect, ts[0].rule[0].match), (A.ALLOW, "*"))

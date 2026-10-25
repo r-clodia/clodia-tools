@@ -157,7 +157,18 @@ def derived(agent: str, verb: str, scope: Optional[str], f: dict) -> list[A.Tupl
         # which is what an empty list means today. A tuple must exist for the
         # verb to be available, so it carries the default as a `*` clause.
         rule = [{"effect": "ask" if f["kind"] == A.WRITE else "allow", "match": "*"}]
-    rule = [c for c in rule if c["match"] == "*" or ":" in c["match"]]
+    # Clause by clause: one entry of a list that is not a rule A·V·R·Q can
+    # match (the room's open web `https:*`, a leftover `gdrive:folder/`) is
+    # left out alone — never the whole tuple, which would make the verb read
+    # as not available (second review of #433).
+    buoni = []
+    for c in rule:
+        try:
+            A.parse_clause(c)
+            buoni.append(c)
+        except A.AuthzError:
+            continue
+    rule = buoni
     ok, bad = A.parse_tuples([{"id": f"derived:{verb}", "agent": agent, "verb": verb,
                                "resource": "*", "rule": rule or [
                                    {"effect": "ask" if f["kind"] == A.WRITE else "allow",
