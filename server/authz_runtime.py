@@ -92,14 +92,17 @@ def _drive_tuples(meta: dict) -> list[A.Tuple]:
         return []
     raw = []
     for v in DRIVE_READ:
+        rule = [{"effect": "allow", "match": f} for f in folders]
+        if v != "gdrive.download":
+            # Verbs on FOLDERS: any other Drive target is another folder,
+            # denied. `gdrive.download` acts on FILES (`gdrive:file/<id>`):
+            # inside or outside a linked folder is a question of the file's
+            # parents, which the topic's Drive perimeter answers (second line)
+            # until the ancestry resolver of #614 §3 exists. (A rule cannot
+            # say «every folder»: a wildcard only opens a scheme's value.)
+            rule.append({"effect": "deny", "match": "gdrive:*"})
         raw.append({"id": f"drive:{v}", "agent": "*", "verb": v, "resource": "*",
-                    "rule": [{"effect": "allow", "match": f} for f in folders]
-                    # Other FOLDERS are denied. A file (`gdrive:file/<id>`) is
-                    # not judged here — inside or outside a linked folder is a
-                    # question of its parents, which the topic's Drive
-                    # perimeter answers (second line) until the ancestry
-                    # resolver of #614 §3 exists.
-                    + [{"effect": "deny", "match": "gdrive:folder/*"}]})
+                    "rule": rule})
     ok, _bad = A.parse_tuples(raw, level=A.TOPIC)
     return ok
 
