@@ -139,6 +139,10 @@ _PREFIX_CLASS = {
     # brings unvetted content into the room from outside the gateway. The
     # room's owner decides, as for a new source.
     "native:": GATE_WALLS,
+    # A·V·R·Q `ask` (#617): a room's rule asks its OWNER; a global rule asks
+    # an admin — the same split as the room's walls and the system's rules.
+    "authz:": GATE_WALLS,
+    "authz-global:": GATE_SYSTEM,
 }
 
 

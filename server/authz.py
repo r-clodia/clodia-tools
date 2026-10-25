@@ -34,6 +34,10 @@ from typing import Iterable, Optional
 
 ALLOW, ASK, DENY = "allow", "ask", "deny"
 EFFECTS = (ALLOW, ASK, DENY)
+#: Internal only (never parsed from a stored tuple): «the verb's default» —
+#: what a room's toolbox says about targets. Enabling a verb makes it
+#: available; it does not decide who it may reach (review of #435, S1).
+DEFAULT = "default"
 #: Lower is stricter: the worst of several effects is the minimum.
 RANK = {DENY: 0, ASK: 1, ALLOW: 2}
 TRUSTED, UNTRUSTED = "trusted", "untrusted"
@@ -44,6 +48,7 @@ ANY = "*"
 NO_TARGET = ""
 
 GLOBAL, TOPIC = "global", "topic"
+EVERYWHERE, OUTSIDE = "everywhere", "outside"
 
 #: Platform/governance namespaces: global tuples only (#614 §7.3). A room does
 #: not decide who installs packs or grants verbs.
@@ -78,11 +83,14 @@ class Tuple:
     resource: str
     rule: tuple[Clause, ...]
     by: str = ""
+    #: Global tuples: `everywhere` or `outside` (only outside rooms).
+    where: str = "everywhere"
 
-    def covers(self, agent: str, verb: str, resource: str) -> bool:
+    def covers(self, agent: str, verb: str, resource: str, *, in_room: bool = False) -> bool:
         return (self.agent in (ANY, agent)
                 and _verb_covers(self.verb, verb)
-                and self.resource in (ANY, resource))
+                and (resource is None or self.resource in (ANY, resource))
+                and not (in_room and self.where == OUTSIDE))
 
     def specificity(self) -> tuple[int, int, int]:
         """Named agent over `*`, exact verb over `ns.*` over `*`, named
@@ -99,10 +107,12 @@ def _verb_covers(pattern: str, verb: str) -> bool:
     return pattern.endswith(".*") and verb.startswith(pattern[:-1])
 
 
-def parse_clause(raw) -> Clause:
+def parse_clause(raw, *, internal: bool = False) -> Clause:
     if not isinstance(raw, dict):
         raise AuthzError(f"clausola non valida: {raw!r}")
     effect = str(raw.get("effect") or "").strip().lower()
+    if internal and effect == DEFAULT:
+        return Clause(DEFAULT, ANY)
     if effect not in EFFECTS:
         raise AuthzError(f"effect deve essere {', '.join(EFFECTS)}: {raw.get('effect')!r}")
     match = " ".join(str(raw.get("match") or "").split())
@@ -126,7 +136,7 @@ def parse_clause(raw) -> Clause:
     return Clause(effect, match, trust, wt)
 
 
-def parse_tuple(raw, *, level: str = GLOBAL) -> Tuple:
+def parse_tuple(raw, *, level: str = GLOBAL, internal: bool = False) -> Tuple:
     """A tuple from its stored form, or `AuthzError` saying what is wrong."""
     if not isinstance(raw, dict):
         raise AuthzError(f"tupla non valida: {raw!r}")
@@ -148,17 +158,24 @@ def parse_tuple(raw, *, level: str = GLOBAL) -> Tuple:
     rule = raw.get("rule")
     if not isinstance(rule, list) or not rule:
         raise AuthzError(f"{tid}: la regola Q è una lista non vuota di clausole")
-    return Tuple(tid, agent, verb, resource, tuple(parse_clause(c) for c in rule),
-                 str(raw.get("by") or ""))
+    where = str(raw.get("where") or EVERYWHERE).strip().lower()
+    if where not in (EVERYWHERE, OUTSIDE):
+        raise AuthzError(f"{tid}: where è everywhere o outside, non {where!r}")
+    if where == OUTSIDE and level == TOPIC:
+        raise AuthzError(f"{tid}: `where: outside` ha senso solo in una tupla globale")
+    return Tuple(tid, agent, verb, resource,
+                 tuple(parse_clause(c, internal=internal) for c in rule),
+                 str(raw.get("by") or ""), where)
 
 
-def parse_tuples(raws: Iterable, *, level: str = GLOBAL) -> tuple[list[Tuple], list[str]]:
+def parse_tuples(raws: Iterable, *, level: str = GLOBAL,
+                 internal: bool = False) -> tuple[list[Tuple], list[str]]:
     """The valid tuples, and one line per tuple refused. A refused tuple grants
     nothing: it is left out, never read leniently."""
     ok, bad = [], []
     for raw in raws or ():
         try:
-            ok.append(parse_tuple(raw, level=level))
+            ok.append(parse_tuple(raw, level=level, internal=internal))
         except AuthzError as e:
             bad.append(str(e))
     return ok, bad
@@ -225,9 +242,9 @@ def default_effect(kind: str) -> str:
 
 def _level(tuples: list[Tuple], agent: str, verb: str, resource: str,
            targets: list[str], kind: str, tainted: bool,
-           level: str) -> Optional[list[TargetDecision]]:
+           level: str, in_room: bool = False) -> Optional[list[TargetDecision]]:
     """One level's per-target answers, or None if the level is silent."""
-    cands = [t for t in tuples if t.covers(agent, verb, resource)]
+    cands = [t for t in tuples if t.covers(agent, verb, resource, in_room=in_room)]
     if not cands:
         return None
     out = []
@@ -238,7 +255,8 @@ def _level(tuples: list[Tuple], agent: str, verb: str, resource: str,
                 spec = _clause_specificity(c.match, target)
                 if spec is None:
                     continue
-                key = (spec, t.specificity(), -RANK[c.effect])
+                ceff = default_effect(kind) if c.effect == DEFAULT else c.effect
+                key = (spec, t.specificity(), -RANK[ceff])
                 if best is None or key > best[0]:
                     best = (key, t, i, c)
         if best is None:
@@ -246,11 +264,12 @@ def _level(tuples: list[Tuple], agent: str, verb: str, resource: str,
             out.append(TargetDecision(target, eff, level, default=True))
             continue
         _, t, i, c = best
-        eff = c.effect
+        eff = default_effect(kind) if c.effect == DEFAULT else c.effect
         if tainted and c.when_tainted and RANK[c.when_tainted] < RANK[eff]:
             eff = c.when_tainted
         out.append(TargetDecision(target, eff, level, t.id, i,
-                                  trusted=(eff == ALLOW and c.trust == TRUSTED)))
+                                  trusted=(eff == ALLOW and c.trust == TRUSTED),
+                                  default=c.effect == DEFAULT))
     return out
 
 
@@ -269,7 +288,8 @@ def decide(global_tuples: list[Tuple], topic_tuples: Optional[list[Tuple]], *,
     """The A·V·R·Q decision for one call (§4–§6). `topic_tuples=None` outside a
     room: only the global level applies."""
     tgs = [t for t in dict.fromkeys(targets or ()) if t is not None] or [NO_TARGET]
-    g = _level(global_tuples, agent, verb, resource, tgs, kind, tainted, GLOBAL)
+    g = _level(global_tuples, agent, verb, resource, tgs, kind, tainted, GLOBAL,
+               in_room=topic_tuples is not None)
     t = (_level(topic_tuples, agent, verb, resource, tgs, kind, tainted, TOPIC)
          if topic_tuples is not None else None)
     if g is None and t is None:
@@ -280,3 +300,34 @@ def decide(global_tuples: list[Tuple], topic_tuples: Optional[list[Tuple]], *,
               + (f"tupla {worst.tuple_id} ({worst.level}), clausola {worst.clause}"
                  if worst.tuple_id else f"default del verbo ({kind})"))
     return Decision(worst.effect, True, per, reason)
+
+
+def _blanket_deny(t: Tuple) -> bool:
+    """A tuple that closes the verb outright: every clause denies, one covers
+    every target, and it is not about one resource only (a deny on
+    `mail:personal` does not hide `email.send` for the other mailboxes)."""
+    return (t.resource == ANY and all(c.effect == DENY for c in t.rule)
+            and any(c.match == ANY for c in t.rule))
+
+
+def available(global_tuples: list[Tuple], topic_tuples: Optional[list[Tuple]], *,
+              agent: str, verb: str) -> bool:
+    """May `agent` see and call `verb` here at all (discovery and dispatch)?
+
+    A covering tuple at some level, and the most specific covering tuple of the
+    level that decides is not a blanket deny (`deny *`): a global blanket deny
+    closes the verb everywhere; in a room that speaks, the room decides — an
+    exception «officer · email.send · deny *» hides the verb from officer next
+    to «* · email.send · allow». Targets are judged per call by `decide`.
+    """
+    in_room = topic_tuples is not None
+
+    def top(ts):
+        return max(ts, key=lambda t: (t.specificity(), _blanket_deny(t)))
+    g = [t for t in global_tuples if t.covers(agent, verb, None, in_room=in_room)]
+    if g and _blanket_deny(top(g)):
+        return False
+    tt = [t for t in (topic_tuples or []) if t.covers(agent, verb, None)]
+    if tt:
+        return not _blanket_deny(top(tt))
+    return bool(g)

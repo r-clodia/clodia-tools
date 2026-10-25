@@ -2625,6 +2625,21 @@ def _agent_tool_reachable(name: str, agent: str | None,
     denies remain a separate subtraction because dispatch reports their more
     useful denial reason after this reachability check.
     """
+    from . import authz_runtime as _azr
+    if _azr.enforcing():
+        # A·V·R·Q (#617): the tuples are the authority on which verbs an agent
+        # has — the seed grants nothing any more. Scoped grants (one request,
+        # signed) still add.
+        from . import egress as _eg_r
+        if name in set(current_scoped_tools()):
+            return True
+        return _azr.available(agent, name, _eg_r._scope_of_call())
+    return _legacy_reachable(name, agent, resolved)
+
+
+def _legacy_reachable(name: str, agent: str | None, resolved: set | None = None) -> bool:
+    """Reachability as it was before A·V·R·Q: seed, ancestry and archseed,
+    scoped grants, data verbs, room toolbox. The shadow measures against it."""
     allowed = (resolved if resolved is not None
                else _declared_tools(agent) | set(current_scoped_tools())
                | _room_data_verbs(agent) | _room_tool_verbs(agent))
@@ -2952,8 +2967,11 @@ async def list_tools() -> list[Tool]:
         return [t for t in (native + proxied) if not agent_denies(t.name, me)]
     # Risolvi l'albero una volta per discovery: l'archseed viene dal filesystem
     # e rifarlo per ciascun verbo renderebbe la fonte unica inutilmente costosa.
-    resolved = (_declared_tools(me) | set(current_scoped_tools())
-                | _room_data_verbs(me) | _room_tool_verbs(me))
+    # Enforced (#617) the tuples decide and the tree is not needed.
+    from . import authz_runtime as _azr_l
+    resolved = (set() if _azr_l.enforcing() else
+                (_declared_tools(me) | set(current_scoped_tools())
+                 | _room_data_verbs(me) | _room_tool_verbs(me)))
     return [t for t in (native + proxied)
             if _agent_tool_reachable(t.name, me, resolved)
             and not agent_denies(t.name, me)]
@@ -3271,7 +3289,9 @@ async def _require_gate_consent(
                          if gate_key.startswith(NATIVE_GATE)
                          else (f"di accedere al topic {gate_key.split(':', 1)[1]}"
                                if gate_key.startswith("topic-access:")
-                               else f"di usare `{gate_key}`"))
+                               else "di usare `{}`".format(
+                                   gate_key.replace("<!--", "‹!--").replace("-->", "--›")
+                                   .replace("`", "'"))))
                 # kind=ai (non system): i system sono filtrati dal render del webui.
                 _topics().post_message(
                     _tier, _name, author="gate",
@@ -4853,6 +4873,38 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                             detail=f"origin:{_org.get('refused_by')}")
                 LOG.info("origin (osservazione): %s rifiuterebbe %s — catena %s",
                          _org.get("refused_by"), name, " → ".join(_org["chain"]))
+
+        # A·V·R·Q ENFORCED (#617): the call's effect from the tuples. After
+        # the origin chain (who asked), before the per-verb gates: a `deny`
+        # needs nobody's consent, an `ask` is the owner's (room rule) or an
+        # admin's (global rule). The checks below stay as a second line.
+        if not is_on_behalf() and not _is_super(_ag) \
+                and name not in set(current_scoped_tools()) \
+                and name not in _DELIVER_VIA.get():
+            # A scoped grant is a signed allow for this request; a verb reached
+            # through `channel.deliver` was decided on `channel.deliver`
+            # (review of #435, S4).
+            from . import authz_runtime as _azr
+            if _azr.enforcing():
+                from . import egress as _eg_r
+                from . import taint as _taint_r
+                _azd = _azr.check(_ag or "", name, arguments, _eg_r._scope_of_call(),
+                                  bool(_taint_r.status(current_chat()).get("tainted")))
+                from . import observe as _obs_a
+                if _azd.effect == "deny":
+                    if _obs_a.skipping():
+                        _obs_a.note("deny", name, _ag or "", detail="authz")
+                    else:
+                        raise PermissionError(f"A·V·R·Q: {_azd.reason}")
+                if _azd.effect == "ask":
+                    if is_unattended() and not _obs_a.skipping():
+                        raise PermissionError(
+                            f"A·V·R·Q: {_azd.reason} — chiede conferma, e in un job "
+                            "non presidiato nessuno può darla")
+                    await _require_gate_consent(
+                        _ag, _azr.gate_key(_azd, name), consume=True,
+                        reason=_azr.ask_reason(_azd, name),
+                        allow_delegation=False)
 
         # UN VERBO CHE NON ESISTE NON SI FA APPROVARE (clodia-platform#539 §7).
         # Stessa regola del blocco non presidiato qui sopra: chiedere un consenso
