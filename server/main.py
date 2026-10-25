@@ -4653,6 +4653,55 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         _audit.reset_resource_tier(tok)
 
 
+_AUTHZ_TASKS: set = set()
+
+
+def _authz_shadow_start(name: str, arguments: dict):
+    """Start the A·V·R·Q shadow decision on the state BEFORE the call (#615),
+    concurrently with it. Returns the task, or None. Never raises."""
+    try:
+        from . import authz_shadow as _azs
+        if _azs.mode() == "off":
+            return None
+        from . import egress as _eg_az
+        try:
+            agent = agent_name()
+        except PermissionError:
+            agent = None
+        task = asyncio.get_running_loop().create_task(asyncio.to_thread(
+            _azs.decide_now, name, dict(arguments or {}), agent=agent,
+            scope=_eg_az._scope_of_call(), chat=current_chat()))
+        _AUTHZ_TASKS.add(task)
+        task.add_done_callback(_AUTHZ_TASKS.discard)
+        return (task, bool(is_on_behalf()))
+    except Exception as e:  # noqa: BLE001
+        LOG.debug("authz shadow: start %s (%s)", name, type(e).__name__)
+        return None
+
+
+def _authz_shadow_record(pre, status: str, denial) -> None:
+    """Record the shadow decision once it is ready, in the background: the
+    call's answer never waits for it."""
+    if not pre:
+        return
+    task, on_behalf = pre
+
+    async def _later():
+        try:
+            from . import authz_shadow as _azs
+            snapshot = await task
+            await asyncio.to_thread(_azs.record, snapshot, status, denial=denial,
+                                    on_behalf=on_behalf)
+        except Exception as e:  # noqa: BLE001
+            LOG.debug("authz shadow: record (%s)", type(e).__name__)
+    try:
+        t = asyncio.get_running_loop().create_task(_later())
+        _AUTHZ_TASKS.add(t)
+        t.add_done_callback(_AUTHZ_TASKS.discard)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def _call_tool_recorded(name: str, arguments: dict) -> list[TextContent]:
     from . import __version__ as _gw_version
     from . import audit as _audit
@@ -4675,6 +4724,7 @@ async def _call_tool_recorded(name: str, arguments: dict) -> list[TextContent]:
     tok_c = _AUDIT_CROSSING.set(crossing)
     tok_e = _AUDIT_EGRESS.set(egress_seen)
     tok_r = _AUDIT_READS.set({})
+    _az_pre = _authz_shadow_start(name, arguments)
     try:
         # Per-agent cap on slow calls (#553): one agent's burst waits for its
         # own slots instead of taking the whole offload pool.
@@ -4694,6 +4744,10 @@ async def _call_tool_recorded(name: str, arguments: dict) -> list[TextContent]:
         _AUDIT_CROSSING.reset(tok_c)
         _AUDIT_PARENT.reset(tok)
     status, err = _outcome_of(out)
+    # A·V·R·Q in shadow (#615): record the pre-call decision next to the
+    # outcome, in the background — it changes nothing and costs the call
+    # nothing (`_az_pre` was started before the dispatch, above).
+    _authz_shadow_record(_az_pre, status, err)
     verdict = egress_seen.get("verdict")
     if status == "ok" and verdict and verdict.get("checked"):
         # Data actually left (#438): where to, under which rule, and the hash of

@@ -584,6 +584,27 @@ async def topic_tools_route(request: Request):
     return JSONResponse(out)
 
 
+async def authz_shadow_route(request: Request):
+    """GET /internal/authz/shadow?limit=N → the A·V·R·Q shadow's divergences
+    (#615): counts by class and verb, the latest ones. An admin, or the
+    agent-server for the webui."""
+    from .pki_mint import ROLE_AGENT_SERVER
+    from .human import _ADMIN_ROLES
+    from . import authz_shadow
+    _, err = _authorize(request)
+    if err:
+        return err
+    p = getattr(request.state, "auth_payload", None) or {}
+    if not ((p.get("on_behalf") and (p.get("human_role") or "") in _ADMIN_ROLES)
+            or p.get("role") == ROLE_AGENT_SERVER):
+        return JSONResponse({"error": "riservato agli admin"}, status_code=403)
+    try:
+        limit = max(1, min(500, int(request.query_params.get("limit", "50"))))
+    except ValueError:
+        limit = 50
+    return JSONResponse(await asyncio.to_thread(authz_shadow.summary, limit))
+
+
 async def dm_tools_route(request: Request):
     """GET  /internal/dm-tools → {enabled, enablable}
     POST /internal/dm-tools {action: enable|disable, verb} (#605, decisione 5
@@ -1477,6 +1498,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/data", topic_data_route, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/tools", topic_tools_route, methods=["GET", "POST"]),
     Route("/internal/dm-tools", dm_tools_route, methods=["GET", "POST"]),
+    Route("/internal/authz/shadow", authz_shadow_route, methods=["GET"]),
     Route("/internal/data-catalog", data_catalog_route, methods=["GET", "POST"]),
     Route("/internal/topic-index", topic_index_route, methods=["GET"]),
     Route("/internal/topic-index/{tier}/{name}", topic_index_route, methods=["POST"]),
