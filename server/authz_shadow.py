@@ -38,6 +38,9 @@ MODE_KEY = "authz_mode"
 MODES = ("off", "shadow")
 GLOBAL_FILE = "authz.json"
 LOG_FILE = "authz-shadow.jsonl"
+#: Divergences only (owner, 25 Oct 2026): read at the end of the day after the
+#: switch to enforce — what the migration closed or changed.
+DIVERGENCE_FILE = "authz-divergences.jsonl"
 _MAX_LOG = 5 << 20
 _lock = threading.Lock()
 
@@ -238,9 +241,9 @@ def divergence(d: A.Decision, actual: str, *, denial: Optional[str] = None,
     return None
 
 
-def _append(entry: dict) -> None:
+def _append(entry: dict, name: str = LOG_FILE) -> None:
     from . import state_paths
-    p = state_paths.state_path(LOG_FILE)
+    p = state_paths.state_path(name)
     line = json.dumps(entry, ensure_ascii=False, default=str) + "\n"
     with _lock:
         try:
@@ -288,6 +291,8 @@ def record(pre: Optional[dict], actual: str, *, denial: Optional[str] = None,
                       "divergence": divergence(d, actual, denial=denial,
                                                facts_ok=pre["facts_ok"], on_behalf=on_behalf)})
         _append(entry)
+        if entry["divergence"]:
+            _append({**entry, "mode": mode_raw()}, DIVERGENCE_FILE)
         return entry
     except Exception as e:  # noqa: BLE001
         _warn(pre.get("verb", "?"), e)

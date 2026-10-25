@@ -1,6 +1,7 @@
 """#615 — A·V·R·Q in shadow: facts, the translation of today's rules, the record."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -113,6 +114,14 @@ class RecordTests(_State):
         self.assertEqual(self._observe("denied", A.ALLOW)["divergence"], "would_allow")
         self.assertEqual(self._observe("ok", A.ASK)["divergence"], "would_ask")
         self.assertIsNone(self._observe("ok", A.ALLOW)["divergence"])
+
+    def test_divergences_also_go_to_their_own_file(self):
+        from . import state_paths
+        self._observe("ok", A.DENY)
+        self._observe("ok", A.ALLOW)
+        lines = state_paths.state_path(S.DIVERGENCE_FILE).read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0])["divergence"], "would_block")
 
     def test_the_summary_reads_the_record(self):
         self._observe("ok", A.DENY)
