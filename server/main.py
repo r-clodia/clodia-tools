@@ -4694,6 +4694,24 @@ async def _call_tool_recorded(name: str, arguments: dict) -> list[TextContent]:
         _AUDIT_CROSSING.reset(tok_c)
         _AUDIT_PARENT.reset(tok)
     status, err = _outcome_of(out)
+    # A·V·R·Q in shadow (#615): the engine decides on the same call and the
+    # decision is recorded next to the outcome. It changes nothing, and a
+    # failure here never reaches the caller.
+    try:
+        from . import authz_shadow as _azs
+        if _azs.mode() != "off":
+            from . import egress as _eg_az
+            from . import taint as _taint_az
+            try:
+                _az_agent = agent_name()
+            except PermissionError:
+                _az_agent = None
+            _az_scope = _eg_az._scope_of_call()
+            _az_tainted = bool(_taint_az.status(current_chat()).get("tainted"))
+            await _aio.to_thread(_azs.observe, name, arguments, status,
+                                 agent=_az_agent, scope=_az_scope, tainted=_az_tainted)
+    except Exception as _az_e:  # noqa: BLE001
+        LOG.warning("authz shadow: %s (%s)", name, type(_az_e).__name__)
     verdict = egress_seen.get("verdict")
     if status == "ok" and verdict and verdict.get("checked"):
         # Data actually left (#438): where to, under which rule, and the hash of
