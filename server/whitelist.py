@@ -1021,6 +1021,19 @@ def tool_allowed(tool_name: str) -> None:
             f"tool '{tool_name}' negato esplicitamente all'agente '{ag}'")
     if ag in _SUPER_AGENTS:
         return
+    from . import authz_runtime as _azr
+    if _azr.enforcing():
+        # A·V·R·Q enforced (#617): the third reader of the matrix answers like
+        # the other two — the room's tuples, not the seed. Until 25 Oct it
+        # still read the seed here, refused a verb the room grants (`email.list`
+        # in titulon-tech) and let `copybrain` "fix" it with another seed's
+        # verbs.
+        from . import main as _m
+        if _m._agent_tool_reachable(tool_name, ag):
+            return
+        raise PermissionError(
+            f"tool '{tool_name}' non è disponibile per l'agente '{ag}' in questo "
+            "canale: lo abilita l'owner della stanza (sezione Strumenti)")
     allowed = effective_tools(ag)          # propri + ereditati (arciseed incluso)
     if tool_name in allowed:
         return

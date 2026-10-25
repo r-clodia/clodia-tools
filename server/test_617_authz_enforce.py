@@ -258,3 +258,33 @@ class ApplyTests(_Env):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdapterAndCopybrainTests(_Env):
+    """25 Oct: the adapter-level gate read the seed and copybrain borrowed
+    another seed's verbs to pass it."""
+
+    def test_the_adapter_gate_answers_with_the_room(self):
+        from . import whitelist as W
+        self.meta_set(authz=[_t("t1", verb="email.list")])
+        with patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"), \
+                patch.object(W, "agent_name", lambda: "clodia"), \
+                patch.object(W, "agent_denies", lambda *a, **k: False), \
+                patch.object(W, "effective_tools", lambda a: set()):
+            W.tool_allowed("email.list")
+            with self.assertRaises(PermissionError):
+                W.tool_allowed("email.send")
+
+    def test_copybrain_is_refused_when_enforcing(self):
+        import asyncio
+        with patch.object(main, "agent_name", lambda: "clodia"), \
+                patch.object(main, "is_on_behalf", lambda: False), \
+                patch.object(main, "_agent_tool_reachable", lambda *a, **k: True), \
+                patch.object(main, "agent_denies", lambda *a, **k: False), \
+                patch.object(main, "_unattended_denial", lambda n: None), \
+                patch.object(main.origin, "evaluate", lambda c, n: {"action": "allow"}), \
+                patch.object(main, "_origin_chain", lambda n: []), \
+                patch.object(R, "check", lambda *a, **k: A.Decision(A.ALLOW, True, [], "ok")):
+            out = asyncio.run(main._call_tool_unaudited("copybrain.assume",
+                                                        {"seed": "officer", "reason": "x"}))
+        self.assertIn("copybrain non è disponibile", out[0].text)
