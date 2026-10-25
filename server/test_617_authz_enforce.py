@@ -20,6 +20,8 @@ from .topics.service import TopicService
 
 class _Env(unittest.TestCase):
     def setUp(self):
+        R.invalidate()
+        self.addCleanup(R.invalidate)
         self.dir = tempfile.mkdtemp(prefix="authz617-")
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         for p in (patch.dict(os.environ, {"CLODIA_TOOLS_STATE_DIR": self.dir}),
@@ -34,11 +36,13 @@ class _Env(unittest.TestCase):
 
     def glob(self, tuples):
         S._global_path().write_text(json.dumps({"tuples": tuples}))
+        R.invalidate()
 
     def meta_set(self, **kw):
         meta, ver = self.svc._read_meta("SEAL-1", "blog")
         meta.update(kw)
         self.svc._write_meta("SEAL-1", "blog", meta, base_version=ver)
+        R.invalidate()
 
 
 def _t(id, agent="*", verb="email.send", rule=None, **kw):
@@ -80,6 +84,7 @@ class AvailabilityTests(_Env):
 
     def test_an_unreadable_global_file_fails_closed(self):
         S._global_path().write_text("{rotto")
+        R.invalidate()
         self.assertFalse(R.available("clodia", "email.send", None))
 
 

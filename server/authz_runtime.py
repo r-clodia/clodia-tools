@@ -92,7 +92,30 @@ def _drive_tuples(meta: dict) -> list[A.Tuple]:
     return ok
 
 
+#: A few seconds of memory per room: discovery asks `available` for every verb
+#: of the instance, hundreds in a row, and must not re-read the global file and
+#: the topic's meta each time. Short enough that a rule the owner changes is in
+#: force before anyone notices; `invalidate()` makes it immediate.
+_TTL = 2.0
+_cache: dict = {}
+
+
+def invalidate() -> None:
+    _cache.clear()
+
+
 def tuples_in_force(scope: Optional[str]) -> tuple[list[A.Tuple], Optional[list[A.Tuple]]]:
+    import time as _time
+    hit = _cache.get(scope)
+    now = _time.monotonic()
+    if hit and now - hit[0] < _TTL:
+        return hit[1]
+    out = _tuples_in_force(scope)
+    _cache[scope] = (now, out)
+    return out
+
+
+def _tuples_in_force(scope: Optional[str]) -> tuple[list[A.Tuple], Optional[list[A.Tuple]]]:
     g, _ = S.global_tuples()
     if not scope:
         return g, None

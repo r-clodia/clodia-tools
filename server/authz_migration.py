@@ -397,6 +397,8 @@ def apply(p: dict, *, by: str) -> dict:
             written += 1
         except Exception as e:  # noqa: BLE001
             failed.append(f"{scope}: {type(e).__name__}: {e}"[:200])
+    from . import authz_runtime as _rt
+    _rt.invalidate()
     return {"ok": not failed, "backup": backup.name, "global": len(p.get("global") or []),
             "topics_written": written, "failed": failed}
 
@@ -428,6 +430,8 @@ def rollback(backup_name: str, *, by: str) -> dict:
             restored += 1
         except Exception:  # noqa: BLE001
             continue
+    from . import authz_runtime as _rt
+    _rt.invalidate()
     return {"ok": True, "restored_topics": restored, "by": by}
 
 
