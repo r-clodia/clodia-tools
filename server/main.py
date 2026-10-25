@@ -3895,6 +3895,10 @@ def _context_gate_needed(verb: str, agent: str, egress_verdict: dict) -> tuple[s
     from . import egress as _eg
     if not _eg.spec_for(verb):
         return None, ""                      # non è un verbo di uscita
+    if egress_verdict.get("superseded_by") == "authz":
+        # A·V·R·Q judged these targets, taint included (allow vs
+        # allow-untrusted), and any consent it needed is already given.
+        return None, ""
     if egress_verdict.get("action") == "gate":
         # La destinazione è nuova: l'umano vede già questa chiamata. Un secondo
         # dialog sullo stesso invio è consent fatigue, non controllo in più.
@@ -4877,7 +4881,10 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
         # A·V·R·Q ENFORCED (#617): the call's effect from the tuples. After
         # the origin chain (who asked), before the per-verb gates: a `deny`
         # needs nobody's consent, an `ask` is the owner's (room rule) or an
-        # admin's (global rule). The checks below stay as a second line.
+        # admin's (global rule). The checks below stay as a second line —
+        # except the destination whitelist, which A·V·R·Q replaces whenever it
+        # judged the call on readable targets (`_avrq_judged_targets`).
+        _avrq_judged_targets = False
         if not is_on_behalf() and not _is_super(_ag) \
                 and name not in set(current_scoped_tools()) \
                 and name not in _DELIVER_VIA.get():
@@ -4905,6 +4912,14 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                         _ag, _azr.gate_key(_azd, name), consume=True,
                         reason=_azr.ask_reason(_azd, name),
                         allow_delegation=False)
+                # The destinations were decided here, target by target: the
+                # legacy egress PDP below only records its verdict. It used to
+                # refuse after the owner's consent (a destination it could not
+                # read where A·V·R·Q could) or ask a second time for the same
+                # target. With no readable target it still decides, fail-closed.
+                _avrq_judged_targets = (
+                    _azd.effect in ("allow", "ask")
+                    and any(x.target for x in _azd.targets))
 
         # UN VERBO CHE NON ESISTE NON SI FA APPROVARE (clodia-platform#539 §7).
         # Stessa regola del blocco non presidiato qui sopra: chiedere un consenso
@@ -5209,6 +5224,11 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             from . import observe as _obs2
             _ev = _egress.check(_ag or "", _acfg, name, _eargs,
                                 unattended=is_unattended())
+            if _avrq_judged_targets and _ev.get("action") in ("deny", "gate"):
+                LOG.info("egress (A·V·R·Q enforced, recorded only): %s · %s · %s",
+                         _ag or "", name, _ev.get("reason"))
+                _ev = {**_ev, "action": "allow", "would_deny": True,
+                       "superseded_by": "authz"}
             _seen = _AUDIT_EGRESS.get()
             if _seen is not None:
                 _seen["verdict"] = _ev
