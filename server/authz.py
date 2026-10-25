@@ -34,6 +34,10 @@ from typing import Iterable, Optional
 
 ALLOW, ASK, DENY = "allow", "ask", "deny"
 EFFECTS = (ALLOW, ASK, DENY)
+#: Internal only (never parsed from a stored tuple): «the verb's default» —
+#: what a room's toolbox says about targets. Enabling a verb makes it
+#: available; it does not decide who it may reach (review of #435, S1).
+DEFAULT = "default"
 #: Lower is stricter: the worst of several effects is the minimum.
 RANK = {DENY: 0, ASK: 1, ALLOW: 2}
 TRUSTED, UNTRUSTED = "trusted", "untrusted"
@@ -103,10 +107,12 @@ def _verb_covers(pattern: str, verb: str) -> bool:
     return pattern.endswith(".*") and verb.startswith(pattern[:-1])
 
 
-def parse_clause(raw) -> Clause:
+def parse_clause(raw, *, internal: bool = False) -> Clause:
     if not isinstance(raw, dict):
         raise AuthzError(f"clausola non valida: {raw!r}")
     effect = str(raw.get("effect") or "").strip().lower()
+    if internal and effect == DEFAULT:
+        return Clause(DEFAULT, ANY)
     if effect not in EFFECTS:
         raise AuthzError(f"effect deve essere {', '.join(EFFECTS)}: {raw.get('effect')!r}")
     match = " ".join(str(raw.get("match") or "").split())
@@ -130,7 +136,7 @@ def parse_clause(raw) -> Clause:
     return Clause(effect, match, trust, wt)
 
 
-def parse_tuple(raw, *, level: str = GLOBAL) -> Tuple:
+def parse_tuple(raw, *, level: str = GLOBAL, internal: bool = False) -> Tuple:
     """A tuple from its stored form, or `AuthzError` saying what is wrong."""
     if not isinstance(raw, dict):
         raise AuthzError(f"tupla non valida: {raw!r}")
@@ -157,17 +163,19 @@ def parse_tuple(raw, *, level: str = GLOBAL) -> Tuple:
         raise AuthzError(f"{tid}: where è everywhere o outside, non {where!r}")
     if where == OUTSIDE and level == TOPIC:
         raise AuthzError(f"{tid}: `where: outside` ha senso solo in una tupla globale")
-    return Tuple(tid, agent, verb, resource, tuple(parse_clause(c) for c in rule),
+    return Tuple(tid, agent, verb, resource,
+                 tuple(parse_clause(c, internal=internal) for c in rule),
                  str(raw.get("by") or ""), where)
 
 
-def parse_tuples(raws: Iterable, *, level: str = GLOBAL) -> tuple[list[Tuple], list[str]]:
+def parse_tuples(raws: Iterable, *, level: str = GLOBAL,
+                 internal: bool = False) -> tuple[list[Tuple], list[str]]:
     """The valid tuples, and one line per tuple refused. A refused tuple grants
     nothing: it is left out, never read leniently."""
     ok, bad = [], []
     for raw in raws or ():
         try:
-            ok.append(parse_tuple(raw, level=level))
+            ok.append(parse_tuple(raw, level=level, internal=internal))
         except AuthzError as e:
             bad.append(str(e))
     return ok, bad
@@ -247,7 +255,8 @@ def _level(tuples: list[Tuple], agent: str, verb: str, resource: str,
                 spec = _clause_specificity(c.match, target)
                 if spec is None:
                     continue
-                key = (spec, t.specificity(), -RANK[c.effect])
+                ceff = default_effect(kind) if c.effect == DEFAULT else c.effect
+                key = (spec, t.specificity(), -RANK[ceff])
                 if best is None or key > best[0]:
                     best = (key, t, i, c)
         if best is None:
@@ -255,11 +264,12 @@ def _level(tuples: list[Tuple], agent: str, verb: str, resource: str,
             out.append(TargetDecision(target, eff, level, default=True))
             continue
         _, t, i, c = best
-        eff = c.effect
+        eff = default_effect(kind) if c.effect == DEFAULT else c.effect
         if tainted and c.when_tainted and RANK[c.when_tainted] < RANK[eff]:
             eff = c.when_tainted
         out.append(TargetDecision(target, eff, level, t.id, i,
-                                  trusted=(eff == ALLOW and c.trust == TRUSTED)))
+                                  trusted=(eff == ALLOW and c.trust == TRUSTED),
+                                  default=c.effect == DEFAULT))
     return out
 
 
@@ -293,7 +303,11 @@ def decide(global_tuples: list[Tuple], topic_tuples: Optional[list[Tuple]], *,
 
 
 def _blanket_deny(t: Tuple) -> bool:
-    return all(c.effect == DENY for c in t.rule) and any(c.match == ANY for c in t.rule)
+    """A tuple that closes the verb outright: every clause denies, one covers
+    every target, and it is not about one resource only (a deny on
+    `mail:personal` does not hide `email.send` for the other mailboxes)."""
+    return (t.resource == ANY and all(c.effect == DENY for c in t.rule)
+            and any(c.match == ANY for c in t.rule))
 
 
 def available(global_tuples: list[Tuple], topic_tuples: Optional[list[Tuple]], *,

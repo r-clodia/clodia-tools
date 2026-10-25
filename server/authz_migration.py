@@ -345,6 +345,8 @@ def markdown(p: dict) -> str:
 # ── applying an approved plan ───────────────────────────────────────────────
 
 BACKUP_PREFIX = "authz-backup-"
+import threading as _threading
+_apply_lock = _threading.Lock()
 
 
 def _validate(p: dict) -> list[str]:
@@ -357,89 +359,148 @@ def _validate(p: dict) -> list[str]:
     return bad
 
 
-def apply(p: dict, *, by: str) -> dict:
-    """Write an APPROVED plan: the global tuples and every topic's `meta.authz`.
+def _atomic_write(path: Path, text: str) -> None:
+    import os
+    import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
 
-    All or nothing on validation: one invalid tuple and nothing is written. The
-    state before is saved first (`authz-backup-<ts>.json`), and `rollback` puts
-    it back. The mode is not touched: enforcing is a separate, explicit act.
-    """
-    bad = _validate(p)
-    if bad:
-        raise A.AuthzError("piano non valido, nulla scritto: " + "; ".join(bad[:5]))
+
+def _snapshot() -> dict:
+    """The state A·V·R·Q rules live in: the global file and EVERY topic's
+    `meta.authz` (not only the plan's: an apply replaces them all)."""
+    from . import authz_shadow as _s
+    gpath = _s._global_path()
+    state = {"global": gpath.read_text() if gpath.exists() else None, "topics": {}}
+    for tier, name, meta in _topics():
+        state["topics"][f"{tier}/{name}"] = meta.get("authz")
+    return state
+
+
+def _backup(state: dict) -> str:
+    import uuid
+    from . import state_paths
+    name = f"{BACKUP_PREFIX}{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.json"
+    _atomic_write(state_paths.state_path(name), json.dumps(state, ensure_ascii=False))
+    return name
+
+
+def _restore(state: dict) -> list[str]:
     from . import authz_shadow as _s
     from . import main as _m
-    from . import state_paths
-    svc = _m._topics()
     gpath = _s._global_path()
-    before = {"global": json.loads(gpath.read_text()) if gpath.exists() else None,
-              "topics": {}}
-    for scope in p.get("topics") or {}:
-        tier, _, name = scope.partition("/")
-        try:
-            before["topics"][scope] = svc._read_meta(tier, name)[0].get("authz")
-        except Exception:  # noqa: BLE001
-            before["topics"][scope] = None
-    ts = time.strftime("%Y%m%d-%H%M%S")
-    backup = state_paths.state_path(f"{BACKUP_PREFIX}{ts}.json")
-    backup.write_text(json.dumps(before, ensure_ascii=False))
-    stamp = {"by": by, "at": time.time()}
-    gpath.write_text(json.dumps({"tuples": [{**t, **stamp} for t in p.get("global") or []],
-                                 "applied_by": by, "applied_at": stamp["at"]},
-                                ensure_ascii=False, indent=1))
-    written, failed = 0, []
-    for scope, rows in (p.get("topics") or {}).items():
-        tier, _, name = scope.partition("/")
-        try:
-            meta, ver = svc._read_meta(tier, name)
-            meta["authz"] = [{**r, **stamp} for r in rows]
-            svc._write_meta(tier, name, meta, base_version=ver)
-            written += 1
-        except Exception as e:  # noqa: BLE001
-            failed.append(f"{scope}: {type(e).__name__}: {e}"[:200])
-    from . import authz_runtime as _rt
-    _rt.invalidate()
-    return {"ok": not failed, "backup": backup.name, "global": len(p.get("global") or []),
-            "topics_written": written, "failed": failed}
-
-
-def rollback(backup_name: str, *, by: str) -> dict:
-    """Put back the global tuples and the topics' `meta.authz` of a backup."""
-    from . import authz_shadow as _s
-    from . import main as _m
-    from . import state_paths
-    if not backup_name.startswith(BACKUP_PREFIX) or "/" in backup_name:
-        raise A.AuthzError(f"backup sconosciuto: {backup_name!r}")
-    before = json.loads(state_paths.state_path(backup_name).read_text())
-    gpath = _s._global_path()
-    if before.get("global") is None:
+    if state.get("global") is None:
         gpath.unlink(missing_ok=True)
     else:
-        gpath.write_text(json.dumps(before["global"], ensure_ascii=False, indent=1))
+        _atomic_write(gpath, state["global"])
     svc = _m._topics()
-    restored = 0
-    for scope, prev in (before.get("topics") or {}).items():
+    failed = []
+    for scope, prev in (state.get("topics") or {}).items():
         tier, _, name = scope.partition("/")
         try:
             meta, ver = svc._read_meta(tier, name)
+            if meta.get("authz") == prev:
+                continue
             if prev is None:
                 meta.pop("authz", None)
             else:
                 meta["authz"] = prev
             svc._write_meta(tier, name, meta, base_version=ver)
-            restored += 1
-        except Exception:  # noqa: BLE001
-            continue
+        except Exception as e:  # noqa: BLE001
+            failed.append(f"{scope}: {type(e).__name__}")
+    return failed
+
+
+def apply(p: dict, *, by: str) -> dict:
+    """Write an APPROVED plan: the global tuples and every topic's `meta.authz`
+    — a REPLACEMENT: a topic outside the plan loses its old rules.
+
+    Validated all-or-nothing before anything is written; the whole state is
+    saved first; if a topic cannot be written, everything is put back. One
+    apply at a time. The mode is not touched: enforcing is a separate act.
+    """
+    bad = _validate(p)
+    if bad:
+        raise A.AuthzError("piano non valido, nulla scritto: " + "; ".join(bad[:5]))
     from . import authz_runtime as _rt
-    _rt.invalidate()
-    return {"ok": True, "restored_topics": restored, "by": by}
+    from . import authz_shadow as _s
+    from . import main as _m
+    if not _apply_lock.acquire(blocking=False):
+        raise A.AuthzError("un'altra migrazione è in corso")
+    try:
+        before = _snapshot()
+        backup = _backup(before)
+        stamp = {"by": by, "at": time.time()}
+        _atomic_write(_s._global_path(), json.dumps(
+            {"tuples": [{**t, **stamp} for t in p.get("global") or []],
+             "applied_by": by, "applied_at": stamp["at"]}, ensure_ascii=False, indent=1))
+        svc = _m._topics()
+        plan_topics = p.get("topics") or {}
+        written, failed = 0, []
+        for scope in sorted(set(before["topics"]) | set(plan_topics)):
+            tier, _, name = scope.partition("/")
+            rows = plan_topics.get(scope)
+            try:
+                meta, ver = svc._read_meta(tier, name)
+                if rows is None and "authz" not in meta:
+                    continue
+                if rows is None:
+                    meta.pop("authz", None)
+                else:
+                    meta["authz"] = [{**r, **stamp} for r in rows]
+                svc._write_meta(tier, name, meta, base_version=ver)
+                written += 1
+            except Exception as e:  # noqa: BLE001
+                failed.append(f"{scope}: {type(e).__name__}: {e}"[:200])
+                break
+        if failed:
+            _restore(before)
+            _rt.invalidate()
+            return {"ok": False, "rolled_back": True, "backup": backup, "failed": failed}
+        _rt.invalidate()
+        return {"ok": True, "backup": backup, "global": len(p.get("global") or []),
+                "topics_written": written}
+    finally:
+        _apply_lock.release()
+
+
+def rollback(backup_name: str, *, by: str) -> dict:
+    """Put back the state of a backup; the current state is saved first."""
+    from . import authz_runtime as _rt
+    from . import state_paths
+    if not backup_name.startswith(BACKUP_PREFIX) or "/" in backup_name \
+            or not backup_name.endswith(".json"):
+        raise A.AuthzError(f"backup sconosciuto: {backup_name!r}")
+    if not _apply_lock.acquire(blocking=False):
+        raise A.AuthzError("un'altra migrazione è in corso")
+    try:
+        state = json.loads(state_paths.state_path(backup_name).read_text())
+        current = _backup(_snapshot())
+        failed = _restore(state)
+        _rt.invalidate()
+        return {"ok": not failed, "failed": failed, "saved_current": current, "by": by}
+    finally:
+        _apply_lock.release()
 
 
 def set_mode(m: str) -> dict:
+    """`enforce` only once a plan has been applied: with no global tuples every
+    agent would lose every verb (review of #435, S6)."""
+    from . import authz_shadow as _s
+    from . import authz_runtime as _rt
     from . import whitelist as _wl
     if m not in ("off", "shadow", "enforce"):
         raise A.AuthzError(f"authz_mode: off | shadow | enforce, non {m!r}")
+    if m == "enforce":
+        tuples, bad = _s.global_tuples()
+        if bad or not tuples:
+            raise A.AuthzError("enforce rifiutato: nessuna tupla globale valida — "
+                               "applica prima un piano approvato")
     _wl.reload_config()
     _wl.CONFIG["authz_mode"] = m
     _wl.save_config()
+    _rt.invalidate()
     return {"ok": True, "authz_mode": m}

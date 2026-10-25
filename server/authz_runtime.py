@@ -39,22 +39,23 @@ def enforcing() -> bool:
 
 
 def _toolbox_tuples(meta: dict) -> list[A.Tuple]:
-    """The room's toolbox (#605) as topic tuples: `* · verb · * · allow *`, and
-    each exception as `agent · verb · * · deny *` (more specific: it wins)."""
+    """The room's toolbox (#605) as topic tuples. An enabled verb becomes
+    AVAILABLE, and its targets take the verb's default (`DEFAULT`): enabling
+    `email.*` does not decide who a mail may reach — the room's and the
+    global rules still do (review of #435, S1). Each exception is
+    `agent · verb · * · deny *`, more specific: it wins."""
     from . import room_tools as _rt
     tb = _rt.toolbox(meta)
     raw = [{"id": f"toolbox:{v}", "agent": "*", "verb": v, "resource": "*",
-            "rule": [{"effect": "allow", "match": "*"}]} for v in tb["enabled"]]
+            "rule": [{"effect": A.DEFAULT}]} for v in tb["enabled"]]
     for agent, verbs in tb["except"].items():
         for v in verbs:
-            # `*` = everything the room gives: one deny per enabled entry and
-            # the floor (a topic tuple may not name the bare `*` verb).
-            targets = (tb["enabled"] + ["topic.*"]) if v == "*" else [v]
-            for x in targets:
-                raw.append({"id": f"toolbox-except:{agent}:{x}", "agent": agent,
-                            "verb": x, "resource": "*",
-                            "rule": [{"effect": "deny", "match": "*"}]})
-    ok, _bad = A.parse_tuples(raw, level=A.TOPIC)
+            if v == "*":
+                continue  # handled as «nothing from the room» (`_room_view`)
+            raw.append({"id": f"toolbox-except:{agent}:{v}", "agent": agent,
+                        "verb": v, "resource": "*",
+                        "rule": [{"effect": "deny", "match": "*"}]})
+    ok, _bad = A.parse_tuples(raw, level=A.TOPIC, internal=True)
     return ok
 
 
@@ -81,13 +82,19 @@ DRIVE_READ = ("gdrive.list", "gdrive.search", "gdrive.download")
 
 
 def _drive_tuples(meta: dict) -> list[A.Tuple]:
+    """Read the linked folders — and only them: any other Drive target is
+    denied (a read would otherwise take the default allow, review of #435
+    B1). A call with no target (a search) is confined by the topic's Drive
+    perimeter (`gdrive_root.roots_for_call`), the second line."""
     from .topics.service import drive_folders
+    folders = [f"gdrive:folder/{f['folder']}" for f in drive_folders(meta)]
+    if not folders:
+        return []
     raw = []
-    for f in drive_folders(meta):
-        for v in DRIVE_READ:
-            raw.append({"id": f"drive:{f['folder']}:{v}", "agent": "*", "verb": v,
-                        "resource": "*",
-                        "rule": [{"effect": "allow", "match": f"gdrive:folder/{f['folder']}"}]})
+    for v in DRIVE_READ:
+        raw.append({"id": f"drive:{v}", "agent": "*", "verb": v, "resource": "*",
+                    "rule": [{"effect": "allow", "match": f} for f in folders]
+                    + [{"effect": "deny", "match": "gdrive:*"}]})
     ok, _bad = A.parse_tuples(raw, level=A.TOPIC)
     return ok
 
@@ -95,7 +102,8 @@ def _drive_tuples(meta: dict) -> list[A.Tuple]:
 #: A few seconds of memory per room: discovery asks `available` for every verb
 #: of the instance, hundreds in a row, and must not re-read the global file and
 #: the topic's meta each time. Short enough that a rule the owner changes is in
-#: force before anyone notices; `invalidate()` makes it immediate.
+#: force before anyone notices; `invalidate()` makes it immediate. An error is
+#: never cached.
 _TTL = 2.0
 _cache: dict = {}
 
@@ -104,30 +112,61 @@ def invalidate() -> None:
     _cache.clear()
 
 
-def tuples_in_force(scope: Optional[str]) -> tuple[list[A.Tuple], Optional[list[A.Tuple]]]:
+class RoomUnreadable(RuntimeError):
+    """The room's rules cannot be read: in a room, nothing is decided without
+    them (review of #435, S7)."""
+
+
+def _room_view(scope: Optional[str]) -> dict:
     import time as _time
     hit = _cache.get(scope)
     now = _time.monotonic()
     if hit and now - hit[0] < _TTL:
         return hit[1]
-    out = _tuples_in_force(scope)
-    _cache[scope] = (now, out)
-    return out
-
-
-def _tuples_in_force(scope: Optional[str]) -> tuple[list[A.Tuple], Optional[list[A.Tuple]]]:
-    g, _ = S.global_tuples()
-    if not scope:
-        return g, None
-    tier, _, name = scope.partition("/")
-    try:
+    g, gbad = S.global_tuples()
+    view = {"global": g, "global_problems": gbad, "explicit": [], "derived": [],
+            "members": set(), "archived": False, "except_all": set()}
+    if scope:
+        tier, _, name = scope.partition("/")
         from . import main as _m
-        meta = _m._topics()._read_meta(tier, name)[0]
-    except Exception:  # noqa: BLE001 — no room readable: only what holds everywhere
-        return g, []
-    raw = meta.get("authz")
-    t, _ = A.parse_tuples(raw if isinstance(raw, list) else [], level=A.TOPIC)
-    return g, t + _toolbox_tuples(meta) + _data_tuples(meta) + _drive_tuples(meta)
+        from . import room_tools as _rt
+        from .topics.service import TopicService
+        try:
+            meta = _m._topics()._read_meta(tier, name)[0]
+        except Exception as e:  # noqa: BLE001
+            raise RoomUnreadable(f"regole della stanza {scope} illeggibili "
+                                 f"({type(e).__name__})") from None
+        raw = meta.get("authz")
+        view["explicit"], _ = A.parse_tuples(raw if isinstance(raw, list) else [],
+                                             level=A.TOPIC)
+        view["derived"] = _toolbox_tuples(meta) + _data_tuples(meta) + _drive_tuples(meta)
+        view["members"] = set(TopicService.participants_map(meta))
+        view["archived"] = str(meta.get("status") or "").strip().lower() == "archived"
+        view["except_all"] = {a for a, vs in _rt.toolbox(meta)["except"].items() if "*" in vs}
+    _cache[scope] = (now, view)
+    return view
+
+
+def tuples_for(agent: str, scope: Optional[str]) -> tuple[list[A.Tuple], Optional[list[A.Tuple]]]:
+    """The tuples in force for THIS agent here. A room gives nothing to whoever
+    does not take part in it, nothing from its panels once archived, and
+    nothing at all to an agent excepted from everything (`*`) — review of
+    #435, B2 and S3. Outside a room: the global level only."""
+    v = _room_view(scope)
+    if not scope:
+        return v["global"], None
+    if agent not in v["members"] or v["archived"]:
+        return v["global"], []
+    if agent in v["except_all"]:
+        return v["global"], [A.Tuple(f"except-all:{agent}", agent, "topic.*", "*",
+                                     (A.Clause(A.DENY, A.ANY),))]
+    return v["global"], v["explicit"] + v["derived"]
+
+
+def tuples_in_force(scope: Optional[str]) -> tuple[list[A.Tuple], Optional[list[A.Tuple]]]:
+    """Every tuple of the place, regardless of who asks (introspection, tests)."""
+    v = _room_view(scope)
+    return v["global"], (None if not scope else v["explicit"] + v["derived"])
 
 
 def available(agent: Optional[str], verb: str, scope: Optional[str]) -> bool:
@@ -136,7 +175,7 @@ def available(agent: Optional[str], verb: str, scope: Optional[str]) -> bool:
     if not agent:
         return False
     try:
-        g, t = tuples_in_force(scope)
+        g, t = tuples_for(agent, scope)
         return A.available(g, t, agent=agent, verb=verb)
     except Exception as e:  # noqa: BLE001
         LOG.error("authz: disponibilità di %s per %s non calcolabile (%s): negato",
@@ -146,17 +185,33 @@ def available(agent: Optional[str], verb: str, scope: Optional[str]) -> bool:
 
 def check(agent: str, verb: str, arguments: dict, scope: Optional[str],
           tainted: bool) -> A.Decision:
-    """The enforced decision for one call."""
+    """The enforced decision for one call. A room whose rules cannot be read
+    denies."""
+    try:
+        g, t = tuples_for(agent, scope)
+    except RoomUnreadable as e:
+        return A.Decision(A.DENY, False, [], str(e))
     f = S.facts(verb, arguments or {})
-    g, t = tuples_in_force(scope)
     return A.decide(g, t, agent=agent, verb=verb, resource=f["resource"],
                     targets=f["targets"], kind=f["kind"], tainted=tainted)
 
 
+def asked_targets(d: A.Decision) -> list[A.TargetDecision]:
+    return [x for x in d.targets if x.effect == A.ASK]
+
+
 def gate_key(d: A.Decision, verb: str) -> str:
-    """The consent key of an `ask`: the verb and the target that asked, and the
-    level — a room's rule is its owner's to answer, a global one an admin's."""
-    asked = next((x for x in d.targets if x.effect == A.ASK), None)
-    target = (asked.target if asked else "") or "*"
-    prefix = "authz-global:" if asked and asked.level == A.GLOBAL else "authz:"
-    return f"{prefix}{verb}|{target}"
+    """The consent key of an `ask`: the verb and EVERY target that asked
+    (review of #435, S2 — approving one recipient must not send to another),
+    and the level: a room's rule is its owner's to answer, a global one an
+    admin's."""
+    asked = asked_targets(d)
+    targets = sorted({(x.target or "*") for x in asked}) or ["*"]
+    prefix = "authz-global:" if any(x.level == A.GLOBAL for x in asked) else "authz:"
+    return f"{prefix}{verb}|{','.join(targets)[:900]}"
+
+
+def ask_reason(d: A.Decision, verb: str) -> str:
+    asked = asked_targets(d)
+    names = ", ".join(sorted({x.target or "(nessun bersaglio)" for x in asked}))
+    return f"Regola A·V·R·Q: {verb} chiede conferma per {names or 'questa chiamata'}"

@@ -119,6 +119,65 @@ class DispatchTests(_Env):
         self.assertFalse(g.await_count)
 
 
+class ReviewOf435Tests(_Env):
+    """Second-line promise: enforcing never opens what is closed today."""
+
+    def test_a_creator_never_brings_drive_folders(self):
+        self.svc.new("SEAL-1", "furbo", {"owner": "intruder", "participants": ["intruder"],
+                                          "drive_folders": [{"name": "d", "folder": "X"}],
+                                          "mounts": [{"type": "drive", "folder": "Y"}]})
+        meta = self.svc._read_meta("SEAL-1", "furbo")[0]
+        self.assertNotIn("drive_folders", meta)
+        self.assertFalse(R.available("intruder", "gdrive.list", "SEAL-1/furbo"))
+
+    def test_a_linked_folder_is_read_and_nothing_else(self):
+        self.meta_set(drive_folders=[{"name": "drive", "folder": "F1"}])
+        d = R.check("clodia", "gdrive.download", {"file_id": "ALTRO"}, "SEAL-1/blog", False)
+        self.assertIn(d.effect, (A.DENY, A.ALLOW))
+        g, t = R.tuples_for("clodia", "SEAL-1/blog")
+        dec = A.decide(g, t, agent="clodia", verb="gdrive.list", resource="google:default",
+                       targets=["gdrive:folder/ALTRA"], kind=A.READ)
+        self.assertEqual(dec.effect, A.DENY)
+        dec = A.decide(g, t, agent="clodia", verb="gdrive.list", resource="google:default",
+                       targets=["gdrive:folder/F1"], kind=A.READ)
+        self.assertEqual(dec.effect, A.ALLOW)
+
+    def test_the_room_gives_nothing_to_outsiders_or_once_archived(self):
+        self.meta_set(tools={"enabled": ["web.*"]})
+        self.assertFalse(R.available("estraneo", "web.fetch", "SEAL-1/blog"))
+        self.meta_set(status="archived")
+        self.assertFalse(R.available("clodia", "web.fetch", "SEAL-1/blog"))
+
+    def test_the_toolbox_does_not_decide_targets(self):
+        self.meta_set(tools={"enabled": ["email.*"]},
+                      authz=[_t("t1", agent="clodia",
+                                rule=[{"effect": "allow", "match": "mailto:a@foo.bar"}])])
+        g, t = R.tuples_for("clodia", "SEAL-1/blog")
+        dec = A.decide(g, t, agent="clodia", verb="email.send", resource="mail:default",
+                       targets=["mailto:b@evil.com"], kind=A.WRITE)
+        self.assertEqual(dec.effect, A.ASK)
+
+    def test_excepted_from_everything_means_everything(self):
+        self.meta_set(tools={"enabled": ["web.*"], "except": {"officer": ["*"]}},
+                      drive_folders=[{"name": "drive", "folder": "F1"}],
+                      data=[{"kind": "rag", "name": "topic-x", "grants": {"officer": "read"}}])
+        for v in ("web.fetch", "gdrive.list", "rag.search", "topic.files"):
+            with self.subTest(v=v):
+                self.assertFalse(R.available("officer", v, "SEAL-1/blog"))
+
+    def test_one_consent_names_every_asked_recipient(self):
+        d = A.Decision(A.ASK, True, [A.TargetDecision("mailto:b@x.it", A.ASK, A.GLOBAL),
+                                     A.TargetDecision("mailto:evil@y.com", A.ASK, A.TOPIC)], "r")
+        k = R.gate_key(d, "email.send")
+        self.assertTrue(k.startswith("authz-global:email.send|"))
+        self.assertIn("mailto:evil@y.com", k)
+        self.assertIn("mailto:b@x.it", k)
+
+    def test_an_unreadable_room_denies(self):
+        d = R.check("clodia", "email.send", {}, "SEAL-1/inesistente", False)
+        self.assertEqual(d.effect, A.DENY)
+
+
 class GateAndStripTests(_Env):
     def test_who_answers_an_ask(self):
         self.assertEqual(gate.gate_class("authz:email.send|mailto:a@b.it"), gate.GATE_WALLS)
@@ -153,6 +212,38 @@ class ApplyTests(_Env):
         with self.assertRaises(A.AuthzError):
             MIG.apply(plan, by="davide")
         self.assertNotIn("authz", self.svc._read_meta("SEAL-1", "blog")[0])
+
+    def test_a_topic_outside_the_plan_loses_its_old_rules(self):
+        self.svc.new("SEAL-1", "altro", {"owner": "davide"})
+        meta, ver = self.svc._read_meta("SEAL-1", "altro")
+        meta["authz"] = [_t("residuo")]
+        self.svc._write_meta("SEAL-1", "altro", meta, base_version=ver)
+        out = MIG.apply({"global": [_t("g1", agent="clodia", verb="packs.list")],
+                         "topics": {"SEAL-1/blog": [_t("t1", agent="clodia")]}}, by="davide")
+        self.assertTrue(out["ok"])
+        self.assertNotIn("authz", self.svc._read_meta("SEAL-1", "altro")[0])
+        MIG.rollback(out["backup"], by="davide")
+        self.assertEqual(self.svc._read_meta("SEAL-1", "altro")[0]["authz"][0]["id"], "residuo")
+
+    def test_a_failed_topic_puts_everything_back(self):
+        orig = self.svc._write_meta
+
+        def boom(tier, name, meta, base_version=None):
+            if name == "blog":
+                raise RuntimeError("disco pieno")
+            return orig(tier, name, meta, base_version=base_version)
+        with patch.object(self.svc, "_write_meta", boom):
+            out = MIG.apply({"global": [_t("g1", agent="clodia", verb="packs.list")],
+                             "topics": {"SEAL-1/blog": [_t("t1", agent="clodia")]}}, by="d")
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["rolled_back"])
+        self.assertEqual(S.global_tuples()[0], [])
+
+    def test_enforce_needs_an_applied_plan(self):
+        with self.assertRaises(A.AuthzError):
+            MIG.set_mode("enforce")
+        self.glob([_t("g1", agent="clodia", verb="packs.list")])
+        MIG.set_mode("enforce")
 
     def test_set_mode(self):
         MIG.set_mode("shadow")

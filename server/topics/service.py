@@ -1163,8 +1163,12 @@ class TopicService:
         # otherwise hand itself every verb of the instance.
         meta.pop("tools", None)
         # Nor A·V·R·Q tuples (#617): a creator — maybe an agent — never brings
-        # the rules of the room it creates.
+        # the rules of the room it creates. Nor Drive folders: since #617 a
+        # linked folder GRANTS reading it, so it is linked through the gated
+        # `topic.drive_folder_add`, never brought (review of #435, B1).
         meta.pop("authz", None)
+        meta.pop("drive_folders", None)
+        meta.pop("mounts", None)
         meta.setdefault("title", name)
         meta.setdefault("type", "progetto")
         # tier = unica classe del topic + livello di privacy per l'enforcement.

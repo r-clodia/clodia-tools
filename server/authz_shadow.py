@@ -73,12 +73,16 @@ def mode() -> str:
 
 # ── the call's facts ────────────────────────────────────────────────────────
 
-def resource_of(verb: str, arguments: dict) -> str:
+def resource_of(verb: str, arguments: dict) -> Optional[str]:
     ns = verb.split(".", 1)[0]
     kind, arg = _RESOURCE_KIND.get(ns, (ns, None))
     if kind in ("web", "topic"):
         return kind
     ident = str((arguments or {}).get(arg) or "").strip() if arg else ""
+    if not ident and kind in ("rag", "datastore"):
+        # A verb on no collection in particular (`rag.collections`): any tuple
+        # of the verb covers it (review of #435, S4).
+        return None
     return f"{kind}:{ident or 'default'}"
 
 

@@ -94,7 +94,7 @@ async def call(request: Request):
     return JSONResponse({"ok": True, "result": data})
 
 
-def _agent_allowed(tool: str) -> bool:
+def _agent_allowed(tool: str, arguments: dict | None = None) -> bool:
     """La decisione per un AGENTE: la STESSA di `call_tool`.
 
     Era `_is_super(agent)`, cioè «solo un super-agent». Da quando
@@ -121,7 +121,25 @@ def _agent_allowed(tool: str) -> bool:
         return False
     if not (main._is_super(ag) or main._agent_tool_reachable(tool, ag)):
         return False
-    return not whitelist.agent_denies(tool, ag)
+    if whitelist.agent_denies(tool, ag):
+        return False
+    return _authz_allows(ag, tool, arguments)
+
+
+def _authz_allows(agent: str, tool: str, arguments: dict | None) -> bool:
+    """A·V·R·Q enforced (#617): the effect too, not only availability — an
+    action the agent-server runs locally gets no gate card, so `ask` is a no
+    here (review of #435, S4)."""
+    from . import authz_runtime as _azr
+    if not _azr.enforcing():
+        return True
+    from . import egress as _eg
+    try:
+        d = _azr.check(agent, tool, arguments or {}, _eg._scope_of_call(), False)
+    except Exception as e:  # noqa: BLE001 — fail closed
+        LOG.warning("authorize: A·V·R·Q non valutabile per %s (%s)", tool, type(e).__name__)
+        return False
+    return d.effect == "allow"
 
 
 async def authorize(request: Request):
@@ -146,7 +164,8 @@ async def authorize(request: Request):
             # «consentito» per verbi fuori dal token che li chiedeva.
             allowed = main._human_tool_allowed(tool) and main._scoped_ceiling_ok(tool)
         else:
-            allowed = _agent_allowed(tool)
+            allowed = _agent_allowed(tool, body.get("arguments")
+                                     if isinstance(body.get("arguments"), dict) else None)
     return JSONResponse({"allowed": bool(allowed),
                          "principal": payload.get("principal"),
                          "human_role": payload.get("human_role")})
