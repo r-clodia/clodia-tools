@@ -5347,6 +5347,16 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             result = await asyncio.to_thread(
                 _dispatch_agents, name, arguments, _ag, gate_approval)
         elif name == "copybrain.assume":
+            from . import authz_runtime as _azr_c
+            if _azr_c.enforcing():
+                # A·V·R·Q enforced (#617): a seed grants nothing any more, so
+                # borrowing a seed's verbs is a way around the room's rules,
+                # not a way to work. A verb an agent needs in a room is enabled
+                # in that room.
+                raise PermissionError(
+                    "copybrain non è disponibile: dal 25 ottobre i verbi li decide "
+                    "la stanza, non il seed. Se ti serve un verbo in questo canale, "
+                    "chiedi all'owner di abilitarlo nella sezione Strumenti.")
             try:
                 _catalogo = list(_all_native_tools()) + list(await proxy.list_proxied_tools())
             except Exception:  # noqa: BLE001 — senza backend montati resta il catalogo nativo
