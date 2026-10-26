@@ -602,6 +602,51 @@ async def topic_tools_route(request: Request):
     return JSONResponse(out)
 
 
+async def topic_tools_epoch_route(request: Request):
+    """GET /internal/topics/{tier}/{name}/tools-epoch?agent=X → {epoch}.
+
+    A fingerprint of everything that decides which tools `agent` has in this
+    room: the room's tools (MCPs, rows), its explicit rules, its data, the
+    agent's membership, the global rules and mode, the agent's own config and
+    the gateway's version. The agent-server compares it at every turn and
+    rebuilds a session whose tools are stale (owner, 26 Oct 2026): changing a
+    room's permissions must not require restarting a session by hand.
+    """
+    who, err = _authorize_topic_owner(request)
+    if err:
+        return err
+    tier = request.path_params["tier"]; name = request.path_params["name"]
+    agent = str(request.query_params.get("agent") or "")
+
+    def _epoch():
+        import hashlib, json as _json
+        from . import __version__ as _ver, whitelist as _wl, authz_shadow as _S
+        meta = _service()._read_meta(tier, name)[0]
+        try:
+            st = _S._global_path().stat()
+            glob = [st.st_mtime_ns, st.st_size]
+        except OSError:
+            glob = None
+        try:
+            acfg = _wl.agent_config(agent) if agent else {}
+        except KeyError:
+            acfg = {}
+        parts = {
+            "v": _ver, "mode": (_wl.CONFIG or {}).get("authz_mode"), "global": glob,
+            "member": agent in TopicService.participants_map(meta),
+            "status": meta.get("status"),
+            "room": {k: meta.get(k) for k in ("tools", "authz", "data", "drive_folders",
+                                              "local_folders", "tier")},
+            "agent": acfg, "dm": (_wl.CONFIG or {}).get(room_tools.DM_KEY),
+        }
+        raw = _json.dumps(parts, sort_keys=True, default=str)
+        return {"epoch": hashlib.sha256(raw.encode()).hexdigest()[:24]}
+    try:
+        return JSONResponse(await asyncio.to_thread(_epoch))
+    except TopicError as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=404)
+
+
 async def authz_shadow_route(request: Request):
     """GET /internal/authz/shadow?limit=N → the A·V·R·Q shadow's divergences
     (#615): counts by class and verb, the latest ones. An admin, or the
@@ -1566,6 +1611,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/data", topic_data_route, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/tools", topic_tools_route, methods=["GET", "POST"]),
+    Route("/internal/topics/{tier}/{name}/tools-epoch", topic_tools_epoch_route, methods=["GET"]),
     Route("/internal/dm-tools", dm_tools_route, methods=["GET", "POST"]),
     Route("/internal/authz/shadow", authz_shadow_route, methods=["GET"]),
     Route("/internal/authz", authz_route, methods=["GET", "POST"]),
