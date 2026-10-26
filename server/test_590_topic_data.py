@@ -174,12 +174,35 @@ class GrantTests(_Base):
             self.auth("tomato.commerciale", clearance="SEAL-1")
 
     def test_listing_shows_only_granted_imports(self):
+        """A datastore is listed only once granted; a RAG collection to every
+        participant (26 Oct 2026)."""
+        self.assertEqual(td.visible("datastore", agent="clodia", scope="SEAL-2/commerciale",
+                                    clearance="SEAL-2"), set())
+        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti", "clodia", "read")
+        self.assertEqual(td.visible("datastore", agent="clodia", scope="SEAL-2/commerciale",
+                                    clearance="SEAL-3"), {"tomato-pack/clienti"})
         self.imp(kind="rag", res="eu-normativa")
         self.assertEqual(td.visible("rag", agent="clodia", scope="SEAL-2/commerciale",
-                                    clearance="SEAL-2"), set())
-        td.grant("SEAL-2", "commerciale", "rag", "eu-normativa", "clodia", "read")
-        self.assertEqual(td.visible("rag", agent="clodia", scope="SEAL-2/commerciale",
                                     clearance="SEAL-2"), {"eu-normativa"})
+        self.assertEqual(td.visible("rag", agent="estraneo", scope="SEAL-2/commerciale",
+                                    clearance="SEAL-2"), set())
+
+    def test_every_participant_reads_the_rooms_rag(self):
+        """Owner, 26 Oct 2026: the room's RAG is part of being in the room —
+        an agent that leaves and comes back reads it again; writing still
+        needs the owner's grant."""
+        self.imp(kind="rag", res="eu-normativa")
+        self.auth("clodia", kind="rag", res="eu-normativa")
+        with self.assertRaises(PermissionError):
+            self.auth("estraneo", kind="rag", res="eu-normativa")
+        with self.assertRaises(PermissionError):
+            self.auth("clodia", kind="rag", res="eu-normativa", write=True)
+        self.svc.remove_participant("SEAL-2", "commerciale", "clodia")
+        with self.assertRaises(PermissionError):
+            self.auth("clodia", kind="rag", res="eu-normativa")
+        self.svc.add_participant("SEAL-2", "commerciale", "clodia")
+        self.auth("clodia", kind="rag", res="eu-normativa")
+        self.assertIn("rag.search", td.room_verbs("clodia", "SEAL-2/commerciale"))
 
 
 class GatewayTests(_Base):
@@ -219,10 +242,10 @@ class GatewayTests(_Base):
                 patch.object(m, "current_clearance", lambda: "SEAL-2"), \
                 patch("server.egress._scope_of_call", lambda: "SEAL-2/commerciale"), \
                 patch.object(m.instance_profile, "rag_check_collection", lambda c: None):
-            with self.assertRaises(PermissionError):
-                m._rag_authorize("eu-normativa", write=False)
-            td.grant("SEAL-2", "commerciale", "rag", "eu-normativa", "clodia", "read")
-            m._rag_authorize("eu-normativa", write=False)
+            m._rag_authorize("eu-normativa", write=False)          # a participant reads
+            with patch.object(m, "agent_name", lambda: "estraneo"):
+                with self.assertRaises(PermissionError):
+                    m._rag_authorize("eu-normativa", write=False)
             with self.assertRaises(PermissionError):
                 m._rag_authorize("eu-normativa", write=True)
             with patch.object(m, "agent_name", lambda: "sysadmin"):
@@ -435,8 +458,10 @@ class RoomVerbsTests(_Base):
     def test_the_grant_brings_the_verbs_in_its_room_only(self):
         self.imp(kind="rag", res="eu-normativa")
         self.imp()
-        self.assertEqual(td.room_verbs("tomato.commerciale", "SEAL-2/commerciale"), set())
-        td.grant("SEAL-2", "commerciale", "rag", "eu-normativa", "tomato.commerciale", "read")
+        # The room's RAG is read by every participant (26 Oct); a datastore
+        # needs the grant.
+        self.assertEqual(td.room_verbs("tomato.commerciale", "SEAL-2/commerciale"),
+                         {"rag.search", "rag.list", "rag.collections"})
         td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
                  "tomato.commerciale", "write")
         self.assertEqual(td.room_verbs("tomato.commerciale", "SEAL-2/commerciale"),

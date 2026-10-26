@@ -164,6 +164,21 @@ def mode() -> str:
     return m if m in ("legacy", "topic") else "legacy"
 
 
+#: Kinds every PARTICIPANT reads once imported in the room (owner, 26 Oct
+#: 2026): the room's RAG — its own index first — is part of being in the room,
+#: like `topic.*`. A per-agent read grant used to be written on joining, and an
+#: agent that left and came back lost it. Writing still needs the owner's grant.
+READ_FOR_PARTICIPANTS = frozenset({"rag"})
+
+
+def _reads(meta: dict, e: dict, agent: str) -> bool:
+    """May `agent` read the import `e` of this room?"""
+    if e["kind"] in READ_FOR_PARTICIPANTS:
+        from .topics.service import TopicService
+        return agent in TopicService.participants_map(meta)
+    return e["grants"].get(agent) in MODES
+
+
 def authorize(kind: str, resource: str, *, write: bool, agent: str,
               clearance: str | None, scope: str | None) -> dict:
     """The topic-mode decision for an AGENT's call. Returns the catalog entry;
@@ -184,7 +199,7 @@ def authorize(kind: str, resource: str, *, write: bool, agent: str,
     if entry is None:
         raise PermissionError(f"{kind} '{resource}' non è più nel catalogo dei dati")
     granted = imp["grants"].get(agent)
-    if granted is None or (write and granted != "write"):
+    if (write and granted != "write") or (not write and not _reads(meta, imp, agent)):
         raise PermissionError(
             f"agent '{agent}' senza permesso di {'SCRITTURA' if write else 'LETTURA'} "
             f"su {kind} '{resource}' nel topic {scope} (lo assegna l'owner del topic)")
@@ -211,7 +226,7 @@ def visible(kind: str, *, agent: str, scope: str | None,
     except Exception:  # noqa: BLE001
         return set()
     for e in imports(meta):
-        if e["kind"] != kind or not e["grants"].get(agent):
+        if e["kind"] != kind or not _reads(meta, e, agent):
             continue
         try:
             authorize(kind, e["name"], write=False, agent=agent, clearance=clearance, scope=scope)
@@ -258,7 +273,7 @@ def room_verbs(agent: str | None, scope: str | None) -> set[str]:
     out: set[str] = set()
     for e in imports(meta):
         mode = e["grants"].get(agent)
-        if mode in MODES:
+        if _reads(meta, e, agent):
             out.update(_READ_VERBS.get(e["kind"], ()))
         if mode == "write":
             out.update(_WRITE_VERBS.get(e["kind"], ()))
