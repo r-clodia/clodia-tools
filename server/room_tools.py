@@ -268,7 +268,10 @@ def mcp_catalogue() -> dict[str, dict]:
             owner[ns] = mid
     out: dict[str, dict] = {}
     for ns, verbs in sorted(cat.items()):
-        if ns in transports:
+        if ns in transports and ns not in owner:
+            # A provider transport is a socket of the gateway, never an MCP —
+            # unless a connector owns the namespace (it-pack's GitHub: the
+            # backend is its transport AND `github.*` is the MCP), 26 Oct.
             continue
         mid = owner.get(ns, ns)
         g = groups.get(mid)

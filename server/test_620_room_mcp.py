@@ -147,3 +147,21 @@ class TupleTests(_Env):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CatalogueTests(unittest.TestCase):
+    def test_a_connector_namespace_served_by_a_transport_is_listed(self):
+        """GitHub: the backend is the connector's transport, the namespace
+        is the MCP — it must be authorisable (26 Oct)."""
+        from types import SimpleNamespace as NS
+        conn = [NS(id="github", label="GitHub", pack="it-pack", namespace="github",
+                   extends="", verbs=())]
+        with patch.object(RT, "_catalogue", lambda: {"github": {"github.clone"},
+                                                       "mail-reader": set()}), \
+                patch.object(RT, "_registry", lambda: NS(connectors=conn)), \
+                patch("server.connectors.resolved.transport_backends",
+                      lambda: frozenset({"github", "mail-reader"})), \
+                patch.object(RT, "_is_write", lambda v: True):
+            cat = RT.mcp_catalogue()
+        self.assertIn("github", cat)
+        self.assertNotIn("mail-reader", cat)
