@@ -39,22 +39,15 @@ def enforcing() -> bool:
 
 
 def _toolbox_tuples(meta: dict) -> list[A.Tuple]:
-    """The room's toolbox (#605) as topic tuples. An enabled verb becomes
-    AVAILABLE, and its targets take the verb's default (`DEFAULT`): enabling
-    `email.*` does not decide who a mail may reach — the room's and the
-    global rules still do (review of #435, S1). Each exception is
-    `agent · verb · * · deny *`, more specific: it wins."""
+    """The room's toolbox (#605, by MCP since #620) as topic tuples. An
+    enabled verb becomes AVAILABLE, and its targets take the verb's default
+    (`DEFAULT`): enabling `email.*` does not decide who a mail may reach — the
+    room's resource rows and the global rules still do (review of #435, S1).
+    The same for every participant: per-agent exceptions were removed (26 Oct)."""
     from . import room_tools as _rt
     tb = _rt.toolbox(meta)
     raw = [{"id": f"toolbox:{v}", "agent": "*", "verb": v, "resource": "*",
             "rule": [{"effect": A.DEFAULT}]} for v in tb["enabled"]]
-    for agent, verbs in tb["except"].items():
-        for v in verbs:
-            if v == "*":
-                continue  # handled as «nothing from the room» (`_room_view`)
-            raw.append({"id": f"toolbox-except:{agent}:{v}", "agent": agent,
-                        "verb": v, "resource": "*",
-                        "rule": [{"effect": "deny", "match": "*"}]})
     ok, _bad = A.parse_tuples(raw, level=A.TOPIC, internal=True)
     return ok
 
@@ -168,7 +161,7 @@ def _room_view(scope: Optional[str]) -> dict:
         return hit[1]
     g, gbad = S.global_tuples()
     view = {"global": g, "global_problems": gbad, "explicit": [], "derived": [],
-            "members": set(), "archived": False, "except_all": set()}
+            "members": set(), "archived": False}
     if scope:
         tier, _, name = scope.partition("/")
         from . import main as _m
@@ -186,24 +179,19 @@ def _room_view(scope: Optional[str]) -> dict:
                            + _data_tuples(meta) + _drive_tuples(meta))
         view["members"] = set(TopicService.participants_map(meta))
         view["archived"] = str(meta.get("status") or "").strip().lower() == "archived"
-        view["except_all"] = {a for a, vs in _rt.toolbox(meta)["except"].items() if "*" in vs}
     _cache[scope] = (now, view)
     return view
 
 
 def tuples_for(agent: str, scope: Optional[str]) -> tuple[list[A.Tuple], Optional[list[A.Tuple]]]:
     """The tuples in force for THIS agent here. A room gives nothing to whoever
-    does not take part in it, nothing from its panels once archived, and
-    nothing at all to an agent excepted from everything (`*`) — review of
-    #435, B2 and S3. Outside a room: the global level only."""
+    does not take part in it and nothing from its panels once archived —
+    review of #435, B2. Outside a room: the global level only."""
     v = _room_view(scope)
     if not scope:
         return v["global"], None
     if agent not in v["members"] or v["archived"]:
         return v["global"], []
-    if agent in v["except_all"]:
-        return v["global"], [A.Tuple(f"except-all:{agent}", agent, "topic.*", "*",
-                                     (A.Clause(A.DENY, A.ANY),))]
     return v["global"], v["explicit"] + v["derived"]
 
 

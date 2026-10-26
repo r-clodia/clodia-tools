@@ -132,63 +132,10 @@ class ToolboxTests(_Base):
         self.assertEqual(rt.toolbox(self.meta())["enabled"], [])
         self.assertNotIn("web.fetch", rt.verbs_for("redattore", "SEAL-1/blog"))
 
-    def test_the_room_never_subtracts_from_the_seed(self):
-        """Additive in R1 (owner, 23 Oct): the subtraction is #610."""
-        rt.exception("SEAL-1", "blog", "fact-checker", "web.fetch")
-        with patch.object(main, "_declared_tools", lambda a: {"web.fetch"}), \
-                patch.object(main, "current_scoped_tools", lambda: ()), \
-                patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"):
-            self.assertTrue(main._agent_tool_reachable("web.fetch", "fact-checker"))
-
-
-class ExceptionTests(_Base):
-    def test_an_exception_bites_through_the_wildcard(self):
-        """`web.*` would swallow its own exception: the wildcard is expanded."""
-        rt.enable("SEAL-1", "blog", "web.*")
-        rt.exception("SEAL-1", "blog", "fact-checker", "web.post")
-        tutti = rt.verbs_for("redattore", "SEAL-1/blog")
-        uno = rt.verbs_for("fact-checker", "SEAL-1/blog")
-        self.assertIn("web.*", tutti)
-        self.assertNotIn("web.*", uno)
-        self.assertIn("web.fetch", uno)
-        self.assertNotIn("web.post", uno)
-        with patch.object(main, "_declared_tools", lambda a: set()), \
-                patch.object(main, "current_scoped_tools", lambda: ()), \
-                patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"):
-            self.assertTrue(main._agent_tool_reachable("web.post", "redattore"))
-            self.assertFalse(main._agent_tool_reachable("web.post", "fact-checker"))
-            self.assertTrue(main._agent_tool_reachable("web.fetch", "fact-checker"))
-
-    def test_a_wildcard_that_cannot_be_cut_is_not_given(self):
-        """A mounted MCP backend does not name its verbs here: with an
-        exception on it, the gift goes away instead of leaking past it."""
-        with patch.object(rt, "_catalogue", lambda: {"backend": set()}):
-            self.assertEqual(rt._minus({"backend.*"}, {"backend.pericoloso"}), set())
-            self.assertEqual(rt._minus({"backend.*"}, set()), {"backend.*"})
-
-    def test_an_exception_on_topic_star_leaves_the_floor_of_the_archseed(self):
-        rt.exception("SEAL-1", "blog", "fact-checker", "topic.delete_file")
-        v = rt.verbs_for("fact-checker", "SEAL-1/blog")
-        self.assertNotIn("topic.delete_file", v)
-        self.assertIn("topic.post_message", v)
-
-    def test_only_a_participant_can_be_excepted(self):
-        with self.assertRaises(rt.ToolboxError):
-            rt.exception("SEAL-1", "blog", "estraneo", "web.fetch")
-        rt.exception("SEAL-1", "blog", "fact-checker", "web.fetch")
-        rt.exception("SEAL-1", "blog", "fact-checker", "web.fetch", on=False)
-        self.assertEqual(rt.toolbox(self.meta())["except"], {})
-
-
 class MetaReadingTests(_Base):
     def test_an_unreadable_toolbox_grants_nothing(self):
-        for raw in ("", [], {"enabled": "web.fetch"}, {"except": ["x"]}, None):
-            self.assertEqual(rt.toolbox({"tools": raw}),
-                             {"enabled": [], "except": {}}, repr(raw))
-
-    def test_an_empty_exception_list_is_not_an_agent(self):
-        self.assertEqual(rt.toolbox({"tools": {"except": {"a": []}}})["except"], {})
-
+        for raw in ("", [], {"enabled": "web.fetch"}, {"except": {"x": ["web.*"]}}, None):
+            self.assertEqual(rt.toolbox({"tools": raw}), {"enabled": []}, repr(raw))
 
 class DmToolboxTests(_Base):
     def test_outside_a_room_the_instance_list_decides(self):
@@ -305,13 +252,6 @@ class RoutesTests(_Base):
                                json={"action": "svuota", "verb": "web.fetch"})
         self.assertEqual(r.status_code, 400)
 
-    def test_the_exception_goes_through_the_same_door(self):
-        c = self._owner()
-        r = c.post("/internal/topics/SEAL-1/blog/tools",
-                   json={"action": "except", "verb": "web.post", "agent": "fact-checker"})
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(rt.toolbox(self.meta())["except"], {"fact-checker": ["web.post"]})
-
     def test_the_dm_list_is_read_by_a_person_and_written_by_an_admin(self):
         with patch.object(whitelist, "CONFIG", {}), \
                 patch.object(whitelist, "save_config", lambda: None), \
@@ -402,46 +342,6 @@ class ReviewB1Tests(_Base):
             self.assertEqual(rt.dm_toolbox(), ["web.fetch"])
 
 
-class WildcardExceptionTests(_Base):
-    """Review of #429, S1: an exception bites by name, by namespace or on all."""
-
-    def test_a_namespace_exception_removes_the_namespace(self):
-        rt.enable("SEAL-1", "blog", "web.*")
-        rt.exception("SEAL-1", "blog", "fact-checker", "web.*")
-        v = rt.verbs_for("fact-checker", "SEAL-1/blog")
-        self.assertFalse({x for x in v if x.startswith("web.")}, v)
-        self.assertIn("web.*", rt.verbs_for("redattore", "SEAL-1/blog"))
-
-    def test_it_also_bites_point_verbs_of_that_namespace(self):
-        rt.enable("SEAL-1", "blog", "web.fetch")
-        rt.exception("SEAL-1", "blog", "fact-checker", "web.*")
-        self.assertNotIn("web.fetch", rt.verbs_for("fact-checker", "SEAL-1/blog"))
-
-    def test_an_exception_on_topic_star_removes_the_floor_for_that_agent(self):
-        rt.exception("SEAL-1", "blog", "fact-checker", "topic.*")
-        self.assertEqual(rt.verbs_for("fact-checker", "SEAL-1/blog"), set())
-        self.assertIn("topic.*", rt.verbs_for("redattore", "SEAL-1/blog"))
-
-    def test_star_removes_everything_the_room_gives(self):
-        rt.enable("SEAL-1", "blog", "web.fetch")
-        rt.exception("SEAL-1", "blog", "fact-checker", "*")
-        self.assertEqual(rt.verbs_for("fact-checker", "SEAL-1/blog"), set())
-
-    def test_a_namespace_exception_on_an_unenumerable_backend(self):
-        with patch.object(rt, "_catalogue", lambda: {"backend": set()}):
-            self.assertEqual(rt._minus({"backend.*"}, {"backend.*"}), set())
-
-    def test_an_exception_that_would_change_nothing_is_refused(self):
-        for bad in ("packs.*", "jobs.run", "rag.search", "web.fetchh", "web", "**", "inesistente.*"):
-            with self.assertRaises(rt.ToolboxError, msg=bad):
-                rt.exception("SEAL-1", "blog", "fact-checker", bad)
-        self.assertEqual(rt.toolbox(self.meta())["except"], {})
-
-    def test_a_hand_written_malformed_exception_is_dropped(self):
-        meta = {"tools": {"except": {"a": ["web.*", "*", "web f", "x.y*"]}}}
-        self.assertEqual(rt.toolbox(meta)["except"], {"a": ["*", "web.*"]})
-
-
 class ArchivedRoomTests(_Base):
     def test_an_archived_room_keeps_the_floor_and_drops_the_toolbox(self):
         rt.enable("SEAL-1", "blog", "web.fetch")
@@ -468,3 +368,14 @@ class ReaderAbolishedTests(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoExceptionsTests(_Base):
+    def test_a_stored_exception_is_ignored(self):
+        """Per-agent exceptions were removed (owner, 26 Oct): every participant
+        gets what the room gives."""
+        rt.enable("SEAL-1", "blog", "web.*")
+        meta, ver = self.svc._read_meta("SEAL-1", "blog")
+        meta["tools"]["except"] = {"fact-checker": ["*"]}
+        self.svc._write_meta("SEAL-1", "blog", meta, base_version=ver)
+        self.assertIn("web.*", rt.verbs_for("fact-checker", "SEAL-1/blog"))

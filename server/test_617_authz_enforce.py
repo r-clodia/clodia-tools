@@ -64,11 +64,11 @@ class AvailabilityTests(_Env):
         self.assertFalse(R.available("clodia", "email.send", "SEAL-1/blog"))
 
     def test_the_panels_of_the_room_are_tuples(self):
-        self.meta_set(tools={"enabled": ["web.*"], "except": {"officer": ["web.post"]}},
+        self.meta_set(tools={"enabled": ["web.*"]},
                       data=[{"kind": "rag", "name": "topic-x", "grants": {"officer": "read"}}],
                       drive_folders=[{"name": "drive", "folder": "FOLDER1"}])
         self.assertTrue(R.available("clodia", "web.post", "SEAL-1/blog"))
-        self.assertFalse(R.available("officer", "web.post", "SEAL-1/blog"))
+        self.assertTrue(R.available("officer", "web.post", "SEAL-1/blog"))
         self.assertTrue(R.available("officer", "rag.search", "SEAL-1/blog"))
         self.assertFalse(R.available("clodia", "rag.search", "SEAL-1/blog"))
         self.assertTrue(R.available("clodia", "gdrive.list", "SEAL-1/blog"))
@@ -180,14 +180,6 @@ class ReviewOf435Tests(_Env):
         dec = A.decide(g, t, agent="clodia", verb="email.send", resource="mail:default",
                        targets=["mailto:b@evil.com"], kind=A.WRITE)
         self.assertEqual(dec.effect, A.ASK)
-
-    def test_excepted_from_everything_means_everything(self):
-        self.meta_set(tools={"enabled": ["web.*"], "except": {"officer": ["*"]}},
-                      drive_folders=[{"name": "drive", "folder": "F1"}],
-                      data=[{"kind": "rag", "name": "topic-x", "grants": {"officer": "read"}}])
-        for v in ("web.fetch", "gdrive.list", "rag.search", "topic.files"):
-            with self.subTest(v=v):
-                self.assertFalse(R.available("officer", v, "SEAL-1/blog"))
 
     def test_one_consent_names_every_asked_recipient(self):
         d = A.Decision(A.ASK, True, [A.TargetDecision("mailto:b@x.it", A.ASK, A.GLOBAL),

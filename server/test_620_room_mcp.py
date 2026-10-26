@@ -92,33 +92,11 @@ class MutationTests(_Env):
         with self.assertRaises(RT.ToolboxError):
             RT.set_resource("SEAL-1", "blog", "google", FOLDER, "allow")
 
-    def test_three_levels(self):
-        RT.enable_mcp("SEAL-1", "blog", "google")
-        RT.enable_mcp("SEAL-1", "blog", "normattiva")
-        RT.except_mcp("SEAL-1", "blog", "officer", "google", "read")
-        RT.except_mcp("SEAL-1", "blog", "clodia", "google", "none")
-        exc = RT.toolbox(self.meta())["except"]
-        self.assertEqual(exc["officer"], ["gdrive.upload"])
-        self.assertEqual(exc["clodia"], ["gdocs.*", "gdrive.*"])
-        # verbs not enumerable: «read» cannot be cut where asked → takes it all
-        RT.except_mcp("SEAL-1", "blog", "officer", "normattiva", "read")
-        self.assertIn("normattiva.*", RT.toolbox(self.meta())["except"]["officer"])
-        RT.except_mcp("SEAL-1", "blog", "clodia", "google", "all")
-        self.assertNotIn("clodia", RT.toolbox(self.meta())["except"])
-
-    def test_an_outsider_has_no_level(self):
-        RT.enable_mcp("SEAL-1", "blog", "google")
-        with self.assertRaises(RT.ToolboxError):
-            RT.except_mcp("SEAL-1", "blog", "estraneo", "google", "none")
-
-    def test_revoking_drops_rows_and_levels(self):
+    def test_revoking_drops_rows(self):
         RT.enable_mcp("SEAL-1", "blog", "google")
         RT.set_resource("SEAL-1", "blog", "google", FOLDER, "allow")
-        RT.except_mcp("SEAL-1", "blog", "officer", "google", "read")
         RT.enable_mcp("SEAL-1", "blog", "google", on=False)
-        raw = self.meta()["tools"]
-        self.assertNotIn("mcp", raw)
-        self.assertNotIn("except_mcp", raw)
+        self.assertNotIn("mcp", self.meta()["tools"])
 
 
 class TupleTests(_Env):
@@ -135,15 +113,6 @@ class TupleTests(_Env):
         self.assertEqual(self._decide("clodia", "gdrive.upload", "gdrive:folder/ALTRA"), "ask")
         RT.set_resource("SEAL-1", "blog", "google", "mailto:*@x.it", "deny")
         self.assertEqual(self._decide("clodia", "gdrive.upload", "mailto:a@x.it"), "deny")
-
-    def test_read_only_hides_the_write_verbs(self):
-        RT.enable_mcp("SEAL-1", "blog", "google")
-        RT.except_mcp("SEAL-1", "blog", "officer", "google", "read")
-        R.invalidate()
-        self.assertFalse(R.available("officer", "gdrive.upload", "SEAL-1/blog"))
-        self.assertTrue(R.available("officer", "gdrive.list", "SEAL-1/blog"))
-        self.assertTrue(R.available("clodia", "gdrive.upload", "SEAL-1/blog"))
-
 
 if __name__ == "__main__":
     unittest.main()
