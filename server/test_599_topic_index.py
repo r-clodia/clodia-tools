@@ -223,11 +223,14 @@ class CatalogLabelTests(_Base):
         def fake_authorize(request):
             request.state.auth_payload = {"agent": "clodia", "role": "agent-server"}
             return "clodia", None
-        with patch.object(topics_api, "_authorize", fake_authorize):
+        with patch.object(topics_api, "_authorize", fake_authorize), \
+                patch.object(topics_api, "_service", ti._svc):
             rows = TestClient(Starlette(routes=topics_api.routes)).get(
                 "/internal/data-catalog").json()["entries"]
         (row,) = [r for r in rows if r["name"] == self.coll()]
         self.assertEqual(row["topic"], "SEAL-2/vendite")
+        # The picker leaves archived rooms out (owner, 26 Oct 2026).
+        self.assertEqual(row["topic_status"], "active")
 
 
 class TaintTests(unittest.TestCase):

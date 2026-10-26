@@ -787,12 +787,21 @@ async def data_catalog_route(request: Request):
                 used = topic_data.importing_topics()
                 from . import topic_index
                 bound = topic_index._bindings()
+                # The topic's status, so a picker can leave archived rooms out
+                # (owner, 26 Oct 2026). One listing, not a read per index.
+                try:
+                    status = {f"{t['tier']}/{t['name']}": str(t.get("status") or "active")
+                              for t in _service().list(include_archived=True)}
+                except Exception:  # noqa: BLE001 — no status, nothing hidden
+                    status = {}
                 for r in rows:
                     r["importing_topics"] = used.get(r["key"], [])
                     # A topic's own index (#599) is shown by its topic, not by
                     # its random id.
                     if r.get("kind") == "rag" and topic_index.is_topic_collection(r.get("name")):
                         r["topic"] = bound.get(r["name"], "")
+                        if r["topic"] in status:
+                            r["topic_status"] = status[r["topic"]]
             return rows
         rows = await asyncio.to_thread(_rows)
         return JSONResponse({"entries": rows, "data_access": topic_data.mode()})
