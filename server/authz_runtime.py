@@ -99,6 +99,11 @@ def _resource_tuples(meta: dict) -> list[A.Tuple]:
             if r.get("verbs"):
                 verbs = verbs & set(r["verbs"])
             for v in verbs:
+                # A family (`github.create_*`) cannot be a tuple's verb — only
+                # `ns.*` can. The row's clause matches its scheme's targets
+                # only, so widening the verb to the namespace keeps it on them.
+                if "*" in v:
+                    v = f"{v.partition('.')[0]}.*"
                 per_verb.setdefault(v, []).append({"effect": r["effect"], "match": r["uri"]})
     raw = [{"id": f"resource:{v}", "agent": "*", "verb": v, "resource": "*", "rule": rule}
            for v, rule in sorted(per_verb.items())]
