@@ -76,6 +76,36 @@ def _data_tuples(meta: dict) -> list[A.Tuple]:
     return ok
 
 
+def _resource_tuples(meta: dict) -> list[A.Tuple]:
+    """The resource rows of the room's MCPs (#620) as topic tuples: per verb
+    of the MCP that reaches the row's scheme (or the verbs the row names), a
+    clause `<effect> <uri>`. A row is more specific than the MCP's own
+    `DEFAULT`, so it decides its targets; the rest keep the verb's default."""
+    from . import room_tools as _rt
+    rows_by = _rt.resources(meta)
+    if not any(rows_by.values()):
+        return []
+    cat = _rt.mcp_catalogue()
+    per_verb: dict[str, list[dict]] = {}
+    for mid, rows in rows_by.items():
+        e = cat.get(mid)
+        if not e:
+            continue
+        by_scheme: dict[str, set[str]] = {}
+        for sc in e["schemes"]:
+            by_scheme.setdefault(sc["scheme"], set()).update(sc["verbs"])
+        for r in rows:
+            verbs = by_scheme.get(r["uri"].partition(":")[0], set())
+            if r.get("verbs"):
+                verbs = verbs & set(r["verbs"])
+            for v in verbs:
+                per_verb.setdefault(v, []).append({"effect": r["effect"], "match": r["uri"]})
+    raw = [{"id": f"resource:{v}", "agent": "*", "verb": v, "resource": "*", "rule": rule}
+           for v, rule in sorted(per_verb.items())]
+    ok, _bad = A.parse_tuples(raw, level=A.TOPIC)
+    return ok
+
+
 #: A linked Drive folder grants reading it (owner, 25 Oct 2026): linking and
 #: enabling are one act. Writing is an explicit tuple.
 DRIVE_READ = ("gdrive.list", "gdrive.search", "gdrive.download")
@@ -147,7 +177,8 @@ def _room_view(scope: Optional[str]) -> dict:
         raw = meta.get("authz")
         view["explicit"], _ = A.parse_tuples(raw if isinstance(raw, list) else [],
                                              level=A.TOPIC)
-        view["derived"] = _toolbox_tuples(meta) + _data_tuples(meta) + _drive_tuples(meta)
+        view["derived"] = (_toolbox_tuples(meta) + _resource_tuples(meta)
+                           + _data_tuples(meta) + _drive_tuples(meta))
         view["members"] = set(TopicService.participants_map(meta))
         view["archived"] = str(meta.get("status") or "").strip().lower() == "archived"
         view["except_all"] = {a for a, vs in _rt.toolbox(meta)["except"].items() if "*" in vs}
