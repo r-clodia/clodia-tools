@@ -121,6 +121,10 @@ def _catalogue() -> dict[str, set[str]]:
             out.setdefault(ns, set()).add(t.name)
     for ns in main._packaged_namespaces():
         out.setdefault(str(ns), set())
+    # Verbs that are a PERMISSION, not a tool the gateway serves: `web.search`
+    # governs the model's native WebSearch (`main.NATIVE_VERB`, option C).
+    for verb in getattr(main, "NATIVE_VERB", {}).values():
+        out.setdefault(verb.partition(".")[0], set()).add(verb)
     try:
         from .proxy import _backends
         for b in _backends():

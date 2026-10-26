@@ -1166,6 +1166,11 @@ NATIVE_GATED_RISKS: dict[str, str] = {
 #: Gate key prefix of a native tool use (`native:<tool>|<chat>`).
 NATIVE_GATE = "native:"
 
+#: The room's verb that governs a native tool (owner, 26 Oct 2026 — option C):
+#: `web.search` is authorised in the Strumenti panel like any verb of «Web», and
+#: A·V·R·Q decides each use of the model's own WebSearch through it.
+NATIVE_VERB: dict[str, str] = {"WebSearch": "web.search"}
+
 _NATIVE_CONSENT_TOOLS: list[Tool] = [
     Tool(name="native.consent",
          description=("Chiede all'owner della stanza di usare uno strumento NATIVO "
@@ -3270,12 +3275,30 @@ async def _native_consent(arguments: dict, agent: str) -> dict:
         raise PermissionError(
             f"native.consent: {tool} esce dal perimetro del gateway e la sessione "
             "non è presidiata: nessuno può approvarlo")
-    key = f"{NATIVE_GATE}{tool}|{current_chat() or '-'}"
-    await _require_gate_consent(
-        agent, key, consume=False,
-        reason=(f"{tool}: {NATIVE_GATED_RISKS[tool]}"
-                + (f" Ricerca: `{query}`" if query else "")),
-        allow_delegation=False)
+    # A·V·R·Q ENFORCED: the room's verb decides (`web.search` for WebSearch).
+    # Not available here → refused; `allow` → no card; `ask` → the owner's card
+    # as before; `deny` → refused. Without enforce: the owner's card, as #570.
+    verdict = "ask"
+    from . import authz_runtime as _azr
+    if _azr.enforcing() and tool in NATIVE_VERB:
+        verb = NATIVE_VERB[tool]
+        from .egress import _scope_of_call
+        scope = _scope_of_call()
+        if not _azr.available(agent, verb, scope):
+            raise PermissionError(
+                f"{tool}: {verb} non è autorizzato qui — l'owner lo abilita "
+                "autorizzando «Web» negli Strumenti della stanza")
+        verdict = _azr.check(agent, verb, {}, scope,
+                             bool(_taint.status(current_chat()).get("tainted"))).effect
+        if verdict == "deny":
+            raise PermissionError(f"{tool}: {verb} è negato da una regola di questa stanza")
+    if verdict != "allow":
+        key = f"{NATIVE_GATE}{tool}|{current_chat() or '-'}"
+        await _require_gate_consent(
+            agent, key, consume=False,
+            reason=(f"{tool}: {NATIVE_GATED_RISKS[tool]}"
+                    + (f" Ricerca: `{query}`" if query else "")),
+            allow_delegation=False)
     _taint.mark(current_chat(), "native", detail=f"{tool}: {query}"[:200], agent=agent)
     try:
         from . import audit as _audit
