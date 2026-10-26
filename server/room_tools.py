@@ -282,7 +282,10 @@ def mcp_catalogue() -> dict[str, dict]:
             "enumerable": True})
         e["namespaces"].append(ns)
         vv = set(verbs) or _backend_verbs(ns)
-        if not vv:
+        if not vv or ns in transports:
+            # Served through a transport (GitHub): the verbs the gateway can
+            # name are a part of them, not the list — say so, so a «read»
+            # level takes it all instead of cutting by a partial list.
             e["enumerable"] = False
         e["verbs"] = sorted(set(e["verbs"]) | vv)
     reg = _registry()
@@ -294,7 +297,9 @@ def mcp_catalogue() -> dict[str, dict]:
                 continue
             for m in c.verbs:
                 if m.scheme:
-                    schemes.setdefault((m.scheme, m.direction), set()).add(m.verb)
+                    # A prefix mapping (`github.create_`) names a family: `*`.
+                    v = f"{m.verb}*" if getattr(m, "prefix", False) else m.verb
+                    schemes.setdefault((m.scheme, m.direction), set()).add(v)
         e["schemes"] = [{"scheme": sc, "direction": d, "verbs": sorted(v)}
                         for (sc, d), v in sorted(schemes.items())]
     return out

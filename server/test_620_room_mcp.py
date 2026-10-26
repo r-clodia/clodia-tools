@@ -165,3 +165,20 @@ class CatalogueTests(unittest.TestCase):
             cat = RT.mcp_catalogue()
         self.assertIn("github", cat)
         self.assertNotIn("mail-reader", cat)
+
+
+class FamilyRowTests(_Env):
+    def test_a_row_on_a_verb_family_reaches_the_family(self):
+        cat = dict(CAT)
+        cat["github"] = {"id": "github", "label": "GitHub", "kind": "connector",
+                         "namespaces": ["github"], "enumerable": False, "verbs": [],
+                         "write": [], "schemes": [{"scheme": "https", "direction": "egress",
+                                                   "verbs": ["github.create_*", "github.push"]}]}
+        with patch.object(RT, "mcp_catalogue", lambda: cat):
+            RT.enable_mcp("SEAL-1", "blog", "github")
+            RT.set_resource("SEAL-1", "blog", "github", "https://github.com/r-clodia/x", "deny")
+            R.invalidate()
+            g, t = R.tuples_for("clodia", "SEAL-1/blog")
+            d = A.decide(g, t, agent="clodia", verb="github.create_issue", resource="*",
+                         targets=["https://github.com/r-clodia/x"], kind=A.WRITE)
+        self.assertEqual(d.effect, "deny")
