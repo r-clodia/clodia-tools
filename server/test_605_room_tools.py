@@ -220,6 +220,19 @@ class RoutesTests(_Base):
     def _owner(self):
         return self._client({"principal": "davide", "on_behalf": True, "human_role": "user"})
 
+    def test_the_tools_epoch_moves_with_the_permissions_only(self):
+        """The agent-server rebuilds a session when this changes (26 Oct)."""
+        c = self._owner()
+        ep = lambda a="redattore": c.get(f"/internal/topics/SEAL-1/blog/tools-epoch?agent={a}").json()["epoch"]
+        e0 = ep()
+        self.assertEqual(ep(), e0)                                   # stable
+        self.svc.post_message("SEAL-1", "blog", "davide", "ciao")    # a message is not a permission
+        self.assertEqual(ep(), e0)
+        c.post("/internal/topics/SEAL-1/blog/tools", json={"action": "enable", "verb": "web.fetch"})
+        e1 = ep()
+        self.assertNotEqual(e1, e0)
+        self.assertNotEqual(ep("estraneo"), e1)                      # membership counts
+
     def test_the_owner_enables_and_it_is_written_and_audited(self):
         c = self._owner()
         r = c.post("/internal/topics/SEAL-1/blog/tools",
