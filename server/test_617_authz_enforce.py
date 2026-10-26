@@ -302,3 +302,45 @@ class AdapterAndCopybrainTests(_Env):
             out = asyncio.run(main._call_tool_unaudited("copybrain.assume",
                                                         {"seed": "officer", "reason": "x"}))
         self.assertIn("copybrain non è disponibile", out[0].text)
+
+
+class NativeWebSearchTests(_Env):
+    """Option C (owner, 26 Oct 2026): the model's WebSearch is governed by the
+    room's `web.search` — authorised with «Web» in the Strumenti panel."""
+
+    def _consent(self, agent="clodia"):
+        import asyncio
+        g = AsyncMock(return_value=None)
+        with patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"), \
+                patch.object(main, "is_unattended", lambda: False), \
+                patch.object(main, "current_chat", lambda: "chan:SEAL-1:blog:clodia"), \
+                patch.object(main._taint, "mark", lambda *a, **k: None), \
+                patch.object(main._taint, "status", lambda c: {"tainted": False}), \
+                patch("server.audit.emit", lambda *a, **k: None), \
+                patch.object(main, "_require_gate_consent", g):
+            try:
+                out = asyncio.run(main._native_consent({"tool": "WebSearch", "query": "q"}, agent))
+            except PermissionError as e:
+                out = e
+        return out, g
+
+    def test_not_authorised_in_the_room_is_refused(self):
+        out, g = self._consent()
+        self.assertIsInstance(out, PermissionError)
+        self.assertIn("web.search", str(out))
+        self.assertFalse(g.await_count)
+
+    def test_web_authorised_searches_without_a_card(self):
+        self.meta_set(tools={"enabled": ["web.*"]})
+        out, g = self._consent()
+        self.assertEqual(out, {"granted": True, "tool": "WebSearch"})
+        self.assertFalse(g.await_count)
+
+    def test_a_rule_that_asks_shows_the_card_and_a_deny_refuses(self):
+        self.meta_set(tools={"enabled": ["web.*"]},
+                      authz=[_t("t1", verb="web.search", rule=[{"effect": "ask", "match": "*"}])])
+        out, g = self._consent()
+        self.assertEqual(g.await_count, 1)
+        self.meta_set(authz=[_t("t2", verb="web.search", rule=[{"effect": "deny", "match": "*"}])])
+        out, g = self._consent()
+        self.assertIsInstance(out, PermissionError)
