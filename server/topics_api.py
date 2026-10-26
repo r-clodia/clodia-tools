@@ -527,9 +527,12 @@ async def topic_data_route(request: Request):
 
 
 async def topic_tools_route(request: Request):
-    """GET  /internal/topics/{tier}/{name}/tools → {enabled, except, enablable}
-    POST /internal/topics/{tier}/{name}/tools {action, verb, agent?} (#605):
-    enable | disable | except | unexcept. Owner (or admin) only, audited.
+    """GET  /internal/topics/{tier}/{name}/tools → {enabled, enablable, gated,
+         mcp_catalogue, mcp, linked_folders}
+    POST /internal/topics/{tier}/{name}/tools {action, …} (#605, #620):
+    enable | disable (verb) · enable_mcp | disable_mcp (mcp) · set_resource |
+    unset_resource (mcp, uri, effect). Owner (or admin) only, audited. No
+    per-agent exceptions (owner, 26 Oct 2026).
 
     Same door as the room's other walls (`_authorize_topic_owner`): enabling a
     verb for every participant IS a wall, and an agent does not move it.
@@ -548,10 +551,8 @@ async def topic_tools_route(request: Request):
             # resource rows and the per-agent levels; linked Drive folders
             # shown among Google's resources (decision 4).
             from .topics.service import drive_folders as _df
-            mcp, exc = room_tools._mcp_entries(meta)
             out["mcp_catalogue"] = room_tools.mcp_catalogue()
-            out["mcp"] = mcp
-            out["except_mcp"] = exc
+            out["mcp"] = room_tools._mcp_entries(meta)
             out["linked_folders"] = [f"gdrive:folder/{f['folder']}" for f in _df(meta)]
             return out
         try:
@@ -569,9 +570,6 @@ async def topic_tools_route(request: Request):
         if action in ("enable", "disable"):
             out = await asyncio.to_thread(room_tools.enable, tier, name, verb,
                                           action == "enable")
-        elif action in ("except", "unexcept"):
-            out = await asyncio.to_thread(room_tools.exception, tier, name, agent, verb,
-                                          action == "except")
         elif action in ("enable_mcp", "disable_mcp"):
             out = await asyncio.to_thread(room_tools.enable_mcp, tier, name,
                                           str(body.get("mcp") or ""), action == "enable_mcp")
@@ -581,9 +579,7 @@ async def topic_tools_route(request: Request):
                 room_tools.set_resource, tier, name, str(body.get("mcp") or ""),
                 str(body.get("uri") or ""),
                 str(body.get("effect") or "") if action == "set_resource" else None, vs)
-        elif action == "except_mcp":
-            out = await asyncio.to_thread(room_tools.except_mcp, tier, name, agent,
-                                          str(body.get("mcp") or ""), str(body.get("level") or ""))
+
         else:
             return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
     except TopicError as e:
@@ -601,7 +597,6 @@ async def topic_tools_route(request: Request):
     _control.safe(_control.emit, "room_tools", str(action), f"{tier}/{name}",
                   verb=verb or None, agent=agent or None, mcp=body.get("mcp") or None,
                   uri=body.get("uri") or None, effect=body.get("effect") or None,
-                  level=body.get("level") or None,
                   by=_actor(request, body)[0] or who or None)
     _invalidate_list_cache()
     return JSONResponse(out)
