@@ -59,6 +59,12 @@ def _data_tuples(meta: dict) -> list[A.Tuple]:
     raw = []
     for imp in _td.imports(meta):
         res = f"{imp['kind']}:{imp['name']}"
+        if imp["kind"] in _td.READ_FOR_PARTICIPANTS:
+            # Read by every participant (26 Oct): a room's tuples reach only
+            # its members (`tuples_for`), so `*` here is «whoever is in».
+            for v in _td._READ_VERBS.get(imp["kind"], ()):
+                raw.append({"id": f"data:{res}:*:{v}", "agent": "*", "verb": v,
+                            "resource": res, "rule": [{"effect": "allow", "match": "*"}]})
         for agent, mode in imp["grants"].items():
             verbs = _td._READ_VERBS.get(imp["kind"], ()) + (
                 _td._WRITE_VERBS.get(imp["kind"], ()) if mode == "write" else ())

@@ -69,8 +69,10 @@ class AvailabilityTests(_Env):
                       drive_folders=[{"name": "drive", "folder": "FOLDER1"}])
         self.assertTrue(R.available("clodia", "web.post", "SEAL-1/blog"))
         self.assertTrue(R.available("officer", "web.post", "SEAL-1/blog"))
+        # A RAG imported in the room is read by every participant (26 Oct).
         self.assertTrue(R.available("officer", "rag.search", "SEAL-1/blog"))
-        self.assertFalse(R.available("clodia", "rag.search", "SEAL-1/blog"))
+        self.assertTrue(R.available("clodia", "rag.search", "SEAL-1/blog"))
+        self.assertFalse(R.available("estraneo", "rag.search", "SEAL-1/blog"))
         self.assertTrue(R.available("clodia", "gdrive.list", "SEAL-1/blog"))
         self.assertFalse(R.available("clodia", "gdrive.upload", "SEAL-1/blog"))
 
