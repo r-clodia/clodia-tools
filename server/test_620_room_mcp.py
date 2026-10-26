@@ -1,0 +1,149 @@
+"""Room tools by MCP, with resource rows and three exception levels (#620)."""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from . import authz as A
+from . import authz_runtime as R
+from . import authz_shadow as S
+from . import main, room_tools as RT, whitelist
+from .topics.local_fs import LocalFsStorage
+from .topics.service import TopicService
+
+CAT = {
+    "google": {"id": "google", "label": "Google Workspace", "kind": "connector",
+               "namespaces": ["gdrive", "gdocs"], "enumerable": True,
+               "verbs": ["gdocs.read", "gdrive.download", "gdrive.list", "gdrive.upload"],
+               "write": ["gdrive.upload"],
+               "schemes": [{"scheme": "gdrive", "direction": "egress", "verbs": ["gdrive.upload"]},
+                           {"scheme": "gdrive", "direction": "source",
+                            "verbs": ["gdrive.download", "gdrive.list"]},
+                           {"scheme": "mailto", "direction": "egress", "verbs": ["gdrive.upload"]}]},
+    "normattiva": {"id": "normattiva", "label": "normattiva", "kind": "mcp",
+                   "namespaces": ["normattiva"], "enumerable": False,
+                   "verbs": [], "write": [], "schemes": []},
+}
+FOLDER = "gdrive:folder/F1"
+
+
+class _Env(unittest.TestCase):
+    def setUp(self):
+        R.invalidate()
+        self.addCleanup(R.invalidate)
+        self.dir = tempfile.mkdtemp(prefix="mcp620-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        tdir = tempfile.mkdtemp(prefix="topics620-")
+        self.addCleanup(shutil.rmtree, tdir, ignore_errors=True)
+        for p in (patch.dict(os.environ, {"CLODIA_TOOLS_STATE_DIR": self.dir}),
+                  patch.object(whitelist, "CONFIG", {"authz_mode": "enforce"}),
+                  patch.object(whitelist, "save_config", lambda: None),
+                  patch.object(whitelist, "reload_config", lambda: None),
+                  patch.object(RT, "mcp_catalogue", lambda: CAT),
+                  patch("server.egress.canonical", lambda u: u)):
+            p.start(); self.addCleanup(p.stop)
+        self.svc = TopicService(LocalFsStorage(tdir))
+        p = patch.object(main, "_topics", lambda: self.svc)
+        p.start(); self.addCleanup(p.stop)
+        self.svc.new("SEAL-1", "blog", {"owner": "davide", "participants": ["clodia", "officer"]})
+        S._global_path().write_text(json.dumps({"tuples": []}))
+
+    def meta(self):
+        return self.svc._read_meta("SEAL-1", "blog")[0]
+
+
+class MutationTests(_Env):
+    def test_an_authorised_mcp_gives_all_its_namespaces(self):
+        RT.enable_mcp("SEAL-1", "blog", "google")
+        tb = RT.toolbox(self.meta())
+        self.assertIn("gdrive.*", tb["enabled"])
+        self.assertIn("gdocs.*", tb["enabled"])
+
+    def test_the_two_forms_never_erase_each_other(self):
+        RT.enable_mcp("SEAL-1", "blog", "google")
+        with patch.object(RT, "check", lambda v: v):
+            RT.enable("SEAL-1", "blog", "web.fetch")
+        raw = self.meta()["tools"]
+        self.assertEqual(raw["enabled"], ["web.fetch"])       # compiled form not baked in
+        self.assertIn("google", raw["mcp"])
+        RT.enable_mcp("SEAL-1", "blog", "normattiva")
+        self.assertEqual(self.meta()["tools"]["enabled"], ["web.fetch"])
+
+    def test_an_unknown_mcp_is_refused(self):
+        with self.assertRaises(RT.ToolboxError):
+            RT.enable_mcp("SEAL-1", "blog", "packs")
+
+    def test_a_resource_must_be_of_the_mcp(self):
+        RT.enable_mcp("SEAL-1", "blog", "google")
+        RT.set_resource("SEAL-1", "blog", "google", FOLDER, "allow")
+        with self.assertRaises(RT.ToolboxError):
+            RT.set_resource("SEAL-1", "blog", "google", "tg:-100", "allow")
+        with self.assertRaises(RT.ToolboxError):
+            RT.set_resource("SEAL-1", "blog", "google", FOLDER, "maybe")
+        self.assertEqual(RT.resources(self.meta())["google"], [{"uri": FOLDER, "effect": "allow"}])
+        RT.set_resource("SEAL-1", "blog", "google", FOLDER, None)
+        self.assertEqual(RT.resources(self.meta())["google"], [])
+
+    def test_a_resource_needs_the_mcp_authorised(self):
+        with self.assertRaises(RT.ToolboxError):
+            RT.set_resource("SEAL-1", "blog", "google", FOLDER, "allow")
+
+    def test_three_levels(self):
+        RT.enable_mcp("SEAL-1", "blog", "google")
+        RT.enable_mcp("SEAL-1", "blog", "normattiva")
+        RT.except_mcp("SEAL-1", "blog", "officer", "google", "read")
+        RT.except_mcp("SEAL-1", "blog", "clodia", "google", "none")
+        exc = RT.toolbox(self.meta())["except"]
+        self.assertEqual(exc["officer"], ["gdrive.upload"])
+        self.assertEqual(exc["clodia"], ["gdocs.*", "gdrive.*"])
+        # verbs not enumerable: «read» cannot be cut where asked → takes it all
+        RT.except_mcp("SEAL-1", "blog", "officer", "normattiva", "read")
+        self.assertIn("normattiva.*", RT.toolbox(self.meta())["except"]["officer"])
+        RT.except_mcp("SEAL-1", "blog", "clodia", "google", "all")
+        self.assertNotIn("clodia", RT.toolbox(self.meta())["except"])
+
+    def test_an_outsider_has_no_level(self):
+        RT.enable_mcp("SEAL-1", "blog", "google")
+        with self.assertRaises(RT.ToolboxError):
+            RT.except_mcp("SEAL-1", "blog", "estraneo", "google", "none")
+
+    def test_revoking_drops_rows_and_levels(self):
+        RT.enable_mcp("SEAL-1", "blog", "google")
+        RT.set_resource("SEAL-1", "blog", "google", FOLDER, "allow")
+        RT.except_mcp("SEAL-1", "blog", "officer", "google", "read")
+        RT.enable_mcp("SEAL-1", "blog", "google", on=False)
+        raw = self.meta()["tools"]
+        self.assertNotIn("mcp", raw)
+        self.assertNotIn("except_mcp", raw)
+
+
+class TupleTests(_Env):
+    def _decide(self, agent, verb, target):
+        R.invalidate()
+        g, t = R.tuples_for(agent, "SEAL-1/blog")
+        return A.decide(g, t, agent=agent, verb=verb, resource="*",
+                        targets=[target], kind=A.WRITE).effect
+
+    def test_a_row_decides_its_target_the_rest_keep_the_default(self):
+        RT.enable_mcp("SEAL-1", "blog", "google")
+        RT.set_resource("SEAL-1", "blog", "google", FOLDER, "allow")
+        self.assertEqual(self._decide("clodia", "gdrive.upload", FOLDER), "allow")
+        self.assertEqual(self._decide("clodia", "gdrive.upload", "gdrive:folder/ALTRA"), "ask")
+        RT.set_resource("SEAL-1", "blog", "google", "mailto:*@x.it", "deny")
+        self.assertEqual(self._decide("clodia", "gdrive.upload", "mailto:a@x.it"), "deny")
+
+    def test_read_only_hides_the_write_verbs(self):
+        RT.enable_mcp("SEAL-1", "blog", "google")
+        RT.except_mcp("SEAL-1", "blog", "officer", "google", "read")
+        R.invalidate()
+        self.assertFalse(R.available("officer", "gdrive.upload", "SEAL-1/blog"))
+        self.assertTrue(R.available("officer", "gdrive.list", "SEAL-1/blog"))
+        self.assertTrue(R.available("clodia", "gdrive.upload", "SEAL-1/blog"))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -192,6 +192,173 @@ def gated_of(enablable: dict[str, list[str]]) -> list[str]:
     return sorted(v for verbs in enablable.values() for v in verbs if gate.is_gated(v))
 
 
+# ---------------------------------------------------------------- MCPs (#620)
+
+#: A pack whose connectors are ONE MCP for the owner (decision 3 of #620):
+#: Drive, Docs, Sheets and Calendar are «Google», not four switches.
+_PACK_AS_ONE: dict[str, tuple[str, str]] = {"google-pack": ("google", "Google Workspace")}
+
+#: Exception levels per MCP (decision 2 of #620).
+LEVELS = ("all", "read", "none")
+EFFECTS = ("allow", "ask", "deny")
+
+
+def _registry():
+    try:
+        from .connectors import resolved as _c
+        return _c.registry()
+    except Exception as e:  # noqa: BLE001 — no registry, no connector MCPs
+        LOG.warning("registro dei connettori non disponibile (%s)", type(e).__name__)
+        return None
+
+
+def _backend_verbs(ns: str) -> set[str]:
+    """The verbs of a mounted MCP backend, if discovery has listed them."""
+    try:
+        from . import proxy
+        return {t.name for t in proxy._TOOL_CACHE.get(ns) or []}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _is_write(verb: str) -> bool:
+    from . import authz_shadow as _s
+    try:
+        return _s.facts(verb, {})["kind"] != "read"
+    except Exception:  # noqa: BLE001 — in doubt a verb writes
+        return True
+
+
+def _groups() -> dict[str, dict]:
+    """`{mcp id: {label, kind, namespaces, connectors}}`: which namespaces make
+    one MCP. A connector that `extends` another (Gmail as a provider of `mail`)
+    adds a provider, not an MCP."""
+    out: dict[str, dict] = {}
+    reg = _registry()
+    for c in (getattr(reg, "connectors", None) or ()):
+        if getattr(c, "extends", ""):
+            continue
+        mid, label = _PACK_AS_ONE.get(c.pack, (c.namespace, c.label or c.namespace))
+        g = out.setdefault(mid, {"label": label, "kind": "connector",
+                                 "namespaces": set(), "connectors": set()})
+        if c.namespace:
+            g["namespaces"].add(c.namespace)
+        g["connectors"].add(c.id)
+    return out
+
+
+def mcp_catalogue() -> dict[str, dict]:
+    """Every MCP a room can authorise (#620), with what the panel needs.
+
+    `verbs` and `write` as far as the gateway can name them (a backend's only
+    once discovery has listed it: `enumerable` says so); `schemes` are the
+    resource kinds the MCP's verbs reach, from the connector manifests, each
+    with its direction and verbs — the rows of the resource panel.
+    """
+    cat = {ns: set(v) for ns, v in _catalogue().items() if ns not in _NOT_ENABLABLE}
+    try:
+        from .connectors import resolved as _c
+        transports = set(_c.transport_backends())
+    except Exception:  # noqa: BLE001
+        transports = set()
+    groups = _groups()
+    owner: dict[str, str] = {}
+    for mid, g in groups.items():
+        for ns in g["namespaces"]:
+            owner[ns] = mid
+    out: dict[str, dict] = {}
+    for ns, verbs in sorted(cat.items()):
+        if ns in transports:
+            continue
+        mid = owner.get(ns, ns)
+        g = groups.get(mid)
+        e = out.setdefault(mid, {
+            "id": mid, "label": (g or {}).get("label") or ns,
+            "kind": (g or {}).get("kind") or ("native" if verbs else "mcp"),
+            "namespaces": [], "verbs": [], "write": [], "schemes": [],
+            "enumerable": True})
+        e["namespaces"].append(ns)
+        vv = set(verbs) or _backend_verbs(ns)
+        if not vv:
+            e["enumerable"] = False
+        e["verbs"] = sorted(set(e["verbs"]) | vv)
+    reg = _registry()
+    for mid, e in out.items():
+        e["write"] = sorted(v for v in e["verbs"] if _is_write(v))
+        schemes: dict[tuple, set] = {}
+        for c in (getattr(reg, "connectors", None) or ()):
+            if c.namespace not in e["namespaces"]:
+                continue
+            for m in c.verbs:
+                if m.scheme:
+                    schemes.setdefault((m.scheme, m.direction), set()).add(m.verb)
+        e["schemes"] = [{"scheme": sc, "direction": d, "verbs": sorted(v)}
+                        for (sc, d), v in sorted(schemes.items())]
+    return out
+
+
+def _mcp_entries(meta: dict) -> tuple[dict, dict]:
+    """`(mcp, except_mcp)` as written in the meta, read defensively: an entry
+    that does not parse grants nothing."""
+    raw = (meta or {}).get(FIELD)
+    raw = raw if isinstance(raw, dict) else {}
+    mcp_raw = raw.get("mcp") if isinstance(raw.get("mcp"), dict) else {}
+    mcp: dict[str, dict] = {}
+    for mid, val in mcp_raw.items():
+        rows = []
+        for r in ((val or {}).get("resources") if isinstance(val, dict) else None) or []:
+            if not isinstance(r, dict):
+                continue
+            uri = " ".join(str(r.get("uri") or "").split())
+            eff = str(r.get("effect") or "").strip().lower()
+            if ":" not in uri or eff not in EFFECTS:
+                continue
+            row = {"uri": uri, "effect": eff}
+            if isinstance(r.get("verbs"), list):
+                row["verbs"] = sorted({str(v) for v in r["verbs"] if str(v).strip()})
+            rows.append(row)
+        mcp[str(mid)] = {"resources": rows}
+    exc_raw = raw.get("except_mcp") if isinstance(raw.get("except_mcp"), dict) else {}
+    exc: dict[str, dict] = {}
+    for agent, per in exc_raw.items():
+        if not isinstance(per, dict):
+            continue
+        levels = {str(m): str(l) for m, l in per.items() if str(l) in ("read", "none")}
+        if levels:
+            exc[str(agent)] = levels
+    return mcp, exc
+
+
+def _compile_mcp(meta: dict) -> tuple[set[str], dict[str, set[str]]]:
+    """The MCP form in the toolbox's own terms: `ns.*` per authorised MCP,
+    and per agent the verbs an exception level takes away. A `read` level on
+    an MCP whose verbs the gateway cannot name takes ALL of it: a cut that
+    cannot be made where the owner asked is not a gift (as `_minus`)."""
+    mcp, exc = _mcp_entries(meta)
+    if not mcp and not exc:
+        return set(), {}
+    cat = mcp_catalogue()
+    enabled: set[str] = set()
+    for mid in mcp:
+        for ns in (cat.get(mid) or {}).get("namespaces") or ():
+            enabled.add(f"{ns}.{WILDCARD}")
+    taken: dict[str, set[str]] = {}
+    for agent, per in exc.items():
+        for mid, level in per.items():
+            e = cat.get(mid) or {}
+            if level == "none" or not e.get("enumerable", False):
+                taken.setdefault(agent, set()).update(
+                    f"{ns}.{WILDCARD}" for ns in e.get("namespaces") or ())
+            else:
+                taken.setdefault(agent, set()).update(e.get("write") or ())
+    return enabled, taken
+
+
+def resources(meta: dict) -> dict[str, list[dict]]:
+    """The resource rows per authorised MCP."""
+    return {mid: v["resources"] for mid, v in _mcp_entries(meta)[0].items()}
+
+
 # ---------------------------------------------------------------- the room's toolbox
 
 def _shape(entry) -> str | None:
@@ -228,6 +395,17 @@ def _exceptable(entry) -> str | None:
 
 
 def toolbox(meta: dict) -> dict:
+    """What the room gives, both forms compiled together (`_legacy` + MCP)."""
+    tb = _legacy(meta)
+    m_enabled, m_taken = _compile_mcp(meta)
+    if m_enabled:
+        tb["enabled"] = sorted(set(tb["enabled"]) | m_enabled)
+    for agent, verbs in m_taken.items():
+        tb["except"][agent] = sorted(set(tb["except"].get(agent, ())) | verbs)
+    return tb
+
+
+def _legacy(meta: dict) -> dict:
     """Il contenuto di `meta["tools"]`, ridotto a ciò che una stanza può dare.
 
     Letto come `topic_data.imports`: voci che non si capiscono vengono scartate,
@@ -333,14 +511,123 @@ def verbs_for(agent: str | None, scope: str | None) -> set[str]:
 # ---------------------------------------------------------------- mutations (owner)
 
 def _write(tier: str, name: str, mutate):
+    """Mutate the LEGACY lists; the MCP form (#620) is carried over as is."""
     svc = _svc()
     meta, ver = svc._read_meta(tier, name)
-    tb = toolbox(meta)
+    tb = _legacy(meta)
+    mcp, exc_mcp = _mcp_entries(meta)
     out = mutate(meta, tb)
-    meta[FIELD] = {"enabled": sorted(set(tb["enabled"])),
-                   "except": {a: sorted(set(v)) for a, v in tb["except"].items() if v}}
+    meta[FIELD] = _serialise(tb, mcp, exc_mcp)
     svc._write_meta(tier, name, meta, base_version=ver)
     return out
+
+
+def _serialise(tb: dict, mcp: dict, exc_mcp: dict) -> dict:
+    out = {"enabled": sorted(set(tb["enabled"])),
+           "except": {a: sorted(set(v)) for a, v in tb["except"].items() if v}}
+    if mcp:
+        out["mcp"] = {m: {"resources": v["resources"]} for m, v in sorted(mcp.items())}
+    levels = {a: dict(sorted(p.items())) for a, p in sorted(exc_mcp.items()) if p}
+    if levels:
+        out["except_mcp"] = levels
+    return out
+
+
+def _write_mcp(tier: str, name: str, mutate):
+    """Mutate the MCP form; the legacy lists are carried over as is."""
+    svc = _svc()
+    meta, ver = svc._read_meta(tier, name)
+    tb = _legacy(meta)
+    mcp, exc_mcp = _mcp_entries(meta)
+    out = mutate(meta, mcp, exc_mcp)
+    meta[FIELD] = _serialise(tb, mcp, exc_mcp)
+    svc._write_meta(tier, name, meta, base_version=ver)
+    return out
+
+
+def _known_mcp(mid: str) -> dict:
+    e = mcp_catalogue().get(str(mid or "").strip())
+    if not e:
+        raise ToolboxError(f"'{mid}' non è un MCP che una stanza può autorizzare")
+    return e
+
+
+def enable_mcp(tier: str, name: str, mid: str, on: bool = True) -> dict:
+    """Authorise (or revoke) a whole MCP in the room (#620, decision 1).
+    Revoking drops its resource rows and the exceptions on it."""
+    mid = str(mid or "").strip()
+    if on:
+        _known_mcp(mid)
+
+    def mutate(meta, mcp, exc):
+        if on:
+            mcp.setdefault(mid, {"resources": []})
+        else:
+            mcp.pop(mid, None)
+            for per in exc.values():
+                per.pop(mid, None)
+        return {"ok": True, "mcp": sorted(mcp)}
+    return _write_mcp(tier, name, mutate)
+
+
+def set_resource(tier: str, name: str, mid: str, uri: str, effect: str | None,
+                 verbs: list[str] | None = None) -> dict:
+    """Add, change (`effect`) or remove (`effect=None`) one resource row of an
+    authorised MCP. The URI's scheme must be one the MCP's verbs reach; the
+    form is the canonical one the PDP compares."""
+    e = _known_mcp(mid)
+    from . import egress as _eg
+    raw = " ".join(str(uri or "").split())
+    u = _eg.canonical(raw) if raw else ""
+    scheme = u.partition(":")[0]
+    reach = {x["scheme"] for x in e["schemes"]}
+    if effect is not None:
+        if effect not in EFFECTS:
+            raise ToolboxError(f"effetto non valido: {effect} (ammessi: {', '.join(EFFECTS)})")
+        if not u or ":" not in u or scheme not in reach:
+            raise ToolboxError(f"'{raw}' non è una risorsa di {e['label']} "
+                               f"(schemi: {', '.join(sorted(reach)) or 'nessuno'})")
+        if verbs:
+            bad = sorted(set(verbs) - set(e["verbs"]))
+            if bad:
+                raise ToolboxError(f"verbi non di {e['label']}: {', '.join(bad)}")
+
+    def mutate(meta, mcp, exc):
+        if mid not in mcp:
+            raise ToolboxError(f"{e['label']} non è autorizzato in questa stanza")
+        rows = [r for r in mcp[mid]["resources"] if r["uri"] != u]
+        if effect is not None:
+            row = {"uri": u, "effect": effect}
+            if verbs:
+                row["verbs"] = sorted(set(verbs))
+            rows.append(row)
+        mcp[mid]["resources"] = sorted(rows, key=lambda r: r["uri"])
+        return {"ok": True, "resources": mcp[mid]["resources"]}
+    return _write_mcp(tier, name, mutate)
+
+
+def except_mcp(tier: str, name: str, agent: str, mid: str, level: str) -> dict:
+    """One agent's level on one MCP: all / read / none (#620, decision 2)."""
+    a = " ".join(str(agent or "").split())
+    level = str(level or "").strip().lower()
+    if not a:
+        raise ToolboxError("serve l'agente dell'eccezione")
+    if level not in LEVELS:
+        raise ToolboxError(f"livello non valido: {level} (ammessi: {', '.join(LEVELS)})")
+    _known_mcp(mid)
+
+    def mutate(meta, mcp, exc):
+        if level != "all" and a not in _svc().participants_map(meta):
+            raise ToolboxError(f"'{a}' non partecipa a {tier}/{name}: non ha nulla da togliere")
+        per = exc.setdefault(a, {})
+        if level == "all":
+            per.pop(mid, None)
+        else:
+            per[mid] = level
+        if not per:
+            exc.pop(a, None)
+        return {"ok": True, "except_mcp": exc}
+    return _write_mcp(tier, name, mutate)
 
 
 def enable(tier: str, name: str, verb: str, on: bool = True) -> dict:
