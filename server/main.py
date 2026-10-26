@@ -1212,6 +1212,37 @@ _RUNTIME_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {
              "agent": {"type": "string", "description": "nome del seed da riavviare (es. 'impiegato-tomato')"}},
              "required": ["agent"]}),
+    # The room's tools from an agent (owner, 26 Oct 2026 — #620): clodia,
+    # sysadmin, segretario may ADD tools (whole MCPs) and resources to a room,
+    # every write behind a human consent. Who holds these verbs is the global
+    # A·V·R·Q tuples' business (`runtime` is a governance namespace: no room
+    # can grant it).
+    Tool(name="runtime.room_tools",
+         description=("Gli strumenti di una stanza: MCP autorizzabili (id, nome, tipi di "
+                      "risorsa) e quelli autorizzati con le loro righe risorsa. Dentro una "
+                      "stanza vale quella stanza; fuori passa tier e name."),
+         inputSchema={"type": "object", "properties": {
+             "tier": {"type": "string"}, "name": {"type": "string"}}}),
+    Tool(name="runtime.room_authorize_mcp",
+         description=("Autorizza (on=true) o revoca (on=false) un MCP intero in una stanza: "
+                      "tutti i suoi verbi per tutti i partecipanti. Chiede SEMPRE conferma "
+                      "(all'owner nella stanza, a un admin fuori). Dentro una stanza agisci "
+                      "solo su quella stanza."),
+         inputSchema={"type": "object", "properties": {
+             "mcp": {"type": "string", "description": "id dall'elenco di runtime.room_tools"},
+             "on": {"type": "boolean", "default": True},
+             "tier": {"type": "string"}, "name": {"type": "string"}},
+             "required": ["mcp"]}),
+    Tool(name="runtime.room_resource",
+         description=("Aggiunge o cambia una riga risorsa di un MCP autorizzato (es. "
+                      "gdrive:folder/<id>, mailto:*@dominio.it, https://github.com/org/repo) "
+                      "con effetto allow|ask|deny, oppure la toglie con effect=remove. Chiede "
+                      "SEMPRE conferma."),
+         inputSchema={"type": "object", "properties": {
+             "mcp": {"type": "string"}, "uri": {"type": "string"},
+             "effect": {"type": "string", "enum": ["allow", "ask", "deny", "remove"]},
+             "tier": {"type": "string"}, "name": {"type": "string"}},
+             "required": ["mcp", "uri", "effect"]}),
     Tool(name="runtime.inspect_topic",
          description=("OPS/STEWARD: ispeziona UN topic specifico (di norma quello da cui "
                       "l'utente ti sta chiamando nel widget). Ritorna metadati (titolo, "
@@ -2250,6 +2281,86 @@ def _dispatch_runtime(name: str, arguments: dict, caller: str | None = None):
         return runtime.inspect_topic(arguments.get("tier"), arguments.get("name"),
                                      by=caller or "")
     raise ValueError(f"unknown runtime tool: {name}")
+
+
+_ROOM_TOOL_VERBS = frozenset({"runtime.room_tools", "runtime.room_authorize_mcp",
+                              "runtime.room_resource"})
+
+
+def _room_target(arguments: dict) -> tuple[str, str, bool]:
+    """`(tier, name, in_room)`. In a room the verb acts on THAT room only — the
+    signed claim decides «here», never an argument; outside one the room is
+    named explicitly."""
+    from .egress import _scope_of_call
+    scope = _scope_of_call()
+    want = "/".join(x for x in (str(arguments.get("tier") or "").strip(),
+                                str(arguments.get("name") or "").strip()) if x)
+    if scope:
+        if want and want != scope:
+            raise PermissionError(f"da {scope} agisci solo su questa stanza, non su {want}")
+        tier, _, nm = scope.partition("/")
+        return tier, nm, True
+    tier, _, nm = want.partition("/")
+    if not (tier and nm):
+        raise ValueError("fuori da una stanza servono tier e name")
+    return tier, nm, False
+
+
+async def _room_tools_verb(name: str, arguments: dict, agent: str) -> dict:
+    """`runtime.room_*` (#620): read a room's tools, or add tools and
+    resources behind a consent — the room's OWNER when called in the room
+    (`authz:`, walls), an ADMIN when called from outside (`authz-global:`)."""
+    from . import room_tools as _rt
+    tier, nm, in_room = _room_target(arguments)
+    if name == "runtime.room_tools":
+        def _read():
+            meta = _topics()._read_meta(tier, nm)[0]
+            cat = _rt.mcp_catalogue()
+            return {"room": f"{tier}/{nm}",
+                    "authorised": _rt._mcp_entries(meta),
+                    "catalogue": {k: {"label": v["label"],
+                                      "schemes": sorted({x["scheme"] for x in v["schemes"]})}
+                                  for k, v in sorted(cat.items())}}
+        return await asyncio.to_thread(_read)
+    if is_unattended():
+        raise PermissionError(f"{name} chiede conferma, e in un job non presidiato "
+                              "nessuno può darla")
+    mid = str(arguments.get("mcp") or "").strip()
+    e = _rt._known_mcp(mid)                          # refuse BEFORE opening a card
+    if name == "runtime.room_authorize_mcp":
+        on = arguments.get("on", True) is not False
+        what = f"{'autorizzare' if on else 'revocare'} {e['label']} (tutti i suoi verbi)"
+        detail = f"{mid}|{'on' if on else 'off'}"
+    else:
+        uri = " ".join(str(arguments.get("uri") or "").split())
+        eff = str(arguments.get("effect") or "").strip().lower()
+        if eff not in ("allow", "ask", "deny", "remove"):
+            raise ValueError("effect: allow | ask | deny | remove")
+        if eff != "remove":
+            from . import egress as _eg
+            sc = _eg.canonical(uri).partition(":")[0]
+            if sc not in {x["scheme"] for x in e["schemes"]}:
+                raise ValueError(f"'{uri}' non è una risorsa di {e['label']}")
+        what = (f"togliere la riga {uri} da {e['label']}" if eff == "remove"
+                else f"{e['label']}: {eff} su {uri}")
+        detail = f"{mid}|{uri}|{eff}"
+    prefix = "authz:" if in_room else "authz-global:"
+    await _require_gate_consent(
+        agent, f"{prefix}{name}|{tier}/{nm}|{detail}"[:900], consume=True,
+        reason=f"@{agent} chiede di {what} nella stanza {tier}/{nm}",
+        allow_delegation=False)
+    if name == "runtime.room_authorize_mcp":
+        out = await asyncio.to_thread(_rt.enable_mcp, tier, nm, mid, on)
+    else:
+        out = await asyncio.to_thread(_rt.set_resource, tier, nm, mid, uri,
+                                      None if eff == "remove" else eff)
+    from . import authz_runtime as _azr
+    _azr.invalidate()
+    from .audit import control as _control
+    _control.safe(_control.emit, "room_tools", name, f"{tier}/{nm}", mcp=mid,
+                  uri=arguments.get("uri") or None, effect=arguments.get("effect") or None,
+                  by=agent)
+    return {"room": f"{tier}/{nm}", **out}
 
 
 def _dispatch_jobs(name: str, a: dict, caller: str | None):
@@ -5350,6 +5461,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_memory(name, arguments)
         elif name.startswith(("egress.", "ingress.")):
             result = _dispatch_egress_admin(name, arguments)
+        elif name in _ROOM_TOOL_VERBS:
+            result = await _room_tools_verb(name, arguments, _ag or "")
         elif name.startswith("runtime."):
             # proxy httpx SINCRONO all'agent-server → offload su thread (no blocco loop)
             result = await asyncio.to_thread(_dispatch_runtime, name, arguments, _ag)

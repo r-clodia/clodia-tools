@@ -151,3 +151,77 @@ class FamilyRowTests(_Env):
             d = A.decide(g, t, agent="clodia", verb="github.create_issue", resource="*",
                          targets=["https://github.com/r-clodia/x"], kind=A.WRITE)
         self.assertEqual(d.effect, "deny")
+
+
+class RuntimeVerbTests(_Env):
+    """`runtime.room_*`: agents add tools and resources behind a consent."""
+
+    def _run(self, name, args, scope="SEAL-1/blog", unattended=False):
+        import asyncio
+        from unittest.mock import AsyncMock
+        g = AsyncMock(return_value=None)
+        with patch("server.egress._scope_of_call", lambda: scope), \
+                patch.object(main, "is_unattended", lambda: unattended), \
+                patch.object(main, "_require_gate_consent", g):
+            try:
+                out = asyncio.run(main._room_tools_verb(name, args, "segretario"))
+            except Exception as e:  # noqa: BLE001
+                out = e
+        return out, g
+
+    def test_reading_needs_no_consent(self):
+        out, g = self._run("runtime.room_tools", {})
+        self.assertEqual(out["room"], "SEAL-1/blog")
+        self.assertIn("google", out["catalogue"])
+        self.assertFalse(g.await_count)
+
+    def test_authorising_asks_the_owner_then_writes(self):
+        out, g = self._run("runtime.room_authorize_mcp", {"mcp": "google"})
+        self.assertEqual(g.await_count, 1)
+        self.assertTrue(g.await_args.args[1].startswith("authz:runtime.room_authorize_mcp|SEAL-1/blog"))
+        self.assertIn("google", RT._mcp_entries(self.meta()))
+        out, g = self._run("runtime.room_resource",
+                           {"mcp": "google", "uri": FOLDER, "effect": "allow"})
+        self.assertEqual(g.await_count, 1)
+        self.assertEqual(RT.resources(self.meta())["google"], [{"uri": FOLDER, "effect": "allow"}])
+        self._run("runtime.room_resource", {"mcp": "google", "uri": FOLDER, "effect": "remove"})
+        self.assertEqual(RT.resources(self.meta())["google"], [])
+
+    def test_a_refused_consent_writes_nothing(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        g = AsyncMock(side_effect=PermissionError("negato"))
+        with patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"), \
+                patch.object(main, "is_unattended", lambda: False), \
+                patch.object(main, "_require_gate_consent", g):
+            with self.assertRaises(PermissionError):
+                asyncio.run(main._room_tools_verb("runtime.room_authorize_mcp",
+                                                  {"mcp": "google"}, "segretario"))
+        self.assertNotIn("google", RT._mcp_entries(self.meta()))
+
+    def test_in_a_room_only_that_room(self):
+        out, g = self._run("runtime.room_authorize_mcp",
+                           {"mcp": "google", "tier": "SEAL-1", "name": "altra"})
+        self.assertIsInstance(out, PermissionError)
+        self.assertFalse(g.await_count)
+
+    def test_outside_a_room_an_admin_answers(self):
+        out, g = self._run("runtime.room_authorize_mcp",
+                           {"mcp": "google", "tier": "SEAL-1", "name": "blog"}, scope=None)
+        self.assertTrue(g.await_args.args[1].startswith("authz-global:"))
+
+    def test_bad_input_and_jobs_open_no_card(self):
+        for args in ({"mcp": "packs"}, ):
+            out, g = self._run("runtime.room_authorize_mcp", args)
+            self.assertIsInstance(out, Exception)
+            self.assertFalse(g.await_count)
+        out, g = self._run("runtime.room_resource", {"mcp": "google", "uri": "tg:-1", "effect": "allow"})
+        self.assertIsInstance(out, ValueError)
+        self.assertFalse(g.await_count)
+        out, g = self._run("runtime.room_authorize_mcp", {"mcp": "google"}, unattended=True)
+        self.assertIsInstance(out, PermissionError)
+        self.assertFalse(g.await_count)
+
+    def test_no_room_can_grant_these_verbs(self):
+        with self.assertRaises(RT.ToolboxError):
+            RT.check("runtime.room_authorize_mcp")
