@@ -283,6 +283,30 @@ def mcp_catalogue() -> dict[str, dict]:
     return out
 
 
+def mcp_for_namespace(ns: str) -> str | None:
+    """The MCP a namespace belongs to (`gdrive` → `google`), or None."""
+    for mid, e in mcp_catalogue().items():
+        if ns in e["namespaces"]:
+            return mid
+    return None
+
+
+def authorise_in_meta(meta: dict, mid: str) -> bool:
+    """Add `mid` to the room's authorised MCPs IN `meta` (the caller writes
+    it): linking a resource authorises its MCP (owner, 26 Oct 2026). True if
+    it was not there."""
+    tools = meta.get(FIELD)
+    if not isinstance(tools, dict):
+        tools = meta[FIELD] = {"enabled": []}
+    mcp = tools.get("mcp")
+    if not isinstance(mcp, dict):
+        mcp = tools["mcp"] = {}
+    if mid in mcp:
+        return False
+    mcp[mid] = {"resources": []}
+    return True
+
+
 def _mcp_entries(meta: dict) -> dict:
     """The authorised MCPs and their rows as written in the meta, read
     defensively: an entry that does not parse grants nothing."""

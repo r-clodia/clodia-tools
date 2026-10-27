@@ -1159,8 +1159,23 @@ async def connector_action(request: Request):
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "bad_json"}, status_code=400)
-        return JSONResponse(ca.apply(connector, action, tier, name,
-                                     body=body or {}, principal=principal or ""))
+        out = ca.apply(connector, action, tier, name,
+                       body=body or {}, principal=principal or "")
+        if str((body or {}).get("action") or "connect") == "connect":
+            # Linking authorises its MCP in the room (owner, 26 Oct 2026),
+            # whoever links — not only the webui (27 Oct).
+            try:
+                mid = room_tools.mcp_for_namespace(getattr(connector, "namespace", "") or "")
+                if mid and mid not in room_tools._mcp_entries(
+                        _service()._read_meta(tier, name)[0]):
+                    room_tools.enable_mcp(tier, name, mid)
+                    from . import authz_runtime as _azr
+                    _azr.invalidate()
+                    out = {**(out if isinstance(out, dict) else {}), "mcp_authorised": mid}
+            except Exception as e:  # noqa: BLE001 — the link stands; say why
+                LOG.warning("connettore %s su %s/%s: MCP non autorizzato (%s)",
+                            getattr(connector, "id", "?"), tier, name, e)
+        return JSONResponse(out)
     except ca.TopicMissing as e:
         return JSONResponse({"error": str(e)[:400]}, status_code=404)
     except ca.ConnectorNotAllowed as e:

@@ -1535,14 +1535,24 @@ class TopicService:
         `_require_approved_folder`, entry 32): questo verbo NARROWS il
         perimetro di un canale dentro ciò che è già autorizzato, non lo apre.
         """
-        self._require_approved_folder(folder, tier, name)
+        from .. import authz_runtime as _azr
+        if not _azr.enforcing():
+            # Under A·V·R·Q the owner's consent on this link decides (the
+            # verb is a wall): the instance-wide whitelist is not asked any
+            # more — approving it widened the folder for EVERY agent (27 Oct).
+            self._require_approved_folder(folder, tier, name)
         meta, ver = self._read_meta(tier, name)
         existing = drive_folders(meta)
         nome = _unique_name(mount_name or "drive", {str(f.get("name") or "") for f in existing})
         voce = {"name": nome, "folder": str(folder).strip(), "account": account}
         meta["drive_folders"] = [f for f in existing if f.get("name") != nome] + [voce]
+        # Linking authorises (owner, 26 Oct 2026): a folder linked by an agent
+        # left the room without Google, and nobody could use it (27 Oct).
+        from .. import room_tools as _rt
+        authorised = _rt.authorise_in_meta(meta, _rt.mcp_for_namespace("gdrive") or "google")
         self._write_meta(tier, name, meta, base_version=ver)
-        return {"ok": True, "drive_folder": voce}
+        _azr.invalidate()
+        return {"ok": True, "drive_folder": voce, "mcp_authorised": authorised}
 
     def drive_folder_remove(self, tier: str, name: str, mount_name: str) -> dict:
         meta, ver = self._read_meta(tier, name)
