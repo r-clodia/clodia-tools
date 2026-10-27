@@ -225,3 +225,25 @@ class RuntimeVerbTests(_Env):
     def test_no_room_can_grant_these_verbs(self):
         with self.assertRaises(RT.ToolboxError):
             RT.check("runtime.room_authorize_mcp")
+
+
+class LinkAuthorisesTests(_Env):
+    """Linking a Drive folder authorises Google in the room, whoever links
+    (27 Oct 2026: an agent linked one and the room stayed without Google)."""
+
+    def test_an_agent_linking_a_folder_authorises_google(self):
+        with patch.object(RT, "mcp_for_namespace", lambda ns: "google"):
+            out = self.svc.drive_folder_add("SEAL-1", "blog", "F9")
+        self.assertTrue(out["mcp_authorised"])
+        self.assertIn("google", RT._mcp_entries(self.meta()))
+        self.assertIn("gdrive.*", RT.toolbox(self.meta())["enabled"])
+
+    def test_under_enforce_the_global_whitelist_is_not_asked(self):
+        from .tools import gdrive_root
+        with patch.object(gdrive_root, "approved_folders", lambda: {"ALTRA"}), \
+                patch.object(RT, "mcp_for_namespace", lambda ns: "google"):
+            self.svc.drive_folder_add("SEAL-1", "blog", "F9")         # enforce: ok
+            whitelist.CONFIG["authz_mode"] = "shadow"
+            from .topics.service import TopicError
+            with self.assertRaises(TopicError):
+                self.svc.drive_folder_add("SEAL-1", "blog", "F10")    # legacy: refused
