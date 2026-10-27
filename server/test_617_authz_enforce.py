@@ -344,3 +344,38 @@ class NativeWebSearchTests(_Env):
         self.meta_set(authz=[_t("t2", verb="web.search", rule=[{"effect": "deny", "match": "*"}])])
         out, g = self._consent()
         self.assertIsInstance(out, PermissionError)
+
+
+class AvailableRouteTests(_Env):
+    """#626: the agent-server asks the gateway instead of reading seeds."""
+
+    def _get(self, payload, qs):
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+        from . import topics_api
+
+        def fake(request):
+            request.state.auth_payload = payload
+            return payload.get("agent") or payload.get("principal"), None
+        with patch.object(topics_api, "_authorize", fake):
+            return TestClient(Starlette(routes=topics_api.routes)).get(
+                "/internal/authz/available?" + qs)
+
+    def test_the_agent_server_asks_the_room(self):
+        self.meta_set(tools={"enabled": ["web.*"]})
+        r = self._get({"agent": "agent-server", "role": "agent-server"},
+                      "agent=clodia&scope=SEAL-1/blog&verbs=web.fetch,email.send")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["available"], {"web.fetch": True, "email.send": False})
+
+    def test_only_the_agent_server(self):
+        r = self._get({"principal": "davide", "on_behalf": True, "human_role": "admin"},
+                      "agent=clodia&verbs=web.fetch")
+        self.assertEqual(r.status_code, 403)
+
+    def test_origin_follows_the_tuples_when_enforcing(self):
+        from . import origin
+        self.meta_set(tools={"enabled": ["web.*"]})
+        with patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"):
+            self.assertTrue(origin._agent_may("officer", "web.fetch"))
+            self.assertFalse(origin._agent_may("officer", "email.send"))

@@ -74,6 +74,13 @@ def _agent_may(name: str, verb: str) -> bool:
     from .whitelist import agent_config, agent_denies
     if agent_denies(verb, name):
         return False                     # il deny vince su tutto, anche su `*`
+    from . import authz_runtime as _azr
+    if _azr.enforcing():
+        # The tuples decide, in the room of the call (#626): the seeds no
+        # longer carry verbs, and the seed's list would call every delegation
+        # through a room verb «would_deny».
+        from .egress import _scope_of_call
+        return bool(_azr.available(name, verb, _scope_of_call()))
     if _m._is_super(name):
         return True
     from .whitelist import effective_tools

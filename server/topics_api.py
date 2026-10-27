@@ -668,6 +668,42 @@ async def authz_shadow_route(request: Request):
     return JSONResponse(await asyncio.to_thread(authz_shadow.summary, limit))
 
 
+async def authz_available_route(request: Request):
+    """GET /internal/authz/available?agent=A&scope=TIER/NAME&verbs=v1,v2
+    → {agent, scope, available: {verb: bool}}  (#626)
+
+    «Does this agent have this verb here?» for the agent-server, which used to
+    read the seed's `tool_permissions` (the relay's `channel.deliver`, the
+    admin of other agents' capabilities, the welcome's team pill, the static
+    trifecta). The seeds no longer carry verbs: the tuples decide. Without
+    `scope` the answer is outside a room. The agent-server only."""
+    from .pki_mint import ROLE_AGENT_SERVER
+    from . import authz_runtime as _azr
+    who, err = _authorize(request)
+    if err:
+        return err
+    p = getattr(request.state, "auth_payload", None) or {}
+    if p.get("role") != ROLE_AGENT_SERVER:
+        return JSONResponse({"error": "riservato all'agent-server"}, status_code=403)
+    agent = str(request.query_params.get("agent") or "").strip()
+    scope = str(request.query_params.get("scope") or "").strip() or None
+    verbs = [v.strip() for v in str(request.query_params.get("verbs") or "").split(",")
+             if v.strip()][:200]
+    if not agent or not verbs:
+        return JSONResponse({"error": "servono agent e verbs"}, status_code=400)
+
+    def _answer():
+        out = {}
+        for v in verbs:
+            try:
+                out[v] = bool(_azr.available(agent, v, scope))
+            except Exception:  # noqa: BLE001 — in doubt, not available
+                out[v] = False
+        return out
+    return JSONResponse({"agent": agent, "scope": scope,
+                         "available": await asyncio.to_thread(_answer)})
+
+
 async def authz_route(request: Request):
     """GET  /internal/authz → {mode, tuples, problems}
     POST /internal/authz {action: plan, days?} | {action: apply, plan} |
@@ -684,8 +720,12 @@ async def authz_route(request: Request):
             or p.get("role") == ROLE_AGENT_SERVER):
         return JSONResponse({"error": "riservato agli admin"}, status_code=403)
     if request.method == "GET":
+        only = str(request.query_params.get("agent") or "").strip()
+
         def _read():
             ts, bad = _azs.global_tuples()
+            if only:                 # one agent's card (#626): its rules and `*`'s
+                ts = [t for t in ts if t.agent in (only, "*")]
             return {"mode": _azr.mode(), "tuples": [vars(t) | {"rule": [vars(c) for c in t.rule]}
                                                      for t in ts], "problems": bad}
         return JSONResponse(await asyncio.to_thread(_read))
@@ -1638,6 +1678,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/tools-epoch", topic_tools_epoch_route, methods=["GET"]),
     Route("/internal/dm-tools", dm_tools_route, methods=["GET", "POST"]),
     Route("/internal/authz/shadow", authz_shadow_route, methods=["GET"]),
+    Route("/internal/authz/available", authz_available_route, methods=["GET"]),
     Route("/internal/authz", authz_route, methods=["GET", "POST"]),
     Route("/internal/data-catalog", data_catalog_route, methods=["GET", "POST"]),
     Route("/internal/topic-index", topic_index_route, methods=["GET"]),
