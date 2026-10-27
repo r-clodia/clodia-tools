@@ -126,6 +126,13 @@ def get(kind: str, name: str) -> dict | None:
 
 
 def effective_tier(entry: dict) -> str:
+    """The level of a catalog resource. Set by an admin (`tier_set`): that
+    level, also below what the data's source declares — the owner lowered
+    assetti-contabili/contabilita from the pack's SEAL-4 to SEAL-1 and the
+    catalog kept SEAL-4 in silence (27 Oct 2026). Otherwise the higher of the
+    catalog's and the source's."""
+    if entry.get("tier_set") and entry.get("tier"):
+        return norm_tier(entry["tier"])
     src = source_tier(entry["kind"], entry["name"])
     tiers = [entry.get("tier") or "SEAL-4"] + ([src] if src else [])
     return _TIERS[max(rank(t) for t in tiers)]
@@ -156,6 +163,9 @@ def update(kind: str, name: str, *, tier: str | None = None,
             if not valid_tier(tier):
                 raise ValueError(f"tier sconosciuto: '{tier}' (SEAL-0 … SEAL-4)")
             data[k]["tier"] = norm_tier(tier)
+            # An admin's level is the level (owner, 27 Oct 2026): the one the
+            # data's source declares is the starting value, not a floor.
+            data[k]["tier_set"] = True
         if importers is not None:
             clean = sorted({str(i).strip() for i in importers if str(i).strip()})
             data[k]["importers"] = clean or [ADMIN]
