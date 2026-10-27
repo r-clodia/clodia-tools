@@ -54,9 +54,12 @@ class CatalogTests(_Base):
         e = cat.get("datastore", "tomato-pack/clienti")
         self.assertEqual((e["tier"], e["importers"]), ("SEAL-2", ["@admin"]))
 
-    def test_the_tier_can_be_raised_never_lowered_below_the_data(self):
-        cat.update("datastore", "tomato-pack/clienti", tier="SEAL-0")
+    def test_the_admins_level_is_the_level(self):
+        """The source's level is the starting value; an admin's choice wins,
+        also downward (owner, 27 Oct 2026)."""
         self.assertEqual(cat.effective_tier(cat.get("datastore", "tomato-pack/clienti")), "SEAL-2")
+        cat.update("datastore", "tomato-pack/clienti", tier="SEAL-0")
+        self.assertEqual(cat.effective_tier(cat.get("datastore", "tomato-pack/clienti")), "SEAL-0")
         cat.update("datastore", "tomato-pack/clienti", tier="SEAL-3")
         self.assertEqual(cat.effective_tier(cat.get("datastore", "tomato-pack/clienti")), "SEAL-3")
 
