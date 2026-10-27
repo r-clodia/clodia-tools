@@ -157,7 +157,9 @@ def rooms(indexed: bool = False) -> list[dict]:
     # A·V·R·Q (owner, 27 Oct 2026): mail enters a room only where the room
     # authorised the Email MCP. The courier saved envelopes and attachments
     # in bilancio-tomato-2026 although Email was not authorised there.
-    return [r for r in out if _email_authorised(r["tier"], r["name"])]
+    # The room's own address (a tagged row) is not a linked mailbox: it
+    # delivers regardless of the Email MCP (owner, 27 Oct 2026).
+    return [r for r in out if r.get("tag") or _email_authorised(r["tier"], r["name"])]
 
 
 def _email_authorised(tier: str, name: str) -> bool:
@@ -213,8 +215,12 @@ def _colony_rooms(existing: list[dict], indexed_ok: bool = False) -> list[dict]:
         if (tier, name) in already:
             continue
         # Cheap check first: the senders are config, opening a topic is not.
+        # Every room with a code gets its row, senders or not: its own
+        # address delivers whoever writes (owner, 27 Oct 2026) — but only
+        # through the one-search index: without it a row is one search per
+        # topic per cycle, the 2.128.0 lesson.
         sig = _senders(f"{tier}/{name}", with_global=indexed)
-        if not sig["senders"] or not _topic_exists(tier, name):
+        if (not sig["senders"] and not indexed) or not _topic_exists(tier, name):
             continue
         out.append({"tier": tier, "name": name, "account": acct, "address": addr,
                     "strict": bool(egress.ingress_strict(f"{tier}/{name}")),

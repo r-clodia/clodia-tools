@@ -326,6 +326,12 @@ class Perimeter:
         from .. import egress
         from ..mail_courier_api import BOX_INDEX_TAG
         tag = self.courier_tag()
+        if tag and tag != BOX_INDEX_TAG and egress._scope_of_call():
+            # The room's own address (`box+CODE@`) always delivers into its
+            # room, whoever sends (owner, 27 Oct 2026): writing to that address
+            # IS the declaration. What arrives stays untrusted (provenance and
+            # taint as any courier mail).
+            return True
         return bool(egress.room_declares_sender(
             header or "", egress._scope_of_call(),
             with_global=bool(tag) and tag != BOX_INDEX_TAG))

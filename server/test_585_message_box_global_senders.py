@@ -103,6 +103,13 @@ class PerimeterTests(unittest.TestCase):
             tok = C.COURIER_TAG.set("UD54G")
             try:
                 self.assertTrue(per.room_declares_sender("dcarboni@gmail.com"))
+                # The room's own address: any sender (owner, 27 Oct 2026).
+                self.assertTrue(per.room_declares_sender("chiunque@altrove.it"))
+            finally:
+                C.COURIER_TAG.reset(tok)
+            tok = C.COURIER_TAG.set(C.BOX_INDEX_TAG)
+            try:
+                self.assertFalse(per.room_declares_sender("chiunque@altrove.it"))
             finally:
                 C.COURIER_TAG.reset(tok)
 
@@ -135,6 +142,12 @@ class IndexGateTests(unittest.TestCase):
         self.assertEqual(self._rooms(cfg, {"courier_message_box"}), [])
         (row,) = self._rooms(_cfg(own=["mailfrom:a@b.it"]), {"courier_message_box"})
         self.assertIs(row["indexed"], False)
+
+    def test_with_the_index_a_room_without_senders_gets_its_row(self):
+        """The room's own address delivers whoever writes (owner, 27 Oct
+        2026): with the index, no sender is needed for the row."""
+        (row,) = self._rooms(_cfg(), {"courier_message_box", "courier_box_index"})
+        self.assertEqual((row["tag"], row["senders"]), ("UD54G", 0))
 
     def test_with_the_index_the_row_says_so(self):
         cfg = _cfg(glob=["mailfrom:dcarboni@gmail.com"])
