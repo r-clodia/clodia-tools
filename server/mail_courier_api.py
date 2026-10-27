@@ -154,7 +154,25 @@ def rooms(indexed: bool = False) -> list[dict]:
             if addr in boxes and row not in out:
                 out.append(row)
     out.extend(_colony_rooms(out, indexed))
-    return out
+    # A·V·R·Q (owner, 27 Oct 2026): mail enters a room only where the room
+    # authorised the Email MCP. The courier saved envelopes and attachments
+    # in bilancio-tomato-2026 although Email was not authorised there.
+    return [r for r in out if _email_authorised(r["tier"], r["name"])]
+
+
+def _email_authorised(tier: str, name: str) -> bool:
+    """May mail enter this room? Without enforce: as before (yes). Under
+    enforce: only if the room gives `email.*` (the Email MCP, or a legacy
+    per-verb entry). An unreadable room gets nothing."""
+    from . import authz_runtime
+    if not authz_runtime.enforcing():
+        return True
+    from . import main, room_tools
+    try:
+        meta = main._topics()._read_meta(tier, name)[0]
+    except Exception:  # noqa: BLE001
+        return False
+    return any(e.partition(".")[0] == "email" for e in room_tools.toolbox(meta)["enabled"])
 
 
 def _colony_rooms(existing: list[dict], indexed_ok: bool = False) -> list[dict]:
