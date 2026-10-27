@@ -128,7 +128,9 @@ class ColonyRoomsTests(unittest.TestCase):
         self.assertEqual((row["account"], row["tag"], row["senders"]),
                          ("devnullboxx", "DJ56K", 1))
 
-    def test_no_declared_sender_no_row(self):
+    def test_no_declared_sender_no_row_without_the_index(self):
+        """Without the one-search index a row is one search per topic: the
+        sender-less rows of #627 need the index (see test_585)."""
         self.assertEqual(self._rooms({}, {"DJ56K": ("SEAL-2", "titulon")}), [])
 
     def test_a_room_already_reading_the_colony_mailbox_gets_no_second_row(self):
