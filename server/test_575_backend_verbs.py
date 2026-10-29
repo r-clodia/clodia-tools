@@ -88,7 +88,8 @@ class BackendVerbsTests(unittest.TestCase):
         blob = json.dumps(r)
         self.assertNotIn("s3cr3t", blob)
         self.assertNotIn("inputSchema", blob)
-        self.assertEqual(set(r["verbs"][0]), {"name", "description", "enabled"})
+        self.assertEqual(set(r["verbs"][0]),
+                         {"name", "tool", "description", "enabled", "disabled", "new"})
 
     def test_a_name_listed_twice_appears_once(self):
         r = self._run([_T("a", "first"), _T("a", "second")])
