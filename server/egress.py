@@ -262,7 +262,13 @@ def _matches(dest: str, rule: str) -> bool:
             return False
         return r_rest.startswith("*") and d_rest.endswith(r_rest[1:])
     if hierarchical(r.split(":", 1)[0]) and d.startswith(r):
-        return True
+        # On a PATH boundary (#636): `…/owner/repo` covers `…/owner/repo` and
+        # `…/owner/repo/tree/main`, never `…/owner/repo-fork`. A rule that
+        # ends with a separator — `/` (a bare host too: `canonical` ends it
+        # with `/`), or the `.` of a namespace (`mcp:normattiva.`) — covers
+        # everything under it, as before.
+        if r.endswith(("/", ".", ":")) or len(d) == len(r) or d[len(r)] in "/?#":
+            return True
     return False
 
 

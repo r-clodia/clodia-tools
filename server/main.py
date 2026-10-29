@@ -5039,6 +5039,9 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
         # except the destination whitelist, which A·V·R·Q replaces whenever it
         # judged the call on readable targets (`_avrq_judged_targets`).
         _avrq_judged_targets = False
+        _azd = None
+        from . import authz_runtime as _azr_j
+        _azr_j.JUDGED.set(None)   # nothing judged for this call yet (#635)
         if not is_on_behalf() and not _is_super(_ag) \
                 and name not in set(current_scoped_tools()) \
                 and name not in _DELIVER_VIA.get():
@@ -5049,8 +5052,18 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             if _azr.enforcing():
                 from . import egress as _eg_r
                 from . import taint as _taint_r
+                # What the call acts on, when the serving component names it
+                # (#635: the repository of a git verb). Off the event loop:
+                # it reads the working tree's origin with git.
+                _comp_targets = await asyncio.to_thread(
+                    _azr.component_targets, name, arguments)
                 _azd = _azr.check(_ag or "", name, arguments, _eg_r._scope_of_call(),
-                                  bool(_taint_r.status(current_chat()).get("tainted")))
+                                  bool(_taint_r.status(current_chat()).get("tainted")),
+                                  targets=_comp_targets)
+                if _comp_targets:
+                    # The component compares what it is about to act on with
+                    # what was judged here (`host.judged_targets`).
+                    _azr.JUDGED.set(tuple(_comp_targets))
                 from . import observe as _obs_a
                 if _azd.effect == "deny":
                     if _obs_a.skipping():
@@ -5183,20 +5196,28 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             _gated_agente = agent_gates(name, _ag)
             if ((_gated_globale or _gated_agente or _off_profile)
                     and _gate.perimeter_answers(name)):
-                try:
-                    from . import egress as _eg
-                    # Stessa risoluzione che userà il PDP: due copie della
-                    # stessa domanda divergono, e questa settimana è successo
-                    # tre volte.
-                    # A component verb resolves through its own service, as
-                    # the PDP does (#525): `github.push`'s origin comes from
-                    # it-pack's component.
-                    _gspec = _component_verb(name)
-                    _args_dest = (_component_pdp_arguments(_gspec, name, arguments)
-                                  if _gspec is not None else arguments)
-                    _perimetro_ok = _eg.destinations_already_allowed(name, _args_dest)
-                except Exception:  # noqa: BLE001 — in dubbio si chiede
-                    _perimetro_ok = False
+                from . import authz_runtime as _azr_p
+                # A resource the owner approved in the room's panel is the
+                # perimeter too (#635): A·V·R·Q allowed every target on a row.
+                # Checked first: the resolution below runs git for a push.
+                _perimetro_ok = _azr_p.allowed_by_room_rows(_azd)
+                if not _perimetro_ok:
+                    try:
+                        from . import egress as _eg
+                        # Stessa risoluzione che userà il PDP: due copie della
+                        # stessa domanda divergono, e questa settimana è
+                        # successo tre volte.
+                        # A component verb resolves through its own service,
+                        # as the PDP does (#525): `github.push`'s origin comes
+                        # from it-pack's component — git, so off the loop.
+                        _gspec = _component_verb(name)
+                        _args_dest = (await asyncio.to_thread(
+                                          _component_pdp_arguments, _gspec, name, arguments)
+                                      if _gspec is not None else arguments)
+                        _perimetro_ok = await asyncio.to_thread(
+                            _eg.destinations_already_allowed, name, _args_dest)
+                    except Exception:  # noqa: BLE001 — in dubbio si chiede
+                        _perimetro_ok = False
                 if _perimetro_ok:
                     LOG.info("gate saltato per '%s' (@%s): destinazione già nel "
                              "perimetro autorizzato", name, _ag)
