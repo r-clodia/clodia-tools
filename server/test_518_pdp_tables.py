@@ -150,6 +150,10 @@ class MatchTests(unittest.TestCase):
             ("tg:-100", "tg:-1001"),
             ("gsheets:S", "gsheets:S2"),
             ("mcp:normattiva.", "mcp:normattiva-mirror.search"),
+            # #636: a path rule covers its subtree, not a sibling.
+            ("https://github.com/ddbit/repo", "https://github.com/ddbit/repo-fork"),
+            ("https://github.com/r-clodia", "https://github.com/r-clodia-evil/x"),
+            ("gdrive:folder/F", "gdrive:folder/Fx"),
         ]:
             with self.subTest(rule=rule):
                 self.assertFalse(egress._matches(dest, rule))

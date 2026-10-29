@@ -17,6 +17,7 @@ topic's `meta.authz` plus its toolbox (#605) read as tuples — so the
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 from typing import Optional
 
@@ -93,6 +94,11 @@ def _resource_tuples(meta: dict) -> list[A.Tuple]:
         by_scheme: dict[str, set[str]] = {}
         for sc in e["schemes"]:
             by_scheme.setdefault(sc["scheme"], set()).update(sc["verbs"])
+        # Verbs with no mapping whose resource the serving component names
+        # (#635: `github.clone`/`pull`): a row covers them on its scheme too.
+        named = _component_named_verbs(e)
+        for verbs in by_scheme.values():
+            verbs.update(named)
         for r in rows:
             verbs = by_scheme.get(r["uri"].partition(":")[0], set())
             if r.get("verbs"):
@@ -222,7 +228,7 @@ def available(agent: Optional[str], verb: str, scope: Optional[str]) -> bool:
 
 
 def check(agent: str, verb: str, arguments: dict, scope: Optional[str],
-          tainted: bool) -> A.Decision:
+          tainted: bool, targets: Optional[list[str]] = None) -> A.Decision:
     """The enforced decision for one call. A room whose rules cannot be read
     denies."""
     try:
@@ -230,8 +236,89 @@ def check(agent: str, verb: str, arguments: dict, scope: Optional[str],
     except RoomUnreadable as e:
         return A.Decision(A.DENY, False, [], str(e))
     f = S.facts(verb, arguments or {})
+    if targets is not None:
+        # The serving component named what the call acts on (#635): that is
+        # the target, never the caller's mapped argument — `github.push`
+        # ignores a `repo` argument, so judging it would judge a fiction.
+        f["targets"] = list(targets)
     return A.decide(g, t, agent=agent, verb=verb, resource=f["resource"],
                     targets=f["targets"], kind=f["kind"], tainted=tainted)
+
+
+#: The component service that names the resource a call acts on (#635):
+#: `authz_targets(verb, arguments) -> [uri, ...]`. it-pack's git verbs: the
+#: repository of `clone`/`pull_request` (argument) and of `pull`/`push` (the
+#: working tree's origin), which the call does not carry in a mapped argument.
+TARGETS_SERVICE = "authz_targets"
+
+#: The targets A·V·R·Q judged for the call in flight, for the component to
+#: compare with what it is about to act on (`host.judged_targets`): the
+#: origin of a working tree can change between the check and the act.
+JUDGED: contextvars.ContextVar[Optional[tuple[str, ...]]] = contextvars.ContextVar(
+    "authz_judged_targets", default=None)
+
+
+def _targets_service(verb: str):
+    """The `authz_targets` service of the component serving `verb`, or None."""
+    from . import main as _m
+    spec = _m._component_verb(verb)
+    if spec is None:
+        return None
+    from . import components as _components
+    return _components.service(spec.pack, TARGETS_SERVICE)
+
+
+def component_targets(verb: str, arguments: dict) -> Optional[list[str]]:
+    """What the serving component says this call acts on.
+
+    None: no component names targets for this verb (the mapped arguments
+    decide, as before). []: it does, but cannot read them now — the call is
+    judged on no target, i.e. it asks, as before #635. Runs git (`pull`/
+    `push` read the working tree's origin): call it off the event loop."""
+    try:
+        svc = _targets_service(verb)
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("authz: servizio bersagli di %s non consultabile (%s)", verb, type(e).__name__)
+        return None
+    if svc is None:
+        return None
+    try:
+        out = svc.handler(verb, dict(arguments or {}))
+    except Exception as e:  # noqa: BLE001 — unreadable: no target, the ask stands
+        LOG.warning("authz: bersaglio di %s non determinabile (%s)", verb, type(e).__name__)
+        return []
+    if out is None:
+        # The service does not handle this verb: the mappings decide.
+        return None
+    return [str(u).strip() for u in out if isinstance(u, str) and str(u).strip()]
+
+
+def _component_named_verbs(entry: dict) -> set[str]:
+    """The MCP's verbs that have no destination mapping but whose serving
+    component names their resource (`authz_targets`)."""
+    out = set()
+    mapped = {v for sc in entry.get("schemes") or [] for v in sc.get("verbs") or []}
+    for v in entry.get("verbs") or []:
+        if v in mapped:
+            continue
+        try:
+            if _targets_service(v) is not None:
+                out.add(v)
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def allowed_by_room_rows(d: Optional[A.Decision]) -> bool:
+    """Every target of an `allow` was decided by a resource row of the room's
+    panel (#620): the owner approved exactly that resource there. The
+    outward gate of a verb (`github.push`) has nothing left to ask (#635)."""
+    if d is None or d.effect != A.ALLOW or not d.targets:
+        return False
+    return all(x.effect == A.ALLOW and x.target and x.target != A.NO_TARGET
+               and x.level == A.TOPIC
+               and str(x.tuple_id or "").startswith("resource:")
+               for x in d.targets)
 
 
 def asked_targets(d: A.Decision) -> list[A.TargetDecision]:

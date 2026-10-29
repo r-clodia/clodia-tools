@@ -650,6 +650,16 @@ class Host:
             raise HostError("git verbs act inside a topic: this call has no channel")
         return main._topics().git_credential(tier, name)[0]
 
+    def judged_targets(self) -> tuple[str, ...]:
+        """The targets A·V·R·Q judged for the call in flight, as the
+        component's own `authz_targets` named them (#635), or `()`.
+
+        For the component to compare with what it is about to act on: the
+        origin of a working tree can change between the check and the act,
+        and an approval was given for the repository judged, not another."""
+        from .. import authz_runtime
+        return tuple(authz_runtime.JUDGED.get() or ())
+
     def current_topic(self) -> tuple[str | None, str | None]:
         """`(tier, name)` of the room the call comes from (signed `chat`
         claim, tier canonical), or `(None, None)` outside a room."""
