@@ -298,6 +298,26 @@ def riautorizzazione(e: BaseException) -> mcp_oauth.ReauthorizationRequired | No
     return riautorizzazione(cause) if cause is not None else None
 
 
+class ToolDisabled(PermissionError):
+    """A tool an admin switched off in Tools (#633)."""
+
+
+def is_disabled(name: str) -> bool:
+    """True if `name` (`<backend>.<tool>`) is a backend tool disabled on this
+    instance (#633). Whoever asks: it is not a per-agent rule."""
+    if NS_SEP not in name:
+        return False
+    backend, tool = name.split(NS_SEP, 1)
+    from . import whitelist as _wl
+    return tool in _wl.disabled_backend_tools(backend)
+
+
+def disabled_refusal(name: str) -> str:
+    return (f"'{name}' is disabled on this instance: an admin switched it off "
+            "in Tools (the MCP server's Test list). No room, rule or approval "
+            "re-enables it; only an admin can, from there.")
+
+
 def is_proxied(name: str) -> bool:
     """True se ``name`` appartiene a un backend montato (namespace)."""
     if NS_SEP not in name:
@@ -341,7 +361,9 @@ async def test_backend(name: str) -> dict:
 
 async def list_proxied_tools() -> list[Tool]:
     """Tutti i tool dei backend, namespaced. Cache per backend; un backend
-    irraggiungibile viene saltato senza far cadere l'intera lista."""
+    irraggiungibile viene saltato senza far cadere l'intera lista. Senza i
+    tool disattivati in Tools (#633)."""
+    from . import whitelist as _wl
     tools: list[Tool] = []
     for name, b in _backends().items():
         if _is_transport(name):
@@ -362,7 +384,10 @@ async def list_proxied_tools() -> list[Tool]:
                     ]
             except Exception:
                 _TOOL_CACHE[name] = []  # backend down: cache vuota (riprovabile a restart)
-        tools.extend(_TOOL_CACHE[name])
+        # Disabled tools (#633) are withheld here, not in the cache: the
+        # toggle takes effect at once, with no backend round trip.
+        off = {f"{name}{NS_SEP}{t}" for t in _wl.disabled_backend_tools(name)}
+        tools.extend(t for t in _TOOL_CACHE[name] if t.name not in off)
     return tools
 
 
@@ -431,6 +456,10 @@ async def call_proxied(name: str, arguments: dict) -> str:
     b = _backends().get(backend_name)
     if not b:
         raise ValueError(f"backend MCP sconosciuto: {backend_name!r}")
+    # Second line of #633: `main.call_tool` refuses first, this holds for any
+    # other path that reaches a backend on an agent's behalf.
+    if is_disabled(name):
+        raise ToolDisabled(disabled_refusal(name))
     try:
         async with _session(b) as s:
             res = await s.call_tool(tool_name, arguments)

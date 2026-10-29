@@ -212,6 +212,104 @@ def gdrive_roots_all() -> dict:
         if isinstance(raw, dict) else {}
 
 
+#: Tools of mounted MCP backends that an admin switched off in Tools (#633):
+#: `{backend: [tool, ...]}`, bare tool names. An instance decision: a disabled
+#: tool is withheld from every listing and refused at every call, whatever a
+#: room, a global rule or a gate says.
+DISABLED_TOOLS_KEY = "mcp_disabled_tools"
+
+#: The tools each backend listed the last time an admin opened its Test
+#: (#633): what is not in here is shown as new. `{backend: [tool, ...]}`.
+KNOWN_TOOLS_KEY = "mcp_known_tools"
+
+
+def disabled_backend_tools(backend: str) -> set[str]:
+    """The tools of `backend` disabled on this instance. Read-only."""
+    raw = (CONFIG.get(DISABLED_TOOLS_KEY) or {})
+    if not isinstance(raw, dict):
+        return set()
+    return {str(t) for t in (raw.get(backend) or []) if t}
+
+
+def set_backend_tool_enabled(backend: str, tool: str, enabled: bool) -> list[str]:
+    """Enable or disable one tool of a mounted backend and persist it; the
+    backend's disabled tools afterwards. Reloads first, like every mutation
+    of the config (see `set_gdrive_roots`): a stale copy would undo someone
+    else's change — and this field is a security control."""
+    reload_config()
+    raw = CONFIG.setdefault(DISABLED_TOOLS_KEY, {})
+    if not isinstance(raw, dict):
+        raw = {}
+        CONFIG[DISABLED_TOOLS_KEY] = raw
+    current = [str(t) for t in (raw.get(backend) or []) if t]
+    if enabled:
+        current = [t for t in current if t != tool]
+    elif tool not in current:
+        current.append(tool)
+    if current:
+        raw[backend] = sorted(current)
+    else:
+        raw.pop(backend, None)
+    save_config()
+    return sorted(current)
+
+
+def known_backend_tools(backend: str) -> set[str] | None:
+    """The tools `backend` listed at the last Test, or None if never tested."""
+    raw = CONFIG.get(KNOWN_TOOLS_KEY) or {}
+    if not isinstance(raw, dict) or backend not in raw:
+        return None
+    return {str(t) for t in (raw.get(backend) or [])}
+
+
+def set_known_backend_tools(backend: str, tools: list[str]) -> None:
+    """Remember what `backend` listed at this Test (#633), persisted."""
+    reload_config()
+    raw = CONFIG.setdefault(KNOWN_TOOLS_KEY, {})
+    if not isinstance(raw, dict):
+        raw = {}
+        CONFIG[KNOWN_TOOLS_KEY] = raw
+    clean = sorted({str(t) for t in tools if t})
+    if raw.get(backend) == clean:
+        return
+    raw[backend] = clean
+    save_config()
+
+
+def forget_known_backend_tools(backend: str, *, save: bool = True) -> None:
+    """Forget what `backend` listed (removed, or mounted elsewhere): its next
+    Test starts over, with nothing marked new.
+
+    The DISABLED tools are deliberately kept. Unmounting and remounting is
+    within reach of an agent holding `mcp.remove`/`mcp.add`, and of a pack
+    Update or re-enable: if either dropped the list, the control would fail
+    open — every disabled tool back on with no admin involved (review of
+    #633). The list only ever restricts; a stale entry costs nothing."""
+    raw = CONFIG.get(KNOWN_TOOLS_KEY)
+    if isinstance(raw, dict) and backend in raw:
+        raw.pop(backend, None)
+        if save:
+            save_config()
+
+
+def rename_backend_tools(old: str, new: str) -> None:
+    """Carry the per-tool state from `old` to `new` when a remount respells a
+    backend's name (`my_server` → `my-server`): the disabled list follows the
+    server, never stays behind under a name nobody calls. In memory: the
+    caller saves."""
+    if old == new:
+        return
+    for key in (DISABLED_TOOLS_KEY, KNOWN_TOOLS_KEY):
+        raw = CONFIG.get(key)
+        if not isinstance(raw, dict) or old not in raw:
+            continue
+        moved = [str(t) for t in (raw.pop(old) or [])]
+        if key == DISABLED_TOOLS_KEY:
+            raw[new] = sorted(set(moved) | {str(t) for t in (raw.get(new) or [])})
+        else:
+            raw[new] = moved
+
+
 def set_agent_tool(agent: str, tool: str, present: bool) -> None:
     """Aggiunge/rimuove un tool (o wildcard '<ns>.*') dalla whitelist di `agent`
     e persiste. Usato per delegare connettori MCP per-agent."""

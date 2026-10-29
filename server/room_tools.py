@@ -194,7 +194,9 @@ def _backend_verbs(ns: str) -> set[str]:
     """The verbs of a mounted MCP backend, if discovery has listed them."""
     try:
         from . import proxy
-        return {t.name for t in proxy._TOOL_CACHE.get(ns) or []}
+        # A tool disabled in Tools (#633) is off for every room: not offered.
+        return {t.name for t in proxy._TOOL_CACHE.get(ns) or []
+                if not proxy.is_disabled(t.name)}
     except Exception:  # noqa: BLE001
         return set()
 

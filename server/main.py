@@ -4792,10 +4792,30 @@ def proxied_verb_refusal(name: str) -> str:
     return ""
 
 
+def _check_tool_disabled(name: str) -> None:
+    """Refuse a backend tool an admin disabled in Tools (#633), and record the
+    refusal. Checked before every other rule: it is an instance decision that
+    no room rule, global allow or gate approval can override."""
+    if not (proxy.is_proxied(name) and proxy.is_disabled(name)):
+        return
+    # A verb served by a gateway component or kept by the gateway is not the
+    # backend's tool, even when a backend of the same namespace is mounted.
+    if _component_verb(name) is not None or name in _GATEWAY_RETAINED_VERBS:
+        return
+    try:
+        from .audit import policy as _apol
+        _apol.decision(name, "tool_toggle", "deny", reason_class="tool_disabled")
+    except Exception as e:  # noqa: BLE001 — the record never turns a deny into an allow
+        LOG.error("audit: refusal of disabled tool %s not recorded (%s)",
+                  name, type(e).__name__)
+    raise _PackVerbRefused(proxy.disabled_refusal(name))
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     from . import audit as _audit
     try:
+        _check_tool_disabled(name)
         _check_not_transport(name)
         _check_pack_connector_held(name)
         _check_component(name)

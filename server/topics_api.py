@@ -638,6 +638,8 @@ async def topic_tools_epoch_route(request: Request):
             "room": {k: meta.get(k) for k in ("tools", "authz", "data", "drive_folders",
                                               "local_folders", "tier")},
             "agent": acfg, "dm": (_wl.CONFIG or {}).get(room_tools.DM_KEY),
+            # A tool switched off in Tools leaves every session (#633).
+            "off": (_wl.CONFIG or {}).get(_wl.DISABLED_TOOLS_KEY),
         }
         raw = _json.dumps(parts, sort_keys=True, default=str)
         return {"epoch": hashlib.sha256(raw.encode()).hexdigest()[:24]}

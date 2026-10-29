@@ -431,6 +431,11 @@ def connectors_snapshot() -> list[dict]:
             "connected": True,
             "accounts": [],
         }
+        # Tools an admin switched off in the Test list (#633): the card says
+        # how many, the list says which.
+        off = whitelist.disabled_backend_tools(str(b.get("name") or ""))
+        if off:
+            row["disabled_tools"] = sorted(off)
         # Un backend OAuth non ancora autorizzato è montato ma non usabile:
         # stessa distinzione delle dipendenze pip mancanti (#451), stesso posto.
         # Con `auth.methods` (#565) la card riceve anche i metodi del suo
@@ -658,6 +663,7 @@ def register_mcp_core(config, secrets: dict | None = None,
     registered = []
     deposits: list[tuple[str, str]] = []
     forget_after: list[str] = []
+    renames: list[tuple[str, str]] = []   # (old name, slug), #633
     for name, spec in servers.items():
         slug = _slugify(name)
         if not slug or slug in _NATIVE_PREFIXES or slug in mcp_credentials.RESERVED_SLUGS:
@@ -763,6 +769,10 @@ def register_mcp_core(config, secrets: dict | None = None,
                     f"{chi_ora} non può sostituirlo. Smontalo prima "
                     f"(mcp.remove), oppure monta il tuo con un altro nome.",
                     status=409)
+            # The entry is stored under `slug`: the per-tool state follows a
+            # respelled name, or the disabled list would stay behind (#633).
+            # Applied once every server is accepted, like the vault writes.
+            renames.append((str(precedente.get("name") or ""), slug))
             if mcp_credentials.fingerprint(precedente) != mcp_credentials.fingerprint(backend):
                 # Rimount accettato (aggiornamento o adozione) che ora punta
                 # altrove: credenziale e token restano dell'host di prima (#565).
@@ -805,9 +815,14 @@ def register_mcp_core(config, secrets: dict | None = None,
 
     for cred, sval in deposits:
         vault.deposit(cred, {"value": sval}, cred_type="mcp_secret", grant_agents=[])
+    for old_name, slug in renames:
+        whitelist.rename_backend_tools(old_name, slug)
     for slug in forget_after:
         vault.remove(mcp_credentials.cred_name(slug))
         mcp_oauth.forget(slug)
+        # Another server under the same name: nothing it lists is "new" yet.
+        # The disabled tools stay (#633): a remount must never re-enable.
+        whitelist.forget_known_backend_tools(slug, save=False)
         LOG.info("mcp: backend '%s' rimontato verso un'altra destinazione: "
                  "credenziale e token dimenticati, serve un nuovo «Connetti»", slug)
     whitelist.CONFIG["mcp_backends"] = backends
@@ -830,6 +845,8 @@ def unregister_mcp_core(name: str) -> dict:
     mcp_oauth.forget(name)
     vault.remove(mcp_credentials.cred_name(name))
     cfg["mcp_backends"] = [b for b in (cfg.get("mcp_backends") or []) if b.get("name") != name]
+    # #633: what it listed goes; what an admin disabled stays (see the helper).
+    whitelist.forget_known_backend_tools(name, save=False)
     whitelist.save_config()
     whitelist.reload_config()
     proxy.clear_cache()
@@ -1323,25 +1340,85 @@ async def test_connector(request: Request):
         tools = r.pop("tools", None)
         if r.get("ok") and tools is not None:
             # Off the event loop: the checks read manifests and mounts.
-            r = {**r, "verbs": await asyncio.to_thread(_backend_verbs, tools)}
+            verbs = await asyncio.to_thread(_backend_verbs, tools, cid)
+            r = {**r, "verbs": verbs,
+                 "disabled": sum(1 for v in verbs if v.get("disabled"))}
+            # This Test is someone looking at the list: what it shows is no
+            # longer new (#633). Admins and the agent-server reach this route;
+            # only the "new" marker depends on it, never a permission.
+            await asyncio.to_thread(whitelist.set_known_backend_tools, cid,
+                                    [v["tool"] for v in verbs])
     return JSONResponse(r)
 
 
-def _backend_verbs(tools: list[dict]) -> list[dict]:
+def _backend_verbs(tools: list[dict], backend: str = "") -> list[dict]:
     """The backend's tools as verbs, each with the gateway's own answer to
-    «can it be reached at all» (#575): enabled ones first, by name."""
+    «can it be reached at all» (#575): enabled ones first, by name.
+
+    Since #633 each row also says whether an admin `disabled` it (a toggle,
+    separate from `enabled`, which is the gateway's reachability) and whether
+    it is `new` since the last Test. Every tool is enabled until someone
+    unticks it, new ones included."""
     from . import main as _main
+    off = whitelist.disabled_backend_tools(backend) if backend else set()
+    known = whitelist.known_backend_tools(backend) if backend else None
+    prefix = f"{backend}{proxy.NS_SEP}" if backend else ""
     out, seen = [], set()
     for t in tools:
         if t["name"] in seen:  # a backend listing a name twice: once is enough
             continue
         seen.add(t["name"])
+        tool = t["name"][len(prefix):] if prefix and t["name"].startswith(prefix) \
+            else t["name"].split(proxy.NS_SEP, 1)[-1]
         why = _main.proxied_verb_refusal(t["name"])
-        row = {"name": t["name"], "description": t["description"], "enabled": not why}
+        row = {"name": t["name"], "tool": tool, "description": t["description"],
+               "enabled": not why, "disabled": tool in off,
+               # Never tested before: nothing is new, the whole list is.
+               "new": known is not None and tool not in known}
         if why:
             row["reason"] = why[:300]
         out.append(row)
+    # Disabled tools the server no longer lists: still shown, still tickable,
+    # or an admin could never clear them (review of #633).
+    listed = {r["tool"] for r in out}
+    for tool in sorted(off - listed):
+        out.append({"name": f"{prefix}{tool}", "tool": tool, "description": "",
+                    "enabled": True, "disabled": True, "new": False, "gone": True})
     return sorted(out, key=lambda v: (not v["enabled"], v["name"]))
+
+
+async def mcp_tool_toggle(request: Request):
+    """POST /tools/mcp/{name}/tools {tool, enabled} → `{disabled: [...]}` (#633).
+
+    Switch one tool of a mounted backend on or off for the whole instance. A
+    HUMAN admin only: an agent able to re-enable a tool would undo the very
+    control this is (same reasoning as the Drive confinement). The change is
+    audited by `save_config` (`control.config`)."""
+    if not _authorized_owner(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    name = request.path_params["name"]
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    tool = str((body or {}).get("tool") or "").strip()
+    enabled = (body or {}).get("enabled")
+    if not tool or not isinstance(enabled, bool):
+        return JSONResponse({"error": "servono 'tool' (nome del tool, senza il "
+                                      "prefisso del server) e 'enabled' (bool)"},
+                            status_code=400)
+    # `tool` is the backend's own name, as the Test list sends it. Never
+    # stripped: a backend may expose a tool literally called `<name>.x`, and
+    # stripping would switch off a different one (review of #633).
+    if name not in {b.get("name") for b in (whitelist.CONFIG.get("mcp_backends") or [])}:
+        return JSONResponse({"error": f"nessun server MCP montato '{name}'"},
+                            status_code=404)
+    disabled = await asyncio.to_thread(whitelist.set_backend_tool_enabled,
+                                       name, tool, enabled)
+    LOG.info("mcp: tool '%s%s%s' %s", name, proxy.NS_SEP, tool,
+             "riabilitato" if enabled else "disattivato")
+    return JSONResponse({"backend": name, "tool": tool, "enabled": enabled,
+                         "disabled": disabled})
 
 
 async def colony_mailbox_get(request: Request):
@@ -1404,6 +1481,7 @@ routes = [
     Route("/tools/backup/restore-test", backup_restore_test, methods=["POST"]),
     Route("/tools/mcp", register_mcp, methods=["POST"]),
     Route("/tools/mcp/{name}", unregister_mcp, methods=["DELETE"]),
+    Route("/tools/mcp/{name}/tools", mcp_tool_toggle, methods=["POST"]),
     Route("/tools/mcp/{name}/oauth/start", mcp_oauth_start, methods=["POST"]),
     Route("/tools/mcp/{name}/oauth/complete", mcp_oauth_complete, methods=["POST"]),
     Route("/tools/mcp/{name}/connect", mcp_connect, methods=["POST"]),
