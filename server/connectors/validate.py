@@ -151,8 +151,11 @@ def summary(connector) -> dict:
     # them sees the same row as before. Never the `base`: where the service
     # listens is the gateway's business, not the page's or the agent-server's.
     if getattr(connector, "relay", None) is not None:
+        from .manifest import DEFAULT_RELAY_SEAL_CAP
+        cap = connector.relay.seal_cap
         row["relay"] = {"label": connector.relay.label,
                         "attachments": connector.relay.attachments,
+                        "seal_cap": f"SEAL-{DEFAULT_RELAY_SEAL_CAP if cap is None else cap}",
                         # The schemes the relay speaks: those with `forms`,
                         # the only ones a relayed URI is vetted against.
                         "schemes": [s.name for s in connector.schemes

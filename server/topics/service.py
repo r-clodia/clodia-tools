@@ -139,7 +139,8 @@ def channel_cap_acked(meta: dict | None, ctype: str, tier: str | None = None) ->
     return _normalize_tier(ack.get("tier")) == effettivo
 
 
-def _check_channel_cap(channel: dict, tier: str, meta: dict | None = None) -> None:
+def _check_channel_cap(channel: dict, tier: str, meta: dict | None = None,
+                       cap: int | None = None) -> None:
     """Verifica che il tier del topic rispetti il cap SEAL del channel.
 
     Il cap resta la regola: sopra il suo rango il channel non si aggancia. Ciò
@@ -149,7 +150,10 @@ def _check_channel_cap(channel: dict, tier: str, meta: dict | None = None) -> No
     identico a prima.
     """
     ctype = (channel or {}).get("type")
-    cap = _CHANNEL_SEAL_CAP.get(ctype)
+    # `cap` is given for a pack relay (#638), whose cap comes from its manifest
+    # or the default; the gateway's own channel types read the table, as before.
+    if cap is None:
+        cap = _CHANNEL_SEAL_CAP.get(ctype)
     if cap is None:
         raise TopicError(f"channel type non supportato: {ctype}")
     if _tier_rank(tier) > cap and not channel_cap_acked(meta, ctype, tier):
@@ -1263,7 +1267,7 @@ class TopicService:
         return meta
 
     def accept_channel_cap(self, tier: str, name: str, ctype: str,
-                           by: str = "") -> dict:
+                           by: str = "", cap: int | None = None) -> dict:
         """Registra la presa d'atto dell'owner sul cap SEAL di un channel (#405).
 
         Chiamata SOLO dalla rotta interna, dove il principal è l'umano owner del
@@ -1276,7 +1280,8 @@ class TopicService:
         verrebbe letto come un precedente.
         """
         meta, ver = self._read_meta(tier, name)
-        cap = _CHANNEL_SEAL_CAP.get(ctype)
+        if cap is None:      # a pack relay passes its own (#638)
+            cap = _CHANNEL_SEAL_CAP.get(ctype)
         if cap is None:
             raise TopicError(f"channel type non supportato: {ctype}")
         t = _normalize_tier(meta.get("tier", tier))

@@ -1014,6 +1014,11 @@ class Relay:
     base: str
     label: str
     attachments: bool = False
+    #: The SEAL rank above which binding a room to this transport needs the
+    #: owner's written acknowledgement (#405's flow). `None` in the manifest
+    #: means the gateway's default for pack relays, `DEFAULT_RELAY_SEAL_CAP`:
+    #: a transport nobody has assessed is treated as the weakest link.
+    seal_cap: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1667,6 +1672,8 @@ _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 _SERVICE_PATH = re.compile(r"^/[A-Za-z0-9._~-]{1,32}(?:/[A-Za-z0-9._~-]{1,32}){0,3}$")
 #: Longest relay label: it is a name in a room, not a sentence.
 MAX_RELAY_LABEL = 32
+#: The SEAL cap of a pack relay that declares none (#638): SEAL-1, Telegram's.
+DEFAULT_RELAY_SEAL_CAP = 1
 
 
 def loopback_base_problem(value: str) -> str:
@@ -1710,14 +1717,49 @@ def _base(raw: Any, where: str) -> str:
     return value
 
 
-def _own_service(raw: Any, where: str, services: Sequence[Service]) -> str:
+def _own_service(raw: Any, where: str, services: Sequence[Service]) -> Service:
     name = _matching(_text(raw, where), _ID, where)
-    if name not in {s.name for s in services}:
+    service = next((s for s in services if s.name == name), None)
+    if service is None:
         raise ManifestError(
             f"{where}: '{name}' is not one of this connector's services "
             f"({', '.join(s.name for s in services) or 'none'}); a transport "
             f"runs in the pack that declares it")
-    return name
+    return service
+
+
+def _host_port(value: str, kind: str) -> tuple[str, int] | None:
+    """`(host, port)` of a base URL or of a health target, or None."""
+    try:
+        if kind == "tcp":
+            host, _, port = value.rpartition(":")
+            return host.strip("[]").lower(), int(port)
+        parts = urlsplit(value)
+        if parts.port is None:
+            return None
+        return (parts.hostname or "").lower(), parts.port
+    except ValueError:
+        return None
+
+
+def _check_base_is_the_service(base: str, service: Service, where: str) -> None:
+    """The base must be WHERE THE SERVICE LISTENS, as its health check says.
+
+    The supervisor's `health` target is the only statement of the service's
+    address the gateway verifies at run time (#515: loopback only); a base that
+    pointed elsewhere would forward to whatever else listens on loopback —
+    another pack's service, or a port of the gateway itself.
+    """
+    if service.health_kind not in ("http", "tcp"):
+        raise ManifestError(
+            f"{where}: service '{service.name}' must declare an http or tcp "
+            f"`health` check on the address the gateway calls")
+    declared = _host_port(service.health_target, service.health_kind)
+    if declared is None or declared != _host_port(base, "http"):
+        raise ManifestError(
+            f"{where}: base {base!r} is not where service '{service.name}' "
+            f"listens (health target {service.health_target!r}): host and port "
+            f"must be the same")
 
 
 def _service_path(raw: Any, where: str, default: str) -> str:
@@ -1731,7 +1773,8 @@ def _service_path(raw: Any, where: str, default: str) -> str:
 def _parse_relay(raw: Any, where: str, *, services: Sequence[Service],
                  schemes: Sequence[Scheme]) -> Relay:
     data = _mapping(raw, where)
-    unknown = sorted(set(data) - {"service", "base", "label", "attachments"})
+    unknown = sorted(set(data) - {"service", "base", "label", "attachments",
+                                  "seal_cap"})
     if unknown:
         raise ManifestError(f"{where}: unknown keys {', '.join(unknown)}")
     if not any(s.forms for s in schemes):
@@ -1746,11 +1789,23 @@ def _parse_relay(raw: Any, where: str, *, services: Sequence[Service],
     if len(label) > MAX_RELAY_LABEL or any(not c.isprintable() for c in label):
         raise ManifestError(
             f"{where}.label: at most {MAX_RELAY_LABEL} printable characters")
+    service = _own_service(data.get("service"), f"{where}.service", services)
+    base = _base(data.get("base"), f"{where}.base")
+    _check_base_is_the_service(base, service, f"{where}.base")
+    cap = None
+    if data.get("seal_cap") is not None:
+        raw_cap = _text(data.get("seal_cap"), f"{where}.seal_cap")
+        m = re.fullmatch(r"SEAL-([0-4])", raw_cap)
+        if not m:
+            raise ManifestError(
+                f"{where}.seal_cap: {raw_cap!r} is not one of SEAL-0 … SEAL-4")
+        cap = int(m.group(1))
     return Relay(
-        service=_own_service(data.get("service"), f"{where}.service", services),
-        base=_base(data.get("base"), f"{where}.base"),
+        service=service.name,
+        base=base,
         label=label,
-        attachments=_flag(data.get("attachments"), f"{where}.attachments"))
+        attachments=_flag(data.get("attachments"), f"{where}.attachments"),
+        seal_cap=cap)
 
 
 def _parse_pairing(raw: Any, where: str, *,
@@ -1759,9 +1814,12 @@ def _parse_pairing(raw: Any, where: str, *,
     unknown = sorted(set(data) - {"service", "base", "status", "start"})
     if unknown:
         raise ManifestError(f"{where}: unknown keys {', '.join(unknown)}")
+    service = _own_service(data.get("service"), f"{where}.service", services)
+    base = _base(data.get("base"), f"{where}.base")
+    _check_base_is_the_service(base, service, f"{where}.base")
     return Pairing(
-        service=_own_service(data.get("service"), f"{where}.service", services),
-        base=_base(data.get("base"), f"{where}.base"),
+        service=service.name,
+        base=base,
         status=_service_path(data.get("status"), f"{where}.status", "/status"),
         start=_service_path(data.get("start"), f"{where}.start", "/pair"))
 
@@ -2463,6 +2521,7 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
             provider_owner[key] = c
 
     _check_vault_entries(parsed)
+    _check_service_bases(parsed)
     _check_verb_schemes(parsed)
     return Registry(connectors=tuple(parsed), refused=tuple(refused))
 
@@ -2510,6 +2569,26 @@ def _check_vault_entries(connectors: list[Connector]) -> None:
                     f"namespace '{owner}' of connector "
                     f"'{namespaces[owner].id}', not under its own "
                     f"'{c.namespace}'"), c.pack)
+
+
+def _check_service_bases(connectors: list[Connector]) -> None:
+    """Two connectors may not point their relay/pairing at the same loopback
+    port (#638). Every loopback name is the same socket, so the PORT decides:
+    the second connector would be forwarding to the first one's service."""
+    seen: dict[int, Connector] = {}
+    for c in connectors:
+        ports = {_host_port(d.base, "http")[1]
+                 for d in (c.relay, c.pairing) if d is not None
+                 and _host_port(d.base, "http") is not None}
+        for port in sorted(ports):
+            other = seen.get(port)
+            if other is not None and other is not c:
+                raise _blame(ManifestError(
+                    f"connectors '{other.id}' ({other.pack}) and '{c.id}' "
+                    f"({c.pack}) both forward to loopback port {port}; a relay "
+                    f"or pairing base belongs to one connector's service"),
+                    *(x.pack for x in (other, c) if not x.builtin))
+            seen[port] = c
 
 
 def _check_verb_schemes(connectors: list[Connector]) -> None:

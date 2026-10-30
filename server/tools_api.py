@@ -1128,6 +1128,21 @@ def _pairing_view(raw: dict) -> dict:
     return out
 
 
+def _admin_principal(request: Request) -> str:
+    """Who is calling an admin route, for the audit: the human principal of
+    the session, or `ui-token` for the trusted core. Never raises."""
+    hdr = request.headers.get("authorization", "")
+    if _UI_TOKEN and _bearer_is(hdr, _UI_TOKEN):
+        return "ui-token"
+    token = hdr[7:] if hdr.lower().startswith("bearer ") else ""
+    try:
+        from .pki_verify import verify_session_token
+        p = verify_session_token(token) if token else {}
+    except Exception:  # noqa: BLE001
+        p = {}
+    return str(p.get("principal") or p.get("agent") or "?")
+
+
 async def connector_pairing(request: Request):
     """GET/POST /tools/connectors/{id}/pairing (clodia-platform#639).
 
@@ -1154,19 +1169,40 @@ async def connector_pairing(request: Request):
         return JSONResponse({"error": f"connector '{cid}' has no pairing step"},
                             status_code=404)
     start = request.method == "POST"
-    if not _ch.service_running(connector, pairing.service):
+    token = _ch.service_token(connector, pairing.service)
+    if not token:
         return JSONResponse(
             {"error": f"service '{pairing.service}' of pack '{connector.pack}' "
                       f"is not running"}, status_code=503)
+    if start:
+        # Starting a pairing adopts a device on the owner's account: recorded,
+        # with WHO asked and for which connector — never the code or the QR,
+        # which do not even exist yet. Before the call, so an audit trail that
+        # cannot record it stops the start (fail-closed, `control.safe`).
+        from .audit import control as _control
+        _control.safe(_control.emit, "connector", "pairing_start", cid,
+                      admin=_admin_principal(request), pack=connector.pack)
     try:
         raw = await _ch.forward(pairing.base, pairing.start if start else pairing.status,
                                 {}, timeout=_PAIRING_TIMEOUT,
-                                max_bytes=64 * 1024,
+                                max_bytes=64 * 1024, token=token,
                                 method="POST" if start else "GET")
     except _ch.RelayUnavailable as e:
         LOG.warning("pairing %s: service unavailable (%s)", cid, e)
         return JSONResponse({"error": "pairing service unavailable"}, status_code=503)
-    except (_ch.RelayFailed, _ch.RelayRefused) as e:
+    except _ch.RelayFailed as e:
+        status = getattr(e, "status", None)
+        if status is not None and 400 <= status < 500 and status not in (401, 403):
+            # The service's own refusal («already paired», «bad state»): its
+            # status and its words, through the same filter as a success.
+            # 401/403 stay a 502: they mean the service refused the GATEWAY
+            # (token), and to the page a 401 means «your session ended».
+            LOG.warning("pairing %s: service answered %s", cid, status)
+            return JSONResponse(_pairing_view(e.payload or {"state": "error"}),
+                                status_code=status)
+        LOG.warning("pairing %s: %s", cid, e)
+        return JSONResponse({"error": "pairing service error"}, status_code=502)
+    except _ch.RelayRefused as e:
         LOG.warning("pairing %s: %s", cid, e)
         return JSONResponse({"error": "pairing service error"}, status_code=502)
     view = _pairing_view(raw)

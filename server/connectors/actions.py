@@ -259,20 +259,40 @@ def _seal_state(connector: Connector, tier: str, name: str) -> dict:
     dell'orchestratore del 14/10.
     """
     from ..topics.service import (CHANNEL_SEAL_ACK, _tier_rank,
-                                  channel_cap_acked, channel_seal_cap)
+                                  channel_cap_acked)
     from ..topics_api import _service
     from ..topics.service import TopicError
     try:
         meta = _service().open(tier, name).get("meta", {})
     except TopicError:
         meta = {}
-    cap = channel_seal_cap(connector.id)
+    cap = channel_cap(connector)
     t = meta.get("tier", tier)
     morde = cap is not None and _tier_rank(t) > cap
     return {"tier": t, "cap": f"SEAL-{cap}" if cap is not None else None,
             "requires_ack": bool(morde
                                  and not channel_cap_acked(meta, connector.id, t)),
             "ack": meta.get(CHANNEL_SEAL_ACK)}
+
+
+def channel_cap(connector: Connector) -> int | None:
+    """The SEAL cap of this connector's channel binding (#405, #638).
+
+    The gateway's own channel types (Telegram) keep their table. Any other
+    connector that binds a channel — a pack relay — is capped too, fail
+    closed: at its manifest's `relay.seal_cap`, or `DEFAULT_RELAY_SEAL_CAP`.
+    Above the cap the owner must acknowledge the downgrade, with the room's
+    tier in front of them, exactly as for Telegram.
+    """
+    from ..topics.service import channel_seal_cap
+    from .manifest import DEFAULT_RELAY_SEAL_CAP
+    cap = channel_seal_cap(connector.id)
+    if cap is not None:
+        return cap
+    relay = getattr(connector, "relay", None)
+    if relay is not None and relay.seal_cap is not None:
+        return relay.seal_cap
+    return DEFAULT_RELAY_SEAL_CAP
 
 
 def _bindings(connector_id: str):
@@ -463,7 +483,7 @@ def _prepare_channel(connector: Connector, tier: str, name: str,
     con la whitelist scritta (Davide, 23 set 2026) — ma un errore sulla
     whitelist non deve lasciare un binding senza le sue voci.
     """
-    from ..topics.service import TopicError, _check_channel_cap, channel_seal_cap
+    from ..topics.service import TopicError, _check_channel_cap
     from ..topics_api import _service
 
     chat = next((v for k, v in values.items() if k != "account" and v), "")
@@ -483,15 +503,15 @@ def _prepare_channel(connector: Connector, tier: str, name: str,
         # perché è ciò che la rende superabile. Qui il principal è l'umano
         # owner del topic — la rotta è owner-only — quindi è l'unico punto
         # della piattaforma in cui quel consenso può nascere.
+        # Telegram passes no cap and reads the table, exactly as before; a
+        # pack relay passes its own (`channel_cap`, #638), never none.
+        cap = None if connector.id == "telegram" else channel_cap(connector)
         if body.get("accept_seal_downgrade"):
-            svc.accept_channel_cap(tier, name, connector.id, by=principal or "")
+            svc.accept_channel_cap(tier, name, connector.id, by=principal or "",
+                                   **({"cap": cap} if cap is not None else {}))
         meta = svc.open(tier, name).get("meta", {})
-        # The SEAL cap is a table of the GATEWAY's channel types (Telegram).
-        # A pack's relay has no cap: the owner decides at the gate, with the
-        # topic's tier in front of them (epic #527) — so no row, no check,
-        # rather than «channel type not supported».
-        if channel_seal_cap(connector.id) is not None:
-            _check_channel_cap({"type": connector.id}, meta.get("tier", tier), meta)
+        _check_channel_cap({"type": connector.id}, meta.get("tier", tier), meta,
+                           **({"cap": cap} if cap is not None else {}))
     except TopicError as e:
         raise ActionError(str(e)[:400])
     return chat

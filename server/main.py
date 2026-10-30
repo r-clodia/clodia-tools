@@ -1892,6 +1892,16 @@ async def _dispatch_channel_deliver(a: dict) -> dict:
     allegati = [str(x) for x in (a.get("attachments") or []) if str(x).strip()]
     _relay = None if destinazione.lower().startswith(("tg:", "mailto:")) \
         else _relay_connector_for(destinazione)
+    if _relay is None and not destinazione.lower().startswith(("tg:", "mailto:")):
+        # A URI of a scheme some pack connector owns never falls into the mail
+        # branch below (#638): `sms:+39…` with its relay down or absent is a
+        # refused delivery, said as such — not an «address» to mail.
+        _owner = _scheme_owner(destinazione)
+        if _owner is not None:
+            raise ValueError(
+                f"'{destinazione}': lo schema '{destinazione.partition(':')[0].strip().lower()}:' "
+                f"è del connettore '{_owner}', che su questa istanza non ha un "
+                f"canale di consegna disponibile")
     if _relay is not None:
         # A pack connector's relay transport (#638): its own `/send`, reached
         # through `channel.relay_send` so the call takes the same path as
@@ -1975,6 +1985,22 @@ def _relay_connector_for(destination: str):
         return _ch.relay_connector(hit.id)
     except Exception:  # noqa: BLE001 — no relay answers: not a relay destination
         return None
+
+
+def _scheme_owner(destination: str) -> str | None:
+    """The id of the connector that owns `destination`'s scheme, or None."""
+    scheme, sep, _rest = (destination or "").partition(":")
+    name = scheme.strip().lower()
+    if not sep or not name:
+        return None
+    try:
+        from .connectors import resolved as _connectors
+        for c in _connectors.registry().connectors:
+            if any(sch.name == name for sch in c.schemes):
+                return c.id
+    except Exception:  # noqa: BLE001 — unreadable registry: nothing to name
+        return None
+    return None
 
 
 async def _dispatch_channel_relay_send(a: dict) -> dict:
@@ -5220,7 +5246,15 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             #    factotum, le mutazioni github di uno sviluppatore)
             #  - FUORI PROFILO: l'agente può raggiungerlo ma non lo dichiara come
             #    proprio mestiere. Non è «pericoloso», è «inatteso da lui».
-            _off_profile = outside_profile(name, _ag)
+            # A delivery-only verb (#638) is not a verb the agent chose: it is
+            # how `channel.deliver` carries a relay's text. Its profile
+            # question is the one asked of `channel.deliver`, which the agent
+            # declares — not of a name no profile can list. (Telegram's verbs
+            # keep being asked as before.)
+            _off_profile = outside_profile(
+                "channel.deliver" if (name in _DELIVERY_ONLY_VERBS
+                                      and name in _DELIVER_VIA.get()) else name,
+                _ag)
             # `gated_in_channel` era il QUARTO motivo ed è stato RITIRATO il
             # 7 ago 2026, dopo B2. Era il surrogato della domanda «chi sta
             # chiedendo?», posta per approssimazione — *qualcuno è in un canale* —

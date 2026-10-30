@@ -468,6 +468,21 @@ def credentials_env(service: Service) -> dict[str, str]:
     return env
 
 
+#: The variable that carries the per-start secret into the service, and the
+#: header the gateway sends it back in on every call it forwards (#638/#639).
+#: A relay or pairing service MUST refuse a request without the matching
+#: header (constant-time compare): loopback is shared by every service uid,
+#: so «it came from 127.0.0.1» does not say «it came from the gateway».
+SERVICE_TOKEN_ENV = "CLODIA_SERVICE_TOKEN"
+SERVICE_TOKEN_HEADER = "X-Clodia-Service-Token"
+
+
+def new_service_token() -> str:
+    """A fresh random secret for one start of one service."""
+    import secrets
+    return secrets.token_urlsafe(32)
+
+
 def build_env(service: Service) -> dict[str, str]:
     """L'ambiente del servizio, COSTRUITO DA ZERO.
 

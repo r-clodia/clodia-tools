@@ -39,6 +39,7 @@ from .launch import (
 from .supervisor import (
     Supervisor,
     reconcile_loop,
+    service_token,
     snapshot,
     stop_all,
     supervisor,
@@ -52,6 +53,7 @@ __all__ = [
     "build_env",
     "privileges",
     "reconcile_loop",
+    "service_token",
     "snapshot",
     "state_dir",
     "stop_all",

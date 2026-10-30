@@ -65,7 +65,18 @@ class RelayUnavailable(RuntimeError):
 
 
 class RelayFailed(RuntimeError):
-    """The service answered, but not with what the contract says → 502."""
+    """The service answered, but not with what the contract says → 502.
+
+    `status` and `payload` carry a 4xx answer of the service (its status and
+    its JSON object, if any), for a caller that relays it (`tools_api`'s
+    pairing routes). Nothing else reads them.
+    """
+
+    def __init__(self, message: str, status: int | None = None,
+                 payload: dict | None = None):
+        super().__init__(message)
+        self.status = status
+        self.payload = payload
 
 
 class RelayRefused(ValueError):
@@ -89,33 +100,43 @@ def relay_connector(cid: str) -> Connector:
     return connector
 
 
-def service_running(connector: Connector, service: str) -> bool:
-    """Is the supervisor (#515) running this connector's service right now?"""
+def service_token(connector: Connector, service: str) -> str | None:
+    """The per-start secret of this connector's service, or None when the
+    supervisor (#515) is not running it right now. None means 503: the
+    gateway never calls a service it cannot authenticate itself to."""
     try:
         from . import services as _services
-        rows = _services.snapshot()
+        return _services.service_token(connector.pack, service)
     except Exception as e:  # noqa: BLE001 — unknown is not running
-        LOG.warning("channels: supervisor snapshot unavailable (%s)", e)
-        return False
-    return any(r.get("pack") == connector.pack and r.get("service") == service
-               and r.get("state") == "running" for r in rows or ())
+        LOG.warning("channels: supervisor unavailable (%s)", type(e).__name__)
+        return None
 
 
 async def forward(base: str, path: str, body: dict, *, timeout: float,
-                  max_bytes: int, method: str = "POST") -> dict:
+                  max_bytes: int, token: str, method: str = "POST") -> dict:
     """One HTTP JSON call to a pack service on loopback. Never follows a
     redirect and never reads the environment's proxy settings: the target is
-    the declared loopback base and nothing else."""
+    the declared loopback base and nothing else.
+
+    `token` is the service's per-start secret (`service_token`), sent as
+    `X-Clodia-Service-Token`: the service refuses whoever does not have it,
+    because every service uid can reach loopback too. Never logged.
+    """
     problem = loopback_base_problem(base)
     if problem:
         # Refused at load already; a manifest on disk may have changed since.
         raise RelayRefused(f"service base refused: {problem}")
+    if not token:
+        raise RelayUnavailable("service not running (no token)")
+    from .services.launch import SERVICE_TOKEN_HEADER
     import httpx
     url = f"{base}{path}"
     try:
         async with httpx.AsyncClient(timeout=timeout, trust_env=False,
                                      follow_redirects=False) as client:
-            kwargs = {} if method == "GET" else {"json": body}
+            kwargs: dict = {"headers": {SERVICE_TOKEN_HEADER: token}}
+            if method != "GET":
+                kwargs["json"] = body
             async with client.stream(method, url, **kwargs) as resp:
                 status = resp.status_code
                 chunks: list[bytes] = []
@@ -135,13 +156,16 @@ async def forward(base: str, path: str, body: dict, *, timeout: float,
         raise RelayUnavailable(f"service call failed ({type(e).__name__})") from e
     if status == 503:
         raise RelayUnavailable("service unavailable (503)")
-    if not 200 <= status < 300:
-        raise RelayFailed(f"service answered HTTP {status}")
     import json as _json
     try:
         data = _json.loads(b"".join(chunks) or b"null")
     except ValueError as e:
+        if not 200 <= status < 300:
+            raise RelayFailed(f"service answered HTTP {status}", status) from e
         raise RelayFailed("service answer is not JSON") from e
+    if not 200 <= status < 300:
+        raise RelayFailed(f"service answered HTTP {status}", status,
+                          data if isinstance(data, dict) else None)
     if not isinstance(data, dict):
         raise RelayFailed("service answer is not a JSON object")
     return data
@@ -150,11 +174,12 @@ async def forward(base: str, path: str, body: dict, *, timeout: float,
 async def _call(connector: Connector, op: str, body: dict, *, timeout: float,
                 max_bytes: int) -> dict:
     relay = connector.relay
-    if not service_running(connector, relay.service):
+    token = service_token(connector, relay.service)
+    if not token:
         raise RelayUnavailable(
             f"service '{relay.service}' of pack '{connector.pack}' is not running")
     return await forward(relay.base, f"/{op}", body, timeout=timeout,
-                         max_bytes=max_bytes)
+                         max_bytes=max_bytes, token=token)
 
 
 def uri_ok(connector: Connector, uri: Any) -> bool:
@@ -173,7 +198,8 @@ def uri_ok(connector: Connector, uri: Any) -> bool:
 
 def vet_rows(connector: Connector, rows: Any) -> list[dict]:
     """The polled rows whose `chat_uri` (required) and `sender_uri` (when
-    present) are the connector's own URIs. Every other row is dropped and
+    present) are the connector's own URIs, and whose `chat_uri` is exactly
+    `<scheme>:<chat_id>`. Every other row is dropped and
     logged — without its values: a sender id is personal data, and a log line
     is not the place to keep it."""
     kept: list[dict] = []
@@ -185,16 +211,27 @@ def vet_rows(connector: Connector, rows: Any) -> list[dict]:
         if not isinstance(row, dict):
             dropped += 1
             continue
-        chat_ok = uri_ok(connector, row.get("chat_uri"))
+        chat_uri = row.get("chat_uri")
+        chat_ok = uri_ok(connector, chat_uri)
+        # The chat the relay will reply to (`chat_id`) and the chat it is
+        # vetted as (`chat_uri`) must be the same chat: otherwise a row could
+        # be vetted as one chat of the room and answered into another.
+        chat_id = row.get("chat_id")
+        chat_id = str(chat_id) if isinstance(chat_id, (str, int)) \
+            and not isinstance(chat_id, bool) else ""
+        same_chat = chat_ok and bool(chat_id) and chat_uri == \
+            f"{chat_uri.partition(':')[0].lower()}:{chat_id}"
         sender = row.get("sender_uri")
         sender_ok = sender is None or uri_ok(connector, sender)
-        if chat_ok and sender_ok:
+        if chat_ok and same_chat and sender_ok:
             kept.append(row)
             continue
         dropped += 1
-        LOG.warning("channels %s: relayed row dropped (%s outside the "
-                    "connector's schemes and forms)", connector.id,
-                    "chat_uri" if not chat_ok else "sender_uri")
+        LOG.warning("channels %s: relayed row dropped (%s)", connector.id,
+                    "chat_uri outside the connector's schemes and forms"
+                    if not chat_ok else
+                    "chat_uri is not <scheme>:<chat_id>" if not same_chat else
+                    "sender_uri outside the connector's schemes and forms")
     if not isinstance(rows, list) and rows is not None:
         LOG.warning("channels %s: poll answer 'messages' is not a list",
                     connector.id)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import threading
 import unittest
@@ -41,7 +42,10 @@ class _Service:
     def __init__(self):
         self.calls: list[tuple[str, str, dict]] = []
         self.closed = False
+        #: The service's per-start secret, as the supervisor would inject it.
+        self.token = "svc-secret-1"
         self.answers: dict[str, tuple[int, object]] = {}
+        self.refused = 0
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -51,9 +55,16 @@ class _Service:
             def _answer(self, method):
                 n = int(self.headers.get("content-length") or 0)
                 body = json.loads(self.rfile.read(n) or b"{}") if n else {}
-                outer.calls.append((method, self.path, body))
-                status, payload = outer.answers.get(
-                    f"{method} {self.path}", (404, {"error": "no route"}))
+                # What a conforming service does: refuse without the header.
+                if not hmac.compare_digest(
+                        self.headers.get("X-Clodia-Service-Token") or "",
+                        outer.token):
+                    outer.refused += 1
+                    status, payload = 401, {"error": "token"}
+                else:
+                    outer.calls.append((method, self.path, body))
+                    status, payload = outer.answers.get(
+                        f"{method} {self.path}", (404, {"error": "no route"}))
                 raw = json.dumps(payload).encode()
                 self.send_response(status)
                 self.send_header("content-type", "application/json")
@@ -89,7 +100,9 @@ def _connector(base: str, *, attachments: bool = False, with_relay: bool = True,
         "schemes": [{"scheme": "sms", "direction": "both",
                      "forms": [{"label": "number", "pattern": r"\+[0-9]{6,15}",
                                 "example": "+39333000111"}]}],
-        "services": [{"name": "sms-relay", "command": ["python3", "relay.py"]}],
+        "services": [{"name": "sms-relay", "command": ["python3", "relay.py"],
+                      "health": {"kind": "tcp",
+                                 "target": base.removeprefix("http://")}}],
         "topic_actions": [{"id": "sms-link", "label": "SMS", "binding": "channel",
                            "fields": [{"name": "chat"}],
                            "adds": {"ingress": ["sms:{chat}"],
@@ -140,8 +153,8 @@ def tearDownModule() -> None:
 BASE = "http://127.0.0.1:8731"
 
 
-def _parse(**kw):
-    return parse_connector(_connector(BASE, **kw), pack="sms-demo-pack",
+def _parse(base=BASE, **kw):
+    return parse_connector(_connector(base, **kw), pack="sms-demo-pack",
                            reserved=frozenset())
 
 
@@ -159,7 +172,7 @@ class ManifestTests(unittest.TestCase):
         self.assertFalse(c.relay.attachments)
         self.assertIsNone(c.pairing)
         c = parse_connector(_connector(BASE, **{"pairing": {
-            "service": "sms-relay", "base": "http://[::1]:9000",
+            "service": "sms-relay", "base": BASE,
             "status": "/link/state", "start": "/link/start"}}),
             pack="p", reserved=frozenset())
         self.assertEqual((c.pairing.status, c.pairing.start),
@@ -168,7 +181,7 @@ class ManifestTests(unittest.TestCase):
     def test_loopback_hosts_accepted(self):
         for base in ("http://127.0.0.1:1", "http://localhost:8080",
                      "http://[::1]:65535"):
-            self.assertEqual(_parse(**{"relay": {
+            self.assertEqual(_parse(base, **{"relay": {
                 "service": "sms-relay", "base": base, "label": "SMS"}}).relay.base,
                 base)
 
@@ -250,7 +263,7 @@ class ListingTests(unittest.TestCase):
                              reserved=frozenset())
         row = _validate.summary(reg.by_id("sms"))
         self.assertEqual(row["relay"], {"label": "SMS", "attachments": True,
-                                        "schemes": ["sms"]})
+                                        "seal_cap": "SEAL-1", "schemes": ["sms"]})
         self.assertIs(row["pairing"], True)
         self.assertNotIn("8731", json.dumps(row))
         self.assertNotIn("127.0.0.1", json.dumps(row))
@@ -292,7 +305,8 @@ class _RouteCase(unittest.TestCase):
                                              attachments=self.attachments)))
         self.running = True
         stack.enter_context(patch.object(
-            channels_api, "service_running", lambda c, s: self.running))
+            channels_api, "service_token",
+            lambda c, s: self.svc.token if self.running else None))
         self.auth = ({"agent": "clodia"}, None)
         stack.enter_context(patch.object(
             channels_api.internal_auth, "authorize",
@@ -305,22 +319,29 @@ class _RouteCase(unittest.TestCase):
 
 class ChannelRouteTests(_RouteCase):
     def test_poll_keeps_only_rows_in_the_connectors_own_forms(self):
-        good = {"chat_uri": "sms:+39333000111", "sender_uri": "sms:+39333000222",
-                "text": "ciao"}
-        no_sender = {"chat_uri": "sms:+39333000111", "text": "ok"}
+        good = {"chat_id": "+39333000111", "chat_uri": "sms:+39333000111",
+                "sender_uri": "sms:+39333000222", "text": "ciao"}
+        no_sender = {"chat_id": "+39333000111", "chat_uri": "sms:+39333000111",
+                     "text": "ok"}
+        c = "+39333000111"
         rows = [good, no_sender,
-                {"chat_uri": "tg:-100123", "text": "other scheme"},
-                {"chat_uri": "sms:pippo", "text": "bad form"},
-                {"chat_uri": "sms:+39333000111", "sender_uri": "mailto:a@b.it"},
-                {"chat_uri": "sms:+39333000111", "sender_uri": ""},
-                {"text": "no chat"}, "not a row"]
+                {"chat_id": "-100123", "chat_uri": "tg:-100123", "text": "other scheme"},
+                {"chat_id": "pippo", "chat_uri": "sms:pippo", "text": "bad form"},
+                {"chat_id": c, "chat_uri": "sms:" + c, "sender_uri": "mailto:a@b.it"},
+                {"chat_id": c, "chat_uri": "sms:" + c, "sender_uri": ""},
+                {"text": "no chat"}, "not a row",
+                # vetted as one chat, answered into another: dropped (#3)
+                {"chat_id": "+39333000999", "chat_uri": "sms:" + c, "text": "x"},
+                {"chat_uri": "sms:" + c, "text": "no chat_id"},
+                {"chat_id": c, "chat_uri": "SMS:" + c, "text": "case"}]
         self.svc.answers["POST /poll"] = (200, {"messages": rows})
         with self.assertLogs("clodia-tools.channels_api", level="WARNING") as logs:
             r = self.post("/internal/channels/sms/poll", {"timeout": 3})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["messages"], [good, no_sender])
         self.assertEqual(self.svc.calls, [("POST", "/poll", {"timeout": 3})])
-        self.assertTrue(any("6 relayed row(s) dropped" in m for m in logs.output))
+        self.assertTrue(any("9 relayed row(s) dropped" in m for m in logs.output))
+        self.assertTrue(any("<scheme>:<chat_id>" in m for m in logs.output))
         # The dropped values are not in the log: personal data.
         self.assertFalse(any("pippo" in m or "a@b.it" in m for m in logs.output))
 
@@ -415,48 +436,119 @@ class BaseRecheckTests(unittest.TestCase):
     def test_forward_refuses_a_non_loopback_base_at_call_time(self):
         with self.assertRaises(channels_api.RelayRefused):
             asyncio.run(channels_api.forward("http://10.0.0.1:80", "/send", {},
-                                             timeout=1, max_bytes=10))
+                                             timeout=1, max_bytes=10, token="t"))
 
 
 # --------------------------------------------------------------------------
 # D) bindings under the action's own connector id
 # --------------------------------------------------------------------------
 
-class BindingTests(unittest.TestCase):
-    def test_binding_channel_writes_under_its_own_connector(self):
+class _Room:
+    """A topic of tier `tier` whose meta records the owner's SEAL ack the way
+    `TopicService.accept_channel_cap` does, bindings in a temp dir."""
+
+    def __init__(self, test, tier: str, doc: dict):
+        import shutil
         import tempfile
         from pathlib import Path
-        from .tools import channel_bindings as cb
         from .tools import telegram_bindings as tb
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(__import__("shutil").rmtree, tmp, True)
-        liste: dict = {}
+        self.tmp = tempfile.mkdtemp()
+        test.addCleanup(shutil.rmtree, self.tmp, True)
+        self.tier = tier
+        self.meta = {"tier": tier}
+        self.liste: dict = {}
+        self.accepted: list = []
         svc = MagicMock()
-        svc.open.return_value = {"meta": {"tier": "SEAL-2"}}
-        with _installed(_pack(BASE)), \
-                patch.object(tb, "_path", lambda: Path(tmp) / "telegram-bindings.json"), \
-                patch.object(egress, "scope_allow",
-                             lambda d, s, u: liste.setdefault((d, s), []).append(u)), \
-                patch.object(egress, "scope_revoke",
-                             lambda d, s, u: liste.get((d, s), []).remove(u)), \
-                patch.object(egress, "scope_uris",
-                             lambda d, s, cfg=None: list(liste.get((d, s), []))), \
-                patch.object(topics_api, "_service", lambda: svc):
-            connector, action = ca.find("sms", "sms-link")
-            out = ca.apply(connector, action, "SEAL-2", "acme",
-                           body={"action": "connect", "chat": "+39333000111"})
-            self.assertEqual(out["bound"], "+39333000111")
-            # Under `sms`, not `telegram`; and no SEAL cap for a pack relay.
-            self.assertEqual(cb.load("sms", base=tmp),
-                             {"+39333000111": {"instance": "messaggero",
-                                               "tier": "SEAL-2", "topic": "acme"}})
-            self.assertEqual(cb.load("telegram", base=tmp), {})
-            self.assertEqual(liste[("ingress", "SEAL-2/acme")], ["sms:+39333000111"])
-            out = ca.apply(connector, action, "SEAL-2", "acme",
-                           body={"action": "disconnect"})
-            self.assertIsNone(out["bound"])
-            self.assertEqual(cb.load("sms", base=tmp), {})
-            self.assertEqual(liste[("ingress", "SEAL-2/acme")], [])
+        svc.open.side_effect = lambda t, n: {"meta": dict(self.meta)}
+
+        def _accept(t, n, ctype, by="", cap=None):
+            self.accepted.append((ctype, cap))
+            from .topics import service as S
+            self.meta[S.CHANNEL_SEAL_ACK] = {"channel": ctype, "tier": tier}
+        svc.accept_channel_cap.side_effect = _accept
+        svc.revoke_channel_cap_ack.side_effect = lambda t, n: self.meta.clear()
+        stack = contextlib.ExitStack()
+        test.addCleanup(stack.close)
+        for p in (_installed(doc),
+                  patch.object(tb, "_path",
+                               lambda: Path(self.tmp) / "telegram-bindings.json"),
+                  patch.object(egress, "scope_allow",
+                               lambda d, s, u: self.liste.setdefault((d, s), []).append(u)),
+                  patch.object(egress, "scope_revoke",
+                               lambda d, s, u: self.liste.get((d, s), []).remove(u)),
+                  patch.object(egress, "scope_uris",
+                               lambda d, s, cfg=None: list(self.liste.get((d, s), []))),
+                  patch.object(topics_api, "_service", lambda: svc)):
+            stack.enter_context(p)
+
+    def apply(self, **body):
+        connector, action = ca.find("sms", "sms-link")
+        return ca.apply(connector, action, self.tier, "acme", body=body)
+
+
+class BindingTests(unittest.TestCase):
+    def test_binding_channel_writes_under_its_own_connector(self):
+        from .tools import channel_bindings as cb
+        room = _Room(self, "SEAL-1", _pack(BASE))
+        out = room.apply(action="connect", chat="+39333000111")
+        self.assertEqual(out["bound"], "+39333000111")
+        # Under `sms`, not `telegram`.
+        self.assertEqual(cb.load("sms", base=room.tmp),
+                         {"+39333000111": {"instance": "messaggero",
+                                           "tier": "SEAL-1", "topic": "acme"}})
+        self.assertEqual(cb.load("telegram", base=room.tmp), {})
+        self.assertEqual(room.liste[("ingress", "SEAL-1/acme")], ["sms:+39333000111"])
+        out = room.apply(action="disconnect")
+        self.assertIsNone(out["bound"])
+        self.assertEqual(cb.load("sms", base=room.tmp), {})
+        self.assertEqual(room.liste[("ingress", "SEAL-1/acme")], [])
+
+
+class SealCapTests(unittest.TestCase):
+    """B1: a pack relay is capped, fail closed, with Telegram's ack flow."""
+
+    def test_default_cap_is_seal_1_and_needs_the_owners_ack_above(self):
+        from .tools import channel_bindings as cb
+        room = _Room(self, "SEAL-2", _pack(BASE))
+        connector, action = ca.find("sms", "sms-link")
+        seal = ca.state(connector, action, "SEAL-2", "acme")["seal"]
+        self.assertEqual((seal["tier"], seal["cap"], seal["requires_ack"]),
+                         ("SEAL-2", "SEAL-1", True))
+        with self.assertRaises(ca.ActionError) as cm:
+            room.apply(action="connect", chat="+39333000111")
+        self.assertIn("SEAL-1", str(cm.exception))
+        self.assertEqual(cb.load("sms", base=room.tmp), {})
+        self.assertEqual(room.liste, {})          # nothing written
+        out = room.apply(action="connect", chat="+39333000111",
+                         accept_seal_downgrade=True)
+        self.assertEqual(out["bound"], "+39333000111")
+        self.assertEqual(room.accepted, [("sms", 1)])
+
+    def test_the_manifest_cap_replaces_the_default(self):
+        doc = _pack(BASE)
+        doc["connectors"][0]["relay"]["seal_cap"] = "SEAL-2"
+        room = _Room(self, "SEAL-2", doc)
+        self.assertEqual(room.apply(action="connect", chat="+39333000111")["bound"],
+                         "+39333000111")
+        self.assertEqual(room.accepted, [])
+        room3 = _Room(self, "SEAL-3", doc)
+        with self.assertRaises(ca.ActionError):
+            room3.apply(action="connect", chat="+39333000112")
+        connector, action = ca.find("sms", "sms-link")
+        self.assertEqual(ca.state(connector, action, "SEAL-3", "acme")["seal"]["cap"],
+                         "SEAL-2")
+
+    def test_bad_seal_caps_are_refused(self):
+        for cap in ("SEAL-5", "P1", "1", "seal-1", 2):
+            with self.subTest(cap=cap):
+                with self.assertRaises(ManifestError):
+                    _parse(**{"relay": {"service": "sms-relay", "base": BASE,
+                                        "label": "SMS", "seal_cap": cap}})
+
+    def test_telegram_keeps_its_table(self):
+        from .connectors.actions import channel_cap
+        reg = resolved.registry()
+        self.assertEqual(channel_cap(reg.by_id("telegram")), 1)
 
 
 # --------------------------------------------------------------------------
@@ -555,6 +647,149 @@ class DeliverTests(unittest.TestCase):
         self.assertIn("non disponibile", out)
 
 
+class DeliverProfileAndOwnershipTests(DeliverTests):
+    """B2 and follow-up 4, on the same harness as `DeliverTests`."""
+
+    def test_a_profile_listing_channel_deliver_raises_no_card(self):
+        self.cfg["agents"]["segretario"]["profile_tools"] = ["channel.deliver"]
+        out = self.call("channel.deliver", {"destination": "sms:+39333000111",
+                                            "text": "ciao"})
+        self.assertFalse(out.startswith(("DENIED", "ERROR")), out)
+        self.assertEqual(self.sent, [("sms", "+39333000111", "ciao", None)])
+        self.gate.assert_not_awaited()
+
+    def test_a_profile_without_channel_deliver_still_asks(self):
+        self.cfg["agents"]["segretario"]["profile_tools"] = ["topic.open"]
+        self.call("channel.deliver", {"destination": "sms:+39333000111",
+                                      "text": "ciao"})
+        self.assertTrue(self.gate.await_args_list)
+
+    def test_a_pack_scheme_without_relay_is_never_mailed(self):
+        mailed = []
+        with _installed(_pack(BASE, with_relay=False)), \
+                patch.object(M, "_room_outbox_account",
+                             lambda *a: mailed.append(a) or "info"):
+            out = self.call("channel.deliver", {"destination": "sms:+39333000111",
+                                                "text": "x"})
+        self.assertTrue(out.startswith("ERROR"), out)
+        self.assertIn("'sms'", out)
+        self.assertEqual((mailed, self.sent), ([], []))
+
+    def test_a_relay_excluded_by_the_profile_is_an_explicit_error(self):
+        from . import instance_profile
+        with patch.object(instance_profile, "connector_allowed",
+                          lambda cid: cid != "sms"):
+            out = self.call("channel.deliver", {"destination": "sms:+39333000111",
+                                                "text": "x"})
+        self.assertTrue(out.startswith("ERROR"), out)
+        self.assertIn("non ha un canale", out)
+        self.assertEqual(self.sent, [])
+
+
+class ServiceAddressTests(unittest.TestCase):
+    """S1: the base is where the named service listens; one port, one owner."""
+
+    def _with_health(self, health):
+        raw = _connector(BASE)
+        if health is None:
+            raw["services"][0].pop("health")
+        else:
+            raw["services"][0]["health"] = health
+        return raw
+
+    def test_the_base_must_match_the_health_target(self):
+        for health in (None,
+                       {"kind": "command", "target": "true"},
+                       {"kind": "tcp", "target": "127.0.0.1:8732"},
+                       {"kind": "http", "target": "http://127.0.0.1:9999/health"},
+                       {"kind": "tcp", "target": "localhost:8731"}):
+            with self.subTest(health=health):
+                with self.assertRaises(ManifestError):
+                    parse_connector(self._with_health(health), pack="p",
+                                    reserved=frozenset())
+
+    def test_an_http_health_on_the_same_address_is_accepted(self):
+        c = parse_connector(self._with_health(
+            {"kind": "http", "target": "http://127.0.0.1:8731/health"}),
+            pack="p", reserved=frozenset())
+        self.assertEqual(c.relay.base, BASE)
+
+    def test_two_connectors_may_not_share_a_port(self):
+        other = _pack("http://localhost:8731")
+        other["name"] = "other-pack"
+        oc = other["connectors"][0]
+        oc.update(id="sms2", namespace="sms2", label="SMS 2")
+        oc["schemes"][0]["scheme"] = "sms2"
+        oc["topic_actions"][0]["adds"] = {"ingress": ["sms2:{chat}"],
+                                          "egress": ["sms2:{chat}"]}
+        with self.assertRaises(ManifestError) as cm:
+            build_registry({"sms-demo-pack": _pack(BASE), "other-pack": other},
+                           reserved=frozenset())
+        self.assertIn("8731", str(cm.exception))
+        self.assertEqual(set(cm.exception.packs), {"sms-demo-pack", "other-pack"})
+
+
+class ServiceTokenTests(_RouteCase):
+    """S2: every forwarded call carries the per-start token."""
+
+    def test_the_token_is_sent_and_a_wrong_one_is_refused_by_the_service(self):
+        self.svc.answers["POST /send"] = (200, {"ok": True, "message_id": 1})
+        self.assertEqual(self.post("/internal/channels/sms/send",
+                                   {"chat_id": "+1", "text": "x"}).status_code, 200)
+        self.assertEqual(self.svc.refused, 0)
+        with patch.object(channels_api, "service_token", lambda c, s: "stale"):
+            r = self.post("/internal/channels/sms/send", {"chat_id": "+1", "text": "x"})
+        self.assertEqual(r.status_code, 502)
+        self.assertEqual(self.svc.refused, 1)
+
+    def test_no_token_means_unavailable(self):
+        with self.assertRaises(channels_api.RelayUnavailable):
+            asyncio.run(channels_api.forward(self.svc.base, "/send", {}, timeout=1,
+                                             max_bytes=100, token=""))
+        self.assertEqual(self.svc.calls, [])
+
+
+class SupervisorTokenTests(unittest.TestCase):
+    """S2: the supervisor makes a new secret per start, injects it, forgets it."""
+
+    def test_token_injected_per_start_and_cleared_on_stop(self):
+        import os
+        import sys
+        import tempfile
+        import time
+        from pathlib import Path
+        from .connectors.manifest import Service
+        from .services import launch
+        from .services.supervisor import Supervisor
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        script = ("import os,time;"
+                  "open(os.path.join(os.environ['CLODIA_SERVICE_STATE_DIR'],'tok'),'w')"
+                  ".write(os.environ.get('CLODIA_SERVICE_TOKEN',''));time.sleep(300)")
+        svc = Service(name="listener", pack="demo-pack", namespace="demo",
+                      command=(sys.executable, "-c", script))
+        with patch.dict(os.environ, {"CLODIA_DATA": tmp.name,
+                                     "CLODIA_SERVICE_ISOLATION": "off"}):
+            sup = Supervisor(lambda: [svc], isolation_probe=lambda p: "")
+            self.addCleanup(sup.stop_all)
+            sup.reconcile()
+            path = Path(tmp.name) / "services/demo-pack/listener/tok"
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not (path.exists()
+                                                        and path.read_text()):
+                time.sleep(0.02)
+            token = sup.service_token("demo-pack", "listener")
+            self.assertTrue(token and len(token) >= 32)
+            self.assertEqual(path.read_text(), token)
+            self.assertNotIn(token, json.dumps(sup.snapshot()))
+            self.assertNotIn(token, repr(sup._entries))
+            self.assertIsNone(sup.service_token("demo-pack", "other"))
+            sup.stop_all()
+            self.assertIsNone(sup.service_token("demo-pack", "listener"))
+        self.assertEqual(launch.SERVICE_TOKEN_ENV, "CLODIA_SERVICE_TOKEN")
+        self.assertNotEqual(launch.new_service_token(), launch.new_service_token())
+
+
 # --------------------------------------------------------------------------
 # F) message kind `channel`
 # --------------------------------------------------------------------------
@@ -638,7 +873,8 @@ class PairingTests(unittest.TestCase):
         stack.enter_context(_installed(_pack(self.svc.base)))
         self.running = True
         stack.enter_context(patch.object(
-            channels_api, "service_running", lambda c, s: self.running))
+            channels_api, "service_token",
+            lambda c, s: self.svc.token if self.running else None))
         self.admin = True
         stack.enter_context(patch.object(tools_api, "_authorized_owner",
                                          lambda r: self.admin))
@@ -712,6 +948,37 @@ class PairingTests(unittest.TestCase):
                 patch.object(tools_api, "_is_human_admin", lambda n: False):
             r = self.client.get("/tools/connectors/sms/pairing", headers=_H)
         self.assertEqual(r.status_code, 401)
+
+
+class PairingFollowUpTests(PairingTests):
+    def test_a_service_4xx_comes_back_filtered_with_its_status(self):
+        self.svc.answers["POST /pair"] = (409, {"state": "open", "me": "+39",
+                                               "error": "already paired",
+                                               "secret": "x"})
+        r = self.client.post("/tools/connectors/sms/pairing", headers=_H)
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.json(), {"state": "open", "me": "+39",
+                                    "error": "already paired"})
+
+    def test_a_service_refusing_the_gateway_is_502_not_401(self):
+        with patch.object(channels_api, "service_token", lambda c, s: "stale"):
+            r = self.client.get("/tools/connectors/sms/pairing", headers=_H)
+        self.assertEqual(r.status_code, 502)
+        self.assertEqual(self.svc.refused, 1)
+
+    def test_pairing_start_is_audited_without_the_code(self):
+        from .audit import control
+        events = []
+        self.svc.answers["POST /pair"] = (200, {"state": "pairing", "code": "C0DE-42"})
+        self.svc.answers["GET /status"] = (200, {"state": "pairing", "code": "C0DE-42"})
+        with patch.object(control, "emit", lambda *a, **k: events.append((a, k))), \
+                patch.object(tools_api, "_admin_principal", lambda r: "davide"):
+            self.client.get("/tools/connectors/sms/pairing", headers=_H)
+            self.assertEqual(events, [])
+            self.client.post("/tools/connectors/sms/pairing", headers=_H)
+        self.assertEqual(events, [(("connector", "pairing_start", "sms"),
+                                   {"admin": "davide", "pack": "sms-demo-pack"})])
+        self.assertNotIn("C0DE", json.dumps(events))
 
 
 _REAL_AUTHORIZED_OWNER = tools_api._authorized_owner
