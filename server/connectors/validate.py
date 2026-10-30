@@ -98,7 +98,7 @@ def summary(connector) -> dict:
     connect. Shared with `GET /internal/connectors`, so the install preview and
     the Tools page cannot drift into describing the same connector differently.
     """
-    return {
+    row = {
         "id": connector.id,
         "label": connector.label,
         "pack": connector.pack,
@@ -147,3 +147,16 @@ def summary(connector) -> dict:
                        if connector.tools_card else None),
         "taint": list(connector.taint_prefixes),
     }
+    # #638/#639: present only when declared, so a client that does not know
+    # them sees the same row as before. Never the `base`: where the service
+    # listens is the gateway's business, not the page's or the agent-server's.
+    if getattr(connector, "relay", None) is not None:
+        row["relay"] = {"label": connector.relay.label,
+                        "attachments": connector.relay.attachments,
+                        # The schemes the relay speaks: those with `forms`,
+                        # the only ones a relayed URI is vetted against.
+                        "schemes": [s.name for s in connector.schemes
+                                    if s.forms]}
+    if getattr(connector, "pairing", None) is not None:
+        row["pairing"] = True
+    return row

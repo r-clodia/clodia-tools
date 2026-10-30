@@ -54,6 +54,19 @@ connectors:
         template: '{value}'
         normalise: url_origin
         dtype: http
+      # The text a pack's relay transport carries out of a room
+      # (clodia-platform#638), reachable only from inside `channel.deliver`.
+      # The destination is the WHOLE URI (`sms:+39…`), already checked against
+      # the relay connector's own schemes and forms, so the PDP judges exactly
+      # what `telegram.send` gets judged on (`tg:<chat>`). `scheme: http` is
+      # only the anchor the grammar requires — no pack scheme exists here —
+      # and it never lowercases; `dtype: channel` names the gate's family.
+      - verb: channel.relay_send
+        direction: egress
+        scheme: http
+        arg: destination
+        template: '{value}'
+        dtype: channel
     # Verbi che PORTANO DENTRO contenuto di terzi. È la domanda «questo verbo
     # produce taint», e la risposta non dipende da chi lo chiama.
     #

@@ -46,7 +46,14 @@ SCHEMA_VERSION = 2
 #: nasce da un censimento dei chiamanti reali nei tre repo, non dai valori che
 #: sembrano plausibili: un insieme chiuso indovinato a memoria avrebbe rotto la
 #: relay al primo messaggio.
-MESSAGE_KINDS = ("human", "ai", "system", "telegram", "proxy")
+#:
+#: `channel` (clodia-platform#638) is `telegram` for any transport a pack
+#: declares with `relay:`: the same relay writes it, after vetting the sender
+#: against the room's ingress, so it is treated like `telegram` — not tainting
+#: at arrival. Which transport carried it is the message's `transport` label.
+MESSAGE_KINDS = ("human", "ai", "system", "telegram", "proxy", "channel")
+#: Longest `transport` label of a `channel` message (`manifest.MAX_RELAY_LABEL`).
+MAX_TRANSPORT_LABEL = 32
 TOPIC_STATES = ("active", "on-hold", "done", "archived")
 VALID_STATUS = set(TOPIC_STATES)
 # Scala SEAL (EC Cloud Sovereignty Framework v1.2.1). Sostituisce P0–P3.
@@ -2509,7 +2516,8 @@ class TopicService:
         return {"participants": meta.get("participants")}
 
     def post_message(self, tier: str, name: str, author: str, text: str,
-                     kind: str = "human", attachments: list[str] | None = None) -> dict:
+                     kind: str = "human", attachments: list[str] | None = None,
+                     transport: str | None = None) -> dict:
         """Posta un messaggio nel canale (append-only file in `.messages/` →
         niente contesa). `kind` = uno di `MESSAGE_KINDS`. `attachments` = nomi
         file in files/.
@@ -2519,6 +2527,16 @@ class TopicService:
             raise TopicError(
                 f"kind non valido: {kind or '(vuoto)'} "
                 f"(ammessi: {', '.join(MESSAGE_KINDS)})")
+        label = ""
+        if kind == "channel":
+            # The transport's name as the relay declares it (`relay.label`):
+            # a label to show, never an identity — capped and printable only.
+            label = str(transport or "").strip()
+            if not label or len(label) > MAX_TRANSPORT_LABEL \
+                    or any(not c.isprintable() for c in label):
+                raise TopicError(
+                    "un messaggio 'channel' porta il nome del trasporto "
+                    f"('transport', 1–{MAX_TRANSPORT_LABEL} caratteri stampabili)")
         meta, _ = self._read_meta(tier, name)
         self._assert_content_available(meta)
         now = _now()
@@ -2542,6 +2560,8 @@ class TopicService:
             "attachments": attachments or [], "ts": now.isoformat(timespec="microseconds"),
             "mentions": mentions.extract_mentions(text or ""),
         }
+        if label:
+            msg["transport"] = label
         # UN INGRESSO EXTERNAL CONTAMINA IL CANALE (clodia-platform#262).
         #
         # La #222 ha consegnato l'etichetta (`kind: proxy` scritto dove il
@@ -2564,6 +2584,9 @@ class TopicService:
         # verbi `telegram.*`, che `taint._TAINTING_EXACT` già marca alla
         # sorgente; marcarlo una seconda volta all'arrivo non aggiunge una
         # difesa, aggiunge un secondo posto in cui la stessa regola può divergere.
+        # `channel` (#638) è lo stesso caso per un trasporto di pack: il relay
+        # ha vagliato il mittente contro gli ingress della stanza prima di
+        # postare, esattamente come per Telegram.
         #
         # La sedia NON vale come vaglio: `egress.is_perimeter_source` dichiara
         # fidato chi è nella stanza, e un proxy È fra i partecipanti (è così che

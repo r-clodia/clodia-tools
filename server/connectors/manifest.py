@@ -998,6 +998,41 @@ class Service:
 
 
 @dataclass(frozen=True)
+class Relay:
+    """A chat transport the connector brings to the room (clodia-platform#638).
+
+    The transport is one of the connector's own `services` (#515), reached by
+    the GATEWAY only, on loopback, at `base`: the gateway forwards the relay's
+    three operations (`/poll`, `/send`, `/download`) there and nowhere else. The
+    agent-server never sees `base` — it calls `/internal/channels/<id>/…`.
+
+    `label` is how the transport is named in the room (the `transport` of a
+    `channel` message). `attachments` says whether `/download` exists at all.
+    """
+
+    service: str
+    base: str
+    label: str
+    attachments: bool = False
+
+
+@dataclass(frozen=True)
+class Pairing:
+    """A device pairing step after the credential is saved (clodia-platform#639).
+
+    `status` (GET) and `start` (POST) are PATHS on the service's loopback
+    `base`; the gateway forwards to them from the admin-only
+    `/tools/connectors/<id>/pairing` routes and returns only
+    `{state, code?, qr?, me?, error?}`.
+    """
+
+    service: str
+    base: str
+    status: str = "/status"
+    start: str = "/pair"
+
+
+@dataclass(frozen=True)
 class StorageRemote:
     """A topic storage backend a pack provides (Drive, clodia-platform#524)."""
 
@@ -1061,6 +1096,10 @@ class Connector:
     #: Gli argomenti di contesto che il gateway riempie nelle chiamate ai verbi
     #: di questo connettore (`ContextArg`, clodia-platform#522).
     context: tuple[ContextArg, ...] = ()
+    #: A chat transport on one of this connector's services (#638).
+    relay: Relay | None = None
+    #: A device pairing step on one of this connector's services (#639).
+    pairing: Pairing | None = None
     #: Shipped by the gateway itself (`builtin/*.yaml`) rather than installed
     #: with a pack. Those files are the connectors this gateway still implements
     #: natively, declared in the same grammar so the PDP has one source — see
@@ -1616,8 +1655,115 @@ def _parse_service(raw: Any, where: str, *, pack: str) -> Service:
 #: contributore che potesse dichiararli riscriverebbe gli argomenti delle
 #: chiamate altrui — o si farebbe consegnare i file di topic, o la chat legata
 #: al canale, per il verbo di un altro.
+#: `relay` and `pairing` (#638, #639) as well: a transport speaks the
+#: vocabulary's own URIs, and the vocabulary is its owner's.
 _OWNER_ONLY = ("schemes", "verbs", "taint", "topic_actions", "context",
-               "files", "defaults")
+               "files", "defaults", "relay", "pairing")
+
+#: Hosts a relay or pairing `base` may name: the gateway's own loopback, as
+#: `services.launch.LOOPBACK` (a service listens on loopback only, #515).
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+#: A path on a service's loopback API (`pairing.status`, `pairing.start`).
+_SERVICE_PATH = re.compile(r"^/[A-Za-z0-9._~-]{1,32}(?:/[A-Za-z0-9._~-]{1,32}){0,3}$")
+#: Longest relay label: it is a name in a room, not a sentence.
+MAX_RELAY_LABEL = 32
+
+
+def loopback_base_problem(value: str) -> str:
+    """Why `value` may not be a service `base` (relay, pairing), or "".
+
+    `http://<loopback>:<port>` and nothing else: no https (loopback needs no
+    TLS, and a certificate check would only fail), no userinfo, no path, no
+    query, no fragment. The gateway appends the operation's path itself, so a
+    base with a path would be a way to aim the forward somewhere the contract
+    does not name. Exported so the forwarding code re-checks at call time.
+    """
+    if not isinstance(value, str) or not value:
+        return "required"
+    if any(c.isspace() or not c.isprintable() or c == "\\" for c in value):
+        return f"{value!r} contains a forbidden character"
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return f"{value!r} is not a URL"
+    if parts.scheme != "http" or not value.startswith("http://"):
+        return f"{value!r} is not an http:// URL"
+    if "@" in parts.netloc or parts.username is not None:
+        return f"{value!r} carries userinfo"
+    if parts.path or parts.query or parts.fragment or value.endswith(("?", "#")):
+        return f"{value!r} has a path, a query or a fragment; a base is scheme, host and port"
+    if host.lower() not in _LOOPBACK_HOSTS:
+        return (f"{value!r} is not on loopback (127.0.0.1, localhost, [::1]): a "
+                f"pack service is reachable by the gateway only")
+    if port is None or not (1 <= port <= 65535):
+        return f"{value!r} names no port"
+    return ""
+
+
+def _base(raw: Any, where: str) -> str:
+    value = _text(raw, where)
+    problem = loopback_base_problem(value)
+    if problem:
+        raise ManifestError(f"{where}: {problem}")
+    return value
+
+
+def _own_service(raw: Any, where: str, services: Sequence[Service]) -> str:
+    name = _matching(_text(raw, where), _ID, where)
+    if name not in {s.name for s in services}:
+        raise ManifestError(
+            f"{where}: '{name}' is not one of this connector's services "
+            f"({', '.join(s.name for s in services) or 'none'}); a transport "
+            f"runs in the pack that declares it")
+    return name
+
+
+def _service_path(raw: Any, where: str, default: str) -> str:
+    value = _text(raw, where, required=False, default=default)
+    if not _SERVICE_PATH.match(value) or ".." in value.split("/"):
+        raise ManifestError(
+            f"{where}: {value!r} is not a plain path ('/status', '/pair')")
+    return value
+
+
+def _parse_relay(raw: Any, where: str, *, services: Sequence[Service],
+                 schemes: Sequence[Scheme]) -> Relay:
+    data = _mapping(raw, where)
+    unknown = sorted(set(data) - {"service", "base", "label", "attachments"})
+    if unknown:
+        raise ManifestError(f"{where}: unknown keys {', '.join(unknown)}")
+    if not any(s.forms for s in schemes):
+        # The gateway vets every row's `chat_uri`/`sender_uri` against the
+        # connector's own forms; a scheme without forms accepts anything, so
+        # there would be nothing to vet against.
+        raise ManifestError(
+            f"{where}: a relay needs at least one of the connector's schemes "
+            f"to declare `forms`: the gateway checks every relayed chat and "
+            f"sender against them")
+    label = _text(data.get("label"), f"{where}.label")
+    if len(label) > MAX_RELAY_LABEL or any(not c.isprintable() for c in label):
+        raise ManifestError(
+            f"{where}.label: at most {MAX_RELAY_LABEL} printable characters")
+    return Relay(
+        service=_own_service(data.get("service"), f"{where}.service", services),
+        base=_base(data.get("base"), f"{where}.base"),
+        label=label,
+        attachments=_flag(data.get("attachments"), f"{where}.attachments"))
+
+
+def _parse_pairing(raw: Any, where: str, *,
+                   services: Sequence[Service]) -> Pairing:
+    data = _mapping(raw, where)
+    unknown = sorted(set(data) - {"service", "base", "status", "start"})
+    if unknown:
+        raise ManifestError(f"{where}: unknown keys {', '.join(unknown)}")
+    return Pairing(
+        service=_own_service(data.get("service"), f"{where}.service", services),
+        base=_base(data.get("base"), f"{where}.base"),
+        status=_service_path(data.get("status"), f"{where}.status", "/status"),
+        start=_service_path(data.get("start"), f"{where}.start", "/pair"))
 
 
 def _parse_context(raw: Any, where: str) -> tuple[ContextArg, ...]:
@@ -1867,6 +2013,19 @@ def parse_connector(raw: Any, *, pack: str,
             f"is a property of the call, not of the manifest: pick another "
             f"argument name")
 
+    relay = pairing = None
+    for key in ("relay", "pairing"):
+        if data.get(key) is not None and builtin:
+            raise ManifestError(
+                f"{where}: '{key}' is for a connector a PACK implements; it "
+                f"names a service of the pack")
+    if data.get("relay") is not None:
+        relay = _parse_relay(data.get("relay"), f"{where}.relay",
+                             services=services, schemes=schemes)
+    if data.get("pairing") is not None:
+        pairing = _parse_pairing(data.get("pairing"), f"{where}.pairing",
+                                 services=services)
+
     return Connector(
         id=cid,
         label=_text(data.get("label"), f"{where}.label", required=False) or cid,
@@ -1886,6 +2045,8 @@ def parse_connector(raw: Any, *, pack: str,
         context=context,
         defaults=defaults,
         files=files,
+        relay=relay,
+        pairing=pairing,
         builtin=builtin,
     )
 
@@ -2132,6 +2293,19 @@ class Registry:
 
     def topic_actions(self) -> tuple[TopicAction, ...]:
         return tuple(a for c in self.connectors for a in c.topic_actions)
+
+    def relay_for_scheme(self, scheme: str) -> Connector | None:
+        """The connector that owns `scheme` and declares a `relay:`, or None.
+
+        Only a scheme with `forms` counts: those are the only URIs a relay is
+        vetted against (`_parse_relay`), on the way in and on the way out.
+        """
+        name = (scheme or "").strip().lower()
+        for c in self.connectors:
+            if c.relay is not None and any(s.name == name and s.forms
+                                           for s in c.schemes):
+                return c
+        return None
 
 
 def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,

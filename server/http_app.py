@@ -200,6 +200,9 @@ def build_app() -> Starlette:
     from .profile_api import routes as profile_routes
     # Telegram channel-runner (server-side): endpoint interni ckt1 per drenare/inviare.
     from .telegram_api import routes as telegram_routes
+    # Relay transports declared by pack connectors (#638): poll/send/download
+    # forwarded to the connector's own loopback service.
+    from .channels_api import routes as channels_routes
     # Mail courier (#531): envelopes and attachments for the agent-server's
     # deterministic courier, inside each room's claims.
     from .mail_courier_api import routes as mail_courier_routes
@@ -241,7 +244,7 @@ def build_app() -> Starlette:
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
                 *imagegen_routes, *topics_routes, *profile_routes,
-                *telegram_routes, *mail_courier_routes, *agents_routes, *vault_routes,
+                *telegram_routes, *channels_routes, *mail_courier_routes, *agents_routes, *vault_routes,
                 *tool_routes, *mint_routes, *gate_routes, *logic_routes,
                 *egress_routes, *proxy_auth_routes, *rag_routes,
                 *audit_routes, *egress_proxy_routes, *connectors_routes,

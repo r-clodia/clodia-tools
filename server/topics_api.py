@@ -26,7 +26,7 @@ from starlette.routing import Route
 
 from . import human_mcp, internal_auth, pki_mint, room_tools
 from .topics.local_fs import LocalFsStorage
-from .topics.service import (VALID_TIER, MESSAGE_KINDS, SCHEMA_VERSION, TopicError, TopicService,
+from .topics.service import (VALID_TIER, MESSAGE_KINDS, MAX_TRANSPORT_LABEL, SCHEMA_VERSION, TopicError, TopicService,
                              normalize_meta_v2, topic_links)
 from .topics.storage import VersionConflict
 
@@ -441,11 +441,24 @@ async def post_message(request: Request):
     if kind not in MESSAGE_KINDS:
         return JSONResponse({"error": f"kind non valido: ammessi "
                                       f"{', '.join(MESSAGE_KINDS)}"}, status_code=400)
+    # `transport` (#638): the name of the relay transport of a `channel`
+    # message. Ignored on any other kind, as before; refused (400, not the
+    # route's 404) when a `channel` message lacks a usable one.
+    transport = None
+    if kind == "channel":
+        transport = body.get("transport")
+        if not isinstance(transport, str) or not transport.strip() \
+                or len(transport.strip()) > MAX_TRANSPORT_LABEL \
+                or any(not c.isprintable() for c in transport):
+            return JSONResponse({"error": "un messaggio 'channel' richiede "
+                                          "'transport' (il nome del trasporto)"},
+                                status_code=400)
     try:
         msg = await asyncio.to_thread(
             _service().post_message, tier, name, author, body.get("text") or "",
             kind=kind,
-            attachments=body.get("attachments") or [])
+            attachments=body.get("attachments") or [],
+            **({"transport": transport} if transport is not None else {}))
         return JSONResponse(msg)
     except TopicError:
         return JSONResponse({"error": "not_found"}, status_code=404)

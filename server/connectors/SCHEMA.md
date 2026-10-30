@@ -83,6 +83,8 @@ extending nothing, is empty and refused.
 | `context` | no | call facts the gateway fills in, see below |
 | `files` | no | arguments that name a TOPIC FILE, which the gateway reads and delivers as bytes |
 | `defaults` | no | arguments the gateway fills **only when omitted**, see below |
+| `relay` | no | a chat transport on one of the connector's `services` (#638), see below |
+| `pairing` | no | a device pairing step on one of the connector's `services` (#639), see below |
 
 `blurb`, `scope` and `icon` (#520) are the card's COPY and its glyph. The
 drawing is a frontend asset — a logo is an SVG file, not gateway data — but the
@@ -468,6 +470,77 @@ author writes against:
 - a transient registry error keeps the running services as they are;
 - status, last error and restart count appear on the Tools page
   (`GET /tools`, `GET /internal/connectors`).
+
+### `relay` (clodia-platform#638)
+
+A connector that brings a **chat channel** declares the transport. The
+transport is one of the connector's own `services` (#515), reachable by the
+gateway only, on loopback:
+
+```
+    relay:
+      service: sms-relay            # one of THIS connector's services
+      base: http://127.0.0.1:8731   # http, loopback host, a port; nothing else
+      label: SMS                    # how the transport is named in the room
+      attachments: false            # default false: no /download
+```
+
+Refused at load when: the connector `extends` another (a transport speaks the
+vocabulary's URIs, and the vocabulary is its owner's); it is a gateway
+manifest; `service` is not one of the connector's services; `base` is not
+`http://<127.0.0.1|localhost|[::1]>:<port>` with no path, query, fragment or
+userinfo; `label` is empty or longer than 32 characters; none of the
+connector's schemes declares `forms` (the gateway vets every relayed URI
+against them); an unknown key appears.
+
+**Transport contract** — HTTP JSON on `base`, called by the gateway only:
+
+| Service endpoint | Body | Answer |
+|---|---|---|
+| `POST /poll` | `{timeout}` | `{messages: [row…]}`; each row carries `chat_uri` and `sender_uri` in the connector's own scheme |
+| `POST /send` | `{chat_id, text, thread_id?}` | `{ok, message_id}` |
+| `POST /download` | `{file_id}` | `{content_b64, size, mime}` — only with `attachments: true` |
+
+**Gateway side.** `POST /internal/channels/<connector>/{poll,send,download}`
+(same authorisation as `/internal/telegram/*`: the agent-server's privileged
+principal) forward to `<base>/<operation>` for a connector the live registry
+accepted with `relay:`, and for no other path. Unknown connector, no `relay:`,
+or `download` without `attachments` → 404; the service not running or not
+answering → 503. On `poll` the gateway keeps a row only if its `chat_uri`
+**and** its `sender_uri` (when present) parse in one of the connector's OWN
+schemes and match one of that scheme's `forms`; any other row is dropped and
+logged. Nothing else in a row is identity.
+
+`GET /internal/connectors` shows `relay: {label, attachments, schemes}` for such
+a connector — never `base` or the port. A topic action with `binding: channel`
+writes its binding under its own connector id, and `channel.deliver` reaches
+any scheme of a relay connector through the same `send` path, under the same
+egress decision as a Telegram delivery (`channel.relay_send`, mapped in the
+core manifest). A relayed message is posted with `kind: channel` and
+`transport: <label>`; like `telegram`, it does not taint the room, because the
+sender was vetted against the room's ingress before it was posted.
+
+### `pairing` (clodia-platform#639)
+
+A transport that needs a **device pairing** step after the credential is saved
+(a linking code typed on a phone, a QR to scan) declares where its service
+exposes it:
+
+```
+    pairing:
+      service: sms-relay
+      base: http://127.0.0.1:8731
+      status: /status      # GET  → {state, code?, qr?, me?, error?}  (default /status)
+      start: /pair         # POST → starts pairing                    (default /pair)
+```
+
+Same refusals as `relay` for `extends`, gateway manifests, `service` and
+`base`; `status`/`start` must be plain paths. `GET` and `POST
+/tools/connectors/<id>/pairing` are for a **human admin only** and forward to
+`status` and `start`. Only `state`, `code`, `qr`, `me` and `error` come back,
+each a length-capped string; the code and the QR are never logged or audited
+by value. A connector without `pairing:` → 404; the service down → 503.
+`GET /internal/connectors` shows `pairing: true`.
 
 ## Components (`components:`, clodia-platform#558)
 
