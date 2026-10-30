@@ -853,16 +853,73 @@ def unregister_mcp_core(name: str) -> dict:
     return {"unregistered": name}
 
 
+def _pack_declared_backends(pack: str) -> set[str]:
+    """The backend names (normalised) an INSTALLED pack declares as its own:
+    its `mcp_servers`, and the `backend` of its connectors' provider
+    transports and `relay:`/`pairing:` (#641). Empty if it is not installed."""
+    from .connectors import resolved as _resolved
+    doc = _resolved.manifests().get(pack)
+    if not isinstance(doc, dict):
+        return set()
+    names = {str(k) for k in (doc.get("mcp_servers") or {})} \
+        if isinstance(doc.get("mcp_servers"), dict) else set()
+    for entry in doc.get("connectors") or []:
+        if not isinstance(entry, dict):
+            continue
+        blocks = [p.get("transport") for p in entry.get("providers") or []
+                  if isinstance(p, dict)]
+        blocks += [entry.get("relay"), entry.get("pairing")]
+        names |= {str(b.get("backend")) for b in blocks
+                  if isinstance(b, dict) and b.get("backend")}
+    return {_norm_backend(_slugify(n)) for n in names if _slugify(n)}
+
+
 async def register_mcp(request: Request):
-    """Registra uno o più MCP server da mcp.json (UI Add-MCP)."""
+    """Registra uno o più MCP server da mcp.json (UI Add-MCP).
+
+    `pack` (optional, #641): mount the servers AS THAT PACK's — the ownership
+    stamp `register_mcp_core(pack=…)` writes and that a pack connector's
+    transport, relay or pairing backend requires (`resolved.backend_owners`).
+    It is how an admin mounts, after review, the server of a pack imported
+    from a zip, whose servers the import leaves `pending`. Human admin only,
+    and only for an installed pack that declares every server being mounted:
+    the stamp is the proof of ownership, so it is never written for a name
+    the pack does not claim.
+    """
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad_json"}, status_code=400)
+    pack = body.get("pack") if isinstance(body, dict) else None
+    if pack is not None:
+        if not _authorized_owner(request):
+            return JSONResponse({"error": "mounting as a pack is for a human admin"},
+                                status_code=403)
+        if not isinstance(pack, str) or not pack.strip():
+            return JSONResponse({"error": "pack must be a pack name"}, status_code=400)
+        pack = pack.strip()
+        declared = _pack_declared_backends(pack)
+        cfg = body.get("config")
+        if isinstance(cfg, str):
+            try:
+                cfg = json.loads(cfg)
+            except Exception:
+                cfg = None
+        servers = (cfg or {}).get("mcpServers") if isinstance(cfg, dict) else None
+        names = [_norm_backend(_slugify(n)) for n in (servers or {})] \
+            if isinstance(servers, dict) else []
+        missing = [n for n in names if n not in declared]
+        if not declared or missing:
+            return JSONResponse(
+                {"error": f"pack '{pack}' is not installed or does not declare "
+                          f"the server(s) {', '.join(missing) or '(none)'}: a "
+                          f"backend is mounted as a pack's only if the pack "
+                          f"names it"}, status_code=403)
     try:
-        return JSONResponse(register_mcp_core(body.get("config"), body.get("secrets") or {}))
+        return JSONResponse(register_mcp_core(body.get("config"), body.get("secrets") or {},
+                                              pack=pack))
     except McpRegisterError as e:
         return JSONResponse({"error": str(e)}, status_code=e.status)
 
@@ -1169,11 +1226,19 @@ async def connector_pairing(request: Request):
         return JSONResponse({"error": f"connector '{cid}' has no pairing step"},
                             status_code=404)
     start = request.method == "POST"
-    token = _ch.service_token(connector, pairing.service)
-    if not token:
-        return JSONResponse(
-            {"error": f"service '{pairing.service}' of pack '{connector.pack}' "
-                      f"is not running"}, status_code=503)
+    token = ""
+    if pairing.backend:
+        # #641: the pack's own mounted MCP backend, tools pairing_status/start.
+        if not _resolved.owned_backend(connector.pack, pairing.backend):
+            return JSONResponse(
+                {"error": f"backend '{pairing.backend}' is not mounted by pack "
+                          f"'{connector.pack}'"}, status_code=503)
+    else:
+        token = _ch.service_token(connector, pairing.service)
+        if not token:
+            return JSONResponse(
+                {"error": f"service '{pairing.service}' of pack '{connector.pack}' "
+                          f"is not running"}, status_code=503)
     if start:
         # Starting a pairing adopts a device on the owner's account: recorded,
         # with WHO asked and for which connector — never the code or the QR,
@@ -1183,10 +1248,17 @@ async def connector_pairing(request: Request):
         _control.safe(_control.emit, "connector", "pairing_start", cid,
                       admin=_admin_principal(request), pack=connector.pack)
     try:
-        raw = await _ch.forward(pairing.base, pairing.start if start else pairing.status,
-                                {}, timeout=_PAIRING_TIMEOUT,
-                                max_bytes=64 * 1024, token=token,
-                                method="POST" if start else "GET")
+        if pairing.backend:
+            raw = await _ch.call_backend(
+                connector, pairing.backend,
+                "pairing_start" if start else "pairing_status", {},
+                timeout=_PAIRING_TIMEOUT, max_bytes=64 * 1024)
+        else:
+            raw = await _ch.forward(pairing.base,
+                                    pairing.start if start else pairing.status,
+                                    {}, timeout=_PAIRING_TIMEOUT,
+                                    max_bytes=64 * 1024, token=token,
+                                    method="POST" if start else "GET")
     except _ch.RelayUnavailable as e:
         LOG.warning("pairing %s: service unavailable (%s)", cid, e)
         return JSONResponse({"error": "pairing service unavailable"}, status_code=503)

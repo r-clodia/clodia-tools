@@ -24,6 +24,9 @@ Rules, each closing a way the door could be misused:
   two URIs and nothing else.
 - **Supervision is #515's.** A service the supervisor is not running, or that
   does not answer, is 503 — the relay retries; it never gets another way in.
+- **Or a mounted MCP backend (#641).** With `relay.backend` the same three
+  operations are the backend's tools `relay_poll`/`relay_send`/
+  `relay_download` (`call_backend`); everything else here is identical.
 
 Same authorisation as `telegram_api`: `internal_auth.authorize`, the
 privileged principal of the agent-server's runner, no on-behalf sessions.
@@ -171,9 +174,58 @@ async def forward(base: str, path: str, body: dict, *, timeout: float,
     return data
 
 
+async def call_backend(connector: Connector, backend: str, tool: str,
+                       args: dict, *, timeout: float, max_bytes: int) -> dict:
+    """One tool of a relay/pairing MCP backend (#641), off the event loop.
+
+    Same contract as `forward`, so every caller is unchanged: the tool's text
+    is parsed as a JSON object; the backend not mounted by the connector's own
+    pack, not mounted at all, or not answering → `RelayUnavailable` (503); the
+    tool's `isError` → `RelayFailed` — carrying status 400 and the tool's JSON
+    object when it answered one (the equivalent of a service's 4xx, which the
+    pairing routes relay), no status otherwise (502).
+    """
+    from . import proxy
+    if not _resolved.owned_backend(connector.pack, backend):
+        LOG.warning("channels %s: backend '%s' is not mounted by pack '%s': "
+                    "not called", connector.id, backend, connector.pack)
+        raise RelayUnavailable(
+            f"backend '{backend}' is not mounted by pack '{connector.pack}'")
+    import asyncio
+    import json as _json
+    try:
+        text = await asyncio.to_thread(proxy.call_backend_tool_sync, backend,
+                                       tool, dict(args), timeout)
+    except proxy.BackendUnavailable as e:
+        raise RelayUnavailable(f"backend unavailable ({str(e)[:160]})") from e
+    except proxy.BackendToolError as e:
+        payload = None
+        try:
+            payload = _json.loads(getattr(e, "text", "") or "null")
+        except ValueError:
+            pass
+        if isinstance(payload, dict):
+            raise RelayFailed(f"{tool} refused the request", 400, payload) from e
+        raise RelayFailed(f"{tool} failed") from e
+    except Exception as e:  # noqa: BLE001 — a session that cannot open: down
+        raise RelayUnavailable(f"backend not reachable ({type(e).__name__})") from e
+    if len(text.encode("utf-8", "replace")) > max_bytes:
+        raise RelayFailed(f"backend answer over {max_bytes} bytes")
+    try:
+        data = _json.loads(text or "null")
+    except ValueError as e:
+        raise RelayFailed("backend answer is not JSON") from e
+    if not isinstance(data, dict):
+        raise RelayFailed("backend answer is not a JSON object")
+    return data
+
+
 async def _call(connector: Connector, op: str, body: dict, *, timeout: float,
                 max_bytes: int) -> dict:
     relay = connector.relay
+    if relay.backend:
+        return await call_backend(connector, relay.backend, f"relay_{op}", body,
+                                  timeout=timeout, max_bytes=max_bytes)
     token = service_token(connector, relay.service)
     if not token:
         raise RelayUnavailable(

@@ -592,6 +592,60 @@ Starting a pairing is recorded in the audit trail (`control.connector`,
 `pairing_start`: connector, admin, pack — never a code).
 `GET /internal/connectors` shows `pairing: true`.
 
+### `relay`/`pairing` through a mounted MCP backend (clodia-platform#641)
+
+A transport built on third-party code may run in **its own container** and
+expose itself as an MCP server, instead of a service the gateway supervises
+(which needs a storage that enforces permission bits, #544). `relay:` and
+`pairing:` then name a mounted backend instead of `service`/`base`:
+
+```
+    relay:
+      backend: sms-transport   # a mounted MCP backend of THIS pack
+      label: SMS
+      attachments: true
+      seal_cap: SEAL-1         # optional, as for the service form
+    pairing:
+      backend: sms-transport
+```
+
+- **Exclusive forms.** A block declares either `backend` or `service`/`base`,
+  never both (refused at load). With `backend` the health/port checks of the
+  service form do not apply, and `pairing` takes no `status`/`start` paths.
+  `backend` follows the mount slug rules: lowercase letters, digits and `-`,
+  at most 40.
+- **Ownership.** The backend must be mounted with the pack's stamp
+  (`pack: <pack>`, `resolved.backend_owners`); otherwise the gateway does not
+  call it and answers 503. An admin mounts a pack's server with that stamp
+  through `POST /tools/mcp {config: {mcpServers: {<name>: {url: …}}}, pack:
+  "<pack>"}` (human admin only, and only for an installed pack whose manifest
+  names that server — in `mcp_servers` or as a `backend` of its connectors),
+  then provides its credential with «Connetti» (#565). The agent-server's own
+  mount of a first-party pack stamps it the same way (`mcp.add` with `pack`).
+- **Transport, not a verb.** A backend named by a `relay:`/`pairing:` counts as
+  a transport (`resolved.is_transport_backend`, like a provider transport of
+  #523): its tools are never listed to agents and an agent's call to one is
+  refused. Agent-facing verbs of the same container go in a SECOND backend,
+  under the ordinary PDP.
+
+**Tool contract** — JSON arguments in, one JSON object as the tool's text out:
+
+| Tool | Arguments | Answer |
+|---|---|---|
+| `relay_poll` | `{timeout, ack?}` | `{messages: [row…], cursor?}` — rows as for `/poll` |
+| `relay_send` | `{chat_id, text, thread_id?}` | `{ok, message_id}` |
+| `relay_download` | `{file_id}` | `{content_b64, size, mime}` (only with `attachments: true`) |
+| `pairing_status` | `{}` | `{state, code?, qr?, me?, error?}` |
+| `pairing_start` | `{}` | the same shape |
+
+The gateway calls them off its event loop, with the poll timeout plus a
+margin. A tool answering `isError` is the equivalent of a service's error: with
+a JSON object as its text it is a refusal (the pairing routes return it, with
+status 400, through the same field filter), otherwise 502; the backend not
+mounted, not the pack's, or not answering is 503. Row vetting, `ack`/`cursor`,
+the SEAL cap, bindings, the `channel` kind and the pairing audit are exactly
+those of the service form.
+
 ## Components (`components:`, clodia-platform#558)
 
 Owner decision of 2026-10-16: a pack is a **distribution of components**, each

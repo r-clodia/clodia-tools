@@ -484,6 +484,11 @@ class BackendToolError(RuntimeError):
     """A backend tool answered with `isError`, or could not be reached."""
 
 
+class BackendUnavailable(BackendToolError):
+    """The backend is not mounted, or did not answer in time (#641: a relay
+    caller tells this — «try later», 503 — from a tool's own `isError`)."""
+
+
 def _backend_named(name: str) -> dict | None:
     """The mounted backend called `name`, compared the way ownership is
     (`resolved.norm_name`: slugs use `-`, namespaces `_`)."""
@@ -519,7 +524,7 @@ def call_backend_tool_sync(backend: str, tool: str, arguments: dict,
     """
     b = _backend_named(backend)
     if b is None:
-        raise BackendToolError(f"backend MCP '{backend}' non montato")
+        raise BackendUnavailable(f"backend MCP '{backend}' non montato")
     budget = float(timeout) + TRANSPORT_SESSION_MARGIN_S
 
     async def _go() -> str:
@@ -529,11 +534,13 @@ def call_backend_tool_sync(backend: str, tool: str, arguments: dict,
         try:
             res = await asyncio.wait_for(_call(), timeout=budget)
         except TimeoutError:
-            raise BackendToolError(
+            raise BackendUnavailable(
                 f"{backend}.{tool}: nessuna risposta entro {int(budget)}s") from None
         text = _response_text(res.content)
         if getattr(res, "isError", False):
-            raise BackendToolError(f"{backend}.{tool}: {text[:500]}")
+            err = BackendToolError(f"{backend}.{tool}: {text[:500]}")
+            err.text = text      # the tool's own answer, for a caller that relays it
+            raise err
         return text
 
     try:

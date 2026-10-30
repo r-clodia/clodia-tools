@@ -1077,7 +1077,8 @@ _TRANSPORTS: tuple[tuple, frozenset[str]] | None = None
 
 
 def transport_backends() -> frozenset[str]:
-    """The (normalised) MCP backends packs declare as provider transports.
+    """The (normalised) MCP backends packs declare as provider transports, or
+    as the `backend` of a `relay:`/`pairing:` (#641).
 
     Gateway-internal sockets: their tools are never listed to an agent and an
     agent's call to one is refused (`main._check_not_transport`). A transport
@@ -1106,8 +1107,13 @@ def transport_backends() -> frozenset[str]:
         entries = meta.get("connectors") if isinstance(meta, Mapping) else None
         for entry in entries if isinstance(entries, list) else []:
             providers = entry.get("providers") if isinstance(entry, Mapping) else None
-            for p in providers if isinstance(providers, list) else []:
-                t = p.get("transport") if isinstance(p, Mapping) else None
+            declared = [p.get("transport") if isinstance(p, Mapping) else None
+                        for p in (providers if isinstance(providers, list) else [])]
+            # A relay or pairing backend (#641) is the same kind of socket: the
+            # gateway's own, never an agent's verb.
+            if isinstance(entry, Mapping):
+                declared += [entry.get("relay"), entry.get("pairing")]
+            for t in declared:
                 name = _norm(str(t.get("backend") or "")) \
                     if isinstance(t, Mapping) else ""
                 if not name:
@@ -1147,6 +1153,13 @@ def transport_backends() -> frozenset[str]:
     result = frozenset(out)
     _TRANSPORTS = (sig, result)
     return result
+
+
+def owned_backend(pack: str, backend: str) -> bool:
+    """Is `backend` mounted by `pack` itself (the `pack:` stamp)? The gateway
+    calls a relay/pairing backend (#641) only then: a manifest naming another
+    pack's or an admin's backend would route a room's messages there."""
+    return _norm(backend) in (backend_owners().get(pack) or ())
 
 
 def is_transport_backend(name: str) -> bool:

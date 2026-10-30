@@ -1008,12 +1008,18 @@ class Relay:
 
     `label` is how the transport is named in the room (the `transport` of a
     `channel` message). `attachments` says whether `/download` exists at all.
+
+    Or, instead of `service`/`base` (#641): `backend`, a mounted MCP backend
+    of the same pack offering `relay_poll`/`relay_send`/`relay_download`. The
+    transport then runs in its own container, not under the supervisor;
+    exactly one of the two forms is set.
     """
 
     service: str
     base: str
     label: str
     attachments: bool = False
+    backend: str = ""
     #: The SEAL rank above which binding a room to this transport needs the
     #: owner's written acknowledgement (#405's flow). `None` in the manifest
     #: means the gateway's default for pack relays, `DEFAULT_RELAY_SEAL_CAP`:
@@ -1035,6 +1041,9 @@ class Pairing:
     base: str
     status: str = "/status"
     start: str = "/pair"
+    #: #641: a mounted MCP backend offering `pairing_status`/`pairing_start`,
+    #: instead of `service`/`base`.
+    backend: str = ""
 
 
 @dataclass(frozen=True)
@@ -1770,11 +1779,33 @@ def _service_path(raw: Any, where: str, default: str) -> str:
     return value
 
 
+#: The name of a mounted MCP backend, as `tools_api._slugify` produces it.
+_BACKEND_SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$")
+
+
+def _transport_form(data: Mapping, where: str) -> str:
+    """`backend` or "" (= `service`/`base`), refusing a mix of the two (#641)."""
+    has_backend = data.get("backend") is not None
+    has_service = data.get("service") is not None or data.get("base") is not None
+    if has_backend and has_service:
+        raise ManifestError(
+            f"{where}: declares both `backend` and `service`/`base`; a transport "
+            f"is either a mounted MCP backend or a supervised service, not both")
+    if not has_backend:
+        return ""
+    name = _text(data.get("backend"), f"{where}.backend")
+    if not _BACKEND_SLUG.match(name):
+        raise ManifestError(
+            f"{where}.backend: {name!r} is not a mounted MCP backend name "
+            f"(lowercase letters, digits and '-', at most 40)")
+    return name
+
+
 def _parse_relay(raw: Any, where: str, *, services: Sequence[Service],
                  schemes: Sequence[Scheme]) -> Relay:
     data = _mapping(raw, where)
     unknown = sorted(set(data) - {"service", "base", "label", "attachments",
-                                  "seal_cap"})
+                                  "seal_cap", "backend"})
     if unknown:
         raise ManifestError(f"{where}: unknown keys {', '.join(unknown)}")
     if not any(s.forms for s in schemes):
@@ -1789,9 +1820,14 @@ def _parse_relay(raw: Any, where: str, *, services: Sequence[Service],
     if len(label) > MAX_RELAY_LABEL or any(not c.isprintable() for c in label):
         raise ManifestError(
             f"{where}.label: at most {MAX_RELAY_LABEL} printable characters")
-    service = _own_service(data.get("service"), f"{where}.service", services)
-    base = _base(data.get("base"), f"{where}.base")
-    _check_base_is_the_service(base, service, f"{where}.base")
+    backend = _transport_form(data, where)
+    if backend:
+        service_name, base = "", ""
+    else:
+        service = _own_service(data.get("service"), f"{where}.service", services)
+        base = _base(data.get("base"), f"{where}.base")
+        _check_base_is_the_service(base, service, f"{where}.base")
+        service_name = service.name
     cap = None
     if data.get("seal_cap") is not None:
         raw_cap = _text(data.get("seal_cap"), f"{where}.seal_cap")
@@ -1801,19 +1837,27 @@ def _parse_relay(raw: Any, where: str, *, services: Sequence[Service],
                 f"{where}.seal_cap: {raw_cap!r} is not one of SEAL-0 … SEAL-4")
         cap = int(m.group(1))
     return Relay(
-        service=service.name,
+        service=service_name,
         base=base,
         label=label,
         attachments=_flag(data.get("attachments"), f"{where}.attachments"),
-        seal_cap=cap)
+        seal_cap=cap,
+        backend=backend)
 
 
 def _parse_pairing(raw: Any, where: str, *,
                    services: Sequence[Service]) -> Pairing:
     data = _mapping(raw, where)
-    unknown = sorted(set(data) - {"service", "base", "status", "start"})
+    unknown = sorted(set(data) - {"service", "base", "status", "start", "backend"})
     if unknown:
         raise ManifestError(f"{where}: unknown keys {', '.join(unknown)}")
+    backend = _transport_form(data, where)
+    if backend:
+        if data.get("status") is not None or data.get("start") is not None:
+            raise ManifestError(
+                f"{where}: `status`/`start` are paths of a service; a backend "
+                f"offers the tools `pairing_status` and `pairing_start`")
+        return Pairing(service="", base="", backend=backend)
     service = _own_service(data.get("service"), f"{where}.service", services)
     base = _base(data.get("base"), f"{where}.base")
     _check_base_is_the_service(base, service, f"{where}.base")
