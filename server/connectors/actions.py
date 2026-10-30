@@ -258,8 +258,7 @@ def _seal_state(connector: Connector, tier: str, name: str) -> dict:
     cade con la migrazione del connettore che cappa (#522), decisione
     dell'orchestratore del 14/10.
     """
-    from ..topics.service import (CHANNEL_SEAL_ACK, _tier_rank,
-                                  channel_cap_acked)
+    from ..topics.service import _tier_rank, channel_ack, channel_cap_acked
     from ..topics_api import _service
     from ..topics.service import TopicError
     try:
@@ -272,7 +271,7 @@ def _seal_state(connector: Connector, tier: str, name: str) -> dict:
     return {"tier": t, "cap": f"SEAL-{cap}" if cap is not None else None,
             "requires_ack": bool(morde
                                  and not channel_cap_acked(meta, connector.id, t)),
-            "ack": meta.get(CHANNEL_SEAL_ACK)}
+            "ack": channel_ack(meta, connector.id)}
 
 
 def channel_cap(connector: Connector) -> int | None:
@@ -530,7 +529,7 @@ def _disconnect_channel(connector: Connector, action: TopicAction, tier: str,
     from ..topics_api import _service
 
     try:
-        _service().revoke_channel_cap_ack(tier, name)
+        _service().revoke_channel_cap_ack(tier, name, connector.id)
     except TopicError:
         pass
     chat = _bound_chat(connector.id, tier, name)

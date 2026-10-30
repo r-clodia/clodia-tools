@@ -185,7 +185,9 @@ class SealCapTests(Base):
             self.assertEqual(tb.get("-1001")["topic"], "preventivi")
             self.assertIn("tg:-1001", w.CONFIG["scope_egress_allow"]["SEAL-2/preventivi"])
             self.assertIn("tg:-1001", w.CONFIG["scope_source_allow"]["SEAL-2/preventivi"])
-        ack = self.svc.open("SEAL-2", "preventivi")["meta"]["channel_seal_ack"]
+        from .topics.service import channel_ack
+        # Keyed by channel since #638; same fields as the single slot before.
+        ack = channel_ack(self.svc.open("SEAL-2", "preventivi")["meta"], "telegram")
         self.assertEqual(ack["channel"], "telegram")
         self.assertEqual(ack["tier"], "SEAL-2")
         self.assertEqual(ack["cap"], "SEAL-1")

@@ -1118,7 +1118,7 @@ def _telegram_seal_state(tier: str, name: str) -> dict:
     frontend è una policy che prima o poi dirà il contrario del backend, e a
     quel punto quella che conta non è quella che l'owner ha letto.
     """
-    from .topics.service import channel_cap_acked, channel_seal_cap, CHANNEL_SEAL_ACK
+    from .topics.service import channel_ack, channel_cap_acked, channel_seal_cap
     try:
         meta = _service().open(tier, name).get("meta", {})
     except TopicError:
@@ -1131,7 +1131,7 @@ def _telegram_seal_state(tier: str, name: str) -> dict:
         "tier": t,
         "cap": f"SEAL-{cap}" if cap is not None else None,
         "requires_ack": bool(morde and not channel_cap_acked(meta, "telegram", t)),
-        "ack": meta.get(CHANNEL_SEAL_ACK),
+        "ack": channel_ack(meta, "telegram"),
     }
 
 
@@ -1162,7 +1162,8 @@ async def topic_tier(request: Request):
     from .topics import retier
     svc = _service()
     try:
-        esito = retier.apply(svc, tier, name, nuovo, by=chi, reason=motivo)
+        esito = retier.apply(svc, tier, name, nuovo, by=chi, reason=motivo,
+                             accept_seal_downgrade=body.get("accept_seal_downgrade") is True)
     except TopicError as e:
         return JSONResponse({"error": str(e)[:300]}, status_code=400)
     # Traccia leggibile nella stanza: chi, da dove a dove, perché. Il registro

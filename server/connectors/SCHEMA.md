@@ -491,13 +491,21 @@ The service named by `relay.service` (and `pairing.service`) must declare an
 `base`: the health target is the address the supervisor verifies, and a base
 pointing anywhere else would forward to whatever else listens on loopback.
 Two connectors may not point a relay or pairing `base` at the same loopback
-port (every loopback name is the same socket); both packs are refused.
+port (every loopback name is the same socket), and no two services of the
+instance — any pack, relay or not — may declare the same `http`/`tcp` health
+address; both packs are refused.
 
 **SEAL cap.** Binding a room to a relay is capped like Telegram (#405): above
 `seal_cap` — or SEAL-1 when the manifest names none, fail closed — the owner
 must acknowledge the downgrade (`accept_seal_downgrade`) with the room's tier
 shown, and the acknowledgement is dropped on disconnect. The cap is reported in
-the topic action's `seal` state and in the listing's `relay.seal_cap`. This is
+the topic action's `seal` state and in the listing's `relay.seal_cap`.
+Acknowledgements are kept per connector (`channel_seal_ack: {<connector>:
+{…}}`; the older single slot is read as Telegram's), and disconnecting a
+channel withdraws only its own. Re-classifying a room carries every
+connector's bindings to the new tier; climbing above a pack relay's cap is
+refused unless the owner acknowledges it again (`accept_seal_downgrade` on the
+retier), recorded at the new tier. This is
 the one place a SEAL value appears in a manifest; a connector-level
 `seal_cap` stays refused.
 
@@ -523,7 +531,7 @@ came from the gateway». The token changes at every restart; never log it.
 
 | Service endpoint | Body | Answer |
 |---|---|---|
-| `POST /poll` | `{timeout}` | `{messages: [row…]}`; each row carries `chat_uri` and `sender_uri` in the connector's own scheme |
+| `POST /poll` | `{timeout, ack?}` | `{messages: [row…], cursor?}`; each row carries `chat_id`, `chat_uri` (= `<scheme>:<chat_id>`) and `sender_uri` in the connector's own scheme. `ack` is the `cursor` of the previous poll: the service drops the rows it covers |
 | `POST /send` | `{chat_id, text, thread_id?}` | `{ok, message_id}` |
 | `POST /download` | `{file_id}` | `{content_b64, size, mime}` — only with `attachments: true` |
 
@@ -538,6 +546,14 @@ schemes and match one of that scheme's `forms`, and its `chat_uri` is exactly
 `<scheme>:<chat_id>` with the row's own `chat_id` (the chat a reply goes to is
 the chat that was vetted); any other row is dropped and logged, without its
 values. Nothing else in a row is identity.
+
+The gateway route takes `{timeout, ack?}` and answers `{messages, count,
+cursor?}`: `ack` is passed through to the service, and the service's `cursor`
+comes back **whatever rows were dropped** — a dropped row is acknowledged like
+a kept one, and a lost cursor would make the service send the same rows
+forever. `ack` and `cursor` are opaque printable strings of at most 512
+characters; a cursor that is not is dropped and logged, an `ack` that is not is
+a 400.
 
 `GET /internal/connectors` shows `relay: {label, attachments, schemes,
 seal_cap}` for such a connector — never `base` or the port. A topic action with `binding: channel`

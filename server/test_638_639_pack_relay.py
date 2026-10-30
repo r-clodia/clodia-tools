@@ -63,8 +63,9 @@ class _Service:
                     status, payload = 401, {"error": "token"}
                 else:
                     outer.calls.append((method, self.path, body))
-                    status, payload = outer.answers.get(
+                    answer = outer.answers.get(
                         f"{method} {self.path}", (404, {"error": "no route"}))
+                    status, payload = answer(body) if callable(answer) else answer
                 raw = json.dumps(payload).encode()
                 self.send_response(status)
                 self.send_header("content-type", "application/json")
@@ -466,7 +467,13 @@ class _Room:
             from .topics import service as S
             self.meta[S.CHANNEL_SEAL_ACK] = {"channel": ctype, "tier": tier}
         svc.accept_channel_cap.side_effect = _accept
-        svc.revoke_channel_cap_ack.side_effect = lambda t, n: self.meta.clear()
+        self.revoked: list = []
+
+        def _revoke(t, n, ctype=None):
+            self.revoked.append(ctype)
+            self.meta.pop(S.CHANNEL_SEAL_ACK, None)
+        from .topics import service as S
+        svc.revoke_channel_cap_ack.side_effect = _revoke
         stack = contextlib.ExitStack()
         test.addCleanup(stack.close)
         for p in (_installed(doc),
@@ -788,6 +795,263 @@ class SupervisorTokenTests(unittest.TestCase):
             self.assertIsNone(sup.service_token("demo-pack", "listener"))
         self.assertEqual(launch.SERVICE_TOKEN_ENV, "CLODIA_SERVICE_TOKEN")
         self.assertNotEqual(launch.new_service_token(), launch.new_service_token())
+
+
+class _QueueService:
+    """A relay's poll queue with cursors, as a conforming service keeps it."""
+
+    def __init__(self, rows):
+        self.queue = list(enumerate(rows, start=1))
+        self.acks: list = []
+
+    def __call__(self, body):
+        ack = body.get("ack")
+        self.acks.append(ack)
+        if ack is not None:
+            self.queue = [(n, r) for n, r in self.queue if n > int(ack)]
+        if not self.queue:
+            return 200, {"messages": []}
+        return 200, {"messages": [r for _n, r in self.queue],
+                     "cursor": str(self.queue[-1][0])}
+
+
+class PollCursorTests(_RouteCase):
+    """BLOCKER-1: ack in, cursor out, whatever rows are dropped."""
+
+    GOOD = {"chat_id": "+39333000111", "chat_uri": "sms:+39333000111", "text": "a"}
+    BAD = {"chat_id": "-1", "chat_uri": "tg:-1", "text": "dropped"}
+
+    def test_round_trip_ack_removes_what_the_cursor_covered(self):
+        q = _QueueService([self.GOOD, self.BAD])
+        self.svc.answers["POST /poll"] = q
+        r = self.post("/internal/channels/sms/poll", {"timeout": 1}).json()
+        self.assertEqual((r["messages"], r["cursor"]), ([self.GOOD], "2"))
+        r2 = self.post("/internal/channels/sms/poll",
+                       {"timeout": 1, "ack": r["cursor"]}).json()
+        self.assertEqual(r2["messages"], [])
+        self.assertNotIn("cursor", r2)
+        self.assertEqual(q.acks, [None, "2"])
+        self.assertEqual(self.svc.calls[-1][2], {"timeout": 1, "ack": "2"})
+
+    def test_the_cursor_survives_when_every_row_is_dropped(self):
+        q = _QueueService([self.BAD, self.BAD])
+        self.svc.answers["POST /poll"] = q
+        r = self.post("/internal/channels/sms/poll", {"timeout": 1}).json()
+        self.assertEqual((r["messages"], r["cursor"]), ([], "2"))
+        self.post("/internal/channels/sms/poll", {"timeout": 1, "ack": "2"})
+        self.assertEqual(q.queue, [])
+
+    def test_a_bad_ack_is_400_and_a_bad_cursor_is_dropped(self):
+        for ack in (5, "", "x" * 513, "a\nb", ["1"]):
+            with self.subTest(ack=ack):
+                self.assertEqual(self.post("/internal/channels/sms/poll",
+                                           {"ack": ack}).status_code, 400)
+        self.assertEqual(self.svc.calls, [])
+        for cursor in (7, "x" * 513, "a\x00b", {"c": 1}):
+            with self.subTest(cursor=cursor):
+                self.svc.answers["POST /poll"] = (200, {"messages": [self.GOOD],
+                                                        "cursor": cursor})
+                r = self.post("/internal/channels/sms/poll", {"timeout": 1}).json()
+                self.assertEqual(r["messages"], [self.GOOD])
+                self.assertNotIn("cursor", r)
+
+
+class RetierTests(unittest.TestCase):
+    """M2: every connector's bindings follow the room; a pack cap holds."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from . import taint
+        from .topics import retier
+        from .topics.local_fs import LocalFsStorage
+        from .topics.service import TopicService
+        from .tools import channel_bindings as cb
+        from .tools import telegram_bindings as tb
+        self.retier, self.cb, self.tb = retier, cb, tb
+        root = tempfile.mkdtemp()
+        self.state = tempfile.mkdtemp()
+        for d in (root, self.state):
+            self.addCleanup(shutil.rmtree, d, True)
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        for p in (_installed(_pack(BASE)),
+                  patch.object(whitelist, "CONFIG", {}),
+                  patch.object(whitelist, "save_config", lambda: None),
+                  patch.object(whitelist, "reload_config", lambda: None),
+                  patch.object(tb, "_path",
+                               lambda: Path(self.state) / "telegram-bindings.json"),
+                  patch.object(taint, "_path", lambda: Path(self.state) / "taint.json"),
+                  patch("server.instance_profile.topic_default_participants",
+                        return_value=[])):
+            stack.enter_context(p)
+        self.svc = TopicService(LocalFsStorage(root))
+        self.svc.new("SEAL-1", "acme", {"title": "Acme", "owner": "davide"})
+        tb.set_binding("-100", "messaggero", "SEAL-1", "acme")
+        cb.set_binding("sms", "+39333000111", "messaggero", "SEAL-1", "acme",
+                       base=self.state)
+
+    def test_every_connectors_binding_moves_within_the_cap(self):
+        doc = _pack(BASE)
+        doc["connectors"][0]["relay"]["seal_cap"] = "SEAL-2"
+        with _installed(doc):
+            esito = self.retier.apply(self.svc, "SEAL-1", "acme", "SEAL-2",
+                                      by="davide", reason="x")
+        self.assertEqual(set(esito["bindings"]), {"-100", "sms:+39333000111"})
+        self.assertEqual(self.tb.get("-100")["tier"], "SEAL-2")
+        self.assertEqual(self.cb.get("sms", "+39333000111", base=self.state)["tier"],
+                         "SEAL-2")
+
+    def test_above_a_pack_cap_it_is_refused_without_the_ack(self):
+        from .topics.service import TopicError, channel_ack
+        with self.assertRaises(TopicError) as cm:
+            self.retier.apply(self.svc, "SEAL-1", "acme", "SEAL-2", by="davide",
+                              reason="x")
+        self.assertIn("'sms'", str(cm.exception))
+        self.assertEqual(self.svc.open("SEAL-1", "acme")["meta"]["tier"], "SEAL-1")
+        self.assertEqual(self.cb.get("sms", "+39333000111", base=self.state)["tier"],
+                         "SEAL-1")
+        self.retier.apply(self.svc, "SEAL-1", "acme", "SEAL-2", by="davide",
+                          reason="x", accept_seal_downgrade=True)
+        ack = channel_ack(self.svc.open("SEAL-2", "acme")["meta"], "sms")
+        self.assertEqual((ack["tier"], ack["cap"], ack["by"]),
+                         ("SEAL-2", "SEAL-1", "davide"))
+
+    def test_rollback_restores_every_connector(self):
+        with patch.object(self.retier, "_rekey_taint",
+                          side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                self.retier.apply(self.svc, "SEAL-1", "acme", "SEAL-2",
+                                  by="davide", reason="x",
+                                  accept_seal_downgrade=True)
+        self.assertEqual(self.tb.get("-100")["tier"], "SEAL-1")
+        self.assertEqual(self.cb.get("sms", "+39333000111", base=self.state)["tier"],
+                         "SEAL-1")
+        self.assertNotIn("channel_seal_ack", self.svc.open("SEAL-1", "acme")["meta"])
+
+
+class AckPerConnectorTests(unittest.TestCase):
+    """M3: one acknowledgement per connector; legacy slot readable."""
+
+    def _svc(self):
+        import shutil
+        import tempfile
+        from .topics.local_fs import LocalFsStorage
+        from .topics.service import TopicService
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        with patch("server.instance_profile.topic_default_participants",
+                   return_value=[]):
+            svc = TopicService(LocalFsStorage(root))
+            svc.new("SEAL-2", "acme", {"owner": "davide"})
+        return svc
+
+    def test_two_acks_and_revoking_one(self):
+        from .topics.service import channel_ack, channel_cap_acked
+        svc = self._svc()
+        svc.accept_channel_cap("SEAL-2", "acme", "telegram", by="davide")
+        svc.accept_channel_cap("SEAL-2", "acme", "sms", by="davide", cap=1)
+        meta = svc.open("SEAL-2", "acme")["meta"]
+        self.assertTrue(channel_cap_acked(meta, "telegram"))
+        self.assertTrue(channel_cap_acked(meta, "sms"))
+        svc.revoke_channel_cap_ack("SEAL-2", "acme", "sms")
+        meta = svc.open("SEAL-2", "acme")["meta"]
+        self.assertTrue(channel_cap_acked(meta, "telegram"))
+        self.assertIsNone(channel_ack(meta, "sms"))
+        svc.revoke_channel_cap_ack("SEAL-2", "acme", "telegram")
+        self.assertNotIn("channel_seal_ack", svc.open("SEAL-2", "acme")["meta"])
+
+    def test_the_legacy_single_slot_is_telegrams_and_migrates(self):
+        from .topics.service import CHANNEL_SEAL_ACK, channel_ack, channel_cap_acked
+        svc = self._svc()
+        meta, ver = svc._read_meta("SEAL-2", "acme")
+        meta[CHANNEL_SEAL_ACK] = {"channel": "telegram", "tier": "SEAL-2",
+                                  "cap": "SEAL-1", "by": "davide", "at": "t"}
+        svc._write_meta("SEAL-2", "acme", meta, base_version=ver)
+        meta = svc.open("SEAL-2", "acme")["meta"]
+        self.assertTrue(channel_cap_acked(meta, "telegram"))
+        self.assertFalse(channel_cap_acked(meta, "sms"))
+        svc.accept_channel_cap("SEAL-2", "acme", "sms", by="davide", cap=1)
+        raw = svc.open("SEAL-2", "acme")["meta"][CHANNEL_SEAL_ACK]
+        self.assertEqual(set(raw), {"telegram", "sms"})
+        self.assertEqual(channel_ack({CHANNEL_SEAL_ACK: raw}, "telegram")["by"],
+                         "davide")
+
+    def test_disconnecting_a_relay_revokes_only_its_ack(self):
+        room = _Room(self, "SEAL-2", _pack(BASE))
+        room.apply(action="connect", chat="+39333000111", accept_seal_downgrade=True)
+        room.apply(action="disconnect")
+        self.assertEqual(room.revoked, ["sms"])
+
+
+class ServiceAddressUniquenessTests(unittest.TestCase):
+    """M4: no two services of the registry share a health address."""
+
+    def _plain(self, pack, cid, target, kind="tcp"):
+        return {"name": pack, "connectors": [{
+            "id": cid, "manifest_version": 1, "namespace": cid.replace("-", ""),
+            "taint": [f"{cid.replace('-', '')}.read"],
+            "services": [{"name": "svc", "command": ["x"],
+                          "health": {"kind": kind, "target": target}}]}]}
+
+    def test_duplicates_across_packs_are_refused(self):
+        for a, b in (("127.0.0.1:9100", "127.0.0.1:9100"),
+                     ("127.0.0.1:9100", "localhost:9100"),
+                     ("127.0.0.1:9100", "http://[::1]:9100/health")):
+            with self.subTest(a=a, b=b):
+                kb = "http" if b.startswith("http") else "tcp"
+                with self.assertRaises(ManifestError) as cm:
+                    build_registry({"pa": self._plain("pa", "ca", a),
+                                    "pb": self._plain("pb", "cb", b, kb)},
+                                   reserved=frozenset())
+                self.assertEqual(set(cm.exception.packs), {"pa", "pb"})
+
+    def test_distinct_addresses_and_command_checks_are_fine(self):
+        reg = build_registry({"pa": self._plain("pa", "ca", "127.0.0.1:9100"),
+                              "pb": self._plain("pb", "cb", "127.0.0.1:9101"),
+                              "pc": self._plain("pc", "cc", "true", "command"),
+                              "pd": self._plain("pd", "cd", "true", "command")},
+                             reserved=frozenset())
+        self.assertEqual(len(reg.services()), 4)
+
+    def test_a_relay_on_another_packs_service_port_is_refused(self):
+        with self.assertRaises(ManifestError):
+            build_registry({"sms-demo-pack": _pack(BASE),
+                            "pa": self._plain("pa", "ca", "127.0.0.1:8731")},
+                           reserved=frozenset())
+
+
+class SupervisorExitClearsEnvTests(unittest.TestCase):
+    """Low: an exited process leaves neither its env nor its token behind."""
+
+    def test_exit_clears_env_and_token(self):
+        import os
+        import sys
+        import tempfile
+        import time
+        from .connectors.manifest import Service
+        from .services.supervisor import Supervisor
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        svc = Service(name="once", pack="demo-pack", namespace="demo",
+                      command=(sys.executable, "-c", "import sys; sys.exit(0)"),
+                      restart="never")
+        with patch.dict(os.environ, {"CLODIA_DATA": tmp.name,
+                                     "CLODIA_SERVICE_ISOLATION": "off"}):
+            sup = Supervisor(lambda: [svc], isolation_probe=lambda p: "")
+            self.addCleanup(sup.stop_all)
+            sup.reconcile()
+            entry = next(iter(sup._entries.values()))
+            self.assertIn("CLODIA_SERVICE_TOKEN", entry.env)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and entry.proc.poll() is None:
+                time.sleep(0.02)
+            sup.reconcile()
+            self.assertEqual(entry.state, "exited")
+            self.assertIsNone(entry.env)
+            self.assertEqual(entry.token, "")
+            self.assertIsNone(sup.service_token("demo-pack", "once"))
 
 
 # --------------------------------------------------------------------------

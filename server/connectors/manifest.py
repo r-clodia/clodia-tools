@@ -2522,6 +2522,7 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
 
     _check_vault_entries(parsed)
     _check_service_bases(parsed)
+    _check_service_addresses(parsed)
     _check_verb_schemes(parsed)
     return Registry(connectors=tuple(parsed), refused=tuple(refused))
 
@@ -2589,6 +2590,42 @@ def _check_service_bases(connectors: list[Connector]) -> None:
                     f"or pairing base belongs to one connector's service"),
                     *(x.pack for x in (other, c) if not x.builtin))
             seen[port] = c
+
+
+def _health_address(service: Service):
+    """The address a service's http/tcp health check says it listens on, as a
+    comparable key: the PORT for any loopback name (one socket), else
+    `(host, port)`. None for no health check or a `command` one."""
+    if service.health_kind not in ("http", "tcp"):
+        return None
+    hp = _host_port(service.health_target, service.health_kind)
+    if hp is None:
+        return None
+    host, port = hp
+    return ("loopback", port) if host in _LOOPBACK_HOSTS else (host, port)
+
+
+def _check_service_addresses(connectors: list[Connector]) -> None:
+    """No two services of the instance may declare the same health address
+    (#638, all packs, relay or not): the address is how the gateway reaches —
+    and authenticates to — ONE service, and two claimants would mean the
+    gateway's calls and its token reach whichever bound first."""
+    seen: dict = {}
+    for c in connectors:
+        for svc in c.services:
+            key = _health_address(svc)
+            if key is None:
+                continue
+            prev = seen.get(key)
+            if prev is not None and prev[1] is not svc:
+                other, other_svc = prev
+                raise _blame(ManifestError(
+                    f"service '{svc.name}' of connector '{c.id}' ({c.pack}) and "
+                    f"service '{other_svc.name}' of connector "
+                    f"'{other.id}' ({other.pack}) declare the same address "
+                    f"({svc.health_target!r}); every service listens on its own "
+                    f"port"), *(x.pack for x in (other, c) if not x.builtin))
+            seen[key] = (c, svc)
 
 
 def _check_verb_schemes(connectors: list[Connector]) -> None:

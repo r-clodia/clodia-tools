@@ -67,7 +67,9 @@ class _Running:
     health_failures: int = 0
     log: str = field(default="", repr=False)
     #: The environment the CURRENT process was started with. Kept so a
-    #: `command` health probe does not read the vault at every round.
+    #: `command` health probe does not read the vault at every round. It
+    #: holds the credentials and `CLODIA_SERVICE_TOKEN`, so it lives exactly
+    #: as long as the process: cleared when the process exits or is stopped.
     env: dict | None = field(default=None, repr=False)
     #: The per-start secret the gateway authenticates itself with to this
     #: service (#638, `launch.SERVICE_TOKEN_HEADER`). In memory only, new at
@@ -272,6 +274,7 @@ class Supervisor:
     def _exited(self, entry: _Running, code: int) -> None:
         service = entry.service
         entry.proc = None
+        entry.env = None
         entry.token = ""
         entry.last_exit = code
         stable = (self._clock() - entry.since) >= STABLE_SECONDS

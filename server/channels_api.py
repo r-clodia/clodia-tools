@@ -6,7 +6,7 @@ comms-pack's component. A pack that brings another chat channel declares a
 its own services, listening on loopback, speaking a three-operation HTTP JSON
 contract. These routes are the agent-server's door to it:
 
-    POST /internal/channels/{connector}/poll      {timeout}            → {messages}
+    POST /internal/channels/{connector}/poll      {timeout, ack?}      → {messages, cursor?}
     POST /internal/channels/{connector}/send      {chat_id, text, thread_id?}
                                                                        → {ok, message_id}
     POST /internal/channels/{connector}/download  {file_id}            → {content_b64, size, mime}
@@ -240,10 +240,32 @@ def vet_rows(connector: Connector, rows: Any) -> list[dict]:
     return kept
 
 
-async def relay_poll(connector: Connector, timeout: int) -> list[dict]:
-    out = await _call(connector, "poll", {"timeout": timeout},
+def cursor_ok(value: Any) -> bool:
+    """A poll cursor / ack: an opaque string, bounded like an id, printable."""
+    return isinstance(value, str) and 0 < len(value) <= MAX_ID \
+        and all(c.isprintable() for c in value)
+
+
+async def relay_poll(connector: Connector, timeout: int,
+                     ack: str | None = None) -> tuple[list[dict], str | None]:
+    """`POST <base>/poll {timeout, ack?}` → `(vetted rows, cursor)`.
+
+    `ack` is the cursor of the previous poll: the service drops what it covers.
+    The cursor comes back whatever `vet_rows` keeps — a row dropped here is
+    still delivered-and-refused, and losing the cursor would make the service
+    send the same rows forever.
+    """
+    body: dict = {"timeout": timeout}
+    if ack is not None:
+        body["ack"] = ack
+    out = await _call(connector, "poll", body,
                       timeout=timeout + POLL_MARGIN, max_bytes=MAX_POLL_BYTES)
-    return vet_rows(connector, out.get("messages"))
+    cursor = out.get("cursor")
+    if cursor is not None and not cursor_ok(cursor):
+        LOG.warning("channels %s: poll cursor refused (not a short printable "
+                    "string)", connector.id)
+        cursor = None
+    return vet_rows(connector, out.get("messages")), cursor
 
 
 async def relay_send(connector: Connector, chat_id: str, text: str,
@@ -314,14 +336,21 @@ async def poll(request: Request):
     except (TypeError, ValueError):
         timeout = POLL_DEFAULT
     timeout = max(POLL_MIN, min(POLL_MAX, timeout))
+    ack = body.get("ack")
+    if ack is not None and not cursor_ok(ack):
+        return JSONResponse({"error": "ack must be a short printable string"},
+                            status_code=400)
     try:
         connector = relay_connector(request.path_params["connector"])
-        msgs = await relay_poll(connector, timeout)
+        msgs, cursor = await relay_poll(connector, timeout, ack)
     except (RelayRefused, RelayUnavailable, RelayFailed) as e:
         if not isinstance(e, RelayRefused):
             LOG.warning("channels %s poll: %s", request.path_params["connector"], e)
         return _error(e)
-    return JSONResponse({"messages": msgs, "count": len(msgs)})
+    out: dict = {"messages": msgs, "count": len(msgs)}
+    if cursor is not None:
+        out["cursor"] = cursor
+    return JSONResponse(out)
 
 
 async def send(request: Request):

@@ -115,7 +115,30 @@ def _clean_channel(ch: dict) -> dict:
 # interna autenticata come owner: è un permesso, e un permesso scrivibile da chi
 # ne è soggetto non è un permesso. Per questo `new()` lo toglie dal meta in
 # ingresso — `topic.new` accetta un meta arbitrario da un agente.
+#:
+#: Keyed by channel/connector id since #638 (`{"telegram": {…}, "sms": {…}}`):
+#: a room bound to two transports holds one acknowledgement per transport, and
+#: disconnecting one revokes only its own. The single-slot shape written before
+#: (`{"channel": "telegram", "tier", "cap", "by", "at"}`) is still read, as the
+#: entry of its `channel`, and is rewritten keyed on the next write.
 CHANNEL_SEAL_ACK = "channel_seal_ack"
+
+
+def channel_acks(meta: dict | None) -> dict[str, dict]:
+    """Every acknowledgement in `meta`, keyed by channel id (legacy migrated)."""
+    raw = (meta or {}).get(CHANNEL_SEAL_ACK)
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    if isinstance(raw.get("channel"), str):
+        # The legacy single slot: it was only ever Telegram's.
+        return {raw.get("channel") or "telegram": dict(raw)}
+    return {str(k): dict(v) for k, v in raw.items() if isinstance(v, dict)}
+
+
+def channel_ack(meta: dict | None, ctype: str) -> dict | None:
+    """The acknowledgement of ONE channel, in the shape the UI reads
+    (`{channel, tier, cap, by, at}`), or None."""
+    return channel_acks(meta).get(ctype)
 
 
 def channel_seal_cap(ctype: str | None) -> int | None:
@@ -132,8 +155,8 @@ def channel_cap_acked(meta: dict | None, ctype: str, tier: str | None = None) ->
     che sta succedendo, e riusarlo sarebbe far dire all'owner una cosa che non
     ha detto. Si torna a chiedere.
     """
-    ack = (meta or {}).get(CHANNEL_SEAL_ACK) or {}
-    if not isinstance(ack, dict) or ack.get("channel") != ctype:
+    ack = channel_ack(meta, ctype) or {}
+    if not ack:
         return False
     effettivo = _normalize_tier(tier if tier is not None else (meta or {}).get("tier"))
     return _normalize_tier(ack.get("tier")) == effettivo
@@ -1287,22 +1310,36 @@ class TopicService:
         t = _normalize_tier(meta.get("tier", tier))
         if _tier_rank(t) <= cap:
             return meta
-        meta[CHANNEL_SEAL_ACK] = {
+        acks = channel_acks(meta)      # the legacy slot is migrated here
+        acks[ctype] = {
             "channel": ctype, "tier": t, "cap": f"SEAL-{cap}",
             "by": by or meta.get("owner", ""),
             "at": _now().isoformat(timespec="seconds"),
         }
+        meta[CHANNEL_SEAL_ACK] = acks
         self._write_meta(tier, name, meta, base_version=ver)
         return meta
 
-    def revoke_channel_cap_ack(self, tier: str, name: str) -> dict:
+    def revoke_channel_cap_ack(self, tier: str, name: str,
+                               ctype: str | None = None) -> dict:
         """Toglie la presa d'atto (#405). La chiama il `disconnect`: finito il
         collegamento finisce il consenso, così il prossimo torna a chiedere
-        invece di ereditare un sì dato a un'altra occasione."""
+        invece di ereditare un sì dato a un'altra occasione.
+
+        `ctype` (#638): only THAT channel's acknowledgement — disconnecting an
+        SMS relay must not withdraw the owner's consent for the Telegram group
+        of the same room. None removes every one, as before."""
         meta, ver = self._read_meta(tier, name)
         if CHANNEL_SEAL_ACK not in meta:
             return meta
-        meta.pop(CHANNEL_SEAL_ACK)
+        acks = channel_acks(meta)
+        if ctype is None or set(acks) <= {ctype}:
+            meta.pop(CHANNEL_SEAL_ACK)
+        elif ctype in acks:
+            acks.pop(ctype)
+            meta[CHANNEL_SEAL_ACK] = acks
+        else:
+            return meta
         self._write_meta(tier, name, meta, base_version=ver)
         return meta
 
