@@ -457,8 +457,10 @@ def _build_owners() -> dict[str, frozenset[str]]:
 #: (`test_518_review_fixes` keeps them a superset), plus those of the
 #: first-party packs' connectors that used to be builtins (#526): in degraded
 #: mode no pack is held either, so the first are DENIED and the second TAINT.
+#: `channel` since #638: `channel.relay_send` is mapped in the core manifest,
+#: and without it a relay delivery must be denied, not sent unchecked.
 FAILSAFE_EGRESS_NAMESPACES = frozenset({
-    "email", "gdrive", "github", "gsheets", "telegram", "web"})
+    "channel", "email", "gdrive", "github", "gsheets", "telegram", "web"})
 FAILSAFE_SOURCE_NAMESPACES = frozenset({
     "datastore", "email", "gcalendar", "gdocs", "gdrive", "github", "gsheets",
     "telegram", "topic", "web"})

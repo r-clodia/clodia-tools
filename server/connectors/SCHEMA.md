@@ -83,6 +83,8 @@ extending nothing, is empty and refused.
 | `context` | no | call facts the gateway fills in, see below |
 | `files` | no | arguments that name a TOPIC FILE, which the gateway reads and delivers as bytes |
 | `defaults` | no | arguments the gateway fills **only when omitted**, see below |
+| `relay` | no | a chat transport on one of the connector's `services` (#638), see below |
+| `pairing` | no | a device pairing step on one of the connector's `services` (#639), see below |
 
 `blurb`, `scope` and `icon` (#520) are the card's COPY and its glyph. The
 drawing is a frontend asset — a logo is an SVG file, not gateway data — but the
@@ -468,6 +470,127 @@ author writes against:
 - a transient registry error keeps the running services as they are;
 - status, last error and restart count appear on the Tools page
   (`GET /tools`, `GET /internal/connectors`).
+
+### `relay` (clodia-platform#638)
+
+A connector that brings a **chat channel** declares the transport. The
+transport is one of the connector's own `services` (#515), reachable by the
+gateway only, on loopback:
+
+```
+    relay:
+      service: sms-relay            # one of THIS connector's services
+      base: http://127.0.0.1:8731   # http, loopback host, a port; nothing else
+      label: SMS                    # how the transport is named in the room
+      attachments: false            # default false: no /download
+      seal_cap: SEAL-1              # optional, SEAL-0 … SEAL-4; default SEAL-1
+```
+
+The service named by `relay.service` (and `pairing.service`) must declare an
+`http` or `tcp` `health` check whose host and port are exactly those of
+`base`: the health target is the address the supervisor verifies, and a base
+pointing anywhere else would forward to whatever else listens on loopback.
+Two connectors may not point a relay or pairing `base` at the same loopback
+port (every loopback name is the same socket), and no two services of the
+instance — any pack, relay or not — may declare the same `http`/`tcp` health
+address; both packs are refused.
+
+**SEAL cap.** Binding a room to a relay is capped like Telegram (#405): above
+`seal_cap` — or SEAL-1 when the manifest names none, fail closed — the owner
+must acknowledge the downgrade (`accept_seal_downgrade`) with the room's tier
+shown, and the acknowledgement is dropped on disconnect. The cap is reported in
+the topic action's `seal` state and in the listing's `relay.seal_cap`.
+Acknowledgements are kept per connector (`channel_seal_ack: {<connector>:
+{…}}`; the older single slot is read as Telegram's), and disconnecting a
+channel withdraws only its own. Re-classifying a room carries every
+connector's bindings to the new tier; climbing above a pack relay's cap is
+refused unless the owner acknowledges it again (`accept_seal_downgrade` on the
+retier), recorded at the new tier. This is
+the one place a SEAL value appears in a manifest; a connector-level
+`seal_cap` stays refused.
+
+Also refused at load when: the connector `extends` another (a transport speaks the
+vocabulary's URIs, and the vocabulary is its owner's); it is a gateway
+manifest; `service` is not one of the connector's services; `base` is not
+`http://<127.0.0.1|localhost|[::1]>:<port>` with no path, query, fragment or
+userinfo; `label` is empty or longer than 32 characters; none of the
+connector's schemes declares `forms` (the gateway vets every relayed URI
+against them); an unknown key appears.
+
+**Transport contract** — HTTP JSON on `base`, called by the gateway only.
+
+**Authentication (MUST).** At every start the supervisor generates a random
+secret for the service and passes it in the environment as
+`CLODIA_SERVICE_TOKEN`; the gateway keeps it in memory and sends it as the
+header `X-Clodia-Service-Token` on every call it forwards (relay and pairing).
+A relay or pairing service **must refuse** (401) any request whose header does
+not match, comparing in constant time (`hmac.compare_digest`): loopback is
+reachable by every service uid, so «it came from 127.0.0.1» does not mean «it
+came from the gateway». The token changes at every restart; never log it.
+
+
+| Service endpoint | Body | Answer |
+|---|---|---|
+| `POST /poll` | `{timeout, ack?}` | `{messages: [row…], cursor?}`; each row carries `chat_id`, `chat_uri` (= `<scheme>:<chat_id>`) and `sender_uri` in the connector's own scheme. `ack` is the `cursor` of the previous poll: the service drops the rows it covers |
+| `POST /send` | `{chat_id, text, thread_id?}` | `{ok, message_id}` |
+| `POST /download` | `{file_id}` | `{content_b64, size, mime}` — only with `attachments: true` |
+
+**Gateway side.** `POST /internal/channels/<connector>/{poll,send,download}`
+(same authorisation as `/internal/telegram/*`: the agent-server's privileged
+principal) forward to `<base>/<operation>` for a connector the live registry
+accepted with `relay:`, and for no other path. Unknown connector, no `relay:`,
+or `download` without `attachments` → 404; the service not running or not
+answering → 503. On `poll` the gateway keeps a row only if its `chat_uri`
+**and** its `sender_uri` (when present) parse in one of the connector's OWN
+schemes and match one of that scheme's `forms`, and its `chat_uri` is exactly
+`<scheme>:<chat_id>` with the row's own `chat_id` (the chat a reply goes to is
+the chat that was vetted); any other row is dropped and logged, without its
+values. Nothing else in a row is identity.
+
+The gateway route takes `{timeout, ack?}` and answers `{messages, count,
+cursor?}`: `ack` is passed through to the service, and the service's `cursor`
+comes back **whatever rows were dropped** — a dropped row is acknowledged like
+a kept one, and a lost cursor would make the service send the same rows
+forever. `ack` and `cursor` are opaque printable strings of at most 512
+characters; a cursor that is not is dropped and logged, an `ack` that is not is
+a 400.
+
+`GET /internal/connectors` shows `relay: {label, attachments, schemes,
+seal_cap}` for such a connector — never `base` or the port. A topic action with `binding: channel`
+writes its binding under its own connector id, and `channel.deliver` reaches
+any scheme of a relay connector through the same `send` path, under the same
+egress decision as a Telegram delivery (`channel.relay_send`, mapped in the
+core manifest; its profile question is asked of `channel.deliver`). A
+destination whose scheme belongs to any connector is never mailed: without a
+usable relay the delivery is refused. A relayed message is posted with `kind: channel` and
+`transport: <label>`; like `telegram`, it does not taint the room, because the
+sender was vetted against the room's ingress before it was posted.
+
+### `pairing` (clodia-platform#639)
+
+A transport that needs a **device pairing** step after the credential is saved
+(a linking code typed on a phone, a QR to scan) declares where its service
+exposes it:
+
+```
+    pairing:
+      service: sms-relay
+      base: http://127.0.0.1:8731
+      status: /status      # GET  → {state, code?, qr?, me?, error?}  (default /status)
+      start: /pair         # POST → starts pairing                    (default /pair)
+```
+
+Same refusals as `relay` for `extends`, gateway manifests, `service` and
+`base`; `status`/`start` must be plain paths. `GET` and `POST
+/tools/connectors/<id>/pairing` are for a **human admin only** and forward to
+`status` and `start`. Only `state`, `code`, `qr`, `me` and `error` come back,
+each a length-capped string; the code and the QR are never logged or audited
+by value. A connector without `pairing:` → 404; the service down → 503; a
+4xx answer of the service comes back with its status, through the same field
+filter (except 401/403, which mean the service refused the gateway → 502).
+Starting a pairing is recorded in the audit trail (`control.connector`,
+`pairing_start`: connector, admin, pack — never a code).
+`GET /internal/connectors` shows `pairing: true`.
 
 ## Components (`components:`, clodia-platform#558)
 

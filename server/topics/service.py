@@ -46,7 +46,14 @@ SCHEMA_VERSION = 2
 #: nasce da un censimento dei chiamanti reali nei tre repo, non dai valori che
 #: sembrano plausibili: un insieme chiuso indovinato a memoria avrebbe rotto la
 #: relay al primo messaggio.
-MESSAGE_KINDS = ("human", "ai", "system", "telegram", "proxy")
+#:
+#: `channel` (clodia-platform#638) is `telegram` for any transport a pack
+#: declares with `relay:`: the same relay writes it, after vetting the sender
+#: against the room's ingress, so it is treated like `telegram` — not tainting
+#: at arrival. Which transport carried it is the message's `transport` label.
+MESSAGE_KINDS = ("human", "ai", "system", "telegram", "proxy", "channel")
+#: Longest `transport` label of a `channel` message (`manifest.MAX_RELAY_LABEL`).
+MAX_TRANSPORT_LABEL = 32
 TOPIC_STATES = ("active", "on-hold", "done", "archived")
 VALID_STATUS = set(TOPIC_STATES)
 # Scala SEAL (EC Cloud Sovereignty Framework v1.2.1). Sostituisce P0–P3.
@@ -108,7 +115,30 @@ def _clean_channel(ch: dict) -> dict:
 # interna autenticata come owner: è un permesso, e un permesso scrivibile da chi
 # ne è soggetto non è un permesso. Per questo `new()` lo toglie dal meta in
 # ingresso — `topic.new` accetta un meta arbitrario da un agente.
+#:
+#: Keyed by channel/connector id since #638 (`{"telegram": {…}, "sms": {…}}`):
+#: a room bound to two transports holds one acknowledgement per transport, and
+#: disconnecting one revokes only its own. The single-slot shape written before
+#: (`{"channel": "telegram", "tier", "cap", "by", "at"}`) is still read, as the
+#: entry of its `channel`, and is rewritten keyed on the next write.
 CHANNEL_SEAL_ACK = "channel_seal_ack"
+
+
+def channel_acks(meta: dict | None) -> dict[str, dict]:
+    """Every acknowledgement in `meta`, keyed by channel id (legacy migrated)."""
+    raw = (meta or {}).get(CHANNEL_SEAL_ACK)
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    if isinstance(raw.get("channel"), str):
+        # The legacy single slot: it was only ever Telegram's.
+        return {raw.get("channel") or "telegram": dict(raw)}
+    return {str(k): dict(v) for k, v in raw.items() if isinstance(v, dict)}
+
+
+def channel_ack(meta: dict | None, ctype: str) -> dict | None:
+    """The acknowledgement of ONE channel, in the shape the UI reads
+    (`{channel, tier, cap, by, at}`), or None."""
+    return channel_acks(meta).get(ctype)
 
 
 def channel_seal_cap(ctype: str | None) -> int | None:
@@ -125,14 +155,15 @@ def channel_cap_acked(meta: dict | None, ctype: str, tier: str | None = None) ->
     che sta succedendo, e riusarlo sarebbe far dire all'owner una cosa che non
     ha detto. Si torna a chiedere.
     """
-    ack = (meta or {}).get(CHANNEL_SEAL_ACK) or {}
-    if not isinstance(ack, dict) or ack.get("channel") != ctype:
+    ack = channel_ack(meta, ctype) or {}
+    if not ack:
         return False
     effettivo = _normalize_tier(tier if tier is not None else (meta or {}).get("tier"))
     return _normalize_tier(ack.get("tier")) == effettivo
 
 
-def _check_channel_cap(channel: dict, tier: str, meta: dict | None = None) -> None:
+def _check_channel_cap(channel: dict, tier: str, meta: dict | None = None,
+                       cap: int | None = None) -> None:
     """Verifica che il tier del topic rispetti il cap SEAL del channel.
 
     Il cap resta la regola: sopra il suo rango il channel non si aggancia. Ciò
@@ -142,7 +173,10 @@ def _check_channel_cap(channel: dict, tier: str, meta: dict | None = None) -> No
     identico a prima.
     """
     ctype = (channel or {}).get("type")
-    cap = _CHANNEL_SEAL_CAP.get(ctype)
+    # `cap` is given for a pack relay (#638), whose cap comes from its manifest
+    # or the default; the gateway's own channel types read the table, as before.
+    if cap is None:
+        cap = _CHANNEL_SEAL_CAP.get(ctype)
     if cap is None:
         raise TopicError(f"channel type non supportato: {ctype}")
     if _tier_rank(tier) > cap and not channel_cap_acked(meta, ctype, tier):
@@ -1256,7 +1290,7 @@ class TopicService:
         return meta
 
     def accept_channel_cap(self, tier: str, name: str, ctype: str,
-                           by: str = "") -> dict:
+                           by: str = "", cap: int | None = None) -> dict:
         """Registra la presa d'atto dell'owner sul cap SEAL di un channel (#405).
 
         Chiamata SOLO dalla rotta interna, dove il principal è l'umano owner del
@@ -1269,28 +1303,43 @@ class TopicService:
         verrebbe letto come un precedente.
         """
         meta, ver = self._read_meta(tier, name)
-        cap = _CHANNEL_SEAL_CAP.get(ctype)
+        if cap is None:      # a pack relay passes its own (#638)
+            cap = _CHANNEL_SEAL_CAP.get(ctype)
         if cap is None:
             raise TopicError(f"channel type non supportato: {ctype}")
         t = _normalize_tier(meta.get("tier", tier))
         if _tier_rank(t) <= cap:
             return meta
-        meta[CHANNEL_SEAL_ACK] = {
+        acks = channel_acks(meta)      # the legacy slot is migrated here
+        acks[ctype] = {
             "channel": ctype, "tier": t, "cap": f"SEAL-{cap}",
             "by": by or meta.get("owner", ""),
             "at": _now().isoformat(timespec="seconds"),
         }
+        meta[CHANNEL_SEAL_ACK] = acks
         self._write_meta(tier, name, meta, base_version=ver)
         return meta
 
-    def revoke_channel_cap_ack(self, tier: str, name: str) -> dict:
+    def revoke_channel_cap_ack(self, tier: str, name: str,
+                               ctype: str | None = None) -> dict:
         """Toglie la presa d'atto (#405). La chiama il `disconnect`: finito il
         collegamento finisce il consenso, così il prossimo torna a chiedere
-        invece di ereditare un sì dato a un'altra occasione."""
+        invece di ereditare un sì dato a un'altra occasione.
+
+        `ctype` (#638): only THAT channel's acknowledgement — disconnecting an
+        SMS relay must not withdraw the owner's consent for the Telegram group
+        of the same room. None removes every one, as before."""
         meta, ver = self._read_meta(tier, name)
         if CHANNEL_SEAL_ACK not in meta:
             return meta
-        meta.pop(CHANNEL_SEAL_ACK)
+        acks = channel_acks(meta)
+        if ctype is None or set(acks) <= {ctype}:
+            meta.pop(CHANNEL_SEAL_ACK)
+        elif ctype in acks:
+            acks.pop(ctype)
+            meta[CHANNEL_SEAL_ACK] = acks
+        else:
+            return meta
         self._write_meta(tier, name, meta, base_version=ver)
         return meta
 
@@ -2509,7 +2558,8 @@ class TopicService:
         return {"participants": meta.get("participants")}
 
     def post_message(self, tier: str, name: str, author: str, text: str,
-                     kind: str = "human", attachments: list[str] | None = None) -> dict:
+                     kind: str = "human", attachments: list[str] | None = None,
+                     transport: str | None = None) -> dict:
         """Posta un messaggio nel canale (append-only file in `.messages/` →
         niente contesa). `kind` = uno di `MESSAGE_KINDS`. `attachments` = nomi
         file in files/.
@@ -2519,6 +2569,16 @@ class TopicService:
             raise TopicError(
                 f"kind non valido: {kind or '(vuoto)'} "
                 f"(ammessi: {', '.join(MESSAGE_KINDS)})")
+        label = ""
+        if kind == "channel":
+            # The transport's name as the relay declares it (`relay.label`):
+            # a label to show, never an identity — capped and printable only.
+            label = str(transport or "").strip()
+            if not label or len(label) > MAX_TRANSPORT_LABEL \
+                    or any(not c.isprintable() for c in label):
+                raise TopicError(
+                    "un messaggio 'channel' porta il nome del trasporto "
+                    f"('transport', 1–{MAX_TRANSPORT_LABEL} caratteri stampabili)")
         meta, _ = self._read_meta(tier, name)
         self._assert_content_available(meta)
         now = _now()
@@ -2542,6 +2602,8 @@ class TopicService:
             "attachments": attachments or [], "ts": now.isoformat(timespec="microseconds"),
             "mentions": mentions.extract_mentions(text or ""),
         }
+        if label:
+            msg["transport"] = label
         # UN INGRESSO EXTERNAL CONTAMINA IL CANALE (clodia-platform#262).
         #
         # La #222 ha consegnato l'etichetta (`kind: proxy` scritto dove il
@@ -2564,6 +2626,9 @@ class TopicService:
         # verbi `telegram.*`, che `taint._TAINTING_EXACT` già marca alla
         # sorgente; marcarlo una seconda volta all'arrivo non aggiunge una
         # difesa, aggiunge un secondo posto in cui la stessa regola può divergere.
+        # `channel` (#638) è lo stesso caso per un trasporto di pack: il relay
+        # ha vagliato il mittente contro gli ingress della stanza prima di
+        # postare, esattamente come per Telegram.
         #
         # La sedia NON vale come vaglio: `egress.is_perimeter_source` dichiara
         # fidato chi è nella stanza, e un proxy È fra i partecipanti (è così che

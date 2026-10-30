@@ -1567,7 +1567,8 @@ _CHANNEL_TOOLS: list[Tool] = [
     Tool(name="channel.deliver",
          description=("Consegna un messaggio FUORI dal topic, a una destinazione già "
                       "dichiarata nelle uscite della stanza: `mailto:<indirizzo>` (o "
-                      "l'indirizzo nudo) per la posta, `tg:<chat_id>` per Telegram. Il "
+                      "l'indirizzo nudo) per la posta, `tg:<chat_id>` per Telegram, "
+                      "`<schema>:<chat>` per il canale di un pack (es. `sms:+39…`). Il "
                       "testo parte com'è scritto; gli allegati sono file del topic "
                       "(`attachments: [\"files/x.pdf\"]`). Valgono le stesse regole "
                       "dell'invio diretto: destinazioni non dichiarate negate, "
@@ -1889,7 +1890,35 @@ async def _dispatch_channel_deliver(a: dict) -> dict:
     if not text.strip():
         raise ValueError("'text' non può essere vuoto")
     allegati = [str(x) for x in (a.get("attachments") or []) if str(x).strip()]
-    if destinazione.lower().startswith("tg:"):
+    _relay = None if destinazione.lower().startswith(("tg:", "mailto:")) \
+        else _relay_connector_for(destinazione)
+    if _relay is None and not destinazione.lower().startswith(("tg:", "mailto:")):
+        # A URI of a scheme some pack connector owns never falls into the mail
+        # branch below (#638): `sms:+39…` with its relay down or absent is a
+        # refused delivery, said as such — not an «address» to mail.
+        _owner = _scheme_owner(destinazione)
+        if _owner is not None:
+            raise ValueError(
+                f"'{destinazione}': lo schema '{destinazione.partition(':')[0].strip().lower()}:' "
+                f"è del connettore '{_owner}', che su questa istanza non ha un "
+                f"canale di consegna disponibile")
+    if _relay is not None:
+        # A pack connector's relay transport (#638): its own `/send`, reached
+        # through `channel.relay_send` so the call takes the same path as
+        # `telegram.send` above — origin chain, gates, egress PDP on the
+        # destination URI, context gate, audit.
+        from . import channels_api as _ch
+        scheme, _, rest = destinazione.partition(":")
+        uri = f"{scheme.strip().lower()}:{rest.strip()}"
+        if not _ch.uri_ok(_relay, uri):
+            raise ValueError(f"'{destinazione}' non ha la forma di un indirizzo "
+                             f"'{scheme.strip().lower()}:' del connettore '{_relay.id}'")
+        if allegati:
+            raise ValueError(f"il canale '{_relay.id}' consegna solo testo: "
+                             "gli allegati non sono supportati")
+        calls = [("channel.relay_send", {"destination": uri, "text": text,
+                                         **({"thread_id": a["thread_id"]} if a.get("thread_id") else {})})]
+    elif destinazione.lower().startswith("tg:"):
         chat = destinazione[3:].strip()
         calls = [("telegram.send", {"chat_id": chat, "text": text,
                                     **({"thread_id": a["thread_id"]} if a.get("thread_id") else {})})]
@@ -1938,6 +1967,62 @@ async def _dispatch_channel_deliver(a: dict) -> dict:
             raise ValueError(f"{verb}: {msg}{nota}")
         risultati.append({"via": verb, "result": parsed})
     return {"ok": True, "destination": destinazione, "deliveries": risultati}
+
+
+def _relay_connector_for(destination: str):
+    """The pack connector whose `relay:` speaks `destination`'s scheme, or None
+    (#638). A connector the profile excludes or that is not in the registry
+    is None, so the caller falls through to its other branches."""
+    scheme, sep, _rest = (destination or "").partition(":")
+    if not sep or not scheme.strip():
+        return None
+    try:
+        from .connectors import resolved as _connectors
+        hit = _connectors.registry().relay_for_scheme(scheme.strip())
+        if hit is None:
+            return None
+        from . import channels_api as _ch
+        return _ch.relay_connector(hit.id)
+    except Exception:  # noqa: BLE001 — no relay answers: not a relay destination
+        return None
+
+
+def _scheme_owner(destination: str) -> str | None:
+    """The id of the connector that owns `destination`'s scheme, or None."""
+    scheme, sep, _rest = (destination or "").partition(":")
+    name = scheme.strip().lower()
+    if not sep or not name:
+        return None
+    try:
+        from .connectors import resolved as _connectors
+        for c in _connectors.registry().connectors:
+            if any(sch.name == name for sch in c.schemes):
+                return c.id
+    except Exception:  # noqa: BLE001 — unreadable registry: nothing to name
+        return None
+    return None
+
+
+async def _dispatch_channel_relay_send(a: dict) -> dict:
+    """`channel.relay_send` (#638): the text goes to the relay service's
+    `/send`. Reached only from `channel.deliver` (`_DELIVERY_ONLY_VERBS`),
+    after the egress decision on `destination`."""
+    from . import channels_api as _ch
+    uri = str(a.get("destination") or "").strip()
+    conn = _relay_connector_for(uri)
+    if conn is None or not _ch.uri_ok(conn, uri):
+        raise ValueError(f"'{uri}' non è una destinazione di un canale di pack")
+    chat = uri.partition(":")[2]
+    try:
+        out = await _ch.relay_send(conn, chat, str(a.get("text") or ""),
+                                   a.get("thread_id"))
+    except _ch.RelayUnavailable as e:
+        raise RuntimeError(f"canale '{conn.id}' non disponibile: {e}") from e
+    except (_ch.RelayFailed, _ch.RelayRefused) as e:
+        raise RuntimeError(f"canale '{conn.id}': {e}") from e
+    if not out.get("ok"):
+        raise RuntimeError(f"canale '{conn.id}': il trasporto non ha confermato l'invio")
+    return {"ok": True, "connector": conn.id, "message_id": out.get("message_id")}
 
 
 def _room_outbox_account(tier: str, tname: str) -> str:
@@ -2904,6 +2989,9 @@ def _verb_implemented(name: str) -> bool:
     non «ti è concesso», e le due domande hanno già ciascuna la propria guardia.
     Più i backend MCP montati, che sono verbi veri quanto i nativi.
     """
+    if name in _DELIVERY_ONLY_VERBS:
+        # Not in any catalog: it exists only inside a `channel.deliver`.
+        return name in _DELIVER_VIA.get()
     if name in {t.name for t in _all_native_tools()} | \
             {t.name for t in _EU_CORPUS_TOOLS + _RAG_TOOLS}:
         return True
@@ -4257,6 +4345,13 @@ import contextvars as _contextvars
 _DELIVER_VIA: "_contextvars.ContextVar[frozenset]" = _contextvars.ContextVar(
     "clodia_deliver_via", default=frozenset())
 
+#: Verbs that exist ONLY inside a `channel.deliver` (#638): no catalog lists
+#: them, no grant reaches them, and `_verb_implemented` answers «unknown tool»
+#: outside a delivery. `channel.relay_send` carries a pack relay's text; its
+#: egress mapping (destination = the whole URI) is in the core manifest, so the
+#: PDP judges it like any other outbound verb.
+_DELIVERY_ONLY_VERBS = frozenset({"channel.relay_send"})
+
 _AUDIT_PARENT: "_contextvars.ContextVar[str | None]" = _contextvars.ContextVar(
     "audit_parent_span", default=None)
 #: Per call: what crossed the perimeter (hash + size of each file that left)
@@ -5151,7 +5246,15 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             #    factotum, le mutazioni github di uno sviluppatore)
             #  - FUORI PROFILO: l'agente può raggiungerlo ma non lo dichiara come
             #    proprio mestiere. Non è «pericoloso», è «inatteso da lui».
-            _off_profile = outside_profile(name, _ag)
+            # A delivery-only verb (#638) is not a verb the agent chose: it is
+            # how `channel.deliver` carries a relay's text. Its profile
+            # question is the one asked of `channel.deliver`, which the agent
+            # declares — not of a name no profile can list. (Telegram's verbs
+            # keep being asked as before.)
+            _off_profile = outside_profile(
+                "channel.deliver" if (name in _DELIVERY_ONLY_VERBS
+                                      and name in _DELIVER_VIA.get()) else name,
+                _ag)
             # `gated_in_channel` era il QUARTO motivo ed è stato RITIRATO il
             # 7 ago 2026, dopo B2. Era il surrogato della domanda «chi sta
             # chiedendo?», posta per approssimazione — *qualcuno è in un canale* —
@@ -5499,6 +5602,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 datastore_sql.write, _entry, arguments, agent=_ag or "")
         elif name == "channel.deliver":
             result = await _dispatch_channel_deliver(arguments)
+        elif name == "channel.relay_send" and name in _DELIVER_VIA.get():
+            result = await _dispatch_channel_relay_send(arguments)
         elif name == "web.post":
             result = await asyncio.to_thread(web_post.post, arguments, agent=_ag or "")
         elif name == "logs.tail":

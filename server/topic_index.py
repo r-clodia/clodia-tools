@@ -51,7 +51,8 @@ MAX_FILES = 15
 MAX_BYTES = 15 * 1024 * 1024
 MAX_CHARS = 400_000
 BUDGET_CHARS = 600_000          # per sync call, days + files together
-UNTRUSTED_KINDS = ("proxy", "telegram")
+#: `channel` (#638) is a pack relay's message: the same standing as `telegram`.
+UNTRUSTED_KINDS = ("proxy", "telegram", "channel")
 
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()

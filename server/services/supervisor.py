@@ -67,8 +67,14 @@ class _Running:
     health_failures: int = 0
     log: str = field(default="", repr=False)
     #: The environment the CURRENT process was started with. Kept so a
-    #: `command` health probe does not read the vault at every round.
+    #: `command` health probe does not read the vault at every round. It
+    #: holds the credentials and `CLODIA_SERVICE_TOKEN`, so it lives exactly
+    #: as long as the process: cleared when the process exits or is stopped.
     env: dict | None = field(default=None, repr=False)
+    #: The per-start secret the gateway authenticates itself with to this
+    #: service (#638, `launch.SERVICE_TOKEN_HEADER`). In memory only, new at
+    #: every start, cleared when the process goes: never logged, never shown.
+    token: str = field(default="", repr=False)
 
     @property
     def key(self) -> tuple[str, str]:
@@ -215,6 +221,8 @@ class Supervisor:
             path = launch.prepare_state_dir(service, privs)
             workdir = str(launch.resolve_workdir(service))
             env = launch.build_env(service)
+            token = launch.new_service_token()
+            env[launch.SERVICE_TOKEN_ENV] = token
             kw: dict = {}
             if privs is not None:
                 # Prima di avviare: niente resti di una vita precedente sotto
@@ -249,6 +257,7 @@ class Supervisor:
         while len(self._sessions) > 1024:
             self._sessions.pop(next(iter(self._sessions)))
         entry.env = env
+        entry.token = token
         entry.uid = privs[0] if privs else None
         entry.state = "running"
         entry.since = self._clock()
@@ -265,6 +274,8 @@ class Supervisor:
     def _exited(self, entry: _Running, code: int) -> None:
         service = entry.service
         entry.proc = None
+        entry.env = None
+        entry.token = ""
         entry.last_exit = code
         stable = (self._clock() - entry.since) >= STABLE_SECONDS
         if stable:
@@ -290,6 +301,7 @@ class Supervisor:
         proc = entry.proc
         entry.proc = None
         entry.env = None
+        entry.token = ""
         entry.state = "stopped"
         if proc is None or proc.poll() is not None:
             return
@@ -388,6 +400,20 @@ class Supervisor:
             for entry in self._entries.values():
                 self._stop(entry, "gateway in arresto")
 
+    def service_token(self, pack: str, name: str) -> str | None:
+        """The secret of the RUNNING process of `pack/name`, or None (#638).
+
+        None whenever the process is not running: a caller that gets None
+        answers «service unavailable», and a token outliving its process
+        would authenticate the gateway to whatever binds the port next.
+        Without the lock, like `snapshot`.
+        """
+        entry = self._entries.get((pack, name))
+        if entry is None or entry.state != "running" or entry.proc is None \
+                or entry.proc.poll() is not None or not entry.token:
+            return None
+        return entry.token
+
     def snapshot(self) -> list[dict]:
         """Stato per la pagina Tools. Mai un segreto: nomi, stato, errore.
 
@@ -432,6 +458,10 @@ def supervisor() -> Supervisor:
 
 def snapshot() -> list[dict]:
     return supervisor().snapshot()
+
+
+def service_token(pack: str, name: str) -> str | None:
+    return supervisor().service_token(pack, name)
 
 
 def stop_all() -> None:

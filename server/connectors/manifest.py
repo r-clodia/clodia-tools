@@ -998,6 +998,46 @@ class Service:
 
 
 @dataclass(frozen=True)
+class Relay:
+    """A chat transport the connector brings to the room (clodia-platform#638).
+
+    The transport is one of the connector's own `services` (#515), reached by
+    the GATEWAY only, on loopback, at `base`: the gateway forwards the relay's
+    three operations (`/poll`, `/send`, `/download`) there and nowhere else. The
+    agent-server never sees `base` — it calls `/internal/channels/<id>/…`.
+
+    `label` is how the transport is named in the room (the `transport` of a
+    `channel` message). `attachments` says whether `/download` exists at all.
+    """
+
+    service: str
+    base: str
+    label: str
+    attachments: bool = False
+    #: The SEAL rank above which binding a room to this transport needs the
+    #: owner's written acknowledgement (#405's flow). `None` in the manifest
+    #: means the gateway's default for pack relays, `DEFAULT_RELAY_SEAL_CAP`:
+    #: a transport nobody has assessed is treated as the weakest link.
+    seal_cap: int | None = None
+
+
+@dataclass(frozen=True)
+class Pairing:
+    """A device pairing step after the credential is saved (clodia-platform#639).
+
+    `status` (GET) and `start` (POST) are PATHS on the service's loopback
+    `base`; the gateway forwards to them from the admin-only
+    `/tools/connectors/<id>/pairing` routes and returns only
+    `{state, code?, qr?, me?, error?}`.
+    """
+
+    service: str
+    base: str
+    status: str = "/status"
+    start: str = "/pair"
+
+
+@dataclass(frozen=True)
 class StorageRemote:
     """A topic storage backend a pack provides (Drive, clodia-platform#524)."""
 
@@ -1061,6 +1101,10 @@ class Connector:
     #: Gli argomenti di contesto che il gateway riempie nelle chiamate ai verbi
     #: di questo connettore (`ContextArg`, clodia-platform#522).
     context: tuple[ContextArg, ...] = ()
+    #: A chat transport on one of this connector's services (#638).
+    relay: Relay | None = None
+    #: A device pairing step on one of this connector's services (#639).
+    pairing: Pairing | None = None
     #: Shipped by the gateway itself (`builtin/*.yaml`) rather than installed
     #: with a pack. Those files are the connectors this gateway still implements
     #: natively, declared in the same grammar so the PDP has one source — see
@@ -1616,8 +1660,168 @@ def _parse_service(raw: Any, where: str, *, pack: str) -> Service:
 #: contributore che potesse dichiararli riscriverebbe gli argomenti delle
 #: chiamate altrui — o si farebbe consegnare i file di topic, o la chat legata
 #: al canale, per il verbo di un altro.
+#: `relay` and `pairing` (#638, #639) as well: a transport speaks the
+#: vocabulary's own URIs, and the vocabulary is its owner's.
 _OWNER_ONLY = ("schemes", "verbs", "taint", "topic_actions", "context",
-               "files", "defaults")
+               "files", "defaults", "relay", "pairing")
+
+#: Hosts a relay or pairing `base` may name: the gateway's own loopback, as
+#: `services.launch.LOOPBACK` (a service listens on loopback only, #515).
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+#: A path on a service's loopback API (`pairing.status`, `pairing.start`).
+_SERVICE_PATH = re.compile(r"^/[A-Za-z0-9._~-]{1,32}(?:/[A-Za-z0-9._~-]{1,32}){0,3}$")
+#: Longest relay label: it is a name in a room, not a sentence.
+MAX_RELAY_LABEL = 32
+#: The SEAL cap of a pack relay that declares none (#638): SEAL-1, Telegram's.
+DEFAULT_RELAY_SEAL_CAP = 1
+
+
+def loopback_base_problem(value: str) -> str:
+    """Why `value` may not be a service `base` (relay, pairing), or "".
+
+    `http://<loopback>:<port>` and nothing else: no https (loopback needs no
+    TLS, and a certificate check would only fail), no userinfo, no path, no
+    query, no fragment. The gateway appends the operation's path itself, so a
+    base with a path would be a way to aim the forward somewhere the contract
+    does not name. Exported so the forwarding code re-checks at call time.
+    """
+    if not isinstance(value, str) or not value:
+        return "required"
+    if any(c.isspace() or not c.isprintable() or c == "\\" for c in value):
+        return f"{value!r} contains a forbidden character"
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return f"{value!r} is not a URL"
+    if parts.scheme != "http" or not value.startswith("http://"):
+        return f"{value!r} is not an http:// URL"
+    if "@" in parts.netloc or parts.username is not None:
+        return f"{value!r} carries userinfo"
+    if parts.path or parts.query or parts.fragment or value.endswith(("?", "#")):
+        return f"{value!r} has a path, a query or a fragment; a base is scheme, host and port"
+    if host.lower() not in _LOOPBACK_HOSTS:
+        return (f"{value!r} is not on loopback (127.0.0.1, localhost, [::1]): a "
+                f"pack service is reachable by the gateway only")
+    if port is None or not (1 <= port <= 65535):
+        return f"{value!r} names no port"
+    return ""
+
+
+def _base(raw: Any, where: str) -> str:
+    value = _text(raw, where)
+    problem = loopback_base_problem(value)
+    if problem:
+        raise ManifestError(f"{where}: {problem}")
+    return value
+
+
+def _own_service(raw: Any, where: str, services: Sequence[Service]) -> Service:
+    name = _matching(_text(raw, where), _ID, where)
+    service = next((s for s in services if s.name == name), None)
+    if service is None:
+        raise ManifestError(
+            f"{where}: '{name}' is not one of this connector's services "
+            f"({', '.join(s.name for s in services) or 'none'}); a transport "
+            f"runs in the pack that declares it")
+    return service
+
+
+def _host_port(value: str, kind: str) -> tuple[str, int] | None:
+    """`(host, port)` of a base URL or of a health target, or None."""
+    try:
+        if kind == "tcp":
+            host, _, port = value.rpartition(":")
+            return host.strip("[]").lower(), int(port)
+        parts = urlsplit(value)
+        if parts.port is None:
+            return None
+        return (parts.hostname or "").lower(), parts.port
+    except ValueError:
+        return None
+
+
+def _check_base_is_the_service(base: str, service: Service, where: str) -> None:
+    """The base must be WHERE THE SERVICE LISTENS, as its health check says.
+
+    The supervisor's `health` target is the only statement of the service's
+    address the gateway verifies at run time (#515: loopback only); a base that
+    pointed elsewhere would forward to whatever else listens on loopback —
+    another pack's service, or a port of the gateway itself.
+    """
+    if service.health_kind not in ("http", "tcp"):
+        raise ManifestError(
+            f"{where}: service '{service.name}' must declare an http or tcp "
+            f"`health` check on the address the gateway calls")
+    declared = _host_port(service.health_target, service.health_kind)
+    if declared is None or declared != _host_port(base, "http"):
+        raise ManifestError(
+            f"{where}: base {base!r} is not where service '{service.name}' "
+            f"listens (health target {service.health_target!r}): host and port "
+            f"must be the same")
+
+
+def _service_path(raw: Any, where: str, default: str) -> str:
+    value = _text(raw, where, required=False, default=default)
+    if not _SERVICE_PATH.match(value) or ".." in value.split("/"):
+        raise ManifestError(
+            f"{where}: {value!r} is not a plain path ('/status', '/pair')")
+    return value
+
+
+def _parse_relay(raw: Any, where: str, *, services: Sequence[Service],
+                 schemes: Sequence[Scheme]) -> Relay:
+    data = _mapping(raw, where)
+    unknown = sorted(set(data) - {"service", "base", "label", "attachments",
+                                  "seal_cap"})
+    if unknown:
+        raise ManifestError(f"{where}: unknown keys {', '.join(unknown)}")
+    if not any(s.forms for s in schemes):
+        # The gateway vets every row's `chat_uri`/`sender_uri` against the
+        # connector's own forms; a scheme without forms accepts anything, so
+        # there would be nothing to vet against.
+        raise ManifestError(
+            f"{where}: a relay needs at least one of the connector's schemes "
+            f"to declare `forms`: the gateway checks every relayed chat and "
+            f"sender against them")
+    label = _text(data.get("label"), f"{where}.label")
+    if len(label) > MAX_RELAY_LABEL or any(not c.isprintable() for c in label):
+        raise ManifestError(
+            f"{where}.label: at most {MAX_RELAY_LABEL} printable characters")
+    service = _own_service(data.get("service"), f"{where}.service", services)
+    base = _base(data.get("base"), f"{where}.base")
+    _check_base_is_the_service(base, service, f"{where}.base")
+    cap = None
+    if data.get("seal_cap") is not None:
+        raw_cap = _text(data.get("seal_cap"), f"{where}.seal_cap")
+        m = re.fullmatch(r"SEAL-([0-4])", raw_cap)
+        if not m:
+            raise ManifestError(
+                f"{where}.seal_cap: {raw_cap!r} is not one of SEAL-0 … SEAL-4")
+        cap = int(m.group(1))
+    return Relay(
+        service=service.name,
+        base=base,
+        label=label,
+        attachments=_flag(data.get("attachments"), f"{where}.attachments"),
+        seal_cap=cap)
+
+
+def _parse_pairing(raw: Any, where: str, *,
+                   services: Sequence[Service]) -> Pairing:
+    data = _mapping(raw, where)
+    unknown = sorted(set(data) - {"service", "base", "status", "start"})
+    if unknown:
+        raise ManifestError(f"{where}: unknown keys {', '.join(unknown)}")
+    service = _own_service(data.get("service"), f"{where}.service", services)
+    base = _base(data.get("base"), f"{where}.base")
+    _check_base_is_the_service(base, service, f"{where}.base")
+    return Pairing(
+        service=service.name,
+        base=base,
+        status=_service_path(data.get("status"), f"{where}.status", "/status"),
+        start=_service_path(data.get("start"), f"{where}.start", "/pair"))
 
 
 def _parse_context(raw: Any, where: str) -> tuple[ContextArg, ...]:
@@ -1867,6 +2071,19 @@ def parse_connector(raw: Any, *, pack: str,
             f"is a property of the call, not of the manifest: pick another "
             f"argument name")
 
+    relay = pairing = None
+    for key in ("relay", "pairing"):
+        if data.get(key) is not None and builtin:
+            raise ManifestError(
+                f"{where}: '{key}' is for a connector a PACK implements; it "
+                f"names a service of the pack")
+    if data.get("relay") is not None:
+        relay = _parse_relay(data.get("relay"), f"{where}.relay",
+                             services=services, schemes=schemes)
+    if data.get("pairing") is not None:
+        pairing = _parse_pairing(data.get("pairing"), f"{where}.pairing",
+                                 services=services)
+
     return Connector(
         id=cid,
         label=_text(data.get("label"), f"{where}.label", required=False) or cid,
@@ -1886,6 +2103,8 @@ def parse_connector(raw: Any, *, pack: str,
         context=context,
         defaults=defaults,
         files=files,
+        relay=relay,
+        pairing=pairing,
         builtin=builtin,
     )
 
@@ -2133,6 +2352,19 @@ class Registry:
     def topic_actions(self) -> tuple[TopicAction, ...]:
         return tuple(a for c in self.connectors for a in c.topic_actions)
 
+    def relay_for_scheme(self, scheme: str) -> Connector | None:
+        """The connector that owns `scheme` and declares a `relay:`, or None.
+
+        Only a scheme with `forms` counts: those are the only URIs a relay is
+        vetted against (`_parse_relay`), on the way in and on the way out.
+        """
+        name = (scheme or "").strip().lower()
+        for c in self.connectors:
+            if c.relay is not None and any(s.name == name and s.forms
+                                           for s in c.schemes):
+                return c
+        return None
+
 
 def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
                    reserved: Iterable[str] | None = None,
@@ -2289,6 +2521,8 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
             provider_owner[key] = c
 
     _check_vault_entries(parsed)
+    _check_service_bases(parsed)
+    _check_service_addresses(parsed)
     _check_verb_schemes(parsed)
     return Registry(connectors=tuple(parsed), refused=tuple(refused))
 
@@ -2336,6 +2570,62 @@ def _check_vault_entries(connectors: list[Connector]) -> None:
                     f"namespace '{owner}' of connector "
                     f"'{namespaces[owner].id}', not under its own "
                     f"'{c.namespace}'"), c.pack)
+
+
+def _check_service_bases(connectors: list[Connector]) -> None:
+    """Two connectors may not point their relay/pairing at the same loopback
+    port (#638). Every loopback name is the same socket, so the PORT decides:
+    the second connector would be forwarding to the first one's service."""
+    seen: dict[int, Connector] = {}
+    for c in connectors:
+        ports = {_host_port(d.base, "http")[1]
+                 for d in (c.relay, c.pairing) if d is not None
+                 and _host_port(d.base, "http") is not None}
+        for port in sorted(ports):
+            other = seen.get(port)
+            if other is not None and other is not c:
+                raise _blame(ManifestError(
+                    f"connectors '{other.id}' ({other.pack}) and '{c.id}' "
+                    f"({c.pack}) both forward to loopback port {port}; a relay "
+                    f"or pairing base belongs to one connector's service"),
+                    *(x.pack for x in (other, c) if not x.builtin))
+            seen[port] = c
+
+
+def _health_address(service: Service):
+    """The address a service's http/tcp health check says it listens on, as a
+    comparable key: the PORT for any loopback name (one socket), else
+    `(host, port)`. None for no health check or a `command` one."""
+    if service.health_kind not in ("http", "tcp"):
+        return None
+    hp = _host_port(service.health_target, service.health_kind)
+    if hp is None:
+        return None
+    host, port = hp
+    return ("loopback", port) if host in _LOOPBACK_HOSTS else (host, port)
+
+
+def _check_service_addresses(connectors: list[Connector]) -> None:
+    """No two services of the instance may declare the same health address
+    (#638, all packs, relay or not): the address is how the gateway reaches —
+    and authenticates to — ONE service, and two claimants would mean the
+    gateway's calls and its token reach whichever bound first."""
+    seen: dict = {}
+    for c in connectors:
+        for svc in c.services:
+            key = _health_address(svc)
+            if key is None:
+                continue
+            prev = seen.get(key)
+            if prev is not None and prev[1] is not svc:
+                other, other_svc = prev
+                raise _blame(ManifestError(
+                    f"service '{svc.name}' of connector '{c.id}' ({c.pack}) and "
+                    f"service '{other_svc.name}' of connector "
+                    f"'{other.id}' ({other.pack}) declare the same address "
+                    f"({svc.health_target!r}); every service listens on its own "
+                    f"port"), *(x.pack for x in (other, c) if not x.builtin))
+            seen[key] = (c, svc)
 
 
 def _check_verb_schemes(connectors: list[Connector]) -> None:

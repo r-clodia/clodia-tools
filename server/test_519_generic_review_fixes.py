@@ -299,7 +299,7 @@ class _MissingSvc:
     def open(self, tier, name):
         raise TopicError(f"topic {tier}/{name} non trovato")
 
-    def revoke_channel_cap_ack(self, tier, name):
+    def revoke_channel_cap_ack(self, tier, name, ctype=None):
         raise TopicError("non trovato")
 
     def accept_channel_cap(self, *a, **k):

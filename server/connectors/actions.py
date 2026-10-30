@@ -227,7 +227,7 @@ def state(connector: Connector, action: TopicAction, tier: str,
     }
     if action.binding == "channel":
         out["seal"] = _seal_state(connector, tier, name)
-        out["bound"] = _bound_chat(tier, name)
+        out["bound"] = _bound_chat(connector.id, tier, name)
         out["connected"] = out["bound"] is not None
         out["suggestions"] = _suggestions(connector, action, tier, name,
                                           out["bound"])
@@ -258,30 +258,87 @@ def _seal_state(connector: Connector, tier: str, name: str) -> dict:
     cade con la migrazione del connettore che cappa (#522), decisione
     dell'orchestratore del 14/10.
     """
-    from ..topics.service import (CHANNEL_SEAL_ACK, _tier_rank,
-                                  channel_cap_acked, channel_seal_cap)
+    from ..topics.service import _tier_rank, channel_ack, channel_cap_acked
     from ..topics_api import _service
     from ..topics.service import TopicError
     try:
         meta = _service().open(tier, name).get("meta", {})
     except TopicError:
         meta = {}
-    cap = channel_seal_cap(connector.id)
+    cap = channel_cap(connector)
     t = meta.get("tier", tier)
     morde = cap is not None and _tier_rank(t) > cap
     return {"tier": t, "cap": f"SEAL-{cap}" if cap is not None else None,
             "requires_ack": bool(morde
                                  and not channel_cap_acked(meta, connector.id, t)),
-            "ack": meta.get(CHANNEL_SEAL_ACK)}
+            "ack": channel_ack(meta, connector.id)}
 
 
-def _bound_chat(tier: str, name: str) -> str | None:
-    # SHORTCUT: il registro dei binding è ancora quello di Telegram. Regge
-    #           finché il solo binding `channel` è il suo. Quando clodia-tools#356
-    #           (#521) è in main, questo legge il registro generico per chiave
-    #           (connettore + chat) e la riga qui sotto sparisce.
+def channel_cap(connector: Connector) -> int | None:
+    """The SEAL cap of this connector's channel binding (#405, #638).
+
+    The gateway's own channel types (Telegram) keep their table. Any other
+    connector that binds a channel — a pack relay — is capped too, fail
+    closed: at its manifest's `relay.seal_cap`, or `DEFAULT_RELAY_SEAL_CAP`.
+    Above the cap the owner must acknowledge the downgrade, with the room's
+    tier in front of them, exactly as for Telegram.
+    """
+    from ..topics.service import channel_seal_cap
+    from .manifest import DEFAULT_RELAY_SEAL_CAP
+    cap = channel_seal_cap(connector.id)
+    if cap is not None:
+        return cap
+    relay = getattr(connector, "relay", None)
+    if relay is not None and relay.seal_cap is not None:
+        return relay.seal_cap
+    return DEFAULT_RELAY_SEAL_CAP
+
+
+def _bindings(connector_id: str):
+    """The channel bindings of ONE connector (clodia-platform#638).
+
+    `channel_bindings` is keyed by connector + chat (#521): a topic action with
+    `binding: channel` writes under its OWN connector id. Telegram keeps going
+    through its facade (`telegram_bindings`), byte for byte what it did before;
+    any other connector uses the same registry, in the same directory — the
+    facade's `_base()`, so whatever points Telegram's file elsewhere (the
+    tests) moves every connector's bindings with it.
+    """
+    from ..tools import channel_bindings as cb
     from ..tools import telegram_bindings as tb
-    for cid, b in tb.load().items():
+
+    class _View:
+        @staticmethod
+        def load() -> dict:
+            if connector_id == tb.CONNECTOR:
+                return tb.load()
+            return cb.load(connector_id, base=tb._base())
+
+        @staticmethod
+        def get(chat: str):
+            if connector_id == tb.CONNECTOR:
+                return tb.get(chat)
+            return cb.get(connector_id, chat, base=tb._base())
+
+        @staticmethod
+        def set_binding(chat: str, instance: str, tier: str, topic: str):
+            if connector_id == tb.CONNECTOR:
+                return tb.set_binding(chat, instance, tier, topic)
+            return cb.set_binding(connector_id, chat, instance, tier, topic,
+                                  base=tb._base())
+
+        @staticmethod
+        def remove(chat: str) -> bool:
+            if connector_id == tb.CONNECTOR:
+                return tb.remove(chat)
+            return cb.remove(connector_id, chat, base=tb._base())
+
+    return _View
+
+
+def _bound_chat(connector_id: str, tier: str, name: str) -> str | None:
+    """The chat of THIS connector bound to the topic, or None."""
+    for cid, b in _bindings(connector_id).load().items():
         if (b.get("tier"), b.get("topic")) == (tier, name):
             return cid
     return None
@@ -401,8 +458,7 @@ def apply(connector: Connector, action: TopicAction, tier: str, name: str, *,
     except ValueError as e:
         raise ActionError(str(e)[:200])
     if chat:
-        from ..tools import telegram_bindings as tb
-        tb.set_binding(chat, "messaggero", tier, name)
+        _bindings(connector.id).set_binding(chat, "messaggero", tier, name)
         if connector.id == "telegram":
             from ..tools import telegram_join as tj
             tj.drop(tier, name, chat)
@@ -428,14 +484,13 @@ def _prepare_channel(connector: Connector, tier: str, name: str,
     """
     from ..topics.service import TopicError, _check_channel_cap
     from ..topics_api import _service
-    # SHORTCUT: vedi `_bound_chat`. Un binding di canale è ancora quello di
-    #           Telegram; con #521 in main diventa il registro generico.
-    from ..tools import telegram_bindings as tb
 
     chat = next((v for k, v in values.items() if k != "account" and v), "")
     if not chat:
         raise ActionError("richiesto l'identificativo della chat")
-    esistente = tb.get(chat)
+    # One chat → one topic, per connector: the binding lives under the
+    # action's own connector id (#638).
+    esistente = _bindings(connector.id).get(chat)
     if esistente and (esistente.get("tier"), esistente.get("topic")) != (tier, name):
         raise ActionError(
             f"chat {chat} già collegata a {esistente.get('tier')}/"
@@ -447,10 +502,15 @@ def _prepare_channel(connector: Connector, tier: str, name: str,
         # perché è ciò che la rende superabile. Qui il principal è l'umano
         # owner del topic — la rotta è owner-only — quindi è l'unico punto
         # della piattaforma in cui quel consenso può nascere.
+        # Telegram passes no cap and reads the table, exactly as before; a
+        # pack relay passes its own (`channel_cap`, #638), never none.
+        cap = None if connector.id == "telegram" else channel_cap(connector)
         if body.get("accept_seal_downgrade"):
-            svc.accept_channel_cap(tier, name, connector.id, by=principal or "")
+            svc.accept_channel_cap(tier, name, connector.id, by=principal or "",
+                                   **({"cap": cap} if cap is not None else {}))
         meta = svc.open(tier, name).get("meta", {})
-        _check_channel_cap({"type": connector.id}, meta.get("tier", tier), meta)
+        _check_channel_cap({"type": connector.id}, meta.get("tier", tier), meta,
+                           **({"cap": cap} if cap is not None else {}))
     except TopicError as e:
         raise ActionError(str(e)[:400])
     return chat
@@ -467,15 +527,14 @@ def _disconnect_channel(connector: Connector, action: TopicAction, tier: str,
     from .. import egress as eg
     from ..topics.service import TopicError
     from ..topics_api import _service
-    from ..tools import telegram_bindings as tb
 
     try:
-        _service().revoke_channel_cap_ack(tier, name)
+        _service().revoke_channel_cap_ack(tier, name, connector.id)
     except TopicError:
         pass
-    chat = _bound_chat(tier, name)
+    chat = _bound_chat(connector.id, tier, name)
     if chat is not None:
-        tb.remove(chat)
+        _bindings(connector.id).remove(chat)
         for direzione, voci in render(action, {f.name: chat
                                                for f in action.fields}).items():
             for uri in voci:

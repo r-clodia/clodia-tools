@@ -1104,6 +1104,116 @@ async def telegram_status(request: Request):
     return JSONResponse(_telegram_status())
 
 
+#: The fields a pairing status may carry back to the Tools card (#639), each
+#: with its length cap. Nothing else of the service's answer reaches the page.
+_PAIRING_FIELDS = {"state": 32, "code": 64, "qr": 4096, "me": 128, "error": 300}
+#: Timeout of a pairing call: a status read or a start, never a long poll.
+_PAIRING_TIMEOUT = 15.0
+
+
+def _pairing_view(raw: dict) -> dict:
+    """`{state, code?, qr?, me?, error?}` out of the service's answer: strings
+    only, control characters stripped, each capped. A field of another type is
+    dropped, not converted: a number or an object where a code should be is
+    not a code."""
+    out: dict = {}
+    for key, cap in _PAIRING_FIELDS.items():
+        value = raw.get(key)
+        if not isinstance(value, str):
+            continue
+        value = "".join(c for c in value if c.isprintable())[:cap]
+        if value:
+            out[key] = value
+    out.setdefault("state", "unknown")
+    return out
+
+
+def _admin_principal(request: Request) -> str:
+    """Who is calling an admin route, for the audit: the human principal of
+    the session, or `ui-token` for the trusted core. Never raises."""
+    hdr = request.headers.get("authorization", "")
+    if _UI_TOKEN and _bearer_is(hdr, _UI_TOKEN):
+        return "ui-token"
+    token = hdr[7:] if hdr.lower().startswith("bearer ") else ""
+    try:
+        from .pki_verify import verify_session_token
+        p = verify_session_token(token) if token else {}
+    except Exception:  # noqa: BLE001
+        p = {}
+    return str(p.get("principal") or p.get("agent") or "?")
+
+
+async def connector_pairing(request: Request):
+    """GET/POST /tools/connectors/{id}/pairing (clodia-platform#639).
+
+    GET reads the pairing state from the connector's service (`pairing.status`),
+    POST starts pairing (`pairing.start`). HUMAN ADMIN only: the answer can
+    carry a linking code or a QR that adopts a device on the owner's account,
+    so neither the agent-server nor a runtime token gets it.
+
+    The code and the QR are never logged or audited by value — the log line
+    names the connector and the state, nothing else.
+    """
+    if not _authorized_owner(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from . import channels_api as _ch
+    from .connectors import resolved as _resolved
+    cid = request.path_params["id"]
+    try:
+        allowed = instance_profile.connector_allowed(cid)
+    except Exception:  # noqa: BLE001 — an unreadable profile allows nothing
+        allowed = False
+    connector = _resolved.registry().by_id(cid) if allowed else None
+    pairing = getattr(connector, "pairing", None) if connector is not None else None
+    if connector is None or connector.builtin or pairing is None:
+        return JSONResponse({"error": f"connector '{cid}' has no pairing step"},
+                            status_code=404)
+    start = request.method == "POST"
+    token = _ch.service_token(connector, pairing.service)
+    if not token:
+        return JSONResponse(
+            {"error": f"service '{pairing.service}' of pack '{connector.pack}' "
+                      f"is not running"}, status_code=503)
+    if start:
+        # Starting a pairing adopts a device on the owner's account: recorded,
+        # with WHO asked and for which connector — never the code or the QR,
+        # which do not even exist yet. Before the call, so an audit trail that
+        # cannot record it stops the start (fail-closed, `control.safe`).
+        from .audit import control as _control
+        _control.safe(_control.emit, "connector", "pairing_start", cid,
+                      admin=_admin_principal(request), pack=connector.pack)
+    try:
+        raw = await _ch.forward(pairing.base, pairing.start if start else pairing.status,
+                                {}, timeout=_PAIRING_TIMEOUT,
+                                max_bytes=64 * 1024, token=token,
+                                method="POST" if start else "GET")
+    except _ch.RelayUnavailable as e:
+        LOG.warning("pairing %s: service unavailable (%s)", cid, e)
+        return JSONResponse({"error": "pairing service unavailable"}, status_code=503)
+    except _ch.RelayFailed as e:
+        status = getattr(e, "status", None)
+        if status is not None and 400 <= status < 500 and status not in (401, 403):
+            # The service's own refusal («already paired», «bad state»): its
+            # status and its words, through the same filter as a success.
+            # 401/403 stay a 502: they mean the service refused the GATEWAY
+            # (token), and to the page a 401 means «your session ended».
+            LOG.warning("pairing %s: service answered %s", cid, status)
+            return JSONResponse(_pairing_view(e.payload or {"state": "error"}),
+                                status_code=status)
+        LOG.warning("pairing %s: %s", cid, e)
+        return JSONResponse({"error": "pairing service error"}, status_code=502)
+    except _ch.RelayRefused as e:
+        LOG.warning("pairing %s: %s", cid, e)
+        return JSONResponse({"error": "pairing service error"}, status_code=502)
+    view = _pairing_view(raw)
+    # The state only, and only when it is a plain word: a service that put
+    # the code in `state` must not get it into the log through this line.
+    state = view.get("state", "")
+    LOG.info("pairing %s: %s → state=%s", cid, "start" if start else "status",
+             state if re.fullmatch(r"[a-z][a-z_-]{0,31}", state) else "(other)")
+    return JSONResponse(view)
+
+
 GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
 
 
@@ -1474,6 +1584,8 @@ routes = [
     Route("/tools/email/mailboxes", email_mailbox_add, methods=["POST"]),
     Route("/tools/email/mailboxes/{account}", email_mailbox_remove, methods=["DELETE"]),
     Route("/tools/telegram/status", telegram_status, methods=["GET"]),
+    Route("/tools/connectors/{id}/pairing", connector_pairing,
+          methods=["GET", "POST"]),
     Route("/tools/backup/config", backup_configure, methods=["POST"]),
     Route("/tools/backup/status", backup_status, methods=["GET"]),
     Route("/tools/backup/snapshots", backup_snapshots, methods=["GET"]),
