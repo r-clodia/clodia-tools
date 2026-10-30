@@ -613,15 +613,23 @@ expose itself as an MCP server, instead of a service the gateway supervises
   never both (refused at load). With `backend` the health/port checks of the
   service form do not apply, and `pairing` takes no `status`/`start` paths.
   `backend` follows the mount slug rules: lowercase letters, digits and `-`,
-  at most 40.
+  at most 40. It may not be the connector's own `namespace` (that is the
+  agent-facing backend), and two connectors may not name the same backend.
 - **Ownership.** The backend must be mounted with the pack's stamp
   (`pack: <pack>`, `resolved.backend_owners`); otherwise the gateway does not
-  call it and answers 503. An admin mounts a pack's server with that stamp
-  through `POST /tools/mcp {config: {mcpServers: {<name>: {url: …}}}, pack:
-  "<pack>"}` (human admin only, and only for an installed pack whose manifest
-  names that server — in `mcp_servers` or as a `backend` of its connectors),
-  then provides its credential with «Connetti» (#565). The agent-server's own
-  mount of a first-party pack stamps it the same way (`mcp.add` with `pack`).
+  call it and answers 503. The stamp is written only for a server the
+  INSTALLED pack names (`resolved.declared_backends`): its `mcp_servers`, the
+  servers of its plugins (`plugin.yaml` `mcp_servers`, `.mcp.json`
+  `mcpServers`), a connector `namespace`, or a transport/relay/pairing
+  `backend` — for every caller (`register_mcp_core`: the Tools route and
+  `mcp.add`, whose gate card names the pack being granted ownership). An
+  admin mounts a pack's server with that stamp through `POST /tools/mcp
+  {config: {mcpServers: {<name>: {url: …}}}, pack: "<pack>"}` (human admin
+  only; recorded as `control.mcp` `mount` with the pack and who), then
+  provides its credential with «Connetti» (#565). Mounting WITHOUT `pack` a
+  name that an installed pack claims as its relay/pairing backend or
+  connector namespace is a 409 that names the pack: a transport is never
+  mounted unhidden.
 - **Transport, not a verb.** A backend named by a `relay:`/`pairing:` counts as
   a transport (`resolved.is_transport_backend`, like a provider transport of
   #523): its tools are never listed to agents and an agent's call to one is
@@ -639,10 +647,13 @@ expose itself as an MCP server, instead of a service the gateway supervises
 | `pairing_start` | `{}` | the same shape |
 
 The gateway calls them off its event loop, with the poll timeout plus a
-margin. A tool answering `isError` is the equivalent of a service's error: with
+5-second margin, and reads an http backend's answer with a byte cap ON THE
+WIRE (a larger answer is cut and is a 502, never buffered whole). A tool answering `isError` is the equivalent of a service's error: with
 a JSON object as its text it is a refusal (the pairing routes return it, with
 status 400, through the same field filter), otherwise 502; the backend not
-mounted, not the pack's, or not answering is 503. Row vetting, `ack`/`cursor`,
+mounted, not the pack's, or not answering is 503; a backend that does not
+serve the tool (JSON-RPC error) or whose session the vault rules refuse (#568)
+is a 502 that says so. Row vetting, `ack`/`cursor`,
 the SEAL cap, bindings, the `channel` kind and the pairing audit are exactly
 those of the service form.
 

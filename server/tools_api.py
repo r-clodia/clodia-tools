@@ -714,6 +714,16 @@ def register_mcp_core(config, secrets: dict | None = None,
         if pack:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", str(pack)):
                 raise McpRegisterError(f"nome di pack non valido: {pack!r}")
+            # The stamp is the PROOF of ownership (#641 review): written only
+            # for a server the installed pack itself names — its servers, its
+            # plugins' servers, a connector namespace or a transport/relay/
+            # pairing backend. For every caller: the Tools route and `mcp.add`.
+            from .connectors import resolved as _res
+            if _res.norm_name(slug) not in _res.declared_backends(str(pack)):
+                raise McpRegisterError(
+                    f"il pack '{pack}' non è installato o non dichiara il server "
+                    f"'{slug}': un backend si monta come di un pack solo se il "
+                    f"pack lo nomina", status=403)
             backend["pack"] = str(pack)
         # The hash of the config AS MOUNTED (placeholders, never secret values:
         # those go to the vault below). The agent-server compares it with the
@@ -853,27 +863,6 @@ def unregister_mcp_core(name: str) -> dict:
     return {"unregistered": name}
 
 
-def _pack_declared_backends(pack: str) -> set[str]:
-    """The backend names (normalised) an INSTALLED pack declares as its own:
-    its `mcp_servers`, and the `backend` of its connectors' provider
-    transports and `relay:`/`pairing:` (#641). Empty if it is not installed."""
-    from .connectors import resolved as _resolved
-    doc = _resolved.manifests().get(pack)
-    if not isinstance(doc, dict):
-        return set()
-    names = {str(k) for k in (doc.get("mcp_servers") or {})} \
-        if isinstance(doc.get("mcp_servers"), dict) else set()
-    for entry in doc.get("connectors") or []:
-        if not isinstance(entry, dict):
-            continue
-        blocks = [p.get("transport") for p in entry.get("providers") or []
-                  if isinstance(p, dict)]
-        blocks += [entry.get("relay"), entry.get("pairing")]
-        names |= {str(b.get("backend")) for b in blocks
-                  if isinstance(b, dict) and b.get("backend")}
-    return {_norm_backend(_slugify(n)) for n in names if _slugify(n)}
-
-
 async def register_mcp(request: Request):
     """Registra uno o più MCP server da mcp.json (UI Add-MCP).
 
@@ -893,6 +882,14 @@ async def register_mcp(request: Request):
     except Exception:
         return JSONResponse({"error": "bad_json"}, status_code=400)
     pack = body.get("pack") if isinstance(body, dict) else None
+    cfg = body.get("config") if isinstance(body, dict) else None
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except Exception:
+            cfg = None
+    servers = (cfg or {}).get("mcpServers") if isinstance(cfg, dict) else None
+    names = [str(n) for n in servers] if isinstance(servers, dict) else []
     if pack is not None:
         if not _authorized_owner(request):
             return JSONResponse({"error": "mounting as a pack is for a human admin"},
@@ -900,28 +897,32 @@ async def register_mcp(request: Request):
         if not isinstance(pack, str) or not pack.strip():
             return JSONResponse({"error": "pack must be a pack name"}, status_code=400)
         pack = pack.strip()
-        declared = _pack_declared_backends(pack)
-        cfg = body.get("config")
-        if isinstance(cfg, str):
-            try:
-                cfg = json.loads(cfg)
-            except Exception:
-                cfg = None
-        servers = (cfg or {}).get("mcpServers") if isinstance(cfg, dict) else None
-        names = [_norm_backend(_slugify(n)) for n in (servers or {})] \
-            if isinstance(servers, dict) else []
-        missing = [n for n in names if n not in declared]
-        if not declared or missing:
-            return JSONResponse(
-                {"error": f"pack '{pack}' is not installed or does not declare "
-                          f"the server(s) {', '.join(missing) or '(none)'}: a "
-                          f"backend is mounted as a pack's only if the pack "
-                          f"names it"}, status_code=403)
+    else:
+        # A server an installed pack names as its relay/pairing backend or
+        # connector namespace is that pack's (#641 review): mounted without
+        # the stamp it would be an unhidden transport — agents would see and
+        # call it — or a namespace no pack owns. Say how to mount it instead.
+        from .connectors import resolved as _res
+        for n in names:
+            claimant = _res.backend_claimant(n)
+            if claimant:
+                return JSONResponse(
+                    {"error": f"'{_slugify(n)}' is declared by pack '{claimant}': "
+                              f"mount it as that pack's (\"pack\": \"{claimant}\")"},
+                    status_code=409)
     try:
-        return JSONResponse(register_mcp_core(body.get("config"), body.get("secrets") or {},
-                                              pack=pack))
+        out = register_mcp_core(body.get("config"), body.get("secrets") or {},
+                                pack=pack)
     except McpRegisterError as e:
         return JSONResponse({"error": str(e)}, status_code=e.status)
+    if pack:
+        # Who handed which servers to which pack: the ownership stamp decides
+        # what a pack's connectors may call, so it is a control-plane event.
+        from .audit import control as _control
+        for n in out.get("registered") or ():
+            _control.safe(_control.emit, "mcp", "mount", n, pack=pack,
+                          by=_admin_principal(request))
+    return JSONResponse(out)
 
 
 async def unregister_mcp(request: Request):
@@ -1229,7 +1230,7 @@ async def connector_pairing(request: Request):
     token = ""
     if pairing.backend:
         # #641: the pack's own mounted MCP backend, tools pairing_status/start.
-        if not _resolved.owned_backend(connector.pack, pairing.backend):
+        if _resolved.owned_backend_entry(connector.pack, pairing.backend) is None:
             return JSONResponse(
                 {"error": f"backend '{pairing.backend}' is not mounted by pack "
                           f"'{connector.pack}'"}, status_code=503)

@@ -2127,6 +2127,16 @@ def parse_connector(raw: Any, *, pack: str,
     if data.get("pairing") is not None:
         pairing = _parse_pairing(data.get("pairing"), f"{where}.pairing",
                                  services=services)
+    for key, block in (("relay", relay), ("pairing", pairing)):
+        # The transport backend is a socket withheld from agents (#641); the
+        # namespace is the connector's AGENT-facing backend. One name for both
+        # would hide the agent verbs, or expose the transport.
+        if block is not None and block.backend and \
+                re.sub(r"[^a-z0-9]", "_", block.backend) == namespace:
+            raise ManifestError(
+                f"{where}.{key}.backend: '{block.backend}' is the connector's own "
+                f"namespace; the transport is a separate backend from the one "
+                f"agents call")
 
     return Connector(
         id=cid,
@@ -2566,6 +2576,7 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
 
     _check_vault_entries(parsed)
     _check_service_bases(parsed)
+    _check_transport_backends(parsed)
     _check_service_addresses(parsed)
     _check_verb_schemes(parsed)
     return Registry(connectors=tuple(parsed), refused=tuple(refused))
@@ -2634,6 +2645,23 @@ def _check_service_bases(connectors: list[Connector]) -> None:
                     f"or pairing base belongs to one connector's service"),
                     *(x.pack for x in (other, c) if not x.builtin))
             seen[port] = c
+
+
+def _check_transport_backends(connectors: list[Connector]) -> None:
+    """One relay/pairing backend serves ONE connector (#641 review): two
+    connectors on the same backend would read each other's rows."""
+    seen: dict[str, Connector] = {}
+    for c in connectors:
+        names = {re.sub(r"[^a-z0-9]", "_", d.backend)
+                 for d in (c.relay, c.pairing) if d is not None and d.backend}
+        for name in sorted(names):
+            other = seen.get(name)
+            if other is not None and other is not c:
+                raise _blame(ManifestError(
+                    f"connectors '{other.id}' ({other.pack}) and '{c.id}' "
+                    f"({c.pack}) name the same relay/pairing backend '{name}'"),
+                    *(x.pack for x in (other, c) if not x.builtin))
+            seen[name] = c
 
 
 def _health_address(service: Service):

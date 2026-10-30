@@ -209,3 +209,38 @@ def uninstall() -> None:
     if _PATCHES:
         _PATCHES.pop().stop()
     resolved.invalidate()
+
+
+# --------------------------------------------------------------------------
+# the mount's ownership stamp, for tests about something else
+# --------------------------------------------------------------------------
+
+class _AnyName(frozenset):
+    """A `declared_backends` answer that contains every name."""
+
+    def __contains__(self, _item) -> bool:  # noqa: D401
+        return True
+
+
+_STAMP_PATCHES: list = []
+
+
+def any_pack_declares_any_backend() -> None:
+    """Make every pack «declare» every server name (`resolved.declared_backends`).
+
+    Since #641's review `register_mcp_core(pack=…)` stamps a mount only for a
+    server the INSTALLED pack names. The tests of ownership conflicts, legacy
+    adoption, credentials and name normalisation mount with pack names that
+    exist only in the test: they measure those rules, not the declaration
+    check, which has its own tests (`test_641_relay_backend`). Usable as
+    `setUpModule`; undo with `restore_backend_declarations`.
+    """
+    from . import resolved
+    p = patch.object(resolved, "declared_backends", lambda pack: _AnyName())
+    p.start()
+    _STAMP_PATCHES.append(p)
+
+
+def restore_backend_declarations() -> None:
+    if _STAMP_PATCHES:
+        _STAMP_PATCHES.pop().stop()

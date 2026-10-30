@@ -174,6 +174,23 @@ async def forward(base: str, path: str, body: dict, *, timeout: float,
     return data
 
 
+#: Seconds added to a backend call's own timeout (#641 review): small, so a
+#: relay poll answers before the agent-server's client gives up on it.
+BACKEND_SESSION_MARGIN = 5.0
+
+
+def _found(e: BaseException, cls):
+    """The first `cls` in `e`, its exception group or its causes, or None."""
+    if isinstance(e, cls):
+        return e
+    for sub in getattr(e, "exceptions", ()) or ():
+        hit = _found(sub, cls)
+        if hit is not None:
+            return hit
+    cause = e.__cause__ or e.__context__
+    return _found(cause, cls) if cause is not None and cause is not e else None
+
+
 async def call_backend(connector: Connector, backend: str, tool: str,
                        args: dict, *, timeout: float, max_bytes: int) -> dict:
     """One tool of a relay/pairing MCP backend (#641), off the event loop.
@@ -186,7 +203,9 @@ async def call_backend(connector: Connector, backend: str, tool: str,
     pairing routes relay), no status otherwise (502).
     """
     from . import proxy
-    if not _resolved.owned_backend(connector.pack, backend):
+    # Resolved ONCE: the entry whose stamp is checked is the entry called.
+    entry = _resolved.owned_backend_entry(connector.pack, backend)
+    if entry is None:
         LOG.warning("channels %s: backend '%s' is not mounted by pack '%s': "
                     "not called", connector.id, backend, connector.pack)
         raise RelayUnavailable(
@@ -194,8 +213,14 @@ async def call_backend(connector: Connector, backend: str, tool: str,
     import asyncio
     import json as _json
     try:
-        text = await asyncio.to_thread(proxy.call_backend_tool_sync, backend,
-                                       tool, dict(args), timeout)
+        text = await asyncio.to_thread(
+            proxy.call_backend_tool_sync, backend, tool, dict(args), timeout,
+            # On the wire, not after buffering; with headroom for the JSON-RPC
+            # envelope, which escapes the tool's JSON text once more.
+            max_bytes=2 * max_bytes + 64 * 1024,
+            margin=BACKEND_SESSION_MARGIN, entry=entry)
+    except proxy.BackendResponseTooLarge as e:
+        raise RelayFailed(f"{tool}: answer too large") from e
     except proxy.BackendUnavailable as e:
         raise RelayUnavailable(f"backend unavailable ({str(e)[:160]})") from e
     except proxy.BackendToolError as e:
@@ -207,7 +232,19 @@ async def call_backend(connector: Connector, backend: str, tool: str,
         if isinstance(payload, dict):
             raise RelayFailed(f"{tool} refused the request", 400, payload) from e
         raise RelayFailed(f"{tool} failed") from e
-    except Exception as e:  # noqa: BLE001 — a session that cannot open: down
+    except Exception as e:  # noqa: BLE001
+        # A backend that answers, but not as the contract says, is a FAILURE
+        # (502) with a message that says which, not a «try later» (503): an
+        # unknown tool (JSON-RPC error) or a session the vault rules refuse
+        # (#568) will not fix itself by retrying.
+        if _found(e, PermissionError):
+            raise RelayFailed(f"backend '{backend}' refused: its credentials "
+                              f"break the vault rules (#568)") from e
+        from mcp.shared.exceptions import McpError
+        mcp_err = _found(e, McpError)
+        if mcp_err is not None:
+            raise RelayFailed(f"backend '{backend}' does not serve '{tool}' "
+                              f"({str(mcp_err)[:120]})") from e
         raise RelayUnavailable(f"backend not reachable ({type(e).__name__})") from e
     if len(text.encode("utf-8", "replace")) > max_bytes:
         raise RelayFailed(f"backend answer over {max_bytes} bytes")

@@ -222,8 +222,67 @@ def vault_refs_problem(b: dict) -> str | None:
             "connettore del suo stesso pack dichiara")
 
 
+class ResponseTooLarge(Exception):
+    """A backend answered more bytes than its caller allows (#641 review)."""
+
+
+def _bounded_http_factory(limit: int, tripped: "asyncio.Event"):
+    """An `httpx_client_factory` for `streamablehttp_client` whose responses
+    stop being read past `limit` bytes IN TOTAL for the session (#641 review).
+
+    The MCP client buffers a whole response before the caller sees it, so a
+    cap checked on the answer is checked after the memory is spent: a hostile
+    transport could stream gigabytes into the gateway. Here the count is on
+    the wire: past the limit the stream raises and `tripped` is set, which the
+    caller (`call_backend_tool_sync`) watches to fail at once instead of
+    waiting for its timeout.
+    """
+    import httpx
+
+    class _Counting(httpx.AsyncByteStream):
+        def __init__(self, inner, state):
+            self._inner, self._state = inner, state
+
+        async def __aiter__(self):
+            async for chunk in self._inner:
+                self._state["n"] += len(chunk)
+                if self._state["n"] > limit:
+                    tripped.set()
+                    raise ResponseTooLarge(f"backend answer over {limit} bytes")
+                yield chunk
+
+        async def aclose(self):
+            await self._inner.aclose()
+
+    class _Bounded(httpx.AsyncBaseTransport):
+        def __init__(self):
+            self._inner = httpx.AsyncHTTPTransport()
+            self._state = {"n": 0}
+
+        async def handle_async_request(self, request):
+            resp = await self._inner.handle_async_request(request)
+            return httpx.Response(resp.status_code, headers=resp.headers,
+                                  stream=_Counting(resp.stream, self._state),
+                                  extensions=resp.extensions)
+
+        async def aclose(self):
+            await self._inner.aclose()
+
+    def factory(headers=None, timeout=None, auth=None):
+        kwargs: dict = {"timeout": timeout or httpx.Timeout(30, read=300),
+                        "transport": _Bounded()}
+        if headers is not None:
+            kwargs["headers"] = headers
+        if auth is not None:
+            kwargs["auth"] = auth
+        return httpx.AsyncClient(**kwargs)
+
+    return factory
+
+
 @asynccontextmanager
-async def session(b: dict, *, oauth_handlers: tuple | None = None):
+async def session(b: dict, *, oauth_handlers: tuple | None = None,
+                  max_bytes: int | None = None, tripped=None):
     """Apre una ClientSession verso il backend (stdio o http). I secret
     ${VAULT:cred} in env/headers/url/args sono risolti dal vault qui, al volo.
 
@@ -266,8 +325,14 @@ async def session(b: dict, *, oauth_handlers: tuple | None = None):
                 yield s
     elif transport == "http":
         auth = mcp_oauth.provider_for(b, handlers=oauth_handlers)
+        extra: dict = {}
+        if max_bytes is not None and tripped is not None:
+            # Bounded on the wire (#641 review): see `_bounded_http_factory`.
+            # A stdio backend is a process of the pack on this host; its pipe
+            # is not bounded here.
+            extra["httpx_client_factory"] = _bounded_http_factory(max_bytes, tripped)
         async with streamablehttp_client(b["url"], headers=b.get("headers"),
-                                         auth=auth) as (read, write, _):
+                                         auth=auth, **extra) as (read, write, _):
             async with ClientSession(read, write) as s:
                 await s.initialize()
                 yield s
@@ -484,6 +549,10 @@ class BackendToolError(RuntimeError):
     """A backend tool answered with `isError`, or could not be reached."""
 
 
+class BackendResponseTooLarge(BackendToolError):
+    """The backend's answer went past the caller's `max_bytes` (#641 review)."""
+
+
 class BackendUnavailable(BackendToolError):
     """The backend is not mounted, or did not answer in time (#641: a relay
     caller tells this — «try later», 503 — from a tool's own `isError`)."""
@@ -501,7 +570,9 @@ def _backend_named(name: str) -> dict | None:
 
 
 def call_backend_tool_sync(backend: str, tool: str, arguments: dict,
-                           timeout: float) -> str:
+                           timeout: float, *, max_bytes: int | None = None,
+                           margin: float | None = None,
+                           entry: dict | None = None) -> str:
     """Call ONE tool of a mounted backend for the gateway itself; the text.
 
     The provider transport of #523: the gateway, not an agent, is the caller,
@@ -521,21 +592,50 @@ def call_backend_tool_sync(backend: str, tool: str, arguments: dict,
     Raises `BackendToolError` on a tool error (`isError`) and when the backend
     is not mounted: the caller fails closed, there is no fallback to the
     in-process client — that would be the switch undoing itself silently.
+
+    #641: `max_bytes` bounds an http backend's answer ON THE WIRE
+    (`BackendResponseTooLarge`, read no further); `margin` replaces the session
+    margin added to `timeout` (a relay keeps it small, under the agent-server
+    client's own timeout); `entry` is the mount entry the caller already
+    resolved and checked — used as is, not looked up a second time.
     """
-    b = _backend_named(backend)
+    b = entry if entry is not None else _backend_named(backend)
     if b is None:
         raise BackendUnavailable(f"backend MCP '{backend}' non montato")
-    budget = float(timeout) + TRANSPORT_SESSION_MARGIN_S
+    budget = float(timeout) + (TRANSPORT_SESSION_MARGIN_S if margin is None
+                               else float(margin))
 
     async def _go() -> str:
+        tripped = asyncio.Event()
+        kw = {"max_bytes": max_bytes, "tripped": tripped} \
+            if max_bytes is not None else {}
+
         async def _call():
-            async with _session(b) as s:
+            async with _session(b, **kw) as s:
                 return await s.call_tool(tool, arguments)
+        task = asyncio.ensure_future(_call())
+        waiter = asyncio.ensure_future(tripped.wait())
         try:
-            res = await asyncio.wait_for(_call(), timeout=budget)
-        except TimeoutError:
+            done, _pending = await asyncio.wait(
+                {task, waiter}, timeout=budget,
+                return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+        if task not in done:
+            task.cancel()
+            try:
+                await task
+            except BaseException:  # noqa: BLE001 — being torn down on purpose
+                pass
+            if tripped.is_set():
+                raise BackendResponseTooLarge(
+                    f"{backend}.{tool}: risposta oltre {max_bytes} byte")
             raise BackendUnavailable(
-                f"{backend}.{tool}: nessuna risposta entro {int(budget)}s") from None
+                f"{backend}.{tool}: nessuna risposta entro {int(budget)}s")
+        if tripped.is_set():
+            raise BackendResponseTooLarge(
+                f"{backend}.{tool}: risposta oltre {max_bytes} byte")
+        res = task.result()
         text = _response_text(res.content)
         if getattr(res, "isError", False):
             err = BackendToolError(f"{backend}.{tool}: {text[:500]}")

@@ -459,3 +459,16 @@ class PackImportEndToEndTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+from .connectors import first_party_fixture as _stamp
+
+
+def setUpModule() -> None:
+    # The mount-stamp declaration check is #641's own test; here every test
+    # pack «declares» the servers it mounts (see the fixture's docstring).
+    _stamp.any_pack_declares_any_backend()
+
+
+def tearDownModule() -> None:
+    _stamp.restore_backend_declarations()

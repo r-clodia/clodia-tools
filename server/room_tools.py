@@ -134,14 +134,37 @@ def _catalogue() -> dict[str, set[str]]:
     return out
 
 
+def _hidden_transports() -> set[str]:
+    """The namespaces that are a transport's backend and NOT also a
+    connector's namespace (#523, #641): a socket of the gateway, never a room
+    tool. Compared normalised (`norm_name`: `mail-transport` = `mail_transport`).
+    it-pack's `github` stays: its backend is a transport AND `github.*` is the
+    connector's MCP."""
+    try:
+        from .connectors import resolved as _c
+        norm = _c.norm_name
+        transports = {norm(t) for t in _c.transport_backends()}
+    except Exception:  # noqa: BLE001 — unknown: nothing hidden here, the call is refused anyway
+        return set()
+    connector_ns = {norm(ns) for g in _groups().values() for ns in g["namespaces"]}
+    return {t for t in transports if t not in connector_ns}
+
+
+def _is_hidden_transport(ns: str, hidden: set[str] | None = None) -> bool:
+    from .connectors.resolved import norm_name
+    return norm_name(ns) in (_hidden_transports() if hidden is None else hidden)
+
+
 def enablable() -> dict[str, list[str]]:
     """`{namespace: [verbi]}` che l'owner può abilitare in una stanza.
 
     Per il pannello di #609 e per il rifiuto della rotta: una sola derivazione,
-    così la UI non può proporre ciò che la rotta rifiuta.
+    così la UI non può proporre ciò che la rotta rifiuta. Without the transport
+    backends (#641 review): a socket of the gateway is no room's tool.
     """
+    hidden = _hidden_transports()
     return {ns: sorted(verbs) for ns, verbs in sorted(_catalogue().items())
-            if ns not in _NOT_ENABLABLE}
+            if ns not in _NOT_ENABLABLE and not _is_hidden_transport(ns, hidden)}
 
 
 def check(entry: str) -> str:
@@ -156,6 +179,9 @@ def check(entry: str) -> str:
     cat = _catalogue()
     if ns not in cat:
         raise ToolboxError(f"namespace sconosciuto: '{ns}'")
+    if _is_hidden_transport(ns):
+        raise ToolboxError(f"'{e}' non si abilita per stanza — è il trasporto "
+                           f"interno di un connettore, lo chiama solo il gateway")
     # Un backend MCP montato non espone qui i propri verbi: il namespace basta.
     if verb != WILDCARD and cat[ns] and e not in cat[ns]:
         raise ToolboxError(f"verbo sconosciuto: '{e}'")
@@ -238,9 +264,13 @@ def mcp_catalogue() -> dict[str, dict]:
     cat = {ns: set(v) for ns, v in _catalogue().items() if ns not in _NOT_ENABLABLE}
     try:
         from .connectors import resolved as _c
-        transports = set(_c.transport_backends())
+        _norm = _c.norm_name
+        transports = {_norm(t) for t in _c.transport_backends()}
     except Exception:  # noqa: BLE001
         transports = set()
+
+        def _norm(x):
+            return x
     groups = _groups()
     owner: dict[str, str] = {}
     for mid, g in groups.items():
@@ -248,7 +278,9 @@ def mcp_catalogue() -> dict[str, dict]:
             owner[ns] = mid
     out: dict[str, dict] = {}
     for ns, verbs in sorted(cat.items()):
-        if ns in transports and ns not in owner:
+        # Normalised (#641 review): `mail-transport` is listed as
+        # `mail_transport`, and a raw comparison let it through.
+        if _norm(ns) in transports and ns not in owner:
             # A provider transport is a socket of the gateway, never an MCP —
             # unless a connector owns the namespace (it-pack's GitHub: the
             # backend is its transport AND `github.*` is the MCP), 26 Oct.
@@ -262,7 +294,7 @@ def mcp_catalogue() -> dict[str, dict]:
             "enumerable": True})
         e["namespaces"].append(ns)
         vv = set(verbs) or _backend_verbs(ns)
-        if not vv or ns in transports:
+        if not vv or _norm(ns) in transports:
             # Served through a transport (GitHub): the verbs the gateway can
             # name are a part of them, not the list — say so, so a «read»
             # level takes it all instead of cutting by a partial list.

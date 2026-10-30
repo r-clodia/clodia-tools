@@ -54,8 +54,9 @@ class _FakeBackend:
         self.error: tuple[str, str] | None = None     # (tool, text) → isError
         self.down = False
 
-    def __call__(self, backend, tool, arguments, timeout):
+    def __call__(self, backend, tool, arguments, timeout, **kw):
         self.calls.append((backend, tool, dict(arguments), timeout))
+        self.kwargs = kw
         if self.down:
             raise proxy.BackendUnavailable(f"backend MCP '{backend}' non montato")
         if self.error and self.error[0] == tool:
@@ -216,7 +217,7 @@ class RelayBackendTests(_Case):
                                    {"timeout": 1}).status_code, 503)
 
     def test_a_non_json_answer_is_502(self):
-        with patch.object(proxy, "call_backend_tool_sync", lambda *a: "not json"):
+        with patch.object(proxy, "call_backend_tool_sync", lambda *a, **k: "not json"):
             self.assertEqual(self.post("/internal/channels/sms/poll",
                                        {"timeout": 1}).status_code, 502)
 
@@ -358,18 +359,25 @@ class DeliverBackendTests(_Case):
 # --------------------------------------------------------------------------
 
 class AdminMountTests(unittest.TestCase):
+    """The admin path, through the REAL `register_mcp_core`."""
+
     def setUp(self):
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
-        self.mounted = []
+        self.cfg = {"mcp_backends": []}
         self.owner = True
+        self.events = []
+        from .audit import control
         for p in (_installed(_backend_doc()),
+                  patch.object(whitelist, "CONFIG", self.cfg),
+                  patch.object(whitelist, "save_config", lambda: None),
+                  patch.object(whitelist, "reload_config", lambda: None),
+                  patch.object(proxy, "clear_cache", lambda: None),
                   patch.object(tools_api, "_authorized", lambda r: True),
                   patch.object(tools_api, "_authorized_owner", lambda r: self.owner),
-                  patch.object(tools_api, "register_mcp_core",
-                               lambda cfg, secrets=None, pack=None:
-                               self.mounted.append((cfg, pack)) or
-                               {"registered": list(cfg["mcpServers"])})):
+                  patch.object(tools_api, "_admin_principal", lambda r: "davide"),
+                  patch.object(control, "emit",
+                               lambda *a, **k: self.events.append((a, k)))):
             stack.enter_context(p)
         self.client = TestClient(Starlette(routes=tools_api.routes))
 
@@ -379,22 +387,210 @@ class AdminMountTests(unittest.TestCase):
             body["pack"] = pack
         return self.client.post("/tools/mcp", json=body, headers=_H)
 
-    def test_a_declared_backend_is_mounted_with_the_packs_stamp(self):
+    def _stamp(self, name):
+        return next((b.get("pack") for b in self.cfg["mcp_backends"]
+                     if b["name"] == name), "(not mounted)")
+
+    def test_a_declared_backend_is_mounted_with_the_packs_stamp_and_audited(self):
         r = self._mount(BACKEND, PACK)
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(self.mounted[-1][1], PACK)
+        self.assertEqual(self._stamp(BACKEND), PACK)
+        self.assertEqual(self.events, [(("mcp", "mount", BACKEND),
+                                        {"pack": PACK, "by": "davide"})])
+
+    def test_the_connector_namespace_is_declared_too(self):
+        # The pack's agent-facing backend is named after its connector.
+        self.assertEqual(self._mount("sms", PACK).status_code, 200)
+        self.assertEqual(self._stamp("sms"), PACK)
 
     def test_an_undeclared_name_or_an_unknown_pack_is_refused(self):
         self.assertEqual(self._mount("other", PACK).status_code, 403)
         self.assertEqual(self._mount(BACKEND, "no-such-pack").status_code, 403)
-        self.assertEqual(self.mounted, [])
+        self.assertEqual(self.cfg["mcp_backends"], [])
 
     def test_only_a_human_admin_may_stamp(self):
         self.owner = False
         self.assertEqual(self._mount(BACKEND, PACK).status_code, 403)
-        # Without `pack` the route is what it was.
+        # Without `pack` an unclaimed name mounts as before.
         self.assertEqual(self._mount("anything", None).status_code, 200)
-        self.assertEqual(self.mounted[-1][1], None)
+        self.assertIsNone(self._stamp("anything"))
+
+    def test_a_claimed_name_without_the_pack_is_409(self):
+        for name in (BACKEND, "SMS Transport", "sms_transport", "sms"):
+            with self.subTest(name=name):
+                r = self._mount(name, None)
+                self.assertEqual(r.status_code, 409)
+                self.assertIn(PACK, r.json()["error"])
+        self.assertEqual(self.cfg["mcp_backends"], [])
+
+
+class DeclaredBackendsTests(unittest.TestCase):
+    """What a pack declares: servers, plugins' servers, namespaces, backends."""
+
+    def test_sources(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "plugins/wa-plugin").mkdir(parents=True)
+        (tmp / "plugins/wa-plugin/plugin.yaml").write_text(
+            "mcp_servers:\n  WA Agent: {url: http://x}\n")
+        (tmp / "plugins/wa-plugin/.mcp.json").write_text(
+            json.dumps({"mcpServers": {"wa_extra": {"url": "http://y"}}}))
+        doc = _backend_doc()
+        doc["plugins"] = ["wa-plugin", "../escape"]
+        doc["mcp_servers"] = {"top-level": {}}
+        doc["connectors"][0]["namespace"] = "whatsapp"
+        with patch.object(resolved, "_DATA", tmp), \
+                patch.object(resolved, "_raw_pack_docs", lambda: {PACK: doc}):
+            got = resolved.declared_backends(PACK)
+            self.assertEqual(resolved.backend_claimant("Whats-App"), None)
+            self.assertEqual(resolved.backend_claimant("whatsapp"), PACK)
+        self.assertEqual(set(got), {"wa_agent", "wa_extra", "top_level",
+                                    "whatsapp", "sms_transport"})
+        self.assertEqual(resolved.declared_backends("nobody"), frozenset())
+
+
+class McpAddGateTextTests(unittest.TestCase):
+    def test_the_gate_names_the_pack_being_granted_ownership(self):
+        txt = M._gate_effect_reason("mcp.add", {
+            "config": {"mcpServers": {BACKEND: {"url": "http://x"}}}, "pack": PACK})
+        self.assertIn(PACK, txt)
+        self.assertNotIn("COME DEL PACK", M._gate_effect_reason("mcp.add", {
+            "config": {"mcpServers": {BACKEND: {"url": "http://x"}}}}))
+
+
+class ReviewManifestTests(unittest.TestCase):
+    def test_the_backend_may_not_be_the_connectors_namespace(self):
+        for key in ("relay", "pairing"):
+            with self.subTest(key=key):
+                doc = _backend_doc()
+                doc["connectors"][0][key]["backend"] = "sms"
+                with self.assertRaises(ManifestError) as cm:
+                    parse_connector(doc["connectors"][0], pack=PACK,
+                                    reserved=frozenset())
+                self.assertIn("namespace", str(cm.exception))
+
+    def test_two_connectors_may_not_share_a_backend(self):
+        doc = _backend_doc()
+        second = json.loads(json.dumps(doc["connectors"][0]))
+        second.update(id="sms2", namespace="sms2", label="SMS 2")
+        second["schemes"][0]["scheme"] = "sms2"
+        second["topic_actions"][0]["adds"] = {"ingress": ["sms2:{chat}"],
+                                              "egress": ["sms2:{chat}"]}
+        second.pop("pairing")
+        doc["connectors"].append(second)
+        with self.assertRaises(ManifestError) as cm:
+            build_registry({PACK: doc}, reserved=frozenset())
+        self.assertIn("same relay/pairing backend", str(cm.exception))
+
+
+class ReviewCallTests(_Case):
+    def test_the_checked_entry_is_the_one_called_with_a_small_margin_and_a_cap(self):
+        self.post("/internal/channels/sms/poll", {"timeout": 3})
+        kw = self.fake.kwargs
+        self.assertEqual(kw["entry"]["pack"], PACK)
+        self.assertEqual(kw["margin"], channels_api.BACKEND_SESSION_MARGIN)
+        self.assertLessEqual(kw["margin"], 5)
+        self.assertEqual(kw["max_bytes"], 2 * channels_api.MAX_POLL_BYTES + 64 * 1024)
+
+    def test_unknown_tool_and_vault_refusal_are_explicit_502s(self):
+        from mcp.shared.exceptions import McpError
+        from mcp.types import ErrorData
+
+        def _unknown(*a, **k):
+            raise McpError(ErrorData(code=-32601, message="Unknown tool: relay_poll"))
+
+        def _vault(*a, **k):
+            try:
+                raise PermissionError("mcp: secret of another pack")
+            except PermissionError as inner:
+                raise BaseExceptionGroup("tg", [inner])   # as anyio wraps it
+        for fake, word in ((_unknown, "does not serve"), (_vault, "vault rules")):
+            with self.subTest(word=word), \
+                    patch.object(proxy, "call_backend_tool_sync", fake):
+                r = self.post("/internal/channels/sms/poll", {"timeout": 1})
+                self.assertEqual(r.status_code, 502)
+                self.assertIn(word, r.json()["error"])
+
+    def test_an_oversized_answer_is_502(self):
+        def _big(*a, **k):
+            raise proxy.BackendResponseTooLarge("too big")
+        with patch.object(proxy, "call_backend_tool_sync", _big):
+            self.assertEqual(self.post("/internal/channels/sms/poll",
+                                       {"timeout": 1}).status_code, 502)
+
+
+class WireBoundTests(unittest.TestCase):
+    """A hostile http backend streaming a huge answer is cut on the wire."""
+
+    def test_the_response_is_not_read_past_the_cap(self):
+        import threading
+        import time
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        sent = {"n": 0}
+
+        class Flood(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("content-length") or 0))
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                chunk = b"x" * 65536
+                try:
+                    for _ in range(4096):          # up to 256 MB
+                        self.wfile.write(chunk)
+                        sent["n"] += len(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def do_GET(self):
+                self.send_response(405)
+                self.end_headers()
+
+            def do_DELETE(self):
+                self.send_response(200)
+                self.end_headers()
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Flood)
+        threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05},
+                         daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        entry = {"name": "flood", "transport": "http",
+                 "url": f"http://127.0.0.1:{srv.server_address[1]}/mcp"}
+        t0 = time.monotonic()
+        with self.assertRaises(proxy.BackendResponseTooLarge):
+            proxy.call_backend_tool_sync("flood", "relay_poll", {}, 10,
+                                         max_bytes=200_000, margin=1, entry=entry)
+        self.assertLess(time.monotonic() - t0, 8)
+        # The server is cut off long before it has sent its 256 MB.
+        self.assertLess(sent["n"], 64 * 1024 * 1024)
+
+
+class RoomToolsTransportTests(_Case):
+    def test_a_transport_is_neither_enablable_nor_accepted(self):
+        from . import room_tools
+        with patch.object(room_tools, "_catalogue",
+                          lambda: {BACKEND: set(), "sms": set(), "topic": {"topic.open"}}):
+            self.assertNotIn(BACKEND, room_tools.enablable())
+            self.assertIn("sms", room_tools.enablable())
+            with self.assertRaises(room_tools.ToolboxError):
+                room_tools.check(f"{BACKEND}.*")
+            self.assertNotIn(BACKEND, room_tools.mcp_catalogue())
+
+    def test_a_hyphenated_transport_is_matched_normalised(self):
+        from . import room_tools
+        with patch.object(room_tools, "_catalogue",
+                          lambda: {"sms-transport": set()}), \
+                patch.object(resolved, "transport_backends",
+                             lambda: frozenset({"sms_transport"})):
+            self.assertEqual(room_tools.enablable(), {})
+            self.assertEqual(room_tools.mcp_catalogue(), {})
 
 
 if __name__ == "__main__":
