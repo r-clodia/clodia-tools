@@ -714,6 +714,16 @@ def register_mcp_core(config, secrets: dict | None = None,
         if pack:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", str(pack)):
                 raise McpRegisterError(f"nome di pack non valido: {pack!r}")
+            # The stamp is the PROOF of ownership (#641 review): written only
+            # for a server the installed pack itself names — its servers, its
+            # plugins' servers, a connector namespace or a transport/relay/
+            # pairing backend. For every caller: the Tools route and `mcp.add`.
+            from .connectors import resolved as _res
+            if _res.norm_name(slug) not in _res.declared_backends(str(pack)):
+                raise McpRegisterError(
+                    f"il pack '{pack}' non è installato o non dichiara il server "
+                    f"'{slug}': un backend si monta come di un pack solo se il "
+                    f"pack lo nomina", status=403)
             backend["pack"] = str(pack)
         # The hash of the config AS MOUNTED (placeholders, never secret values:
         # those go to the vault below). The agent-server compares it with the
@@ -854,17 +864,65 @@ def unregister_mcp_core(name: str) -> dict:
 
 
 async def register_mcp(request: Request):
-    """Registra uno o più MCP server da mcp.json (UI Add-MCP)."""
+    """Registra uno o più MCP server da mcp.json (UI Add-MCP).
+
+    `pack` (optional, #641): mount the servers AS THAT PACK's — the ownership
+    stamp `register_mcp_core(pack=…)` writes and that a pack connector's
+    transport, relay or pairing backend requires (`resolved.backend_owners`).
+    It is how an admin mounts, after review, the server of a pack imported
+    from a zip, whose servers the import leaves `pending`. Human admin only,
+    and only for an installed pack that declares every server being mounted:
+    the stamp is the proof of ownership, so it is never written for a name
+    the pack does not claim.
+    """
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad_json"}, status_code=400)
+    pack = body.get("pack") if isinstance(body, dict) else None
+    cfg = body.get("config") if isinstance(body, dict) else None
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except Exception:
+            cfg = None
+    servers = (cfg or {}).get("mcpServers") if isinstance(cfg, dict) else None
+    names = [str(n) for n in servers] if isinstance(servers, dict) else []
+    if pack is not None:
+        if not _authorized_owner(request):
+            return JSONResponse({"error": "mounting as a pack is for a human admin"},
+                                status_code=403)
+        if not isinstance(pack, str) or not pack.strip():
+            return JSONResponse({"error": "pack must be a pack name"}, status_code=400)
+        pack = pack.strip()
+    else:
+        # A server an installed pack names as its relay/pairing backend or
+        # connector namespace is that pack's (#641 review): mounted without
+        # the stamp it would be an unhidden transport — agents would see and
+        # call it — or a namespace no pack owns. Say how to mount it instead.
+        from .connectors import resolved as _res
+        for n in names:
+            claimant = _res.backend_claimant(n)
+            if claimant:
+                return JSONResponse(
+                    {"error": f"'{_slugify(n)}' is declared by pack '{claimant}': "
+                              f"mount it as that pack's (\"pack\": \"{claimant}\")"},
+                    status_code=409)
     try:
-        return JSONResponse(register_mcp_core(body.get("config"), body.get("secrets") or {}))
+        out = register_mcp_core(body.get("config"), body.get("secrets") or {},
+                                pack=pack)
     except McpRegisterError as e:
         return JSONResponse({"error": str(e)}, status_code=e.status)
+    if pack:
+        # Who handed which servers to which pack: the ownership stamp decides
+        # what a pack's connectors may call, so it is a control-plane event.
+        from .audit import control as _control
+        for n in out.get("registered") or ():
+            _control.safe(_control.emit, "mcp", "mount", n, pack=pack,
+                          by=_admin_principal(request))
+    return JSONResponse(out)
 
 
 async def unregister_mcp(request: Request):
@@ -1169,11 +1227,19 @@ async def connector_pairing(request: Request):
         return JSONResponse({"error": f"connector '{cid}' has no pairing step"},
                             status_code=404)
     start = request.method == "POST"
-    token = _ch.service_token(connector, pairing.service)
-    if not token:
-        return JSONResponse(
-            {"error": f"service '{pairing.service}' of pack '{connector.pack}' "
-                      f"is not running"}, status_code=503)
+    token = ""
+    if pairing.backend:
+        # #641: the pack's own mounted MCP backend, tools pairing_status/start.
+        if _resolved.owned_backend_entry(connector.pack, pairing.backend) is None:
+            return JSONResponse(
+                {"error": f"backend '{pairing.backend}' is not mounted by pack "
+                          f"'{connector.pack}'"}, status_code=503)
+    else:
+        token = _ch.service_token(connector, pairing.service)
+        if not token:
+            return JSONResponse(
+                {"error": f"service '{pairing.service}' of pack '{connector.pack}' "
+                          f"is not running"}, status_code=503)
     if start:
         # Starting a pairing adopts a device on the owner's account: recorded,
         # with WHO asked and for which connector — never the code or the QR,
@@ -1183,10 +1249,17 @@ async def connector_pairing(request: Request):
         _control.safe(_control.emit, "connector", "pairing_start", cid,
                       admin=_admin_principal(request), pack=connector.pack)
     try:
-        raw = await _ch.forward(pairing.base, pairing.start if start else pairing.status,
-                                {}, timeout=_PAIRING_TIMEOUT,
-                                max_bytes=64 * 1024, token=token,
-                                method="POST" if start else "GET")
+        if pairing.backend:
+            raw = await _ch.call_backend(
+                connector, pairing.backend,
+                "pairing_start" if start else "pairing_status", {},
+                timeout=_PAIRING_TIMEOUT, max_bytes=64 * 1024)
+        else:
+            raw = await _ch.forward(pairing.base,
+                                    pairing.start if start else pairing.status,
+                                    {}, timeout=_PAIRING_TIMEOUT,
+                                    max_bytes=64 * 1024, token=token,
+                                    method="POST" if start else "GET")
     except _ch.RelayUnavailable as e:
         LOG.warning("pairing %s: service unavailable (%s)", cid, e)
         return JSONResponse({"error": "pairing service unavailable"}, status_code=503)

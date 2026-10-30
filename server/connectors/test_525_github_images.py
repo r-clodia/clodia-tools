@@ -876,7 +876,10 @@ def setUpModule() -> None:
     # was retired (#526) the tables pinned here are theirs, not the gateway's.
     # it-pack is this module's own (`_ItIstanza` writes it).
     _first_party.install(without=("it-pack",))
+    # The mount-stamp declaration check is #641's own test.
+    _first_party.any_pack_declares_any_backend()
 
 
 def tearDownModule() -> None:
+    _first_party.restore_backend_declarations()
     _first_party.uninstall()

@@ -1077,7 +1077,8 @@ _TRANSPORTS: tuple[tuple, frozenset[str]] | None = None
 
 
 def transport_backends() -> frozenset[str]:
-    """The (normalised) MCP backends packs declare as provider transports.
+    """The (normalised) MCP backends packs declare as provider transports, or
+    as the `backend` of a `relay:`/`pairing:` (#641).
 
     Gateway-internal sockets: their tools are never listed to an agent and an
     agent's call to one is refused (`main._check_not_transport`). A transport
@@ -1106,8 +1107,13 @@ def transport_backends() -> frozenset[str]:
         entries = meta.get("connectors") if isinstance(meta, Mapping) else None
         for entry in entries if isinstance(entries, list) else []:
             providers = entry.get("providers") if isinstance(entry, Mapping) else None
-            for p in providers if isinstance(providers, list) else []:
-                t = p.get("transport") if isinstance(p, Mapping) else None
+            declared = [p.get("transport") if isinstance(p, Mapping) else None
+                        for p in (providers if isinstance(providers, list) else [])]
+            # A relay or pairing backend (#641) is the same kind of socket: the
+            # gateway's own, never an agent's verb.
+            if isinstance(entry, Mapping):
+                declared += [entry.get("relay"), entry.get("pairing")]
+            for t in declared:
                 name = _norm(str(t.get("backend") or "")) \
                     if isinstance(t, Mapping) else ""
                 if not name:
@@ -1147,6 +1153,130 @@ def transport_backends() -> frozenset[str]:
     result = frozenset(out)
     _TRANSPORTS = (sig, result)
     return result
+
+
+def _slug_norm(name: str) -> str:
+    """A server name as the MOUNT names it (`tools_api._slugify`), normalised
+    for comparison (`norm_name`): `My Server`, `my-server` and `my_server` are
+    one backend."""
+    import re as _re
+    slug = _re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-")[:40]
+    return _norm(slug)
+
+
+def _raw_pack_docs() -> dict[str, dict]:
+    """`{pack: pack.yaml}` of EVERY installed pack, disabled ones included:
+    enabling a pack mounts its servers back (#563) before the registry sees
+    it again, and the ownership stamp must not depend on that order."""
+    import yaml
+    out: dict[str, dict] = dict(_installed_manifests())
+    for path in _manifest_files():
+        try:
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(loaded, Mapping):
+            out.setdefault(str(loaded.get("name") or path.parent.name), dict(loaded))
+    return out
+
+
+_PLUGIN_NAME = __import__("re").compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _plugin_servers(plugin: str) -> set[str]:
+    """The MCP server names a plugin of a pack declares: its `plugin.yaml`
+    `mcp_servers` and its `.mcp.json` `mcpServers` (the import keeps both)."""
+    import json as _json
+    import yaml
+    if not _PLUGIN_NAME.match(plugin or "") or ".." in plugin:
+        return set()
+    root = _DATA / "plugins" / plugin
+    names: set[str] = set()
+    try:
+        meta = yaml.safe_load((root / "plugin.yaml").read_text(encoding="utf-8")) \
+            if (root / "plugin.yaml").is_file() else {}
+        if isinstance(meta, Mapping) and isinstance(meta.get("mcp_servers"), Mapping):
+            names |= {str(k) for k in meta["mcp_servers"]}
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        doc = _json.loads((root / ".mcp.json").read_text(encoding="utf-8")) \
+            if (root / ".mcp.json").is_file() else {}
+        if isinstance(doc, Mapping) and isinstance(doc.get("mcpServers"), Mapping):
+            names |= {str(k) for k in doc["mcpServers"]}
+    except Exception:  # noqa: BLE001
+        pass
+    return names
+
+
+def declared_backends(pack: str) -> frozenset[str]:
+    """The backend names (normalised, `_slug_norm`) an INSTALLED pack declares
+    as its own (#641 review): its `mcp_servers`, the servers of its plugins,
+    the namespace of each of its connectors (its agent-facing backend), and
+    the `backend` of its provider transports and `relay:`/`pairing:`. Empty
+    for a pack that is not installed.
+
+    It is what a mount may be stamped with (`tools_api.register_mcp_core`):
+    the stamp is the proof of ownership, so it is written only for a name the
+    pack itself claims.
+    """
+    doc = _raw_pack_docs().get(pack)
+    if not isinstance(doc, Mapping):
+        return frozenset()
+    names: set[str] = set()
+    if isinstance(doc.get("mcp_servers"), Mapping):
+        names |= {str(k) for k in doc["mcp_servers"]}
+    for p in doc.get("plugins") or []:
+        plugin = p if isinstance(p, str) else \
+            (p.get("plugin") or p.get("name")) if isinstance(p, Mapping) else None
+        if isinstance(plugin, str):
+            names |= _plugin_servers(plugin)
+    for entry in doc.get("connectors") or []:
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get("namespace"):
+            names.add(str(entry["namespace"]))
+        blocks = [p.get("transport") for p in entry.get("providers") or []
+                  if isinstance(p, Mapping)]
+        blocks += [entry.get("relay"), entry.get("pairing")]
+        names |= {str(b.get("backend")) for b in blocks
+                  if isinstance(b, Mapping) and b.get("backend")}
+    return frozenset(n for n in (_slug_norm(x) for x in names) if n)
+
+
+def backend_claimant(name: str) -> str | None:
+    """The installed pack that names `name` as a relay/pairing backend or as a
+    connector namespace, or None (#641 review): such a server mounted WITHOUT
+    the pack's stamp would be an unhidden transport, or a namespace nobody owns."""
+    want = _slug_norm(name)
+    for pack, doc in _raw_pack_docs().items():
+        for entry in doc.get("connectors") or []:
+            if not isinstance(entry, Mapping):
+                continue
+            claimed = [entry.get("namespace")] + [
+                b.get("backend") for b in (entry.get("relay"), entry.get("pairing"))
+                if isinstance(b, Mapping)]
+            if any(c and _slug_norm(str(c)) == want for c in claimed):
+                return pack
+    return None
+
+
+def owned_backend_entry(pack: str, backend: str) -> dict | None:
+    """The mounted entry of `backend`, if `pack` stamped it — read ONCE, so
+    the caller hands this very entry to the call (no second lookup between
+    the ownership check and the session)."""
+    from .. import proxy
+    entry = proxy._backend_named(backend)
+    if not isinstance(entry, dict) or str(entry.get("pack") or "") != pack:
+        return None
+    return dict(entry)
+
+
+def owned_backend(pack: str, backend: str) -> bool:
+    """Is `backend` mounted by `pack` itself (the `pack:` stamp)? The gateway
+    calls a relay/pairing backend (#641) only then: a manifest naming another
+    pack's or an admin's backend would route a room's messages there."""
+    return _norm(backend) in (backend_owners().get(pack) or ())
 
 
 def is_transport_backend(name: str) -> bool:

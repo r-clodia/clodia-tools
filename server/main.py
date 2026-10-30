@@ -4239,8 +4239,16 @@ def _gate_effect_reason(name: str, arguments: dict) -> str:
         if name == "mcp.add":
             server_names = list(((a.get("config") or {}).get("mcpServers") or {}).keys())
             elenco = ", ".join(f"`{n}`" for n in server_names) or "(nessun server nel config)"
-            return (f"monta {len(server_names)} server MCP: {elenco} — nuova "
-                    f"superficie di codice nel gateway.")
+            testo = (f"monta {len(server_names)} server MCP: {elenco} — nuova "
+                     f"superficie di codice nel gateway.")
+            if a.get("pack"):
+                # The ownership stamp (#641 review): what the approver grants
+                # is not only a mount, it is these servers BELONGING to a pack
+                # — the proof its connectors' transports rely on.
+                testo += (f" Li monta COME DEL PACK `{a.get('pack')}`: da quel "
+                          f"momento i connettori di quel pack possono usarli come "
+                          f"propri (trasporti, relay, pairing).")
+            return testo
         if name == "mcp.remove":
             return f"smonta il server MCP `{a.get('name')}`."
         if name == "packs.import_url":
