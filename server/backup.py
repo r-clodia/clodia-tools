@@ -45,7 +45,10 @@ RESTORE_MAX_DAYS = int(os.environ.get("CLODIA_BACKUP_RESTORE_MAX_DAYS") or 8)
 # solo alla consistenza transazionale di DB scritti di frequente.
 _DBS = [d.strip() for d in (os.environ.get("CLODIA_BACKUP_DBS") or "").split(",") if d.strip()]
 # Esclusioni: backup vecchi, cache, snapshot DB temporanei (rigenerati).
-_EXCLUDES = ["*.bak-*", "topics-store.bak-*", "**/__pycache__", "**/*.pyc"]
+_EXCLUDES = ["*.bak-*", "topics-store.bak-*", "**/__pycache__", "**/*.pyc",
+             # Room repository copies (#637): rebuilt from GitHub on demand,
+             # hundreds of MB each — not backup material.
+             "**/room-cache"]
 
 #: restic esce **3** quando lo snapshot è stato creato ma qualche file non si è
 #: potuto leggere. È un esito diverso da 1 (fallimento): una copia utilizzabile

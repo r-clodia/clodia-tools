@@ -57,6 +57,8 @@ _VERB = re.compile(r"^[a-z][a-z0-9_]{0,31}\.[A-Za-z0-9_.]{1,63}$")
 _CONFIG_KEY = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _STATE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _SERVICE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+#: One plain path segment of a room cache entry (#637): no separator, no `..`.
+_ROOM_ENTRY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 #: Set by the route dispatcher while an OWNER-authenticated route runs: the
 #: only context in which a component may write its config (perimeter).
@@ -659,6 +661,45 @@ class Host:
         and an approval was given for the repository judged, not another."""
         from .. import authz_runtime
         return tuple(authz_runtime.JUDGED.get() or ())
+
+    def room_cache_path(self, name: str) -> str:
+        """The absolute path of the entry `name` in THIS component's private
+        cache for the room the call comes from (clodia-platform#637):
+        `<gateway state>/components/room-cache/<pack>/<id>/<tier>/<topic>/<name>`.
+
+        For data a component keeps per room and nobody else may write — the
+        repository copy `github.clone` starts from. It is on the gateway's own
+        volume: not mounted where agents run, not reachable through the topic
+        verbs, not on the Mac side (the room's shared folder is writable by
+        agents through `topic.put`, review of #637). The room is the signed
+        claim's, never an argument; `name` is ONE plain segment; a symlink
+        there is refused."""
+        n = str(name or "")
+        if not _ROOM_ENTRY.fullmatch(n) or ".." in n:
+            raise HostError(f"invalid cache entry name '{name}'")
+        from .. import main
+        tier, topic = main._current_topic()
+        if not tier or not topic:
+            raise HostError("this call has no channel: no room cache")
+        if not (_ROOM_ENTRY.fullmatch(str(tier)) and _ROOM_ENTRY.fullmatch(str(topic))):
+            raise HostError("room name not usable as a path segment")
+        from .. import state_paths
+        if not state_paths.is_isolated():
+            # On the datadir the agent-server mounts, the cache would be
+            # writable by agents' shells — the very hole of #637's review.
+            raise HostError("the gateway state is not isolated from the agents "
+                            "(CLODIA_TOOLS_STATE_DIR): no room cache")
+        from . import store
+        d = store.root() / "room-cache" / self._c.pack / self._c.id / str(tier) / str(topic)
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass
+        p = d / n
+        if p.is_symlink():
+            raise HostError(f"'{n}' in the room cache is a link: refused")
+        return str(p)
 
     def current_topic(self) -> tuple[str | None, str | None]:
         """`(tier, name)` of the room the call comes from (signed `chat`

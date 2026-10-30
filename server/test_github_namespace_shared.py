@@ -22,9 +22,10 @@ from . import main as M
 
 
 class TheGitVerbsAreNamedTests(unittest.TestCase):
-    def test_the_four_git_verbs(self):
+    def test_the_git_verbs(self):
         self.assertEqual(M._GITHUB_NATIVE_NAMES, frozenset({
-            "github.clone", "github.pull", "github.push", "github.pull_request"}))
+            "github.clone", "github.pull", "github.push", "github.pull_request",
+            "github.mirror"}))  # #637
 
     def test_a_backend_verb_is_not_a_git_verb(self):
         for v in ("github.issue_write", "github.list_issues", "github.search_code"):
