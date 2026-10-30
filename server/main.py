@@ -521,7 +521,9 @@ _RAG_TOOLS: list[Tool] = [
 #: verb that no component serves must be refused, never proxied there
 #: (`_check_component`).
 _GITHUB_NATIVE_NAMES: frozenset[str] = frozenset({
-    "github.clone", "github.pull", "github.push", "github.pull_request"})
+    "github.clone", "github.pull", "github.push", "github.pull_request",
+    # The room's repository copy (#637, it-pack >= 0.24.0).
+    "github.mirror"})
 
 
 _TOPIC_TOOLS: list[Tool] = [
