@@ -5334,10 +5334,28 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 if _perimetro_ok:
                     LOG.info("gate saltato per '%s' (@%s): destinazione già nel "
                              "perimetro autorizzato", name, _ag)
-            if _gate.needs_consent(name, globally_gated=_gated_globale,
-                                   agent_gated=_gated_agente,
-                                   off_profile=_off_profile,
-                                   perimeter_ok=_perimetro_ok):
+            # Adding to the caller's own room an entry it already lists moves
+            # nothing: no card (#647). The fact-checker calls
+            # `topic.ingress_add(https:*)` on entering a room, and the owner is
+            # asked only the first time.
+            _gia_presente = False
+            if name in ("topic.ingress_add", "topic.egress_add"):
+                try:
+                    from . import egress as _eg
+                    _gia_presente = _eg.already_in_own_room(
+                        name.split(".", 1)[1].split("_", 1)[0],
+                        f"{arguments.get('tier') or ''}/{arguments.get('name') or ''}",
+                        str(arguments.get("uri") or ""))
+                except Exception:  # noqa: BLE001 — in doubt, ask
+                    _gia_presente = False
+                if _gia_presente:
+                    LOG.info("gate saltato per '%s' (@%s): già nella lista della "
+                             "stanza", name, _ag)
+            if not _gia_presente and _gate.needs_consent(
+                    name, globally_gated=_gated_globale,
+                    agent_gated=_gated_agente,
+                    off_profile=_off_profile,
+                    perimeter_ok=_perimetro_ok):
                 if name == "web.post":
                     reason = web_post.gate_summary(arguments)
                 elif name in ("egress.allow", "ingress.allow"):

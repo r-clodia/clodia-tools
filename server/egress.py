@@ -602,6 +602,24 @@ def _scope_of_call() -> str | None:
         return None
 
 
+def already_in_own_room(direction: str, scope: str, uri: str) -> bool:
+    """Does the CALLER's own room already list `uri` in `direction`? (#647)
+
+    `topic.ingress_add`/`egress_add` of an entry already there moves nothing,
+    so there is nothing for the owner to approve: the fact-checker's «open the
+    web if it is not open» is one idempotent call, asked only when missing.
+    Only the caller's room (from the signed claim): on another room the answer
+    would say what that room lists, which is not the caller's to know."""
+    mine = _scope_of_call()
+    if not (mine and scope) or _norm_scope_key(mine) != _norm_scope_key(scope):
+        return False
+    if direction == "ingress" and canonical(uri).lower() == OPEN_WEB:
+        u = OPEN_WEB
+    else:
+        u = canonical(uri)
+    return bool(u) and _nomina(scope_uris(direction, scope), u)
+
+
 def scope_uris(direction: str, scope: str | None, cfg: dict | None = None) -> list[str]:
     """Voci della lista di UNO scope. Vuota se lo scope non ne ha.
 
