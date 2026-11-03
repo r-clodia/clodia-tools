@@ -241,8 +241,21 @@ def check(agent: str, verb: str, arguments: dict, scope: Optional[str],
         # the target, never the caller's mapped argument — `github.push`
         # ignores a `repo` argument, so judging it would judge a fiction.
         f["targets"] = list(targets)
+    kind = f["kind"]
+    if (scope and not f["mapped"] and targets is None and not f["targets"]
+            and kind == A.WRITE):
+        # A verb no manifest describes, acting on nothing the gateway can name
+        # (#650). Its «write» comes only from the name heuristic — Normattiva's
+        # `risolvi`, `articolo` are not English — and in a room it asked on
+        # every call. The owner's rule (3 Nov 2026): «se metto il tool nel
+        # canale → autorizzato». In a room it takes the read default: allowed
+        # where the room enables its MCP, and still narrowed by any explicit
+        # rule (a global deny, an ask or deny the owner wrote). A verb with a
+        # mapping keeps its destinations judged: enabling mail never decides
+        # who a mail may reach (review of #435, S1).
+        kind = A.READ
     return A.decide(g, t, agent=agent, verb=verb, resource=f["resource"],
-                    targets=f["targets"], kind=f["kind"], tainted=tainted)
+                    targets=f["targets"], kind=kind, tainted=tainted)
 
 
 #: The component service that names the resource a call acts on (#635):
