@@ -74,7 +74,10 @@ class AvailabilityTests(_Env):
         self.assertTrue(R.available("clodia", "rag.search", "SEAL-1/blog"))
         self.assertFalse(R.available("estraneo", "rag.search", "SEAL-1/blog"))
         self.assertTrue(R.available("clodia", "gdrive.list", "SEAL-1/blog"))
-        self.assertFalse(R.available("clodia", "gdrive.upload", "SEAL-1/blog"))
+        # A linked folder is worked in, not only read (#652): its writes are
+        # confined to the subtree by the google-pack component.
+        self.assertTrue(R.available("clodia", "gdrive.upload", "SEAL-1/blog"))
+        self.assertFalse(R.available("clodia", "gdrive.share", "SEAL-1/blog"))
 
     def test_reachability_follows_the_mode(self):
         self.meta_set(authz=[_t("t1", agent="clodia")])
