@@ -117,8 +117,17 @@ def _resource_tuples(meta: dict) -> list[A.Tuple]:
 
 
 #: A linked Drive folder grants reading it (owner, 25 Oct 2026): linking and
-#: enabling are one act. Writing is an explicit tuple.
+#: enabling are one act.
 DRIVE_READ = ("gdrive.list", "gdrive.search", "gdrive.download")
+#: …and working in it (owner, 4 Nov 2026, #652: «il canale è collegato a quella
+#: folder, non deve chiedere»). Any Drive target is allowed HERE because the
+#: google-pack component confines every one of these writes to the linked
+#: folder's subtree (`gdrive_root.assert_writable_parent` / `assert_inside`,
+#: parents walked up to the root) — a target outside is refused there, never
+#: reached. `gdrive.share` is not here: sharing hands a file to people outside
+#: the room, and that still asks.
+DRIVE_WRITE = ("gdrive.upload", "gdrive.mkdir", "gdrive.move", "gdrive.update",
+               "gdrive.rename")
 
 
 def _drive_tuples(meta: dict) -> list[A.Tuple]:
@@ -143,6 +152,9 @@ def _drive_tuples(meta: dict) -> list[A.Tuple]:
             rule.append({"effect": "deny", "match": "gdrive:*"})
         raw.append({"id": f"drive:{v}", "agent": "*", "verb": v, "resource": "*",
                     "rule": rule})
+    for v in DRIVE_WRITE:
+        raw.append({"id": f"drive:{v}", "agent": "*", "verb": v, "resource": "*",
+                    "rule": [{"effect": "allow", "match": "gdrive:*"}]})
     ok, _bad = A.parse_tuples(raw, level=A.TOPIC)
     return ok
 
