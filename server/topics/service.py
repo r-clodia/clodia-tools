@@ -1623,6 +1623,7 @@ class TopicService:
                 + (f" (ci sono: {disponibili})" if disponibili else ""))
         meta["drive_folders"] = [f for f in existing if f.get("name") != mount_name]
         self._write_meta(tier, name, meta, base_version=ver)
+        _index_notify("drive", tier, name)           # unlinked → out of the RAG now
         return {"ok": True, "removed": mount_name}
 
     def local_folder_add(self, tier: str, name: str, mount_name: str | None = None) -> dict:
@@ -3220,6 +3221,7 @@ class TopicService:
             # non resta a metà fra due livelli.
             self.s.move(dst, src)
             raise
+        _index_notify("retier", new, name)           # the collection follows the tier now
         return {"from": tier, "to": new, "name": name, "entry": voce}
 
     def archive(self, tier: str, name: str) -> dict:

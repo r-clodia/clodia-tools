@@ -77,6 +77,13 @@ def _lock(key: str) -> threading.Lock:
         return _LOCKS.setdefault(key, threading.Lock())
 
 
+def _nt(tier: str) -> str:
+    """The canonical tier: lock keys, job files and notify events must agree
+    (a legacy `P2` and `SEAL-2` are the same room)."""
+    from .topics.service import _normalize_tier
+    return _normalize_tier(tier)
+
+
 def _svc():
     from . import main
     return main._topics()
@@ -286,12 +293,15 @@ def job_running(tier: str, name: str) -> bool:
 def job_status(tier: str, name: str) -> dict:
     """`{on, collection, since, job}` for the room. A job left «running» by a
     gateway restart is resumed here: the room never stays «in corso» forever."""
+    tier = _nt(tier)
     meta = _svc()._read_meta(tier, name)[0]
     ix = settings(meta)
-    job = _job_read(tier, name)
-    if job.get("state") in RUNNING_STATES and not job_running(tier, name):
-        _start_job(tier, name, job["state"] == "indexing")
+    with _JOBS_GUARD:
         job = _job_read(tier, name)
+        if job.get("state") in RUNNING_STATES and not job_running(tier, name):
+            # Resumed on what the room says NOW, not on what the file said.
+            _start_job(tier, name, ix["on"])
+            job = _job_read(tier, name)
     return {"on": ix["on"], "collection": ix["collection"], "since": ix["since"],
             "job": job or {"state": "idle"}}
 
@@ -301,6 +311,7 @@ def set_enabled(tier: str, name: str, enabled: bool) -> dict:
     in the background. Refused while a job runs. Flipping to the value it
     already has re-runs the job (a failed indexing is retried this way)."""
     from .topics.service import TopicError
+    tier = _nt(tier)
     key = f"{tier}/{name}"
     with _JOBS_GUARD:
         if job_running(tier, name):
@@ -308,9 +319,12 @@ def set_enabled(tier: str, name: str, enabled: bool) -> dict:
         svc = _svc()
         meta, ver = svc._read_meta(tier, name)
         index = dict(meta.get("index") or {})
+        was_on = index.get("on") is True
         index["on"] = bool(enabled)
         index.pop("enabled", None)
-        if enabled:
+        if enabled and not (was_on and index.get("since")):
+            # A retry of a room already ON keeps its start: the messages
+            # indexed since then are not lost.
             index["since"] = _now_iso()
         meta["index"] = index
         svc._write_meta(tier, name, meta, base_version=ver)
@@ -332,11 +346,17 @@ def _start_job(tier: str, name: str, on: bool) -> None:
 def _run_job(tier: str, name: str, on: bool) -> None:
     with _lock(f"{tier}/{name}"):
         try:
+            # The room's switch NOW decides, not the one the job was started
+            # with: a job resumed after a restart, or overtaken by a flip,
+            # never indexes a room that is off (review of #648).
+            on = settings(_svc()._read_meta(tier, name)[0])["on"]
+            _job_write(tier, name, state="indexing" if on else "deindexing")
             if on:
                 _index_all(tier, name)
             else:
                 _deindex_all(tier, name)
-            _job_write(tier, name, state="done", finished_at=_now_iso(), error=None)
+            _job_write(tier, name, state="done", finished_at=_now_iso(),
+                       error=_job_read(tier, name).get("error"))
         except Exception as e:  # noqa: BLE001 — the room shows the error, toggling again retries
             LOG.warning("topic index: job %s/%s fallito (%s)", tier, name, type(e).__name__)
             _job_write(tier, name, state="error", finished_at=_now_iso(),
@@ -351,6 +371,8 @@ def _index_all(tier: str, name: str) -> None:
     """ON: a clean collection, then every file, the Drive content, the summary."""
     svc = _svc()
     info = ensure(tier, name)
+    if not info.get("on", True) or not info.get("collection"):
+        return                                        # off meanwhile: nothing to index
     coll, t = info["collection"], info["tier"]
     rag = _rag()
     rag.drop_collection(coll)          # whatever was there before the switch
@@ -363,19 +385,29 @@ def _index_all(tier: str, name: str) -> None:
         _walk(svc, tier, name, root, files)
     drive = _drive_files(meta)
     drive_rows = drive["files"] if drive else []
-    total = len(files) + len(drive_rows) + 1
-    done = 0
-    _job_write(tier, name, total=total, done=0)
-    for e in files:
-        _ingest_file(svc, rag, tier, name, coll, t, st, e)
-        done += 1
-        _job_write(tier, name, done=done)
-    for row in drive_rows:
-        _ingest_drive(rag, tier, name, coll, t, st, row)
+    msgs = _messages_since(svc, tier, name, settings(meta)["since"])
+    _LAST.pop(f"{tier}/{name}", None)
+    total = len(files) + len(drive_rows) + len(msgs) + 1
+    done = errors = 0
+    _job_write(tier, name, total=total, done=0, error=None)
+    for kind, item in ([("file", e) for e in files] + [("drive", r) for r in drive_rows]
+                       + [("msg", m) for m in msgs]):
+        try:
+            if kind == "file":
+                _ingest_file(svc, rag, tier, name, coll, t, st, item)
+            elif kind == "drive":
+                _ingest_drive(rag, tier, name, coll, t, st, item)
+            else:
+                _ingest_message(rag, tier, name, coll, t, item, st)
+        except Exception as e:  # noqa: BLE001 — one document never stops the job
+            errors += 1
+            LOG.warning("topic index: %s/%s %s non indicizzato (%s)", tier, name, kind,
+                        type(e).__name__)
         done += 1
         _job_write(tier, name, done=done)
     _ingest_summary(svc, rag, tier, name, coll, t, st)
-    _job_write(tier, name, done=total)
+    _job_write(tier, name, done=total,
+               error=(f"{errors} elementi non indicizzati" if errors else None))
 
 
 def _deindex_all(tier: str, name: str) -> None:
@@ -549,10 +581,15 @@ def _drive_files(meta: dict) -> dict | None:
     return {"files": rows, "complete": complete}
 
 
+def _drive_doc(row: dict) -> str:
+    """`drive/<mount>/<path> [<id>]`: two Drive files may share a path."""
+    return f"drive/{row['mount']}/{row['path']} [{row.get('id')}]"
+
+
 def _ingest_drive(rag, tier, name, coll, t, st, row) -> bool:
     """One Drive file → `drive/<mount>/<path>`, always `untrusted` (nobody in
     the room vouched for it)."""
-    doc = f"drive/{row['mount']}/{row['path']}"
+    doc = _drive_doc(row)
     sig = f"{row.get('size')}:{row.get('modifiedTime')}"
     if (row.get("size") or 0) > MAX_BYTES:
         st["drive"][doc] = sig
@@ -608,21 +645,43 @@ def _message_provenance(tier: str, name: str, msg: dict) -> str:
     return "trusted"
 
 
-_LAST: dict[str, str] = {}
+_LAST: dict[str, tuple[str, str]] = {}
+_RANK = {"untrusted": 0, "agent": 1, "trusted": 2}
 
 
-def _ingest_message(rag, tier, name, coll, t, msg: dict) -> None:
+def _messages_since(svc, tier: str, name: str, since: str) -> list[dict]:
+    """The room's messages posted from the switch on, oldest first."""
+    if not since:
+        return []
+    try:
+        msgs = svc.list_messages(tier, name, limit=1_000_000)
+    except Exception:  # noqa: BLE001
+        return []
+    return [m for m in msgs if str(m.get("ts") or "") >= since and m.get("id")]
+
+
+def _ingest_message(rag, tier, name, coll, t, msg: dict, st: dict | None = None) -> None:
     """One chat message → `msg/<id>`, with the previous one as context (a «sì,
-    procedi» alone is not findable)."""
+    procedi» alone is not findable). The document is as trusted as the LEAST
+    trusted of the two: an untrusted message never gets in as the context of
+    a trusted one (review of #648)."""
     key = f"{tier}/{name}"
     line = f"[{str(msg.get('ts'))[:16]}] {msg.get('author')}: {msg.get('text') or ''}"
+    prov = _message_provenance(tier, name, msg)
     prev = _LAST.get(key)
-    text = (f"(prima: {prev[:500]})\n{line}" if prev else line)[:MAX_CHARS]
-    _LAST[key] = line
+    _LAST[key] = (line, prov)
     if not str(msg.get("text") or "").strip():
         return
-    rag.ingest_text(coll, f"msg/{msg['id']}", text, source=f"{tier}/{name} messaggio {msg['id']}",
-                    provenance=_message_provenance(tier, name, msg), tier=t)
+    text = line
+    if prev:
+        text = f"(prima: {prev[0][:500]})\n{line}"
+        if _RANK.get(prev[1], 0) < _RANK.get(prov, 0):
+            prov = prev[1]
+    rag.ingest_text(coll, f"msg/{msg['id']}", text[:MAX_CHARS],
+                    source=f"{tier}/{name} messaggio {msg['id']}", provenance=prov, tier=t)
+    if st is not None:
+        st.setdefault("msgs", {})[str(msg["id"])] = 1
+        _save(coll, st)
 
 
 # ── changes inside the room, at once (#648) ─────────────────────────────────
@@ -639,7 +698,7 @@ def notify(event: str, tier: str, name: str, **kw) -> None:
     or a file is written, moved or deleted (`file`, paths=[…]). Never blocks
     and never fails the caller: the work happens on the queue's thread."""
     try:
-        _Q.put_nowait((event, tier, name, kw))
+        _Q.put_nowait((event, _nt(tier), name, kw))
         with _WORKER_GUARD:
             if not (_WORKER and _WORKER[0].is_alive()):
                 th = threading.Thread(target=_drain, name="topic-index-live", daemon=True)
@@ -672,14 +731,16 @@ def _drain() -> None:
 
 def _apply(event: str, tier: str, name: str, kw: dict, wait: float = 0.2) -> None:
     svc = _svc()
-    meta = svc._read_meta(tier, name)[0]
-    ix = settings(meta)
-    if not ix["on"] or not ix["collection"]:
-        return
     lk = _lock(f"{tier}/{name}")
     if not lk.acquire(timeout=wait):        # after a running job, never during
         raise _Busy()
     try:
+        # Read under the lock: an event queued before an OFF must not be
+        # applied after the room was emptied (review of #648).
+        meta = svc._read_meta(tier, name)[0]
+        ix = settings(meta)
+        if not ix["on"] or not ix["collection"]:
+            return
         _apply_locked(svc, meta, ix, event, tier, name, kw)
     finally:
         lk.release()
@@ -689,11 +750,17 @@ def _apply_locked(svc, meta, ix, event, tier, name, kw) -> None:
     coll = ix["collection"]
     t = cat.norm_tier(meta.get("tier") or tier)
     rag = _rag()
+    if event == "retier":
+        ensure(tier, name)                  # the collection's tier follows the room's
+        return
+    if event == "drive":
+        _sync_drive(svc, meta, rag, tier, name, coll, t, _load(coll), [10_000])
+        return
     if event == "message":
         msg = kw.get("msg") or {}
         if ix["since"] and str(msg.get("ts") or "") < ix["since"]:
             return
-        _ingest_message(rag, tier, name, coll, t, msg)
+        _ingest_message(rag, tier, name, coll, t, msg, _load(coll))
         return
     if event == "file":
         st = _load(coll)
@@ -721,10 +788,47 @@ def _apply_locked(svc, meta, ix, event, tier, name, kw) -> None:
                     _ingest_file(svc, rag, tier, name, coll, t, st, e)
 
 
+def _sync_drive(svc, meta, rag, tier, name, coll, t, st, left: list) -> tuple[int, int, bool]:
+    """Drive changes in, unlinked or deleted Drive files out. Returns
+    (ingested, removed, pending). `left` is a one-item budget list."""
+    drive = _drive_files(meta)
+    if drive is None:
+        return 0, 0, False
+    ingested = removed = 0
+    pending = False
+    seen = {}
+    for row in drive["files"]:
+        doc = _drive_doc(row)
+        sig = f"{row.get('size')}:{row.get('modifiedTime')}"
+        seen[doc] = sig
+        if st["drive"].get(doc) == sig:
+            continue
+        if left[0] <= 0:
+            pending = True
+            continue
+        left[0] -= 1
+        try:
+            ingested += int(_ingest_drive(rag, tier, name, coll, t, st, row))
+        except Exception:  # noqa: BLE001
+            pending = True
+    if drive["complete"]:
+        for doc in [d for d in st["drive"] if d not in seen]:
+            try:
+                rag.remove(doc, None, coll)
+            except Exception:  # noqa: BLE001
+                pending = True
+                continue
+            st["drive"].pop(doc, None)
+            _save(coll, st)
+            removed += 1
+    return ingested, removed, pending
+
+
 # ── the periodic pass: the safety net ───────────────────────────────────────
 
 def sync(tier: str, name: str) -> dict:
     """One bounded pass over a topic. Returns counts and `pending`."""
+    tier = _nt(tier)
     lk = _lock(f"{tier}/{name}")
     if not lk.acquire(blocking=False):
         return {"skipped": "sincronizzazione già in corso", "pending": True}
@@ -783,30 +887,26 @@ def _sync(tier: str, name: str) -> dict:
             _save(coll, st)
             done["removed"] += 1
     # Drive: changes there are picked up here (Drive does not tell us)
-    drive = _drive_files(meta)
-    if drive is not None:
-        seen = {}
-        for row in drive["files"]:
-            doc = f"drive/{row['mount']}/{row['path']}"
-            sig = f"{row.get('size')}:{row.get('modifiedTime')}"
-            seen[doc] = sig
-            if st["drive"].get(doc) == sig:
-                continue
-            if left <= 0:
-                pending = True
-                continue
-            left -= 1
-            done["drive"] += int(_ingest_drive(rag, tier, name, coll, t, st, row))
-        if drive["complete"]:
-            for doc in [d for d in st["drive"] if d not in seen]:
-                try:
-                    rag.remove(doc, None, coll)
-                except Exception:  # noqa: BLE001
-                    pending = True
-                    continue
-                st["drive"].pop(doc, None)
-                _save(coll, st)
-                done["removed"] += 1
+    budget = [left]
+    d_done, d_removed, d_pending = _sync_drive(svc, meta, rag, tier, name, coll, t, st, budget)
+    left = budget[0]
+    done["drive"] += d_done
+    done["removed"] += d_removed
+    pending = pending or d_pending
+    # messages a restart or an error kept off the live path
+    have = st.get("msgs") or {}
+    for m in _messages_since(svc, tier, name, ix["since"]):
+        if str(m["id"]) in have:
+            continue
+        if left <= 0:
+            pending = True
+            break
+        left -= 1
+        try:
+            _ingest_message(rag, tier, name, coll, t, m, st)
+            done["messages"] = done.get("messages", 0) + 1
+        except Exception:  # noqa: BLE001
+            pending = True
     return {"collection": coll, **done, "pending": pending}
 
 
@@ -826,7 +926,11 @@ def _clear_before_toggle() -> None:
             coll = _own_collection(svc, row["tier"], row["name"], s["collection"])
             if s["on"] or not coll or _load(coll).get("cleared"):
                 continue
-            with _lock(f"{row['tier']}/{row['name']}"):
+            with _lock(f"{_nt(row['tier'])}/{row['name']}"):
+                # Again under the lock: the owner may have switched it on
+                # meanwhile, and a just-indexed room must not be emptied.
+                if settings(svc._read_meta(row["tier"], row["name"])[0])["on"]:
+                    continue
                 _drop(row["tier"], row["name"], coll)
         except Exception as e:  # noqa: BLE001
             LOG.warning("topic index: pulizia di %s/%s rimandata (%s)", row.get("tier"),
