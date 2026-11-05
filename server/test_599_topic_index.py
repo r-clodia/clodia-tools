@@ -1,5 +1,5 @@
 """#599/#601/#602 — every topic indexed in its own collection; a hit from
-untrusted content taints."""
+untrusted content taints. #648: one toggle per room, a job, live messages."""
 from __future__ import annotations
 
 import tempfile
@@ -50,6 +50,24 @@ class _Base(unittest.TestCase):
             self.addCleanup(p.stop)
         self.svc.new("SEAL-2", "vendite", {"owner": "davide",
                                            "participants": ["davide", "clodia", "ophelia"]})
+        # Live changes are applied in-line in tests (the queue's thread in prod).
+        p = patch.object(ti, "notify", lambda e, t, n, **kw: ti._apply(e, t, n, kw))
+        p.start()
+        self.addCleanup(p.stop)
+        self.switch_on()
+
+    def switch_on(self, tier="SEAL-2", name="vendite"):
+        """The room's toggle ON in the meta, without running the job."""
+        meta, ver = self.svc._read_meta(tier, name)
+        meta["index"] = {**(meta.get("index") or {}), "on": True,
+                         "since": "2000-01-01T00:00:00+00:00"}
+        self.svc._write_meta(tier, name, meta, ver)
+
+    def flip(self, on, tier="SEAL-2", name="vendite"):
+        """The owner's toggle, waiting for its job."""
+        out = ti.set_enabled(tier, name, on)
+        ti._RUNNING[f"{tier}/{name}"].join(10)
+        return out
 
     def meta(self):
         return self.svc._read_meta("SEAL-2", "vendite")[0]
@@ -81,27 +99,42 @@ class CollectionTests(_Base):
         ti.ensure("SEAL-2", "vendite")
         self.assertEqual(self.rag.tiers[self.coll()], "SEAL-3")
 
-    def test_opt_out_drops_and_stops(self):
+    def test_off_drops_and_stops(self):
         ti.ensure("SEAL-2", "vendite")
         c = self.coll()
-        ti.set_enabled("SEAL-2", "vendite", False)
+        self.flip(False)
         self.assertEqual(self.rag.dropped, [c])
+        self.assertEqual(ti.job_status("SEAL-2", "vendite")["job"]["state"], "done")
         self.assertEqual(ti.sync("SEAL-2", "vendite"), {"skipped": "indicizzazione spenta"})
-        self.assertEqual(ti.topics(), [])
+        with patch.object(ti, "_CLEAR_STARTED", [True]):
+            self.assertEqual(ti.topics(), [])
 
 
 class SyncTests(_Base):
-    def test_messages_summary_and_files_with_provenance(self):
+    def test_messages_go_in_one_by_one_from_the_switch(self):
+        self.svc.post_message("SEAL-2", "vendite", "davide", "prima del toggle", kind="human")
+        meta, ver = self.svc._read_meta("SEAL-2", "vendite")
+        meta["index"]["since"] = "2999-01-01T00:00:00+00:00"   # switched on «later»
+        self.svc._write_meta("SEAL-2", "vendite", meta, ver)
+        ti.ensure("SEAL-2", "vendite")
+        self.svc.post_message("SEAL-2", "vendite", "davide", "non ancora", kind="human")
+        self.assertEqual([k for k in self.rag.docs if k[1].startswith("msg/")], [])
+        meta, ver = self.svc._read_meta("SEAL-2", "vendite")
+        meta["index"]["since"] = "2000-01-01T00:00:00+00:00"
+        self.svc._write_meta("SEAL-2", "vendite", meta, ver)
         self.svc.post_message("SEAL-2", "vendite", "davide", "ciao a tutti", kind="human")
         self.svc.post_message("SEAL-2", "vendite", "posta", "busta di una mail", kind="proxy")
-        out = ti.sync("SEAL-2", "vendite")
-        c = out["collection"]
-        days = [k for k in self.rag.docs if k[1].startswith("msg/")]
-        self.assertEqual(len(days), 1)
-        self.assertEqual(self.rag.docs[days[0]]["provenance"], "untrusted")   # a proxy spoke
-        self.assertIn("busta di una mail", self.rag.docs[days[0]]["text"])
-        again = ti.sync("SEAL-2", "vendite")
-        self.assertEqual((again["days"], again["files"]), (0, 0))              # nothing new
+        docs = {k[1]: v for k, v in self.rag.docs.items() if k[1].startswith("msg/")}
+        self.assertEqual(len(docs), 2)
+        prov = sorted(v["provenance"] for v in docs.values())
+        self.assertEqual(prov, ["trusted", "untrusted"])               # per message
+        (proxy,) = [v for v in docs.values() if "busta" in v["text"]]
+        self.assertIn("ciao a tutti", proxy["text"])                  # previous as context
+
+    def test_off_no_message_goes_in(self):
+        self.flip(False)
+        self.svc.post_message("SEAL-2", "vendite", "davide", "ciao", kind="human")
+        self.assertEqual(self.rag.docs, {})
 
     def test_files_in_and_out(self):
         files = [{"kind": "file", "path": "files/a.md", "size": 5, "mtime_iso": "1"},
@@ -129,6 +162,7 @@ class ReviewTests(_Base):
         m = self.svc.new("SEAL-0", "trap", {"owner": "mallory", "participants": ["clodia"],
                                           "index": {"collection": victim}})
         self.assertNotIn("index", m)
+        self.switch_on("SEAL-0", "trap")
         out = ti.ensure("SEAL-0", "trap")
         self.assertNotEqual(out["collection"], victim)
         self.assertEqual(cat.get("rag", victim)["tier"], "SEAL-2")
@@ -140,6 +174,11 @@ class ReviewTests(_Base):
         meta, ver = self.svc._read_meta("SEAL-0", "trap2")
         meta["index"] = {"collection": victim}
         self.svc._write_meta("SEAL-0", "trap2", meta, ver)
+        # Off, the forged room must not get the victim emptied (#648 review).
+        ti.sync("SEAL-0", "trap2")
+        ti._clear_before_toggle()
+        self.assertEqual(self.rag.dropped, [])
+        self.switch_on("SEAL-0", "trap2")
         out = ti.ensure("SEAL-0", "trap2")
         self.assertNotEqual(out["collection"], victim)
         self.assertEqual(self.rag.tiers[victim], "SEAL-2")
@@ -189,28 +228,133 @@ class ReviewTests(_Base):
         self.assertEqual(out["removed"], 0)
         self.assertIn((c, "file/files/a.md"), self.rag.docs)
 
-    def test_s4_a_failed_drop_stays_pending_and_seen_survives(self):
+    def test_s4_a_failed_drop_is_an_error_retried_by_flipping_and_seen_survives(self):
         ti.ensure("SEAL-2", "vendite")
         c = self.coll()
         td.grant("SEAL-2", "vendite", "rag", c, "ophelia", None)
         self.rag.fail_drop = True
-        ti.set_enabled("SEAL-2", "vendite", False)
-        self.assertTrue(ti.settings(self.meta())["drop_pending"])
-        self.assertEqual([t["name"] for t in ti.topics()], ["vendite"])
+        self.flip(False)
+        self.assertEqual(ti.job_status("SEAL-2", "vendite")["job"]["state"], "error")
         self.rag.fail_drop = False
-        ti.sync("SEAL-2", "vendite")
+        self.flip(False)
         self.assertEqual(self.rag.dropped, [c])
-        self.assertFalse(ti.settings(self.meta())["drop_pending"])
-        ti.set_enabled("SEAL-2", "vendite", True)
-        ti.ensure("SEAL-2", "vendite")
+        self.assertEqual(ti.job_status("SEAL-2", "vendite")["job"]["state"], "done")
+        self.flip(True)
         self.assertNotIn("ophelia", td.imports(self.meta())[0]["grants"])
 
-    def test_s7_a_day_written_while_tainted_is_untrusted(self):
-        self.svc.post_message("SEAL-2", "vendite", "clodia", "riassunto della mail", kind="ai")
+    def test_s7_a_message_written_while_tainted_is_untrusted(self):
+        ti.ensure("SEAL-2", "vendite")
         with patch.object(ti, "_tainted_on", lambda t, n, d: True):
-            c = ti.sync("SEAL-2", "vendite")["collection"]
+            self.svc.post_message("SEAL-2", "vendite", "clodia", "riassunto della mail", kind="ai")
         (doc,) = [v for k, v in self.rag.docs.items() if k[1].startswith("msg/")]
         self.assertEqual(doc["provenance"], "untrusted")
+
+
+class ToggleTests(_Base):
+    """#648: the job, Drive, the live files, the cleanup before the toggle."""
+
+    FILES = [{"kind": "file", "path": "files/a.md", "size": 5, "mtime_iso": "1"},
+             {"kind": "file", "path": "files/b.pdf", "size": 5, "mtime_iso": "1"}]
+
+    def _room(self, files=None):
+        files = self.FILES if files is None else files
+        return [patch.object(self.svc, "list_files",
+                             lambda t, n, root: files if root == "files" else []),
+                patch.object(self.svc, "read_file", lambda t, n, p: b"testo del file"),
+                patch.object(self.svc, "provenance_of", lambda t, n, p: "trusted"),
+                patch("server.main._extract_document_text", lambda n, d: ("pdf", 1),
+                      create=True)]
+
+    def _drive(self, rows):
+        from types import SimpleNamespace as NS
+        walk = NS(handler=lambda folder, account=None: {"files": rows, "complete": True})
+        read = NS(handler=lambda fid, account=None: (f"{fid}.txt", f"drive {fid}".encode()))
+        return patch("server.components.loader.service",
+                     lambda pack, name: {"index_walk": walk, "index_read": read}.get(name))
+
+    def _link_drive(self):
+        meta, ver = self.svc._read_meta("SEAL-2", "vendite")
+        meta["drive_folders"] = [{"name": "drive", "folder": "ROOT"}]
+        self.svc._write_meta("SEAL-2", "vendite", meta, ver)
+
+    def test_on_indexes_every_file_and_the_drive_and_reports_progress(self):
+        self._link_drive()
+        ps = self._room() + [self._drive([{"id": "d1", "path": "sub/Piano", "size": 9,
+                                           "modifiedTime": "t"}])]
+        for p in ps:
+            p.start()
+        try:
+            out = self.flip(True)
+        finally:
+            for p in ps:
+                p.stop()
+        self.assertEqual(out["on"], True)
+        c = self.coll()
+        self.assertIn((c, "file/files/a.md"), self.rag.docs)
+        self.assertIn((c, "file/files/b.pdf"), self.rag.docs)
+        self.assertEqual(self.rag.docs[(c, "drive/drive/sub/Piano")]["provenance"], "untrusted")
+        job = ti.job_status("SEAL-2", "vendite")["job"]
+        self.assertEqual((job["state"], job["done"], job["total"]), ("done", 4, 4))
+
+    def test_a_flip_is_refused_while_a_job_runs(self):
+        import threading
+        gate = threading.Event()
+        with patch.object(ti, "_index_all", lambda t, n: gate.wait(5)):
+            ti.set_enabled("SEAL-2", "vendite", True)
+            self.assertEqual(ti.job_status("SEAL-2", "vendite")["job"]["state"], "indexing")
+            from .topics.service import TopicError
+            with self.assertRaises(TopicError):
+                ti.set_enabled("SEAL-2", "vendite", False)
+            gate.set()
+            ti._RUNNING["SEAL-2/vendite"].join(5)
+        self.assertEqual(ti.job_status("SEAL-2", "vendite")["job"]["state"], "done")
+
+    def test_a_file_written_or_deleted_reaches_the_rag_at_once(self):
+        ti.ensure("SEAL-2", "vendite")
+        files = [dict(self.FILES[0])]
+        ps = self._room(files)
+        for p in ps:
+            p.start()
+        try:
+            ti._apply("file", "SEAL-2", "vendite", {"paths": ["files/a.md"]})
+            c = self.coll()
+            self.assertIn((c, "file/files/a.md"), self.rag.docs)
+            files.clear()
+            ti._apply("file", "SEAL-2", "vendite", {"paths": ["files/a.md"]})
+            self.assertNotIn((c, "file/files/a.md"), self.rag.docs)
+        finally:
+            for p in ps:
+                p.stop()
+
+    def test_a_collection_from_before_the_toggle_is_emptied(self):
+        ti.ensure("SEAL-2", "vendite")
+        c = self.coll()
+        meta, ver = self.svc._read_meta("SEAL-2", "vendite")
+        meta["index"] = {"collection": c, "enabled": True, "seen": ["clodia", "ophelia"]}
+        self.svc._write_meta("SEAL-2", "vendite", meta, ver)      # the old form: off now
+        self.assertFalse(ti.settings(self.meta())["on"])
+        ti._clear_before_toggle()
+        self.assertEqual(self.rag.dropped, [c])
+        ti._clear_before_toggle()                                   # once
+        self.assertEqual(self.rag.dropped, [c])
+
+    def test_a_busy_room_sends_its_event_back_to_the_queue(self):
+        ti.ensure("SEAL-2", "vendite")
+        lk = ti._lock("SEAL-2/vendite")
+        lk.acquire()
+        try:
+            with self.assertRaises(ti._Busy):
+                ti._apply("message", "SEAL-2", "vendite",
+                          {"msg": {"id": "m1", "ts": "2999", "author": "a", "text": "x"}}, wait=0.01)
+        finally:
+            lk.release()
+
+    def test_a_job_left_running_by_a_restart_resumes(self):
+        ti._job_write("SEAL-2", "vendite", state="deindexing", done=0, total=1)
+        st = ti.job_status("SEAL-2", "vendite")
+        ti._RUNNING["SEAL-2/vendite"].join(5)
+        self.assertIn(st["job"]["state"], ("deindexing", "done"))
+        self.assertEqual(ti.job_status("SEAL-2", "vendite")["job"]["state"], "done")
 
 
 class CatalogLabelTests(_Base):

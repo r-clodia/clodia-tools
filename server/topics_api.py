@@ -924,6 +924,13 @@ async def topic_index_route(request: Request):
         p = getattr(request.state, "auth_payload", None) or {}
         if p.get("role") != ROLE_AGENT_SERVER:
             return JSONResponse({"error": "riservato all'agent-server"}, status_code=403)
+        if tier and name:
+            # The room's toggle and its job (#648): the agent-server reads it
+            # for the webui, after checking the person belongs to the room.
+            try:
+                return JSONResponse(await asyncio.to_thread(topic_index.job_status, tier, name))
+            except (TopicError, VersionConflict) as e:
+                return JSONResponse({"error": str(e)[:300]}, status_code=404)
         return JSONResponse({"topics": await asyncio.to_thread(topic_index.topics)})
     try:
         body = await request.json()
@@ -947,7 +954,10 @@ async def topic_index_route(request: Request):
         _, err = _authorize_topic_owner(request)
         if err:
             return err
-        out = await asyncio.to_thread(topic_index.set_enabled, tier, name, action == "enable")
+        try:
+            out = await asyncio.to_thread(topic_index.set_enabled, tier, name, action == "enable")
+        except (TopicError, VersionConflict) as e:     # a job is running (#648)
+            return JSONResponse({"error": str(e)[:300]}, status_code=409)
         from .audit import control as _control
         _control.safe(_control.emit, "topic_index", str(action), f"{tier}/{name}",
                       by=_actor(request, body)[0])
@@ -1698,7 +1708,7 @@ routes = [
     Route("/internal/authz", authz_route, methods=["GET", "POST"]),
     Route("/internal/data-catalog", data_catalog_route, methods=["GET", "POST"]),
     Route("/internal/topic-index", topic_index_route, methods=["GET"]),
-    Route("/internal/topic-index/{tier}/{name}", topic_index_route, methods=["POST"]),
+    Route("/internal/topic-index/{tier}/{name}", topic_index_route, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/local-folder", local_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/link", topic_link, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/tier", topic_tier, methods=["POST"]),
