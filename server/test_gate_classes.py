@@ -41,8 +41,7 @@ class ClassificationTests(unittest.TestCase):
         """Il gate va all'OWNER dello scope, non a un admin qualunque (voce 24):
         è per questo che non stanno con i verbi di sistema."""
         for v in ("topic.add_participant", "topic.drive_folder_add",
-                  "topic.drive_folder_remove", "topic.save_agents_md",
-                  "topic.egress_add", "topic.egress_remove",
+                  "topic.egress_add", "topic.egress_remove", "topic.save_agents_md",
                   "topic.ingress_add", "topic.ingress_remove"):
             with self.subTest(verbo=v):
                 self.assertEqual(gate.gate_class(v), gate.GATE_WALLS)

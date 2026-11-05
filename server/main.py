@@ -528,18 +528,6 @@ _GITHUB_NATIVE_NAMES: frozenset[str] = frozenset({
 
 _TOPIC_TOOLS: list[Tool] = [
     Tool(
-        name="topic.new",
-        description=("Crea (idempotente) un topic. tier = SEAL-0..4 "
-                     "(Public/Internal/Confidential/Restricted/Sovereign; default SEAL-0). "
-                     "meta opzionale: title, type, tags, people, entity, deadline, contact_agent."),
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"],
-                     "description": "classe/sovranità del topic — scala SEAL (default SEAL-0 Public)"},
-            "name": {"type": "string", "description": "slug a-z0-9_-"},
-            "meta": {"type": "object"},
-        }, "required": ["name"]},
-    ),
-    Tool(
         name="topic.open",
         description=("Apre un topic (read-only): ritorna meta, summary (col "
                      "summary_version per l'optimistic lock), tldr, lista minute."),
@@ -558,37 +546,6 @@ _TOPIC_TOOLS: list[Tool] = [
             "text": {"type": "string", "description": "prima riga = TLDR; sezione '## Prossimi passi'"},
             "base_version": {"type": ["string", "null"]},
         }, "required": ["tier", "name", "text"]},
-    ),
-    Tool(
-        name="topic.save_agents_md",
-        description=("Riscrive le ISTRUZIONI di scope del topic (AGENTS.md) in optimistic "
-                     "lock, come il summary. Non è un file del topic: vive nel "
-                     "control-plane, non è sincronizzato dai remote e non si carica con "
-                     "topic.put. Testo vuoto = rimuove le istruzioni."),
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"},
-            "text": {"type": "string", "description": "markdown; vuoto = rimuove"},
-            "base_version": {"type": ["string", "null"],
-                             "description": "agents_md_version letto con topic.open"},
-        }, "required": ["tier", "name", "text"]},
-    ),
-    Tool(
-        name="topic.add_minute",
-        description="Aggiunge una minuta (file append-only datato). Niente contesa concorrente.",
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"},
-            "text": {"type": "string"},
-        }, "required": ["tier", "name", "text"]},
-    ),
-    Tool(
-        name="topic.archive",
-        description="Imposta status=archived nel meta (non sposta su storage inferiore).",
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"},
-        }, "required": ["tier", "name"]},
     ),
     Tool(
         name="topic.list",
@@ -918,15 +875,6 @@ _TOPIC_TOOLS: list[Tool] = [
             "mount": {"type": "string", "description": "nome che identifica questa dichiarazione (default: 'drive'). Un canale può averne più d'una."},
         }, "required": ["tier", "name", "folder"]},
     ),
-    Tool(
-        name="topic.drive_folder_remove",
-        description="Toglie una cartella Drive dichiarata per questo canale.",
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"},
-            "mount": {"type": "string", "description": "nome della dichiarazione da togliere"}},
-            "required": ["tier", "name", "mount"]},
-    ),
     # ── Cartella condivisa Mac↔container: BIND reale (non uno specchio come
     # Drive), su una radice unica montata una volta sola nel gateway
     # (`LOCAL_SHARED_ROOT`). Aggancia una sua sottocartella come `shared/` di
@@ -949,58 +897,10 @@ _TOPIC_TOOLS: list[Tool] = [
             "mount": {"type": "string", "description": "nome della sottocartella condivisa sul Mac (default: il codename del topic); nel topic è sempre shared/"},
         }, "required": ["tier", "name"]},
     ),
-    Tool(
-        name="topic.local_folder_remove",
-        description=("Sgancia una cartella condivisa dal topic. Rimuove solo "
-                     "il collegamento: il contenuto reale sulla cartella "
-                     "condivisa resta intatto, riagganciabile in futuro."),
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"},
-            "mount": {"type": "string", "description": "nome della sottocartella condivisa da sganciare, oppure \"shared\""}},
-            "required": ["tier", "name", "mount"]},
-    ),
     # ── Collegamento fra due topic (clodia-platform#477): ognuno vede l'albero
     # dati dell'altro come una cartella in SOLA LETTURA accanto a `local/`.
     # Nessuna copia: i byte restano nel topic che li possiede, e con loro
     # l'etichetta di provenienza. Solo fra topic dello STESSO livello SEAL.
-    Tool(
-        name="topic.link_add",
-        description=("Collega due topic dello stesso livello SEAL: ognuno vede "
-                     "i file dell'altro come una cartella in sola lettura "
-                     "accanto a local/, e l'altro topic diventa una fonte "
-                     "dichiarata per questo (e viceversa). Simmetrico: il "
-                     "collegamento si scrive su entrambi. Non copia niente — i "
-                     "file restano dove sono, con la loro provenienza. Per "
-                     "scrivere in un topic collegato si lavora da dentro quel "
-                     "topic. Richiede il consenso dell'owner di ENTRAMBI i "
-                     "topic (o di un admin): se i due owner sono diversi il "
-                     "collegamento resta in attesa, inerte, finché l'owner "
-                     "dell'altro non approva chiamando questo stesso verbo dal "
-                     "suo topic. Chi legge attraverso il collegamento deve "
-                     "comunque poter leggere l'altro topic di suo "
-                     "(partecipante e clearance)."),
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"},
-            "other_tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"], "description": "livello dell'altro topic: deve essere lo stesso"},
-            "other_name": {"type": "string", "description": "codename dell'altro topic"},
-            "mount": {"type": "string", "description": "nome della cartella con cui l'altro topic compare qui (default: il suo codename)"},
-        }, "required": ["tier", "name", "other_tier", "other_name"]},
-    ),
-    Tool(
-        name="topic.link_remove",
-        description=("Scollega un topic collegato: la cartella sparisce da "
-                     "entrambi i lati. Non cancella nessun file — toglie solo "
-                     "la vista. Toglie anche le voci di ingresso che il "
-                     "collegamento aveva aggiunto, non quelle dichiarate a "
-                     "parte."),
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"},
-            "mount": {"type": "string", "description": "nome della cartella del collegamento da togliere"}},
-            "required": ["tier", "name", "mount"]},
-    ),
     # Whitelist egress/ingress LOCALE a questo canale (router-notebook R17,
     # clodia-platform#334): a differenza di egress.allow/ingress.allow (GLOBALI,
     # per tutti gli agenti, per sempre) queste voci valgono solo dentro questo
@@ -1011,17 +911,6 @@ _TOPIC_TOOLS: list[Tool] = [
         description=("Aggiunge una DESTINAZIONE ammessa in uscita SOLO per questo "
                      "canale (non per tutti gli agenti). Stessa notazione URI di "
                      "egress.allow. Richiede approvazione dell'owner dello scope."),
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"},
-            "uri": {"type": "string"}},
-            "required": ["tier", "name", "uri"]},
-    ),
-    Tool(
-        name="topic.egress_remove",
-        description=("Toglie una destinazione ammessa localmente a questo canale. "
-                     "Non tocca la whitelist globale. Richiede approvazione "
-                     "dell'owner dello scope."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
@@ -1081,16 +970,6 @@ _TOPIC_TOOLS: list[Tool] = [
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string", "description": "slug del topic"},
             "agent": {"type": "string", "description": "nome dell'agent/utente da aggiungere"},
-        }, "required": ["tier", "name", "agent"]},
-    ),
-    Tool(
-        name="topic.remove_participant",
-        description=("Rimuove un agente dai partecipanti di un topic/chat. Come "
-                     "add_participant: owner|partecipante|super."),
-        inputSchema={"type": "object", "properties": {
-            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
-            "name": {"type": "string"},
-            "agent": {"type": "string"},
         }, "required": ["tier", "name", "agent"]},
     ),
 ]
@@ -4280,45 +4159,15 @@ def _gate_effect_reason(name: str, arguments: dict) -> str:
         if name == "topic.add_participant":
             return (f"aggiunge @{a.get('agent')} ai partecipanti del topic "
                     f"`{a.get('tier')}/{a.get('name')}`.")
-        if name == "topic.remove_participant":
-            return (f"rimuove @{a.get('agent')} dai partecipanti del topic "
-                    f"`{a.get('tier')}/{a.get('name')}`.")
         if name == "topic.drive_folder_add":
             return (f"dichiara la cartella Drive `{a.get('folder')}` come perimetro "
                     f"gdrive.* del topic `{a.get('tier')}/{a.get('name')}`.")
-        if name == "topic.drive_folder_remove":
-            return (f"toglie la dichiarazione Drive `{a.get('mount')}` dal topic "
-                    f"`{a.get('tier')}/{a.get('name')}` — gli accessi gdrive.* da qui "
-                    f"ricadono sulle radici account, più ampie del perimetro dichiarato.")
         if name == "topic.local_folder_add":
             mount = a.get("mount") or a.get("name")
             return (f"aggancia la cartella condivisa Mac↔container `{mount}` "
                     f"come `shared/` nel topic "
                     f"`{a.get('tier')}/{a.get('name')}` — bind reale, non uno specchio: "
                     f"chi scrive lì dal Mac lo rende visibile a ogni agente del topic.")
-        if name == "topic.link_add":
-            return (f"collega i topic `{a.get('tier')}/{a.get('name')}` e "
-                    f"`{a.get('other_tier')}/{a.get('other_name')}` (read-only, both "
-                    f"ways). Your approval is the consent of the owner of each of the "
-                    f"two topics you own; the link is active only once the owner of "
-                    f"BOTH has consented. Through it, only who can already read the "
-                    f"other topic (participant and clearance) reads its files, and "
-                    f"its unlabelled files still taint the channel.")
-        if name == "topic.link_remove":
-            return (f"scollega il topic montato come `{a.get('mount')}` da "
-                    f"`{a.get('tier')}/{a.get('name')}`: la cartella sparisce da "
-                    f"entrambi i lati. Nessun file viene cancellato.")
-        if name == "topic.local_folder_remove":
-            return (f"sgancia la cartella condivisa `{a.get('mount')}` dal topic "
-                    f"`{a.get('tier')}/{a.get('name')}` — il contenuto reale resta "
-                    f"sul Mac, solo il collegamento viene tolto.")
-        if name == "topic.save_agents_md":
-            testo = (a.get("text") or "").strip()
-            anteprima = (testo[:200] + "…") if len(testo) > 200 else testo
-            return (f"riscrive le istruzioni di scope (AGENTS.md) del topic "
-                    f"`{a.get('tier')}/{a.get('name')}` — entrano nel prompt di OGNI "
-                    f"agente della stanza, ogni turno."
-                    + (f" Anteprima: «{anteprima}»" if anteprima else " (testo vuoto: le rimuove)"))
         if name == "github.push":
             return (f"spinge i commit dalla scratch `{a.get('dir')}` al branch "
                     f"`{a.get('branch')}` — destinazione FUORI dal perimetro già approvato.")
@@ -4369,12 +4218,6 @@ _AUDIT_CROSSING: "_contextvars.ContextVar[list | None]" = _contextvars.ContextVa
     "audit_crossing", default=None)
 _AUDIT_EGRESS: "_contextvars.ContextVar[dict | None]" = _contextvars.ContextVar(
     "audit_egress", default=None)
-
-
-#: Per call: the gate consent the call runs on (`gate.details`), or None. Read
-#: by `topic.link_add` to know whose consent a new link carries (#477 B1).
-_GATE_APPROVAL: "_contextvars.ContextVar[dict | None]" = _contextvars.ContextVar(
-    "gate_approval", default=None)
 
 
 #: Per call: the topic files actually read, `{ref: {content_hash, version}}`,
@@ -5368,7 +5211,7 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                              else "destinazione ammessa")
                     reason = (f"@{_ag} chiede di aggiungere {_u} come {_what}, "
                               f"per TUTTI gli agenti. {_eg.admin_note(_dir, _u)}")
-                elif name in ("topic.egress_add", "topic.egress_remove",
+                elif name in ("topic.egress_add",
                               "topic.ingress_add", "topic.ingress_remove"):
                     # Stessa logica del ramo globale sopra, ma il perimetro che
                     # si sposta è quello di QUESTA stanza soltanto — il dialog
@@ -5412,8 +5255,7 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                     # side): a standing delegation names no approver for the
                     # card, so it cannot stand in for that consent.
                     allow_delegation=name not in {
-                        "web.post", "agents.grant_scoped", "agents.revoke_scoped",
-                        "topic.link_add"},
+                        "web.post", "agents.grant_scoped", "agents.revoke_scoped"},
                     arguments=arguments,
                 )
                 # Approved WITH CORRECTIONS (#448): the call runs on the corrected
@@ -5436,10 +5278,6 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # esattamente il buco che lo scoping per spawn chiude.
                 await _require_gate_consent(_ag, _ck, consume=False,
                                             allow_delegation=False)
-        # The consent this call runs on, for the verbs whose effect depends on
-        # WHO approved it (`topic.link_add`, review fix B1 of #477). Set on
-        # every call, None included, so a value can never outlive its call.
-        _GATE_APPROVAL.set(gate_approval)
         # REGOLA DI NAMESPACE A CALL TIME (clodia-platform#517, AC4). Un
         # manifest validato all'installazione non dice niente su oggi: i verbi
         # nativi del gateway crescono a ogni deploy, e un pack che aveva
@@ -6019,15 +5857,13 @@ def _safe_scratch_path(p: str) -> str:
 # caller sia participant/owner (compartimento, need-to-know). `new`/`list`/`search`
 # sono gestiti a parte (creazione / risultati filtrati per membership).
 _TOPIC_SCOPED_VERBS = {
-    "open", "save_summary", "save_agents_md", "add_minute", "archive",
+    "open", "save_summary",
     "files", "read_file",
     "read_document", "convert_document", "write_document", "write_file", "fetch",
     "put", "delete_file", "move_file", "goal_progress",
     "post_message", "messages", "my_mentions", "mark_seen",
-    "drive_folder_add", "drive_folder_remove",
-    "local_folder_add", "local_folder_remove",
-    "link_add", "link_remove",
-    "egress_add", "egress_remove", "ingress_add", "ingress_remove",
+    "drive_folder_add", "local_folder_add",
+    "egress_add", "ingress_add", "ingress_remove",
 }
 
 
@@ -6054,13 +5890,11 @@ def _topic_is_member(meta: dict, caller: str) -> bool:
 #: stretto del ruolo. L'ha colto un test scritto apposta — «una classificazione
 #: su un verbo che non esiste è una regola che non si applica mai».
 _TOPIC_MUTATING_VERBS = frozenset({
-    "save_summary", "save_agents_md", "add_minute", "archive",
+    "save_summary",
     "write_file", "convert_document", "write_document", "put", "delete_file",
     "move_file", "goal_progress",
-    "drive_folder_add", "drive_folder_remove",
-    "local_folder_add", "local_folder_remove",
-    "link_add", "link_remove",
-    "egress_add", "egress_remove", "ingress_add", "ingress_remove",
+    "drive_folder_add", "local_folder_add",
+    "egress_add", "ingress_add", "ingress_remove",
 })
 
 
@@ -6176,46 +6010,6 @@ def _require_topic_member(svc, tier, name, mutating: bool = False) -> None:
         raise PermissionError(
             f"agent '{caller}': clearance insufficiente per il tier {tier_t} del "
             f"topic {tier}/{name} (accesso negato: livello)")
-
-
-def _link_approver() -> tuple[str, bool]:
-    """Whose consent a `topic.link_add` call carries, and whether that person
-    is an admin (review fix B1 of clodia-platform#477).
-
-    - an admin acting on-behalf is exempt from the M-gate: the consent is
-      theirs, as admin;
-    - otherwise the consent is the human who approved the WALLS gate card,
-      named by `by` in the CA-signed capability — never an argument of the
-      call, which would be the agent's word on who agreed.
-
-    No consent (observation mode, a gate turned off by configuration) gives
-    an empty approver, and the service then refuses to create the link.
-    """
-    from .human import is_admin as _is_admin
-    if is_on_behalf() and _human_is_admin():
-        return str(current_principal() or ""), True
-    by = str((_GATE_APPROVAL.get() or {}).get("by") or "")
-    return by, bool(by) and _is_admin(by)
-
-
-def _announce_pending_link(svc, res: dict) -> None:
-    """Tell the room whose owner has not consented yet that a link waits for
-    them. Best effort: the link stays inert whether or not this is read."""
-    lato1 = f"{res['other']['tier']}/{res['other']['topic']}"   # the topic called
-    lato2 = f"{res['link']['tier']}/{res['link']['topic']}"     # the other one
-    for scope in res.get("awaiting_owner_of") or []:
-        try:
-            t, n = scope.split("/", 1)
-            altro = lato2 if scope == lato1 else lato1
-            svc.post_message(
-                t, n, author="gate", kind="ai",
-                text=(f"🔗 A link between this topic and `{altro}` is waiting for "
-                      f"the consent of this topic's owner. Until then it is inert: "
-                      f"no folder, no reads. To approve, ask an agent here to call "
-                      f"`topic.link_add` with tier=`{t}`, name=`{n}`, "
-                      f"other_tier/other_name=`{altro}` and approve the card."))
-        except Exception:  # noqa: BLE001
-            LOG.warning("link: avviso di collegamento in attesa non postato su %s", scope)
 
 
 def _require_link_reader(tier: str, name: str, meta: dict) -> None:
@@ -7005,28 +6799,16 @@ def _dispatch_topic(name: str, a: dict):
     if verb in _TOPIC_SCOPED_VERBS:
         _require_topic_member(svc, a.get("tier"), a.get("name"),
                               mutating=verb in _TOPIC_MUTATING_VERBS)
-    if verb == "link_add":
-        # DUE topic, due controlli. `_require_topic_member` guarda solo
-        # `tier`/`name`: senza questa riga, chi partecipa a una stanza sola
-        # potrebbe agganciarci qualunque altra e leggerne i file — il
-        # compartimento aggirato dal verbo che lo allarga. Il collegamento scrive
-        # anche il meta dell'altro lato, quindi è `mutating` anche là.
-        _require_topic_member(svc, a.get("other_tier"), a.get("other_name"),
-                              mutating=True)
     if verb == "suggest_team":
         # proposta di squadra: proxy read-only all'agent-server (registry+rilevanza)
         return runtime.suggest_team(a.get("tier") or "SEAL-0", a.get("description") or "")
-    if verb in ("add_participant", "remove_participant"):
-        # topic.add_participant/remove_participant sono verbi GATED → il
-        # gate di call_tool ha già richiesto la conferma umana (block-and-wait)
-        # prima di arrivare qui. L'owner umano usa invece l'endpoint webui
-        # dedicato, già autorizzato sul suo ruolo.
+    if verb == "add_participant":
+        # topic.add_participant è un verbo GATED → il gate di call_tool ha già
+        # richiesto la conferma umana (block-and-wait) prima di arrivare qui.
+        # Togliere un partecipante, creare o archiviare un topic: solo
+        # dall'owner, dalla webui (#654 — i verbi non si usavano).
         return runtime.set_participant(a["tier"], a["name"], (a.get("agent") or "").strip(),
-                                       by=agent_name() or "", add=(verb == "add_participant"))
-    if verb == "new":
-        # Profilo topics:single → solo il workspace unico (DM sempre permessi).
-        instance_profile.topic_creation_check(a["name"])
-        return svc.new(a.get("tier"), a["name"], dict(a.get("meta") or {}))
+                                       by=agent_name() or "", add=True)
     if verb == "open":
         return svc.open(a["tier"], a["name"])
     if verb == "post_message":
@@ -7117,12 +6899,6 @@ def _dispatch_topic(name: str, a: dict):
         return svc.mark_seen(a["tier"], a["name"], chi, a.get("seen_through") or "")
     if verb == "save_summary":
         return svc.save_summary(a["tier"], a["name"], a["text"], a.get("base_version"))
-    if verb == "save_agents_md":
-        return svc.save_agents_md(a["tier"], a["name"], a["text"], a.get("base_version"))
-    if verb == "add_minute":
-        return svc.add_minute(a["tier"], a["name"], a["text"])
-    if verb == "archive":
-        return svc.archive(a["tier"], a["name"])
     if verb in ("list", "search"):
         # `list` e `search` non passano da `_require_topic_member`: filtrano da
         # sé. Chi può vedere quali righe è deciso in un posto solo,
@@ -7311,27 +7087,10 @@ def _dispatch_topic(name: str, a: dict):
     if verb == "drive_folder_add":
         return svc.drive_folder_add(a["tier"], a["name"], a["folder"],
                                     mount_name=a.get("mount"), account=a.get("account"))
-    if verb == "drive_folder_remove":
-        return svc.drive_folder_remove(a["tier"], a["name"], a["mount"])
     # Cartella condivisa Mac↔container: bind reale su una radice unica, mai
     # un path assoluto scelto a runtime — vedi TopicService.local_folder_add.
     if verb == "local_folder_add":
         return svc.local_folder_add(a["tier"], a["name"], a.get("mount"))
-    if verb == "local_folder_remove":
-        return svc.local_folder_remove(a["tier"], a["name"], a["mount"])
-    # Collegamento fra topic (clodia-platform#477): vista in sola lettura
-    # sull'albero dati dell'altro, mai una copia. Gated WALLS — chi entra nel
-    # perimetro di una stanza lo decide l'owner, come per i partecipanti.
-    if verb == "link_add":
-        approver, approver_admin = _link_approver()
-        res = svc.link_add(a["tier"], a["name"], a["other_tier"], a["other_name"],
-                           mount_name=a.get("mount"), by=agent_name() or "",
-                           approver=approver, approver_admin=approver_admin)
-        if res.get("state") == "pending":
-            _announce_pending_link(svc, res)
-        return res
-    if verb == "link_remove":
-        return svc.link_remove(a["tier"], a["name"], a["mount"])
     # Whitelist egress/ingress locale al canale (router-notebook R17,
     # clodia-platform#334): stesso storage di egress.allow/revoke, chiave
     # scoped `<tier>/<name>` invece che globale. Il gate WALLS (owner dello
@@ -7341,9 +7100,9 @@ def _dispatch_topic(name: str, a: dict):
         from . import egress as eg
         direction = "egress" if verb == "egress_add" else "ingress"
         return eg.scope_allow(direction, f"{a['tier']}/{a['name']}", a["uri"])
-    if verb in ("egress_remove", "ingress_remove"):
+    if verb == "ingress_remove":
         from . import egress as eg
-        direction = "egress" if verb == "egress_remove" else "ingress"
+        direction = "ingress"
         scope = f"{a['tier']}/{a['name']}"
         out = eg.scope_revoke(direction, scope, a["uri"])
         # Togliere una chat dalle fonti SCOLLEGA anche il binding che ne

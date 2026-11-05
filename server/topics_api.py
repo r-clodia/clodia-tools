@@ -50,7 +50,6 @@ def _service() -> TopicService:
 #: assente: aprirebbe una rotta di amministrazione a un token di chat.
 _VERBI = {
     ("GET", ""): "topic.list",
-    ("POST", ""): "topic.new",
     ("GET", "topic"): "topic.open",
     ("GET", "messages"): "topic.messages",
     ("POST", "messages"): "topic.post_message",

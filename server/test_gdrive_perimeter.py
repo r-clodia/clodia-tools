@@ -62,15 +62,15 @@ class PerimeterMovingVerbsAreGatedTests(unittest.TestCase):
 
     def test_setting_or_removing_a_drive_folder_is_gated(self):
         from . import gate
-        for v in ("topic.drive_folder_add", "topic.drive_folder_remove"):
+        for v in ("topic.drive_folder_add",):
             with self.subTest(verb=v):
                 self.assertTrue(gate.is_gated(v), f"{v} sposta il perimetro")
 
-    def test_remove_is_gated_because_removing_the_perimeter_widens_it(self):
-        """La ragione meno ovvia: togliere la cartella fa ricadere sulle radici
-        d'account, che possono essere più larghe o assenti."""
-        from . import gate
-        self.assertTrue(gate.is_gated("topic.drive_folder_remove"))
+    def test_removing_is_not_an_agent_verb(self):
+        """Togliere la cartella allarga il perimetro (si ricade sulle radici
+        d'account): dal #654 non è un verbo degli agenti, solo dell'owner."""
+        from . import main
+        self.assertNotIn("topic.drive_folder_remove", {t.name for t in main._TOPIC_TOOLS})
 
 
 if __name__ == "__main__":

@@ -77,27 +77,29 @@ _GATE_CLASS = {
     "jobs.set_enabled": GATE_SYSTEM,
     # WALLS — chi sta nello scope, o quanto è largo
     "topic.add_participant": GATE_WALLS,
-    "topic.remove_participant": GATE_WALLS,
-    "topic.drive_folder_add": GATE_WALLS, "topic.drive_folder_remove": GATE_WALLS,
+    "topic.drive_folder_add": GATE_WALLS,
     # Cartella condivisa Mac↔container (19-20 set 2026): stesso principio di
     # drive_folder_add/remove due righe sopra — collegare o scollegare una
     # cartella allarga o restringe cosa un agente del topic può leggere/
     # scrivere oltre ai propri file, quindi lo decide l'owner dello scope, in
     # entrambe le direzioni.
-    "topic.local_folder_add": GATE_WALLS, "topic.local_folder_remove": GATE_WALLS,
+    "topic.local_folder_add": GATE_WALLS,
     # Collegamento fra due topic (clodia-platform#477): è la stessa domanda di
     # `add_participant` guardata dall'altro verso — invece di far entrare un
     # agente in una stanza, fa entrare una stanza intera nel campo visivo di
     # un'altra. Simmetrico, perché scollegare cambia chi vede cosa quanto
     # collegare.
-    "topic.link_add": GATE_WALLS, "topic.link_remove": GATE_WALLS,
     # Whitelist egress/ingress LOCALE al topic (router-notebook R17, clodia-
     # platform#334): stessa forma di drive_folder_add/remove due righe sopra —
     # un agent può chiedere, solo l'owner dello scope allarga o restringe il
     # perimetro di UNA stanza. Simmetrico apposta: `topic.remove_participant`
     # è gated quanto `add_participant`, e qui vale la stessa ragione — "quanto
     # è largo lo scope" lo decide sempre l'owner, in entrambe le direzioni.
-    "topic.egress_add": GATE_WALLS, "topic.egress_remove": GATE_WALLS,
+    "topic.egress_add": GATE_WALLS,
+    # Not agent verbs since #654, but still the authorisation key of the
+    # owner's webui routes (`require_authz`): removing a room's egress entry,
+    # rewriting its AGENTS.md. Out of this table a non-admin person would pass.
+    "topic.egress_remove": GATE_WALLS, "topic.save_agents_md": GATE_WALLS,
     "topic.ingress_add": GATE_WALLS, "topic.ingress_remove": GATE_WALLS,
     # OUTWARD — verso fuori
     "web.post": GATE_OUTWARD,
@@ -108,7 +110,6 @@ _GATE_CLASS = {
     # a dire da dove si può tirare — quindi non sono gated.
     "github.push": GATE_OUTWARD, "github.pull_request": GATE_OUTWARD,
     "egress.allow": GATE_OUTWARD, "ingress.allow": GATE_OUTWARD,
-    "topic.save_agents_md": GATE_WALLS,
 }
 
 _PREFIX_CLASS = {
@@ -181,39 +182,25 @@ _DEFAULT_GATED_EXACT = frozenset({
     # fermato apposta è l'atto più privilegiato dei due, non il meno.
     "jobs.set_enabled",
     # gestione partecipanti di un topic (auto-invito / confused-deputy)
-    "topic.add_participant", "topic.remove_participant",
+    "topic.add_participant",
     # La cartella Drive dichiarata di un topic È il suo perimetro di accesso
     # per gdrive.* (decision-record #40, `gdrive_root.roots_for_call`). Quindi
     # dichiararla, cambiarla o TOGLIERLA non è una preferenza: è una
     # dichiarazione di autorità, e va autorizzata come tale — per un umano un
-    # verbo gated richiede il ruolo admin.
-    #
-    # `drive_folder_remove` è nella lista per la ragione meno ovvia: toglierla
-    # fa ricadere gli accessi sulle radici d'ACCOUNT, che possono essere più
-    # larghe. Togliere il perimetro è un allargamento.
-    "topic.drive_folder_add", "topic.drive_folder_remove",
-    # Cartella condivisa Mac↔container: stessa ragione due voci sopra —
-    # collegarla/scollegarla è la dichiarazione di autorità, in entrambe le
-    # direzioni (simmetrico come drive_folder_add/remove).
-    "topic.local_folder_add", "topic.local_folder_remove",
-    # Collegare due topic apre a OGNI partecipante di ciascuno la lettura dei
-    # file dell'altro: più largo di una cartella agganciata, e per la stessa
-    # ragione simmetrico — scollegare toglie a una stanza ciò su cui stava
-    # lavorando, e nessuna delle due direzioni è una preferenza.
-    "topic.link_add", "topic.link_remove",
+    # verbo gated richiede il ruolo admin. (Le rimozioni, e i collegamenti fra
+    # topic, non sono più verbi degli agenti dal #654: solo webui dell'owner.)
+    "topic.drive_folder_add",
+    # Cartella condivisa Mac↔container: stessa ragione.
+    "topic.local_folder_add",
     # Whitelist egress/ingress LOCALE a un topic (router-notebook R17,
     # clodia-platform#334): stessa ragione di drive_folder_add/remove due
     # righe sopra — è il perimetro DI QUESTA STANZA, quindi simmetrico
     # (aggiunta E rimozione), a differenza della whitelist globale due voci
     # più sotto dove `revoke` non è gated.
-    "topic.egress_add", "topic.egress_remove",
+    "topic.egress_add",
     "topic.ingress_add", "topic.ingress_remove",
-    # Le istruzioni di scope entrano nel contesto di OGNI agente della stanza a
-    # OGNI turno: scriverle è un atto di autorità, non una preferenza. Finché il
-    # gate non sarà rivolto all'owner dello scope (modello «titolo», voci 23-25
-    # del system-notebook) qui vale la regola generale — per un umano un verbo
-    # gated richiede il ruolo admin.
-    "topic.save_agents_md",
+    # Human routes only since #654 (see `_GATE_CLASS`): still admin-gated.
+    "topic.egress_remove", "topic.save_agents_md",
     # HTTP egress mutante: consenso umano obbligatorio per ogni singola POST.
     "web.post",
     # Uscita di codice dallo scope. Il perimetro (la lista dei repository) dice
