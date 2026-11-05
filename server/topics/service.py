@@ -414,6 +414,16 @@ def _coerce_goal(value, ctx: str = "") -> Optional[dict]:
 #: Nome del mount quando il metadata legacy non ne ha uno. Il tipo va bene finché
 #: i mount sono uno: con due mount dello stesso tipo servirebbe distinguerli, ed è
 #: per questo che il nome nuovo si sceglie al collegamento invece di derivarlo.
+def _index_notify(event: str, tier: str, name: str, **kw) -> None:
+    """The room RAG follows the room at once (#648): never blocks, never fails
+    the write it follows."""
+    try:
+        from .. import topic_index
+        topic_index.notify(event, _normalize_tier(tier), name, **kw)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def drive_folders(meta: dict) -> list:
     """Le cartelle Drive dichiarate per questo topic (decision-record #40).
 
@@ -1613,6 +1623,7 @@ class TopicService:
                 + (f" (ci sono: {disponibili})" if disponibili else ""))
         meta["drive_folders"] = [f for f in existing if f.get("name") != mount_name]
         self._write_meta(tier, name, meta, base_version=ver)
+        _index_notify("drive", tier, name)           # unlinked → out of the RAG now
         return {"ok": True, "removed": mount_name}
 
     def local_folder_add(self, tier: str, name: str, mount_name: str | None = None) -> dict:
@@ -2650,6 +2661,7 @@ class TopicService:
                         f"proxy:{author}", author)
         self.s.write(f"{self._dir(tier, name)}/.messages/{msg['id']}.json",
                      json.dumps(msg, ensure_ascii=False).encode())
+        _index_notify("message", tier, name, msg=dict(msg))
         # L'ANNUNCIO APPARTIENE ALL'ATTO DI POSTARE (clodia-platform#219). Qui
         # passano TUTTI gli scrittori — la webui via `/internal/topics`, il
         # verbo MCP del gateway (proxy, messaggero, client MCP di una persona),
@@ -2958,6 +2970,7 @@ class TopicService:
         # sarebbe una classificazione inventata.
         if mount in self._WRITABLE_MOUNTS:
             self.set_provenance(tier, name, self._prov_key(meta, mount, sub), prov, by=by)
+        _index_notify("file", tier, name, paths=[f"{mount}/{sub}"])
         return {"name": parts[-1], "path": f"{mount}/{sub}", "provenance": prov}
 
     def _resolve_write_target(self, tier: str, name: str, filename: str):
@@ -3095,6 +3108,7 @@ class TopicService:
         moved_labels = self._move_provenance(
             tier, name, self._prov_key(meta, mount, sub),
             self._prov_key(meta, d_mount, d_sub))
+        _index_notify("file", tier, name, paths=[f"{mount}/{sub}", f"{d_mount}/{d_sub}"])
         return {"moved": f"{mount}/{sub}", "path": f"{d_mount}/{d_sub}",
                 "name": d_parts[-1], "provenance_entries_moved": moved_labels}
 
@@ -3161,6 +3175,7 @@ class TopicService:
             ts = _now().strftime("%Y%m%d-%H%M%S")
             trash_rel = f".trash/{ts}/{rel}"
             self.s.move(target, f"{self._dir(tier, name)}/{trash_rel}")
+            _index_notify("file", tier, name, paths=[rel])
             return {"trashed": rel, "trash_path": trash_rel, "recoverable": True}
         # drive → trash nativo di Drive (recuperabile dal Cestino dell'account).
         store.delete(target)
@@ -3206,6 +3221,7 @@ class TopicService:
             # non resta a metà fra due livelli.
             self.s.move(dst, src)
             raise
+        _index_notify("retier", new, name)           # the collection follows the tier now
         return {"from": tier, "to": new, "name": name, "entry": voce}
 
     def archive(self, tier: str, name: str) -> dict:

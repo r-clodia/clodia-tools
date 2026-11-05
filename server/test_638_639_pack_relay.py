@@ -1120,7 +1120,7 @@ class MessageKindTests(unittest.TestCase):
 
     def test_the_topic_index_treats_it_like_telegram(self):
         from . import topic_index
-        self.assertEqual(topic_index._messages_provenance([{"kind": "channel"}], False),
+        self.assertEqual(topic_index._message_provenance("SEAL-1", "acme", {"kind": "channel"}),
                          "untrusted")
 
 
