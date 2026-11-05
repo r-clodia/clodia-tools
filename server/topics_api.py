@@ -520,8 +520,13 @@ async def topic_data_route(request: Request):
         elif action == "remove":
             out = await asyncio.to_thread(topic_data.remove, tier, name, kind, resource)
         elif action == "grant":
-            out = await asyncio.to_thread(topic_data.grant, tier, name, kind, resource,
-                                          str(body.get("agent") or ""), body.get("mode"))
+            # Per-agent roles were removed (#653): whoever is in the room reads
+            # and writes what it imports. Refused, not ignored: a silent no-op
+            # would read as «granted».
+            return JSONResponse({"error": "i permessi per agente non esistono più: chi "
+                                          "partecipa al canale legge e scrive i dati "
+                                          "importati (clodia-platform#653)"},
+                                status_code=400)
         else:
             return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
     except PermissionError as e:

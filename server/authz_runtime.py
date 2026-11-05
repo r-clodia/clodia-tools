@@ -54,24 +54,20 @@ def _toolbox_tuples(meta: dict) -> list[A.Tuple]:
 
 
 def _data_tuples(meta: dict) -> list[A.Tuple]:
-    """The room's data grants (#590) as tuples on the collection or datastore,
-    so a grant made in the «Dati» panel after the migration is in force."""
+    """The room's imported data as tuples on the collection or datastore:
+    every participant reads and writes it (owner, 5 Nov 2026, #653 — no
+    per-agent roles); the room's own index is read-only. A room's tuples reach
+    only its members (`tuples_for`), so `*` here is «whoever is in»."""
     from . import topic_data as _td
     raw = []
     for imp in _td.imports(meta):
         res = f"{imp['kind']}:{imp['name']}"
-        if imp["kind"] in _td.READ_FOR_PARTICIPANTS:
-            # Read by every participant (26 Oct): a room's tuples reach only
-            # its members (`tuples_for`), so `*` here is «whoever is in».
-            for v in _td._READ_VERBS.get(imp["kind"], ()):
-                raw.append({"id": f"data:{res}:*:{v}", "agent": "*", "verb": v,
-                            "resource": res, "rule": [{"effect": "allow", "match": "*"}]})
-        for agent, mode in imp["grants"].items():
-            verbs = _td._READ_VERBS.get(imp["kind"], ()) + (
-                _td._WRITE_VERBS.get(imp["kind"], ()) if mode == "write" else ())
-            for v in verbs:
-                raw.append({"id": f"data:{res}:{agent}:{v}", "agent": agent, "verb": v,
-                            "resource": res, "rule": [{"effect": "allow", "match": "*"}]})
+        verbs = _td._READ_VERBS.get(imp["kind"], ())
+        if not _td.own_index(imp):
+            verbs = verbs + _td._WRITE_VERBS.get(imp["kind"], ())
+        for v in verbs:
+            raw.append({"id": f"data:{res}:*:{v}", "agent": "*", "verb": v,
+                        "resource": res, "rule": [{"effect": "allow", "match": "*"}]})
     ok, _bad = A.parse_tuples(raw, level=A.TOPIC)
     return ok
 

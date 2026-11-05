@@ -9,8 +9,10 @@ A topic declares in its meta the catalog resources it uses:
 - **Import** (owner only): the resource must be in the catalog
   (`data_catalog`), the owner an allowed importer with clearance for it, and
   **the topic's tier ≥ the resource's tier** — data never moves down a level.
-- **Grants** (owner only): `read` | `write` per agent of the channel (seed
-  name). Default none; `write` implies read. Only participants.
+- **Access** (owner, 5 Nov 2026, #653): every agent IN THE CHANNEL reads and
+  writes everything imported there — no per-agent roles. The one exception is
+  the room's own index (`topic-*`): read-only, the indexer writes it. The old
+  `grants` map is kept in the meta but no longer decides anything.
 - **Enforcement** (`authorize`): on the topic of the SIGNED claim, never an
   argument. The resource is imported there, the agent is granted there, its
   clearance covers the resource, and the topic's tier still covers it. No
@@ -164,19 +166,31 @@ def mode() -> str:
     return m if m in ("legacy", "topic") else "legacy"
 
 
-#: Kinds every PARTICIPANT reads once imported in the room (owner, 26 Oct
-#: 2026): the room's RAG — its own index first — is part of being in the room,
-#: like `topic.*`. A per-agent read grant used to be written on joining, and an
-#: agent that left and came back lost it. Writing still needs the owner's grant.
-READ_FOR_PARTICIPANTS = frozenset({"rag"})
+#: Kinds every PARTICIPANT reads once imported in the room (26 Oct 2026) —
+#: since #653 every kind, and they write it too.
+READ_FOR_PARTICIPANTS = frozenset({"rag", "datastore"})
+
+
+def _participant(meta: dict, agent: str) -> bool:
+    from .topics.service import TopicService
+    return bool(agent) and agent in TopicService.participants_map(meta)
+
+
+def own_index(e: dict) -> bool:
+    """The room's own RAG index: written by the indexer alone (#422 B2)."""
+    return e["kind"] == "rag" and str(e["name"]).startswith("topic-")
 
 
 def _reads(meta: dict, e: dict, agent: str) -> bool:
-    """May `agent` read the import `e` of this room?"""
-    if e["kind"] in READ_FOR_PARTICIPANTS:
-        from .topics.service import TopicService
-        return agent in TopicService.participants_map(meta)
-    return e["grants"].get(agent) in MODES
+    """May `agent` read the import `e` of this room? Being in the room is
+    enough (#653)."""
+    return _participant(meta, agent)
+
+
+def _writes(meta: dict, e: dict, agent: str) -> bool:
+    """May `agent` write the import `e`? Being in the room is enough (#653),
+    except for the room's own index."""
+    return _participant(meta, agent) and not own_index(e)
 
 
 def authorize(kind: str, resource: str, *, write: bool, agent: str,
@@ -198,11 +212,13 @@ def authorize(kind: str, resource: str, *, write: bool, agent: str,
     entry = cat.get(kind, resource)
     if entry is None:
         raise PermissionError(f"{kind} '{resource}' non è più nel catalogo dei dati")
-    granted = imp["grants"].get(agent)
-    if (write and granted != "write") or (not write and not _reads(meta, imp, agent)):
+    if write and own_index(imp):
+        raise PermissionError(f"'{resource}' è l'indice del topic {scope}: lo scrive "
+                              "solo l'indicizzazione automatica")
+    if not (_writes(meta, imp, agent) if write else _reads(meta, imp, agent)):
         raise PermissionError(
-            f"agent '{agent}' senza permesso di {'SCRITTURA' if write else 'LETTURA'} "
-            f"su {kind} '{resource}' nel topic {scope} (lo assegna l'owner del topic)")
+            f"agent '{agent}' non partecipa al topic {scope}: i dati importati lì li "
+            "usano solo i partecipanti")
     need = cat.effective_tier(entry)
     topic_tier = meta.get("tier") or tier
     if cat.rank_have(topic_tier) < cat.rank(need):
@@ -255,7 +271,7 @@ def importing_topics() -> dict[str, list[str]]:
 #: what an agent may do with the data imported THERE.
 _READ_VERBS = {"rag": ("rag.search", "rag.list", "rag.collections"),
                "datastore": ("datastore.read",)}
-_WRITE_VERBS = {"datastore": ("datastore.write",)}
+_WRITE_VERBS = {"datastore": ("datastore.write",), "rag": ("rag.ingest", "rag.remove")}
 
 
 def room_verbs(agent: str | None, scope: str | None) -> set[str]:
@@ -272,9 +288,8 @@ def room_verbs(agent: str | None, scope: str | None) -> set[str]:
         return set()
     out: set[str] = set()
     for e in imports(meta):
-        mode = e["grants"].get(agent)
         if _reads(meta, e, agent):
             out.update(_READ_VERBS.get(e["kind"], ()))
-        if mode == "write":
+        if _writes(meta, e, agent):
             out.update(_WRITE_VERBS.get(e["kind"], ()))
     return out
