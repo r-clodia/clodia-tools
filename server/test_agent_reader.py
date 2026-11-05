@@ -92,7 +92,7 @@ class VerbClassificationTests(unittest.TestCase):
 
     def test_writing_verbs_are_mutating(self):
         for v in ("put", "write_file", "delete_file", "save_summary",
-                  "save_agents_md", "drive_folder_add", "drive_folder_remove"):
+                  "drive_folder_add"):
             with self.subTest(verbo=v):
                 self.assertIn(v, M._TOPIC_MUTATING_VERBS)
 

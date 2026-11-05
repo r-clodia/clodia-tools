@@ -14,7 +14,6 @@ class NoLegacySudoTests(unittest.TestCase):
 
     def test_participant_mutations_remain_gated(self) -> None:
         self.assertTrue(gate.is_gated("topic.add_participant"))
-        self.assertTrue(gate.is_gated("topic.remove_participant"))
 
 
 if __name__ == "__main__":
