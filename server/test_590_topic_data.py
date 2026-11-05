@@ -117,19 +117,14 @@ class GrantTests(_Base):
         super().setUp()
         self.imp()
 
-    def test_default_none_then_read_then_write(self):
-        with self.assertRaises(PermissionError):
-            self.auth("tomato.commerciale")
-        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
-                 "tomato.commerciale", "read")
+    def test_a_participant_reads_and_writes_an_outsider_nothing(self):
+        """#653 (owner, 5 Nov 2026): no per-agent roles — being in the room is
+        read AND write; leaving the room is neither."""
         self.auth("tomato.commerciale")
-        with self.assertRaises(PermissionError):
-            self.auth("tomato.commerciale", write=True)
-        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
-                 "tomato.commerciale", "write")
         self.auth("tomato.commerciale", write=True)
-        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
-                 "tomato.commerciale", None)
+        with self.assertRaises(PermissionError):
+            self.auth("estraneo")
+        self.svc.remove_participant("SEAL-2", "commerciale", "tomato.commerciale")
         with self.assertRaises(PermissionError):
             self.auth("tomato.commerciale")
 
@@ -155,18 +150,12 @@ class GrantTests(_Base):
         meta = self.svc._read_meta("SEAL-2", "commerciale")[0]
         self.assertEqual(td.imports(meta)[0]["grants"], {})
 
-    def test_the_grant_is_per_topic(self):
-        self.svc.new("SEAL-2", "altro", {"owner": "davide",
-                                         "participants": ["davide", "tomato.commerciale"]})
+    def test_access_is_per_topic(self):
+        self.svc.new("SEAL-2", "altro", {"owner": "davide", "participants": ["davide"]})
         self.imp(name="altro")
-        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
-                 "tomato.commerciale", "write")
-        td.grant("SEAL-2", "altro", "datastore", "tomato-pack/clienti",
-                 "tomato.commerciale", "read")
         self.auth("tomato.commerciale", write=True)
         with self.assertRaises(PermissionError):
-            self.auth("tomato.commerciale", write=True, scope="SEAL-2/altro")
-        self.auth("tomato.commerciale", scope="SEAL-2/altro")
+            self.auth("tomato.commerciale", scope="SEAL-2/altro")       # not in that room
 
     def test_no_topic_no_access_and_clearance_still_counts(self):
         td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
@@ -176,12 +165,7 @@ class GrantTests(_Base):
         with self.assertRaises(PermissionError):
             self.auth("tomato.commerciale", clearance="SEAL-1")
 
-    def test_listing_shows_only_granted_imports(self):
-        """A datastore is listed only once granted; a RAG collection to every
-        participant (26 Oct 2026)."""
-        self.assertEqual(td.visible("datastore", agent="clodia", scope="SEAL-2/commerciale",
-                                    clearance="SEAL-2"), set())
-        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti", "clodia", "read")
+    def test_listing_shows_every_import_to_participants(self):
         self.assertEqual(td.visible("datastore", agent="clodia", scope="SEAL-2/commerciale",
                                     clearance="SEAL-3"), {"tomato-pack/clienti"})
         self.imp(kind="rag", res="eu-normativa")
@@ -190,16 +174,20 @@ class GrantTests(_Base):
         self.assertEqual(td.visible("rag", agent="estraneo", scope="SEAL-2/commerciale",
                                     clearance="SEAL-2"), set())
 
-    def test_every_participant_reads_the_rooms_rag(self):
-        """Owner, 26 Oct 2026: the room's RAG is part of being in the room —
-        an agent that leaves and comes back reads it again; writing still
-        needs the owner's grant."""
+    def test_every_participant_reads_and_writes_the_rooms_rag_but_not_its_index(self):
         self.imp(kind="rag", res="eu-normativa")
         self.auth("clodia", kind="rag", res="eu-normativa")
+        self.auth("clodia", kind="rag", res="eu-normativa", write=True)
         with self.assertRaises(PermissionError):
             self.auth("estraneo", kind="rag", res="eu-normativa")
-        with self.assertRaises(PermissionError):
-            self.auth("clodia", kind="rag", res="eu-normativa", write=True)
+        meta, ver = self.svc._read_meta("SEAL-2", "commerciale")
+        meta["data"] = meta.get("data", []) + [{"kind": "rag", "name": "topic-abcd", "grants": {}}]
+        self.svc._write_meta("SEAL-2", "commerciale", meta, ver)
+        with patch.object(td.cat, "get", lambda k, n: {"tier": "SEAL-0", "name": n}), \
+                patch.object(td.cat, "effective_tier", lambda e: "SEAL-0"):
+            self.auth("clodia", kind="rag", res="topic-abcd")
+            with self.assertRaises(PermissionError):
+                self.auth("clodia", kind="rag", res="topic-abcd", write=True)
         self.svc.remove_participant("SEAL-2", "commerciale", "clodia")
         with self.assertRaises(PermissionError):
             self.auth("clodia", kind="rag", res="eu-normativa")
@@ -246,11 +234,10 @@ class GatewayTests(_Base):
                 patch("server.egress._scope_of_call", lambda: "SEAL-2/commerciale"), \
                 patch.object(m.instance_profile, "rag_check_collection", lambda c: None):
             m._rag_authorize("eu-normativa", write=False)          # a participant reads
+            m._rag_authorize("eu-normativa", write=True)           # and writes (#653)
             with patch.object(m, "agent_name", lambda: "estraneo"):
                 with self.assertRaises(PermissionError):
                     m._rag_authorize("eu-normativa", write=False)
-            with self.assertRaises(PermissionError):
-                m._rag_authorize("eu-normativa", write=True)
             with patch.object(m, "agent_name", lambda: "sysadmin"):
                 m._rag_authorize("eu-normativa", write=True, verb="ingest")   # the provisioner
 
@@ -458,18 +445,12 @@ class RoomVerbsTests(_Base):
     """An agent granted an imported index can query it in that room even when
     its seed never declared rag.* (tomato.sales-rep, 23 Oct 2026)."""
 
-    def test_the_grant_brings_the_verbs_in_its_room_only(self):
+    def test_being_in_the_room_brings_the_verbs_in_that_room_only(self):
         self.imp(kind="rag", res="eu-normativa")
         self.imp()
-        # The room's RAG is read by every participant (26 Oct); a datastore
-        # needs the grant.
         self.assertEqual(td.room_verbs("tomato.commerciale", "SEAL-2/commerciale"),
-                         {"rag.search", "rag.list", "rag.collections"})
-        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti",
-                 "tomato.commerciale", "write")
-        self.assertEqual(td.room_verbs("tomato.commerciale", "SEAL-2/commerciale"),
-                         {"rag.search", "rag.list", "rag.collections",
-                          "datastore.read", "datastore.write"})
+                         {"rag.search", "rag.list", "rag.collections", "rag.ingest",
+                          "rag.remove", "datastore.read", "datastore.write"})
         self.assertEqual(td.room_verbs("tomato.commerciale", "SEAL-1/blog"), set())
         self.assertEqual(td.room_verbs("tomato.commerciale", None), set())
 
