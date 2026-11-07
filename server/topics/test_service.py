@@ -107,13 +107,13 @@ def main() -> int:
         check("status invalido rifiutato", False)
     except TopicError:
         check("status invalido rifiutato", True)
-    check("set_deadline ISO", svc.set_deadline("P2", "cliente-x", "2026-08-15")["deadline"] == "2026-08-15")
-    check("set_deadline null", svc.set_deadline("P2", "cliente-x", None)["deadline"] is None)
+    # #658: the deadline is derived from meta.todos, set_deadline refuses.
     try:
-        svc.set_deadline("P2", "cliente-x", "15/08/2026")
-        check("deadline invalida rifiutata", False)
-    except TopicError:
-        check("deadline invalida rifiutata", True)
+        svc.set_deadline("P2", "cliente-x", "2026-08-15")
+        check("set_deadline rifiutata (deadline derivata)", False)
+    except TopicError as e:
+        check("set_deadline rifiutata (deadline derivata)",
+              "deadline is derived from todo items" in str(e))
 
     # read-path TOLLERANTE (review #49): un topic con meta legacy non conforme
     # (status fuori vocabolario + deadline testo libero) NON deve rompere

@@ -373,6 +373,54 @@ async def set_goal(request: Request):
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
+async def todos(request: Request):
+    """The topic's to-do list for a person (clodia-platform#658).
+
+      POST   …/todos            {text, due?, assignee?, base_version, by}  → add
+      POST   …/todos/{todo_id}  {text?, due?, assignee?, status?, base_version, by}
+      DELETE …/todos/{todo_id}?base_version=…&by=…
+
+    Internal route like `goal`: the agent-server has already checked that the
+    person is a participant and passes the principal in `by`. 409 = the list
+    changed since `base_version`; the caller re-reads, never overwrites.
+    """
+    _, err = _authorize(request)
+    if err:
+        return err
+    tier, name = request.path_params["tier"], request.path_params["name"]
+    todo_id = request.path_params.get("todo_id")
+    if request.method == "DELETE":
+        body = dict(request.query_params)
+    else:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        body = body if isinstance(body, dict) else {}
+    by = str(body.get("by") or "").strip()
+    svc = _service()
+    try:
+        if request.method == "DELETE":
+            res = svc.todo_remove(tier, name, todo_id,
+                                  base_version=body.get("base_version"), by=by)
+        elif todo_id is None:
+            res = svc.todo_add(tier, name, body.get("text"), due=body.get("due"),
+                               assignee=body.get("assignee"),
+                               base_version=body.get("base_version"), by=by)
+        else:
+            fields = {k: body[k] for k in ("text", "due", "assignee", "status")
+                      if k in body}
+            res = svc.todo_update(tier, name, todo_id,
+                                  base_version=body.get("base_version"), by=by,
+                                  **fields)
+    except VersionConflict as e:
+        return JSONResponse({"error": f"version conflict: {e}"}, status_code=409)
+    except TopicError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    _invalidate_list_cache()
+    return JSONResponse(res)
+
+
 async def create_topic(request: Request):
     principal, err = _authorize(request)
     if err:
@@ -1699,6 +1747,8 @@ routes = [
     Route("/internal/topics/{tier}/{name}/status", set_status, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/agents-md", set_agents_md, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/deadline", set_deadline, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/todos", todos, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/todos/{todo_id}", todos, methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/goal", set_goal, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/participants", participants, methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
