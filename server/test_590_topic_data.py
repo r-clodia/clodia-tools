@@ -17,6 +17,9 @@ DS = [{"pack": "tomato-pack", "name": "clienti", "clearance": "SEAL-2",
 
 class _Base(unittest.TestCase):
     def setUp(self):
+        from . import authz_runtime as _azr
+        _azr.invalidate()               # the room view is cached per scope
+        self.addCleanup(_azr.invalidate)
         d = Path(tempfile.mkdtemp(prefix="cat-"))
         self.svc = TopicService(LocalFsStorage(tempfile.mkdtemp(prefix="topics-")))
         self.patches = [
@@ -458,7 +461,9 @@ class RoomVerbsTests(_Base):
         from . import main
         self.imp(kind="rag", res="eu-normativa")
         td.grant("SEAL-2", "commerciale", "rag", "eu-normativa", "tomato.commerciale", "read")
-        with patch.object(main, "_declared_tools", lambda a: {"topic.open"}), \
+        # The room's imported data are tuples (#617): the gateway reads the
+        # room through `main._topics()`, the same store.
+        with patch.object(main, "_topics", lambda: self.svc), \
                 patch.object(main, "current_scoped_tools", lambda: ()):
             with patch("server.egress._scope_of_call", lambda: "SEAL-2/commerciale"):
                 self.assertTrue(main._agent_tool_reachable("rag.search", "tomato.commerciale"))

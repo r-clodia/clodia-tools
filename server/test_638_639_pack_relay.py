@@ -140,10 +140,14 @@ def _installed(doc: dict):
 
 
 def setUpModule() -> None:
+    from . import testkit_authz as _tk_authz
+    _tk_authz.module_start()   # reachability is the tuples' (#656)
     _first_party.install()
 
 
 def tearDownModule() -> None:
+    from . import testkit_authz as _tk_authz
+    _tk_authz.module_stop()
     _first_party.uninstall()
 
 

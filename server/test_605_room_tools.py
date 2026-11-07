@@ -24,6 +24,9 @@ from .topics.service import TopicService
 
 class _Base(unittest.TestCase):
     def setUp(self):
+        from . import authz_runtime as _azr
+        _azr.invalidate()               # the room view is cached per scope
+        self.addCleanup(_azr.invalidate)
         self.svc = TopicService(LocalFsStorage(tempfile.mkdtemp(prefix="topics-")))
         for p in (patch.object(rt, "_svc", lambda: self.svc),
                   patch.object(main, "_topics", lambda: self.svc)):
@@ -95,11 +98,10 @@ class RoomFloorTests(_Base):
     def test_artifact_render_does_not_ride_in_on_the_floor(self):
         """It lives in `_TOPIC_TOOLS` next to the `topic.` verbs, and its
         namespace is `artifact`: the floor is a namespace, not a file."""
-        with patch.object(main, "_declared_tools", lambda a: set()), \
-                patch.object(main, "current_scoped_tools", lambda: ()), \
-                patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"):
-            self.assertTrue(main._agent_tool_reachable("topic.write_file", "redattore"))
-            self.assertFalse(main._agent_tool_reachable("artifact.render", "redattore"))
+        floor = rt.verbs_for("redattore", "SEAL-1/blog")
+        self.assertIn("topic.*", floor)
+        self.assertNotIn("artifact.render", floor)
+        self.assertNotIn("artifact.*", floor)
 
 
 class ToolboxTests(_Base):
@@ -115,16 +117,15 @@ class ToolboxTests(_Base):
                 self.assertFalse(main._agent_tool_reachable("web.fetch", "redattore"))
 
     def test_discovery_and_dispatch_say_the_same_thing(self):
-        """`list_tools` resolves the tree once; the two must not diverge."""
+        """`list_tools` and dispatch ask the same question: the tuples in force
+        in the room of the call (#617, #656 — no pre-resolved seed set)."""
+        from . import authz_runtime as _azr
         rt.enable("SEAL-1", "blog", "web.fetch")
-        with patch.object(main, "_declared_tools", lambda a: set()), \
-                patch.object(main, "current_scoped_tools", lambda: ()), \
+        with patch.object(main, "current_scoped_tools", lambda: ()), \
                 patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"):
-            resolved = (main._declared_tools("redattore") | set(main.current_scoped_tools())
-                        | main._room_data_verbs("redattore") | main._room_tool_verbs("redattore"))
-            self.assertTrue(main._agent_tool_reachable("web.fetch", "redattore", resolved))
-            self.assertEqual(main._agent_tool_reachable("web.fetch", "redattore"),
-                             main._agent_tool_reachable("web.fetch", "redattore", resolved))
+            for verb in ("web.fetch", "web.post", "email.send"):
+                self.assertEqual(main._agent_tool_reachable(verb, "redattore"),
+                                 _azr.available("redattore", verb, "SEAL-1/blog"), verb)
 
     def test_disable_takes_it_back(self):
         rt.enable("SEAL-1", "blog", "web.fetch")
@@ -143,10 +144,11 @@ class DmToolboxTests(_Base):
             self.assertEqual(rt.verbs_for("redattore", None), {"web.fetch"})
             # In a room the room decides: the DM list does not add itself.
             self.assertNotIn("web.fetch", rt.verbs_for("redattore", "SEAL-1/blog"))
-            with patch.object(main, "_declared_tools", lambda a: set()), \
-                    patch.object(main, "current_scoped_tools", lambda: ()), \
+            # Reachability outside a room is the GLOBAL tuples' (#617): the DM
+            # list is not a source of tuples, and since #656 there is no
+            # seed-based path left that would read it.
+            with patch.object(main, "current_scoped_tools", lambda: ()), \
                     patch("server.egress._scope_of_call", lambda: None):
-                self.assertTrue(main._agent_tool_reachable("web.fetch", "redattore"))
                 self.assertFalse(main._agent_tool_reachable("web.post", "redattore"))
 
     def test_an_unreadable_list_grants_nothing(self):
@@ -342,13 +344,11 @@ class ReviewB1Tests(_Base):
         meta, ver = self.svc._read_meta("SEAL-1", "blog")
         meta["tools"] = {"enabled": ["*", "packs.*", "agents.*"]}
         self.svc._write_meta("SEAL-1", "blog", meta, base_version=ver)
-        with patch.object(main, "_declared_tools", lambda a: set()), \
-                patch.object(main, "current_scoped_tools", lambda: ()), \
+        with patch.object(main, "current_scoped_tools", lambda: ()), \
                 patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"):
             for verb in ("packs.import_url", "agents.grant_tool", "copybrain.ask",
                          "runtime.status"):
                 self.assertFalse(main._agent_tool_reachable(verb, "redattore"), verb)
-            self.assertTrue(main._agent_tool_reachable("topic.write_file", "redattore"))
 
     def test_the_dm_list_is_filtered_the_same_way(self):
         with patch.object(whitelist, "CONFIG", {"dm_tools": ["*", "packs.*", "web.fetch"]}):

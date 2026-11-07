@@ -682,10 +682,14 @@ from . import first_party_fixture as _stamp
 
 
 def setUpModule() -> None:
+    from .. import testkit_authz as _tk_authz
+    _tk_authz.module_start()   # reachability is the tuples' (#656)
     # The mount-stamp declaration check is #641's own test; here every test
     # pack «declares» the servers it mounts (see the fixture's docstring).
     _stamp.any_pack_declares_any_backend()
 
 
 def tearDownModule() -> None:
+    from .. import testkit_authz as _tk_authz
+    _tk_authz.module_stop()
     _stamp.restore_backend_declarations()

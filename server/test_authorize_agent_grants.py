@@ -24,6 +24,8 @@ from unittest.mock import patch
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
+from . import authz_runtime as _azr
+from . import testkit_authz as _tk_authz
 from . import human_mcp, main, tool_api, whitelist
 
 _H = {"Authorization": "Bearer ckt1.finto"}
@@ -53,7 +55,9 @@ class _Agente:
             patch.object(tool_api, "verify_session_token", lambda _t: self._payload),
             patch.object(tool_api.whitelist, "agent_name", lambda: "sysadmin"),
             patch.object(main, "_is_super", lambda _n: False),
-            patch.object(main, "_declared_tools", lambda _ag: set(self._dichiarati)),
+            # #656: the verbs are the tuples' (global, here), not a seed's.
+            _tk_authz.global_grants({"sysadmin": sorted(self._dichiarati)}),
+            patch.object(_azr, "_TTL", 0.0),
             patch.object(whitelist, "agent_denies",
                          lambda verb, name=None: verb in self._denies),
         ]
@@ -125,3 +129,4 @@ class TheHumanBranchKeepsItsCeilingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

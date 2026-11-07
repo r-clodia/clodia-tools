@@ -98,7 +98,13 @@ class TheAgentBranchIsUnchangedTests(unittest.TestCase):
     """
 
     def test_scoped_tools_still_widen_for_an_agent(self):
-        with patch.object(M, "_declared_tools", return_value={"topic.open"}), \
+        from . import authz_runtime as _azr
+        from . import testkit_authz as _tk
+        _azr.invalidate()
+        self.addCleanup(_azr.invalidate)
+        with _tk.global_grants({"messaggero": ["topic.open"]}), \
+             patch.object(_azr, "_TTL", 0.0), \
+             patch("server.egress._scope_of_call", lambda: None), \
              patch.object(M, "current_scoped_tools", return_value=("email.send",)):
             self.assertTrue(M._agent_tool_reachable("topic.open", "messaggero"))
             self.assertTrue(M._agent_tool_reachable("email.send", "messaggero"))
@@ -129,3 +135,4 @@ class TheListMatchesTheDispatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

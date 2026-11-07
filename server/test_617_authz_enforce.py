@@ -79,13 +79,60 @@ class AvailabilityTests(_Env):
         self.assertTrue(R.available("clodia", "gdrive.upload", "SEAL-1/blog"))
         self.assertFalse(R.available("clodia", "gdrive.share", "SEAL-1/blog"))
 
-    def test_reachability_follows_the_mode(self):
+    def test_reachability_is_the_tuples_in_every_mode(self):
+        """#656: the seed-based path is gone. `shadow`/`off` set explicitly no
+        longer bring back the seed's `allowed_tools`: the tuples decide."""
         self.meta_set(authz=[_t("t1", agent="clodia")])
+        whitelist.CONFIG["agents"] = {"officer": {"allowed_tools": ["email.*", "*"]}}
+        with patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"):
+            for m in ("enforce", "shadow", "off"):
+                whitelist.CONFIG["authz_mode"] = m
+                R.invalidate()
+                self.assertTrue(main._agent_tool_reachable("email.send", "clodia"), m)
+                # The seed's list grants nothing, `*` included.
+                self.assertFalse(main._agent_tool_reachable("email.send", "officer"), m)
+
+    def test_the_adapter_gate_reads_the_tuples_not_the_seed(self):
+        """`whitelist.tool_allowed`, the third reader: no `effective_tools`
+        fallback any more (#656)."""
+        whitelist.CONFIG["agents"] = {"officer": {"allowed_tools": ["*"]}}
+        whitelist.CONFIG["authz_mode"] = "shadow"
         with patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"), \
-                patch.object(main, "_declared_tools", lambda a: set()):
-            self.assertTrue(main._agent_tool_reachable("email.send", "clodia"))
-            whitelist.CONFIG["authz_mode"] = "shadow"
-            self.assertFalse(main._agent_tool_reachable("email.send", "clodia"))
+                patch.object(whitelist, "agent_name", lambda: "officer"), \
+                patch.object(whitelist, "_SUPER_AGENTS", set()):
+            with self.assertRaises(PermissionError):
+                whitelist.tool_allowed("email.send")
+            self.meta_set(authz=[_t("t1", agent="officer")])
+            whitelist.tool_allowed("email.send")
+
+
+class ModeDefaultTests(unittest.TestCase):
+    """#656: `enforce` is the default — a missing key, an empty value or an
+    unknown one never falls back to a weaker mode."""
+
+    def test_missing_key_is_enforce(self):
+        with patch.object(whitelist, "CONFIG", {}):
+            self.assertEqual(R.mode(), "enforce")
+            self.assertTrue(R.enforcing())
+            self.assertEqual(S.mode_raw(), "enforce")
+        with patch.object(whitelist, "CONFIG", None):
+            self.assertEqual(R.mode(), "enforce")
+
+    def test_empty_or_unknown_is_enforce(self):
+        for raw in ("", None, "shdow", "ENFORCE ", 0):
+            with patch.object(whitelist, "CONFIG", {"authz_mode": raw}):
+                self.assertEqual(R.mode(), "enforce", repr(raw))
+
+    def test_an_explicit_weaker_mode_is_still_read(self):
+        for raw in ("shadow", "off", " Shadow "):
+            with patch.object(whitelist, "CONFIG", {"authz_mode": raw}):
+                self.assertEqual(R.mode(), raw.strip().lower())
+                self.assertFalse(R.enforcing())
+
+    def test_the_legacy_reachability_path_is_gone(self):
+        self.assertFalse(hasattr(main, "_legacy_reachable"))
+        self.assertFalse(hasattr(main, "_room_data_verbs"))
+        self.assertFalse(hasattr(main, "_room_tool_verbs"))
 
     def test_an_unreadable_global_file_fails_closed(self):
         S._global_path().write_text("{rotto")
