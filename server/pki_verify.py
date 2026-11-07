@@ -89,6 +89,38 @@ def _agent_public_key(agent: str) -> Ed25519PublicKey:
     return pub
 
 
+#: The claims of a session token a BROWSER signs with the principal's own key
+#: (clodia-web `signToken`): nothing else. A token minted server-side for a
+#: human carries more (`principal`, `on_behalf`, `chat`, a non-empty
+#: `execution_id`), and a delegation carries `typ`. Mirrors clodia-logic
+#: `server/colony/pki.py`.
+_BROWSER_SESSION_CLAIMS = frozenset({"agent", "execution_id", "iat", "exp", "aud"})
+#: The longest lifetime a browser-signed session token may claim: the WebUI
+#: signs 12 h (clodia-web `DEFAULT_TTL`), twice that is the margin.
+MAX_BROWSER_SESSION_LIFETIME = 24 * 3600
+
+
+def _reject_retired_pairing_token(payload: dict) -> None:
+    """Refuse a PWA pairing token (clodia-platform#657).
+
+    The retired PWA was paired with 30-day `ckt1` tokens signed in the browser.
+    They have the browser's claims and nothing else, an empty `execution_id`,
+    and a lifetime (`exp - iat`) no WebUI session has: that shape is refused.
+    A token without `iat` is not judged here: the browser always writes it.
+    """
+    if set(payload) - _BROWSER_SESSION_CLAIMS:
+        return
+    if str(payload.get("execution_id") or ""):
+        return
+    try:
+        lifetime = int(payload["exp"]) - int(payload["iat"])
+    except (KeyError, TypeError, ValueError):
+        return
+    if lifetime > MAX_BROWSER_SESSION_LIFETIME:
+        raise PermissionError(
+            "PWA pairing token retired (clodia-platform#657): sign in from the WebUI")
+
+
 def verify_session_token(token: str) -> dict:
     """Valida un token ckt1 e ritorna il payload {agent, execution_id, iat,
     exp, aud}. Solleva PermissionError su qualsiasi problema."""
@@ -113,6 +145,7 @@ def verify_session_token(token: str) -> dict:
         raise PermissionError("audience token errata")
     if int(payload.get("exp", 0)) < time.time():
         raise PermissionError("token scaduto")
+    _reject_retired_pairing_token(payload)
     return payload
 
 
