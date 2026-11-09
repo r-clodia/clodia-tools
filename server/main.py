@@ -542,7 +542,10 @@ _TOPIC_TOOLS: list[Tool] = [
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
             "name": {"type": "string"},
-            "text": {"type": "string", "description": "prima riga = TLDR; sezione '## Prossimi passi'"},
+            "text": {"type": "string", "description": (
+                "prima riga = TLDR: UNA riga telegrafica, max 120 caratteri, senza titolo — "
+                "stato, numeri chiave, prossima azione (es. 'Discovery chiusa. Stima 3 mesi "
+                "300k euro. Next action decidere escrow.'); poi sezione '## Prossimi passi'")},
             "base_version": {"type": ["string", "null"]},
         }, "required": ["tier", "name", "text"]},
     ),
