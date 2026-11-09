@@ -1215,8 +1215,17 @@ def scope_allow(direction: str, scope: str, uri: str) -> dict:
     _wl.CONFIG[key] = per_scope
     _wl.save_config()
     LOG.warning("%s[%s] · %s %s", key, chiave, "+=" if added else "già presente:", u)
-    return {"direction": direction, "scope": chiave, "uri": u,
-            "added": added, "total": len(cur)}
+    out = {"direction": direction, "scope": chiave, "uri": u,
+           "added": added, "total": len(cur)}
+    # A source, a sender, a recipient… enables its tool in the room, and an
+    # outbound one is allowed by the tool's own row (#662) — whoever adds it.
+    try:
+        from . import room_tools as _rt
+        out.update(_rt.on_room_list_added(direction, chiave, u))
+    except Exception as e:  # noqa: BLE001 — the entry stands; say why
+        LOG.warning("%s[%s] · %s: strumento non abilitato (%s)", key, chiave, u,
+                    type(e).__name__)
+    return out
 
 
 def scope_revoke(direction: str, scope: str, uri: str) -> dict:
@@ -1249,6 +1258,12 @@ def scope_revoke(direction: str, scope: str, uri: str) -> dict:
     _wl.CONFIG[key] = per_scope
     _wl.save_config()
     LOG.warning("%s[%s] · -= %s", key, chiave, u)
+    try:
+        from . import room_tools as _rt
+        _rt.on_room_list_removed(direction, chiave, u)
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("%s[%s] · %s: riga dello strumento non tolta (%s)", key, chiave, u,
+                    type(e).__name__)
     return {"direction": direction, "scope": chiave, "uri": u,
             "removed": True, "total": len(cur)}
 
