@@ -856,6 +856,55 @@ _TOPIC_TOOLS: list[Tool] = [
                                              "topic (es. 'local/goals/strategia.md')"},
         }, "required": ["tier", "name", "state"]},
     ),
+    # ── To-do list of the room (clodia-platform#658). `meta.deadline` is
+    # derived from it: the earliest `due` among open items.
+    Tool(
+        name="topic.todo_add",
+        description=("Adds an open item to the topic's to-do list (meta.todos). The "
+                     "topic deadline is derived from the list: the earliest due date "
+                     "among open items. base_version is REQUIRED: the todos_version "
+                     "returned by topic.open. On a version conflict do not retry "
+                     "blindly: re-read with topic.open and reconcile."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "text": {"type": "string", "description": "the action, one line"},
+            "due": {"type": ["string", "null"], "description": "ISO date YYYY-MM-DD, optional"},
+            "assignee": {"type": ["string", "null"], "description": "agent or person, optional"},
+            "base_version": {"type": "string", "description": "todos_version from topic.open"},
+        }, "required": ["tier", "name", "text", "base_version"]},
+    ),
+    Tool(
+        name="topic.todo_update",
+        description=("Changes one item of the topic's to-do list: text, due, assignee "
+                     "or status (open|done). Only the fields you pass change; due=null "
+                     "or assignee=null clears them. Close a done item with "
+                     "status='done' rather than removing it. base_version is REQUIRED "
+                     "(todos_version from topic.open); on conflict re-read."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "id": {"type": "string", "description": "item id, e.g. 't-7f3a'"},
+            "text": {"type": "string"},
+            "due": {"type": ["string", "null"], "description": "ISO date YYYY-MM-DD or null"},
+            "assignee": {"type": ["string", "null"]},
+            "status": {"type": "string", "enum": ["open", "done"]},
+            "base_version": {"type": "string", "description": "todos_version from topic.open"},
+        }, "required": ["tier", "name", "id", "base_version"]},
+    ),
+    Tool(
+        name="topic.todo_remove",
+        description=("Removes one item from the topic's to-do list (for an item that "
+                     "should not be there; a finished one is closed with todo_update "
+                     "status='done'). base_version is REQUIRED (todos_version from "
+                     "topic.open); on conflict re-read."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "id": {"type": "string"},
+            "base_version": {"type": "string", "description": "todos_version from topic.open"},
+        }, "required": ["tier", "name", "id", "base_version"]},
+    ),
     # ── Cartelle Drive dichiarate: whitelist + confinamento, MAI un mount da
     # navigare (decision-record #40). Un agente che deve lavorare su un file
     # Drive lo raggiunge coi verbi `gdrive.*` nel proprio scratch.
@@ -5817,6 +5866,7 @@ _TOPIC_SCOPED_VERBS = {
     "files", "read_file",
     "read_document", "convert_document", "write_document", "write_file", "fetch",
     "put", "delete_file", "move_file", "goal_progress",
+    "todo_add", "todo_update", "todo_remove",
     "post_message", "messages", "my_mentions", "mark_seen",
     "drive_folder_add", "local_folder_add",
     "egress_add", "ingress_add", "ingress_remove",
@@ -5849,6 +5899,7 @@ _TOPIC_MUTATING_VERBS = frozenset({
     "save_summary",
     "write_file", "convert_document", "write_document", "put", "delete_file",
     "move_file", "goal_progress",
+    "todo_add", "todo_update", "todo_remove",
     "drive_folder_add", "local_folder_add",
     "egress_add", "ingress_add", "ingress_remove",
 })
@@ -7039,6 +7090,23 @@ def _dispatch_topic(name: str, a: dict):
         # dell'owner (TopicService.advance_goal).
         return svc.advance_goal(a["tier"], a["name"], a["state"],
                                 a.get("strategy_path"), by=agent_name())
+    if verb in ("todo_add", "todo_update", "todo_remove"):
+        # The room's to-do list (#658). Who wrote it is who asked: the signed
+        # principal for a person's client, the agent otherwise.
+        chi = (current_principal() if is_on_behalf() else agent_name()) or ""
+        if verb == "todo_add":
+            return svc.todo_add(a["tier"], a["name"], a.get("text"),
+                                due=a.get("due"), assignee=a.get("assignee"),
+                                base_version=a.get("base_version"), by=chi)
+        if verb == "todo_remove":
+            return svc.todo_remove(a["tier"], a["name"], a.get("id"),
+                                   base_version=a.get("base_version"), by=chi)
+        # `due`/`assignee` null clears them; a null `text`/`status` is a client
+        # that sends every optional key, not a request to blank the item.
+        fields = {k: a[k] for k in ("due", "assignee") if k in a}
+        fields.update({k: a[k] for k in ("text", "status") if a.get(k) is not None})
+        return svc.todo_update(a["tier"], a["name"], a.get("id"),
+                               base_version=a.get("base_version"), by=chi, **fields)
     # Cartelle Drive dichiarate: whitelist + confinamento, mai un mount (#40).
     if verb == "drive_folder_add":
         return svc.drive_folder_add(a["tier"], a["name"], a["folder"],

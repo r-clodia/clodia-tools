@@ -134,6 +134,7 @@ _MEMBER_VERBS = (
     "topic.read_file", "topic.read_document", "topic.convert_document",
     "topic.write_document",
     "topic.put", "topic.write_file", "topic.save_summary", "topic.post_message",
+    "topic.todo_add", "topic.todo_update", "topic.todo_remove",
 )
 
 _BUILTIN_SEEDS: dict[str, dict] = {

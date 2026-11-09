@@ -7,7 +7,30 @@ Required fields:
 - `schema_version`: `2`
 - `tier`: `SEAL-0` | `SEAL-1` | `SEAL-2` | `SEAL-3` | `SEAL-4`
 - `status`: `active` | `on-hold` | `done` | `archived`
-- `deadline`: ISO date `YYYY-MM-DD` or `null`
+- `deadline`: ISO date `YYYY-MM-DD` or `null` — **derived**, never written by
+  hand (clodia-platform#658): the earliest `due` among `todos` with
+  `status: open`, recomputed on every read and every write.
+- `todos`: the room's to-do list, a list of
+  `{id, text, due, assignee, status, updated_at, updated_by}` — `id` like
+  `t-7f3a`, `due` an ISO date or `null`, `assignee` optional, `status`
+  `open` | `done`. Written only through `topic.todo_add` / `todo_update` /
+  `todo_remove`, whose `base_version` is **mandatory**: the `todos_version`
+  returned by `topic.open` (a hash of the list alone). A stale one raises
+  `VersionConflict` and the caller re-reads. On read a malformed item is
+  dropped, never raised.
+
+A meta written before #658 has no `todos` key: its manual `deadline` is read
+as one item `{"id": "t-deadline", "text": "Topic deadline", "due": <deadline>}`,
+so the derived value is unchanged. To write that conversion to disk and get the
+list of dated bullets still sitting in `## Prossimi passi` (not converted):
+
+```bash
+python3 -m server.topics.migrate_todos --root /datadir/clodia-vault/topics-store          # dry-run
+python3 -m server.topics.migrate_todos --root /datadir/clodia-vault/topics-store --apply  # idempotent
+```
+
+`topic.list` still emits `next_deadline`, now an alias of `deadline`, for one
+release.
 
 Optional fields worth naming, because each carries authority:
 

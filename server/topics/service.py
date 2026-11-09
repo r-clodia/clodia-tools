@@ -280,8 +280,9 @@ def _validate_status(s: str | None) -> str:
     return st
 
 
-# Scadenze nei todo (action_points): una data nel testo del punto (es.
-# "inviare LOI entro 2026-07-10" o "20/07/2026"). La card mostra la più vicina.
+# A date written in a free-text line (e.g. "inviare LOI entro 2026-07-10" or
+# "20/07/2026"). Since #658 the topic deadline comes from `meta["todos"]`; this
+# parser validates ISO dates and lets `migrate_todos` list dated bullets.
 import re as _re
 from datetime import date as _date
 _DATE_RXS = [
@@ -299,17 +300,6 @@ def _parse_deadline(text: str):
             except ValueError:
                 continue
     return None
-
-
-def _next_deadline(action_points: list[str]) -> str | None:
-    """Scadenza più vicina fra i todo con data: la prima IMMINENTE (>= oggi);
-    se sono tutte passate, la più recente (scaduta, ancora rilevante). ISO date."""
-    dates = [d for d in (_parse_deadline(a) for a in (action_points or [])) if d]
-    if not dates:
-        return None
-    today = _date.today()
-    future = sorted(d for d in dates if d >= today)
-    return (future[0] if future else max(dates)).isoformat()
 
 
 def _norm_deadline(value) -> str | None:
@@ -335,6 +325,124 @@ def _coerce_deadline(value, ctx: str = "") -> str | None:
     LOG.warning("meta v2%s: deadline legacy non conforme %r → null",
                 f" ({ctx})" if ctx else "", value)
     return None
+
+
+# ── To-do list (clodia-platform#658) ─────────────────────────────────────────
+#
+# The room's action items live in `meta["todos"]`, structured, instead of
+# being parsed out of the free-text bullets of `## Prossimi passi`. The topic's
+# `deadline` is DERIVED from them — the earliest `due` among open items — on
+# every read and every write, so the two can never disagree.
+#
+# Read path tolerant, write path strict, as for `deadline` and `goal`: a
+# malformed item on disk is dropped with a warning (the topic stays openable),
+# while the `todo_*` verbs refuse malformed input with an error.
+TODO_STATES = ("open", "done")
+TODO_MAX_ITEMS = 200
+TODO_MAX_TEXT = 500
+TODO_MAX_ASSIGNEE = 64
+_TODO_ID_RX = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+#: Message of the refusal on every path that used to set `deadline` by hand.
+DEADLINE_DERIVED = "deadline is derived from todo items: use topic.todo_add / topic.todo_update"
+#: The item that carries a pre-#658 manual deadline. Deterministic id, so the
+#: lazy conversion on read and the one-shot migration produce the same item.
+LEGACY_DEADLINE_TODO_ID = "t-deadline"
+LEGACY_DEADLINE_TODO_TEXT = "Topic deadline"
+
+
+def _legacy_deadline_todo(deadline: str) -> dict:
+    return {"id": LEGACY_DEADLINE_TODO_ID, "text": LEGACY_DEADLINE_TODO_TEXT,
+            "due": deadline, "assignee": None, "status": "open",
+            "updated_at": None, "updated_by": "migration"}
+
+
+def _coerce_todo(item, ctx: str = "") -> dict | None:
+    """One item, tolerant: None (dropped) when it cannot be read as a to-do."""
+    if not isinstance(item, dict):
+        LOG.warning("meta v2%s: todo non conforme %r → scartato", ctx, item)
+        return None
+    tid = item.get("id")
+    text = item.get("text")
+    if not (isinstance(tid, str) and _TODO_ID_RX.match(tid)) \
+            or not (isinstance(text, str) and text.strip()):
+        LOG.warning("meta v2%s: todo senza id/testo validi %r → scartato", ctx, item)
+        return None
+    assignee = item.get("assignee")
+    assignee = assignee.strip()[:TODO_MAX_ASSIGNEE] or None \
+        if isinstance(assignee, str) else None
+    status = item.get("status")
+    upd_at, upd_by = item.get("updated_at"), item.get("updated_by")
+    return {
+        "id": tid,
+        "text": text.strip()[:TODO_MAX_TEXT],
+        "due": _coerce_deadline(item.get("due"), ctx=ctx.strip(" ()")),
+        "assignee": assignee,
+        "status": status if status in TODO_STATES else "open",
+        "updated_at": upd_at if isinstance(upd_at, str) else None,
+        "updated_by": upd_by if isinstance(upd_by, str) else None,
+    }
+
+
+def _coerce_todos(value, ctx: str = "") -> list[dict]:
+    if not isinstance(value, list):
+        if value is not None:
+            LOG.warning("meta v2%s: todos non è una lista → []", ctx)
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for raw in value:
+        item = _coerce_todo(raw, ctx)
+        if item is None or item["id"] in seen:
+            continue
+        seen.add(item["id"])
+        out.append(item)
+    return out[:TODO_MAX_ITEMS]
+
+
+def derive_deadline(todos: list[dict] | None) -> str | None:
+    """The topic deadline: the earliest `due` among OPEN items, None if none.
+    Overdue items count — an overdue deadline is still the deadline."""
+    dues = [t["due"] for t in (todos or [])
+            if t.get("status") == "open" and t.get("due")]
+    return min(dues) if dues else None
+
+
+def todos_version(todos: list[dict] | None) -> str:
+    """Optimistic-lock token of the to-do list ALONE (not of the whole meta):
+    a status change or a new participant does not invalidate a to-do edit."""
+    import hashlib
+    blob = json.dumps(todos or [], sort_keys=True, ensure_ascii=False,
+                      separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def _todo_text(value) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise TopicError("todo: text is required")
+    if len(value.strip()) > TODO_MAX_TEXT:
+        raise TopicError(f"todo: text longer than {TODO_MAX_TEXT} characters")
+    return value.strip()
+
+
+def _todo_due(value) -> str | None:
+    try:
+        return _norm_deadline(value)
+    except TopicError:
+        raise TopicError("todo: due must be an ISO date YYYY-MM-DD or null")
+
+
+def _todo_assignee(value) -> str | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or len(value.strip()) > TODO_MAX_ASSIGNEE:
+        raise TopicError(f"todo: assignee must be a name of at most {TODO_MAX_ASSIGNEE} characters")
+    return value.strip() or None
+
+
+def _todo_status(value) -> str:
+    if value not in TODO_STATES:
+        raise TopicError(f"todo: status must be one of {', '.join(TODO_STATES)}")
+    return value
 
 
 #: Ciclo di vita dell'OBIETTIVO di un canale (clodia-platform#457). Un goal è un
@@ -596,13 +704,24 @@ def normalize_meta_v2(meta: dict, tier: str) -> dict:
     legacy non conformi, altrimenti un topic diventa non-apribile e sparisce
     dalla lista (list() ingoia TopicError). status sconosciuto → 'active',
     deadline non valida → null. La validazione stretta con errore resta solo
-    negli endpoint di scrittura set_status/set_deadline."""
+    negli endpoint di scrittura (set_status, todo_*).
+
+    `deadline` is not read from the input: it is derived from `todos`
+    (clodia-platform#658), and a malformed to-do item is dropped."""
     out = dict(meta or {})
     out.pop("minutes", None)
     out["schema_version"] = SCHEMA_VERSION
     out["tier"] = _normalize_tier(out.get("tier") or tier)
     out["status"] = _norm_status(out.get("status") or "active")
-    out["deadline"] = _coerce_deadline(out.get("deadline"), ctx=out.get("name", ""))
+    ctx = f" ({out['name']})" if out.get("name") else ""
+    if "todos" not in out:
+        # A meta written before #658: its manual deadline becomes the first
+        # item, so the derived value is unchanged (`migrate_todos` persists it).
+        legacy = _coerce_deadline(out.get("deadline"), ctx=out.get("name", ""))
+        out["todos"] = [_legacy_deadline_todo(legacy)] if legacy else []
+    else:
+        out["todos"] = _coerce_todos(out.get("todos"), ctx=ctx)
+    out["deadline"] = derive_deadline(out["todos"])
     goal = _coerce_goal(out.get("goal"), ctx=out.get("name", ""))
     if goal is None:
         out.pop("goal", None)  # assente ≠ presente e vuoto: la UI legge la chiave
@@ -2076,6 +2195,8 @@ class TopicService:
         base = {
             "tier": meta["tier"], "tier_name": TIER_NAMES.get(meta["tier"], meta["tier"]), "name": name,
             "meta": meta, "summary": summary, "summary_version": summary_version,
+            # Lock token for the todo_* verbs (#658): of the list, not the meta.
+            "todos_version": todos_version(meta.get("todos")),
             "tldr": _tldr(summary), "minutes": [],
             "updated_at": updated_at,
             # Collegamenti ATTIVI (clodia-platform#477). Il meta porta quelli
@@ -3324,9 +3445,13 @@ class TopicService:
                     "tier": tr, "tier_name": TIER_NAMES.get(tr, tr),
                     "name": e.name, "title": m.get("title"),
                     "status": status, "tldr": info["tldr"],
+                    # Derived from the to-do list (#658). `next_deadline` was
+                    # parsed from the summary bullets; it is an alias of
+                    # `deadline` for one release, then it goes.
                     "deadline": m.get("deadline"),
-                    # scadenza più vicina fra i todo (action_points) con data
-                    "next_deadline": _next_deadline(aps),
+                    "next_deadline": m.get("deadline"),
+                    "todos_open": sum(1 for t in m.get("todos") or []
+                                      if t.get("status") == "open"),
                     "contact_agent": m.get("contact_agent", "clodia"),
                     "kind": m.get("kind"),
                     "owner": m.get("owner"),
@@ -3370,12 +3495,102 @@ class TopicService:
         return {"status": st}
 
     def set_deadline(self, tier: str, name: str, deadline) -> dict:
-        """Imposta la deadline del topic in formato ISO YYYY-MM-DD, oppure null."""
-        dl = _norm_deadline(deadline)
-        meta, ver = self._read_meta(tier, name)
-        meta["deadline"] = dl
-        self._write_meta(tier, name, meta, base_version=ver)
-        return {"deadline": dl}
+        """Refused since clodia-platform#658: the deadline is derived from the
+        to-do list. Kept so an old caller gets the reason, not a 404."""
+        raise TopicError(DEADLINE_DERIVED)
+
+    # ── To-do list (clodia-platform#658) ─────────────────────────────────────
+    def _mutate_todos(self, tier: str, name: str, base_version, change) -> dict:
+        """Apply `change(todos) -> (todos, item)` under the to-do lock.
+
+        `base_version` is MANDATORY, unlike `save_summary`: a to-do edit made on
+        a list the caller has not seen (an item closed meanwhile, a date moved)
+        is exactly the lost update the lock exists for. It is the
+        `todos_version` returned by `open`; a stale one raises VersionConflict
+        and the caller re-reads. The meta's own storage version is used for
+        the write itself: a concurrent write elsewhere in the meta is retried,
+        never overwritten."""
+        if not isinstance(base_version, str) or not base_version.strip():
+            raise TopicError("todo: base_version is required — pass the "
+                             "todos_version returned by topic.open")
+        for _ in range(3):
+            meta, ver = self._read_meta(tier, name)
+            self._assert_content_available(meta)
+            current = todos_version(meta["todos"])
+            if current != base_version:
+                raise VersionConflict(
+                    f"todos changed for {tier}/{name}: expected {base_version}, "
+                    f"current {current} — re-read with topic.open")
+            todos, item = change([dict(t) for t in meta["todos"]])
+            if len(todos) > TODO_MAX_ITEMS:
+                raise TopicError(f"todo: at most {TODO_MAX_ITEMS} items per topic")
+            meta["todos"] = todos
+            try:
+                self._write_meta(tier, name, meta, base_version=ver)
+            except VersionConflict:
+                continue      # the meta moved elsewhere: re-check the list
+            saved = normalize_meta_v2(meta, tier)
+            return {"todo": item, "todos": saved["todos"],
+                    "deadline": saved["deadline"],
+                    "todos_version": todos_version(saved["todos"])}
+        raise VersionConflict(f"meta of {tier}/{name} keeps changing: re-read and retry")
+
+    @staticmethod
+    def _todo_index(todos: list[dict], todo_id) -> int:
+        for i, t in enumerate(todos):
+            if t.get("id") == todo_id:
+                return i
+        raise TopicError(f"todo not found: {todo_id}")
+
+    def todo_add(self, tier: str, name: str, text, *, due=None, assignee=None,
+                 base_version=None, by: str = "") -> dict:
+        """Add an open item. Returns the item, the list, the derived deadline
+        and the new `todos_version`."""
+        import secrets
+        item = {"text": _todo_text(text), "due": _todo_due(due),
+                "assignee": _todo_assignee(assignee), "status": "open",
+                "updated_at": _now().isoformat(timespec="seconds"),
+                "updated_by": (by or "").strip() or None}
+
+        def change(todos):
+            taken = {t["id"] for t in todos}
+            while True:
+                tid = f"t-{secrets.token_hex(2)}"
+                if tid not in taken:
+                    break
+            new = {"id": tid, **item}
+            return todos + [new], new
+        return self._mutate_todos(tier, name, base_version, change)
+
+    def todo_update(self, tier: str, name: str, todo_id, *, base_version=None,
+                    by: str = "", **fields) -> dict:
+        """Change text / due / assignee / status of one item. Only the fields
+        PRESENT are changed; `due=None` or `assignee=None` clears them."""
+        allowed = {"text": _todo_text, "due": _todo_due,
+                   "assignee": _todo_assignee, "status": _todo_status}
+        unknown = set(fields) - set(allowed)
+        if unknown:
+            raise TopicError(f"todo: unknown field(s) {', '.join(sorted(unknown))}")
+        if not fields:
+            raise TopicError("todo: nothing to update (text, due, assignee, status)")
+        clean = {k: allowed[k](v) for k, v in fields.items()}
+
+        def change(todos):
+            i = self._todo_index(todos, todo_id)
+            todos[i].update(clean)
+            todos[i]["updated_at"] = _now().isoformat(timespec="seconds")
+            todos[i]["updated_by"] = (by or "").strip() or None
+            return todos, todos[i]
+        return self._mutate_todos(tier, name, base_version, change)
+
+    def todo_remove(self, tier: str, name: str, todo_id, *, base_version=None,
+                    by: str = "") -> dict:
+        """Remove one item. Closing it (`status: done`) keeps the record; this
+        is for an item that should never have been there."""
+        def change(todos):
+            i = self._todo_index(todos, todo_id)
+            return todos[:i] + todos[i + 1:], todos[i]
+        return self._mutate_todos(tier, name, base_version, change)
 
     def set_goal(self, tier: str, name: str, goal, by: str = "") -> dict:
         """Fissa l'OBIETTIVO del canale, o lo toglie (`goal=None` → unpin).
