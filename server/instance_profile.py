@@ -42,11 +42,14 @@ _FEATURE_DEFAULTS: dict[str, Any] = {
     "packs_ui": True,
     "providers_ui": True,
     "activity": True,
-    "pwa": True,
     "helpdesk": True,
     "kanban": False,
     "colony": False,
 }
+#: Feature keys that existed and were removed. The builder wrote them into
+#: every edition's profile, so they are dropped silently — not a warning on each
+#: load for a key nobody can act on. `pwa`: the PWA is retired (#657).
+_RETIRED_FEATURES = frozenset({"pwa"})
 _TRISTATE = {"topics": ("off", "single", "full"),
              "rag": ("off", "single", "full"),
              "integrations": ("off", "fixed", "full")}
@@ -92,6 +95,8 @@ def load(force: bool = False) -> dict:
             if not isinstance(feats, dict):
                 raise ValueError("'features' deve essere un mapping")
             for key, val in feats.items():
+                if key in _RETIRED_FEATURES:
+                    continue
                 if key not in _FEATURE_DEFAULTS:
                     # Chiave che questo lettore non conosce (schema del profilo
                     # condiviso con l'agent-server, che può essere più nuovo):

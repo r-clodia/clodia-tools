@@ -82,6 +82,14 @@ class InstanceProfileGatewayTest(unittest.TestCase):
         self._write("features: {rag: off, chiave_futura: true}\n")
         self.assertEqual(ip.rag_mode(), "off")
 
+    def test_retired_pwa_key_dropped_silently(self) -> None:
+        # clodia-platform#657: every built edition says `pwa: false`. The key is
+        # gone, the profile keeps gating, and no warning is logged for it.
+        with self.assertNoLogs("clodia-tools.instance_profile", level="WARNING"):
+            self._write("features: {rag: off, pwa: false}\n")
+        self.assertEqual(ip.rag_mode(), "off")
+        self.assertNotIn("pwa", ip.load()["features"])
+
     def test_topic_default_participants(self) -> None:
         ip.load(force=True)
         # Il segretario è partecipante di default dal pack 6.4.0 (verbalizza lo
