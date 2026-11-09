@@ -537,6 +537,8 @@ def set_resource(tier: str, name: str, mid: str, uri: str, effect: str | None,
     u = _eg.canonical(raw) if raw else ""
     scheme = u.partition(":")[0]
     reach = {x["scheme"] for x in e["schemes"]}
+    if reach & {"http", "https"}:
+        reach |= {"http", "https"}      # one family: a web address is either (#662)
     if effect is not None:
         if effect not in EFFECTS:
             raise ToolboxError(f"effetto non valido: {effect} (ammessi: {', '.join(EFFECTS)})")
@@ -560,6 +562,75 @@ def set_resource(tier: str, name: str, mid: str, uri: str, effect: str | None,
         mcp[mid]["resources"] = sorted(rows, key=lambda r: r["uri"])
         return {"ok": True, "resources": mcp[mid]["resources"]}
     return _write_mcp(tier, name, mutate)
+
+
+#: The room's lists, by tool (#662): which MCP a list entry belongs to. In:
+#: Fonti (web), Mittenti and Caselle collegate (email), Gruppi e contatti
+#: (telegram, whatsapp). Out: Destinazioni (web), Destinatari (email), Gruppi e
+#: contatti. Explicit, not derived from the catalogue: `mailto:` is reached by
+#: Google too, and `https:` out by GitHub — the list names the tool.
+LIST_TOOLS = {
+    ("ingress", "https"): "web", ("ingress", "http"): "web",
+    ("egress", "https"): "web", ("egress", "http"): "web",
+    ("ingress", "mailfrom"): "email", ("ingress", "inbox"): "email",
+    ("egress", "mailto"): "email", ("egress", "outbox"): "email",
+    ("ingress", "tg"): "telegram", ("egress", "tg"): "telegram",
+    ("ingress", "wa"): "whatsapp", ("egress", "wa"): "whatsapp",
+}
+
+
+def list_tool(direction: str, uri: str) -> str | None:
+    """The tool a list entry belongs to, or None (topic:, datastore:, …)."""
+    return LIST_TOOLS.get((direction, str(uri or "").partition(":")[0].lower()))
+
+
+def on_room_list_added(direction: str, scope: str, uri: str) -> dict:
+    """A list entry was added to the room `scope` (#662, owner 9 Nov 2026):
+    its tool is authorised in the room, and an OUTBOUND entry (or a chat) gets
+    an `allow` row on the tool, so writing there asks nobody. The open web
+    (`https:*`) and every inbound entry only authorise the tool. A tool the
+    instance does not have (no such MCP) is left alone."""
+    mid = list_tool(direction, uri)
+    tier, _, name = str(scope).partition("/")
+    if not (mid and tier and name):
+        return {}
+    cat = mcp_catalogue()
+    if mid not in cat:
+        return {}
+    meta = _svc()._read_meta(tier, name)[0]
+    out: dict = {}
+    if mid not in _mcp_entries(meta):
+        enable_mcp(tier, name, mid)
+        out["mcp_authorised"] = mid
+    row = direction == "egress" or mid in ("telegram", "whatsapp")
+    if row and str(uri).strip().lower() != "https:*":
+        try:
+            set_resource(tier, name, mid, uri, "allow")
+            out["resource_allowed"] = uri
+        except ToolboxError as e:
+            # A scheme the tool cannot take as a row: the list entry still
+            # works where the gateway reads the lists.
+            LOG.info("room list %s: nessuna riga su %s (%s)", uri, mid, e)
+    from . import authz_runtime as _azr
+    _azr.invalidate()
+    return out
+
+
+def on_room_list_removed(direction: str, scope: str, uri: str) -> None:
+    """The entry left the list: its own `allow` row goes with it (a hand-written
+    ask or deny stays). The tool stays authorised: only the owner revokes it."""
+    mid = list_tool(direction, uri)
+    tier, _, name = str(scope).partition("/")
+    if not (mid and tier and name):
+        return
+    from . import egress as _eg
+    u = _eg.canonical(" ".join(str(uri or "").split()))
+    meta = _svc()._read_meta(tier, name)[0]
+    rows = _mcp_entries(meta).get(mid, {}).get("resources") or []
+    if any(r["uri"] == u and r["effect"] == "allow" for r in rows):
+        set_resource(tier, name, mid, u, None)
+        from . import authz_runtime as _azr
+        _azr.invalidate()
 
 
 def enable(tier: str, name: str, verb: str, on: bool = True) -> dict:
