@@ -21,8 +21,8 @@ LOG = logging.getLogger("clodia-tools.agents_api")
 def _authorize(request: Request):
     """Regola unica delle rotte interne (`internal_auth.authorize`).
 
-    Questa API è il punto di ENFORCEMENT: `register` riscrive `allowed_tools` di
-    un agente. Un token stretto a quattro verbi di chat poteva allargarsi da sé
+    Questa API è il punto di ENFORCEMENT: `register` riscrive `gated_tools`,
+    `denied_tools` e `profile_tools` di un agente. Un token stretto a quattro verbi di chat poteva allargarsi da sé
     passando da qui, perché il tetto che lo tratteneva vive(va) solo sul percorso
     MCP (clodia-platform#261). Nessun verbo del gateway corrisponde a queste
     rotte: un token scoped, o on-behalf, non entra.
@@ -32,7 +32,14 @@ def _authorize(request: Request):
 
 
 async def register(request: Request):
-    """POST /internal/agents/whitelist {agent, allowed_tools?} → upsert config.yaml."""
+    """POST /internal/agents/whitelist {agent, gated_tools?, denied_tools?,
+    profile_tools?} → upsert config.yaml.
+
+    `allowed_tools` in the body is ignored (clodia-platform#656): under A·V·R·Q
+    the seed grants no verb, and reachability reads the tuples only. An entry
+    already in the config is left as it is (other readers — the origin chain
+    outside enforce, `copybrain` — still look at it); it is never rewritten
+    from a seed any more."""
     _agent, err = _authorize(request)
     if err:
         return err
@@ -55,13 +62,12 @@ async def register(request: Request):
     # campo doveva solo smettere di condizionare.
     # Il corpo può ancora contenerlo (i chiamanti vecchi lo mandano): si ignora
     # in silenzio, invece di rifiutare una registrazione per un campo morto.
-    spec = whitelist.upsert_agent(name, allowed_tools=body.get("allowed_tools"),
+    spec = whitelist.upsert_agent(name,
                                   gated_tools=body.get("gated_tools"),
                                   profile_tools=body.get("profile_tools"),
                                   denied_tools=body.get("denied_tools"))
     whitelist.reload_config()
     return JSONResponse({"ok": True, "agent": name,
-                         "allowed_tools": spec.get("allowed_tools"),
                          "gated_tools": spec.get("gated_tools") or [],
                          "denied_tools": spec.get("denied_tools") or [],
                          "profile_tools": spec.get("profile_tools") or []})

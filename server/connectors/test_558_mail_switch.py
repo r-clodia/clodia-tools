@@ -447,10 +447,14 @@ if __name__ == "__main__":  # pragma: no cover
 
 
 def setUpModule() -> None:
+    from .. import testkit_authz as _tk_authz
+    _tk_authz.module_start()   # reachability is the tuples' (#656)
     # google-pack and it-pack as on every instance (#526); comms-pack is this
     # module's own (`_MailIstanza` writes it).
     _FP.install(without=("comms-pack",))
 
 
 def tearDownModule() -> None:
+    from .. import testkit_authz as _tk_authz
+    _tk_authz.module_stop()
     _FP.uninstall()

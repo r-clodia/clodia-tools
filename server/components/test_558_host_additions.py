@@ -285,3 +285,15 @@ class PdpArgumentsTests(_WithServices):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+def setUpModule():
+    # Reachability is decided by A·V·R·Q tuples only (#656): the verbs these
+    # tests declare in `whitelist.CONFIG` become tuples, in `shadow` mode.
+    from .. import testkit_authz as _tk_authz
+    _tk_authz.module_start()
+
+
+def tearDownModule():
+    from .. import testkit_authz as _tk_authz
+    _tk_authz.module_stop()

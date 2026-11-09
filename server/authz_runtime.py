@@ -7,9 +7,15 @@ grant anything to an agent.
 
 What stays, on purpose, as a second line: the egress/ingress PDP, the gates,
 the data grants of #590, the Drive perimeter, the origin chain, denied_tools,
-the unattended block. Enforcement therefore only NARROWS what those allow —
-the switch can be turned on without opening anything that is closed today, and
-turned off (`shadow`) to return exactly to today.
+the unattended block, and the gateway-held `denied_tools`, `gated_tools`,
+`profile_tools`. Enforcement therefore only NARROWS what those allow.
+
+`enforce` is the default when `authz_mode` is missing or unreadable
+(clodia-platform#656). Reachability — which verbs an agent has — is decided by
+the tuples in every mode: the pre-A·V·R·Q path that read the seed's
+`allowed_tools` was removed in the same change. `shadow`/`off`, when set
+explicitly, only switch off the per-call effects (`check`) at the call sites
+that test `enforcing()`; they no longer return to the seed-based matrix.
 
 The tuples in force: the global file (`authz.json`) and, in a room, the
 topic's `meta.authz` plus its toolbox (#605) read as tuples — so the
@@ -30,9 +36,11 @@ ENFORCE = "enforce"
 
 
 def mode() -> str:
+    """`enforce` unless the config explicitly says `shadow` or `off`. A
+    missing key or an unknown value is `enforce`: fail closed (#656)."""
     from . import whitelist as _wl
-    m = str((_wl.CONFIG or {}).get(S.MODE_KEY) or "shadow").strip().lower()
-    return m if m in ("off", "shadow", ENFORCE) else "shadow"
+    m = str((_wl.CONFIG or {}).get(S.MODE_KEY) or ENFORCE).strip().lower()
+    return m if m in ("off", "shadow", ENFORCE) else ENFORCE
 
 
 def enforcing() -> bool:

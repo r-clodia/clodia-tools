@@ -2698,63 +2698,25 @@ def _declared_tools(agent: str | None) -> set:
     return effective_tools(agent)
 
 
-def _agent_tool_reachable(name: str, agent: str | None,
-                          resolved: set | None = None) -> bool:
-    """One allow-matrix decision for agent discovery and dispatch.
+def _agent_tool_reachable(name: str, agent: str | None) -> bool:
+    """One reachability decision for agent discovery and dispatch.
 
-    ``effective_tools`` is authoritative: it resolves the seed, its ancestry and
-    the archseed floor. Scoped grants are request-local additions. Explicit
+    A·V·R·Q (#617) is the only authority on which verbs an agent has: the
+    tuples in force here (global file, the room's rules and panels). The seed
+    grants nothing. Scoped grants (one request, signed) still add. Explicit
     denies remain a separate subtraction because dispatch reports their more
     useful denial reason after this reachability check.
+
+    The pre-A·V·R·Q path (seed `allowed_tools`, ancestry, archseed, room
+    toolbox and data verbs as a set) was removed in clodia-platform#656: it
+    was reachable only with `authz_mode` set to `shadow`/`off`, and the mode
+    now defaults to `enforce`.
     """
     from . import authz_runtime as _azr
-    if _azr.enforcing():
-        # A·V·R·Q (#617): the tuples are the authority on which verbs an agent
-        # has — the seed grants nothing any more. Scoped grants (one request,
-        # signed) still add.
-        from . import egress as _eg_r
-        if name in set(current_scoped_tools()):
-            return True
-        return _azr.available(agent, name, _eg_r._scope_of_call())
-    return _legacy_reachable(name, agent, resolved)
-
-
-def _legacy_reachable(name: str, agent: str | None, resolved: set | None = None) -> bool:
-    """Reachability as it was before A·V·R·Q: seed, ancestry and archseed,
-    scoped grants, data verbs, room toolbox. The shadow measures against it."""
-    allowed = (resolved if resolved is not None
-               else _declared_tools(agent) | set(current_scoped_tools())
-               | _room_data_verbs(agent) | _room_tool_verbs(agent))
-    return _tool_allowed(name, allowed)
-
-
-def _room_data_verbs(agent: str | None) -> set:
-    """The data verbs the owner's grants give `agent` in the room of this call
-    (#590): an agent granted an imported index can query it even when its seed
-    never declared `rag.*`."""
-    from . import topic_data
-    from .egress import _scope_of_call
-    try:
-        return topic_data.room_verbs(agent, _scope_of_call())
-    except Exception:  # noqa: BLE001
-        return set()
-
-
-def _room_tool_verbs(agent: str | None) -> set:
-    """The verbs the ROOM of this call enables for `agent` (#605): every
-    `topic.*` for a participant, plus the owner's toolbox minus this agent's
-    exceptions — or, outside a room, the instance's DM toolbox.
-
-    Additive in R1 like `_room_data_verbs`: it widens what is reachable, never
-    narrows it. The gate, the deny list, the origin chain and the egress PDP
-    decide the call afterwards exactly as before.
-    """
-    from . import room_tools
-    from .egress import _scope_of_call
-    try:
-        return room_tools.verbs_for(agent, _scope_of_call())
-    except Exception:  # noqa: BLE001
-        return set()
+    from . import egress as _eg_r
+    if name in set(current_scoped_tools()):
+        return True
+    return _azr.available(agent, name, _eg_r._scope_of_call())
 
 
 
@@ -3050,15 +3012,9 @@ async def list_tools() -> list[Tool]:
                 if _human_tool_allowed(t.name) and _scoped_ceiling_ok(t.name)]
     if _is_super(me):
         return [t for t in (native + proxied) if not agent_denies(t.name, me)]
-    # Risolvi l'albero una volta per discovery: l'archseed viene dal filesystem
-    # e rifarlo per ciascun verbo renderebbe la fonte unica inutilmente costosa.
-    # Enforced (#617) the tuples decide and the tree is not needed.
-    from . import authz_runtime as _azr_l
-    resolved = (set() if _azr_l.enforcing() else
-                (_declared_tools(me) | set(current_scoped_tools())
-                 | _room_data_verbs(me) | _room_tool_verbs(me)))
+    # The tuples decide (#617, #656): the same call as dispatch.
     return [t for t in (native + proxied)
-            if _agent_tool_reachable(t.name, me, resolved)
+            if _agent_tool_reachable(t.name, me)
             and not agent_denies(t.name, me)]
 
 

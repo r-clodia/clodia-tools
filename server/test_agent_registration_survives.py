@@ -88,11 +88,28 @@ class TheEndpointRegistersTests(unittest.TestCase):
 
     def test_a_new_agent_lands_in_the_config(self):
         r, config = self._register({"agent": "content-creator",
-                                    "allowed_tools": ["topic.open", "topic.files"]})
+                                    "denied_tools": ["email.send"]})
         self.assertEqual(r.status_code, 200)
         self.assertIn("content-creator", config["agents"])
-        self.assertEqual(config["agents"]["content-creator"]["allowed_tools"],
-                         ["topic.open", "topic.files"])
+        self.assertEqual(config["agents"]["content-creator"]["denied_tools"],
+                         ["email.send"])
+
+    def test_allowed_tools_in_the_body_is_ignored(self):
+        """#656: under A·V·R·Q a seed grants no verb. An old caller still
+        sending `allowed_tools` is registered, and the list is not written."""
+        r, config = self._register({"agent": "content-creator",
+                                    "allowed_tools": ["topic.open", "topic.files"]})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(config["agents"]["content-creator"]["allowed_tools"], [])
+        self.assertNotIn("allowed_tools", json.loads(r.body))
+
+    def test_an_existing_allowed_tools_entry_is_left_alone(self):
+        """Not rewritten from the seed any more — and not wiped either: other
+        readers (origin outside enforce, copybrain) still look at it."""
+        r, config = self._register({"agent": "legacy", "allowed_tools": ["x.*"]},
+                                   cfg={"legacy": {"allowed_tools": ["topic.open"]}})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(config["agents"]["legacy"]["allowed_tools"], ["topic.open"])
 
     def test_a_retired_field_in_the_body_does_not_break_the_registration(self):
         """Un chiamante vecchio manda ancora `gated_in_channel`: si ignora.

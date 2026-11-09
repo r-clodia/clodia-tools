@@ -850,6 +850,8 @@ class ElectedUrlHostIsTheRawPrefixTests(unittest.TestCase):
 
 
 def setUpModule() -> None:
+    from .. import testkit_authz as _tk_authz
+    _tk_authz.module_start()   # reachability is the tuples' (#656)
     # comms-pack and it-pack as on every instance (#526): `gdrive.upload`
     # shares on `mailto:`, which comms-pack's `mail` declares. google-pack is
     # this module's own (`_GoogleIstanza` writes it).
@@ -857,4 +859,6 @@ def setUpModule() -> None:
 
 
 def tearDownModule() -> None:
+    from .. import testkit_authz as _tk_authz
+    _tk_authz.module_stop()
     _FP.uninstall()

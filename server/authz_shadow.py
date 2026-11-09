@@ -14,7 +14,8 @@ What it decides on:
   that say what today's mechanisms say (`derived`): the verb is the agent's
   (seed, room toolbox, data grants, scoped grants), the destinations are those
   of the global and room egress lists, the trusted sources those of the ingress
-  lists, a gated verb asks. A divergence between the engine and the outcome is
+  lists, a gated verb asks. (Since #656 «the verb is the agent's» is the
+  enforced reachability — the tuples — not the seed's list.) A divergence between the engine and the outcome is
   therefore a gap in the engine or in that translation, which is exactly what
   S3 (the migration) needs to know before it writes real tuples.
 
@@ -65,7 +66,8 @@ _READ_WORDS = frozenset({"list", "read", "get", "search", "show", "open", "statu
 
 def mode_raw() -> str:
     from . import whitelist as _wl
-    return str((_wl.CONFIG or {}).get(MODE_KEY) or "shadow").strip().lower()
+    # Missing key: `enforce`, as `authz_runtime.mode` (#656).
+    return str((_wl.CONFIG or {}).get(MODE_KEY) or "enforce").strip().lower()
 
 
 def mode() -> str:
@@ -147,7 +149,10 @@ def derived(agent: str, verb: str, scope: Optional[str], f: dict) -> list[A.Tupl
     from . import gate as _gate
     from . import main as _m
     from . import whitelist as _wl
-    if not _m._legacy_reachable(verb, agent) or _wl.agent_denies(verb, agent):
+    # Reachability is the tuples' since #656 (the seed-based matrix the shadow
+    # used to measure against is gone): what this derivation still measures is
+    # the egress/ingress lists and the gates against the enforced outcome.
+    if not _m._agent_tool_reachable(verb, agent) or _wl.agent_denies(verb, agent):
         return []
     gated = _gate.is_gated(verb)
     rule: list[dict] = []

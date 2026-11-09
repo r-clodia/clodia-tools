@@ -208,7 +208,9 @@ class SubtractionTests(unittest.TestCase):
             self.assertFalse(origin._agent_may("segretario", "topic.post_message"))
 
     def test_the_rest_of_the_inheritance_survives_the_subtraction(self):
-        with _cfg():
+        # The origin chain's seed-based reading is the one outside enforce
+        # (#626); under enforce the tuples decide (#656).
+        with _cfg({**CFG, "authz_mode": "shadow"}):
             self.assertTrue(origin._agent_may("segretario", "topic.open"))
 
 
@@ -283,14 +285,22 @@ class OneAnswerTests(unittest.TestCase):
             m, o, e = self._tre_esiti("segretario", "topic.post_message")
             self.assertEqual((m, o, e), (False, False, False))
 
-    def test_list_tools_serves_the_archseed_floor(self):
-        """The MCP discovery response must expose inherited verbs, not raw config."""
+    def test_list_tools_does_not_serve_the_archseed_floor(self):
+        """#656: discovery is the tuples'. The archseed's verbs (and the seed's
+        own) are not served without a tuple — the legacy path that resolved
+        the seed tree for `list_tools` is gone."""
+        from . import authz_runtime as R
+        from . import authz_shadow as S
         native = [
             Tool(name="memory.list", description="memory", inputSchema={}),
             Tool(name="topic.save_summary", description="summary", inputSchema={}),
             Tool(name="settings.set", description="settings", inputSchema={}),
         ]
+        R.invalidate()
+        self.addCleanup(R.invalidate)
         with _cfg(), _seed(), \
+             patch.object(S, "global_tuples", lambda: ([], [])), \
+             patch("server.egress._scope_of_call", lambda: None), \
              patch.object(M, "agent_name", lambda: "segretario"), \
              patch.object(M, "is_on_behalf", lambda: False), \
              patch.object(M, "_is_super", lambda _n: False), \
@@ -299,11 +309,17 @@ class OneAnswerTests(unittest.TestCase):
              patch.object(M.proxy, "list_proxied_tools", return_value=[]):
             names = {tool.name for tool in asyncio.run(M.list_tools())}
 
-        self.assertEqual(names, {"memory.list", "topic.save_summary"})
+        self.assertEqual(names, set())
 
-    def test_dispatch_executes_a_verb_inherited_from_archseed(self):
-        """Regression: sysadmin/segretario saw no memory.* at the decision point."""
+    def test_dispatch_refuses_a_verb_only_the_archseed_declares(self):
+        """#656: the archseed floor no longer reaches dispatch either."""
+        from . import authz_runtime as R
+        from . import authz_shadow as S
+        R.invalidate()
+        self.addCleanup(R.invalidate)
         with _cfg(), _seed(), \
+             patch.object(S, "global_tuples", lambda: ([], [])), \
+             patch("server.egress._scope_of_call", lambda: None), \
              patch.object(M, "agent_name", lambda: "segretario"), \
              patch.object(M, "is_on_behalf", lambda: False), \
              patch.object(M, "_is_super", lambda _n: False), \
@@ -315,9 +331,8 @@ class OneAnswerTests(unittest.TestCase):
              patch.object(M._tlm, "record"):
             result = asyncio.run(M.call_tool("memory.list", {}))
 
-        dispatch.assert_called_once_with("memory.list", {})
-        self.assertIn('"files": []', result[0].text)
-
+        dispatch.assert_not_called()
+        self.assertTrue(result[0].text.startswith("DENIED"), result[0].text)
 
 if __name__ == "__main__":
     unittest.main()
