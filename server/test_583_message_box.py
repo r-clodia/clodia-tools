@@ -133,11 +133,27 @@ class ColonyRoomsTests(unittest.TestCase):
         sender-less rows of #627 need the index (see test_585)."""
         self.assertEqual(self._rooms({}, {"DJ56K": ("SEAL-2", "titulon")}), [])
 
-    def test_a_room_already_reading_the_colony_mailbox_gets_no_second_row(self):
+    def test_a_room_linking_the_colony_mailbox_keeps_its_message_box(self):
+        """#665: the direct row would deliver only declared senders and hide
+        the room's own address; the tagged row wins, one row, no duplicate."""
         out = self._rooms({"SEAL-2/titulon": ["inbox:devnullboxx@gmail.com",
                                                "mailfrom:a@b.it"]},
                           {"DJ56K": ("SEAL-2", "titulon")})
-        self.assertEqual([r.get("tag") for r in out], [None])
+        self.assertEqual([r.get("tag") for r in out], ["DJ56K"])
+
+    def test_with_an_older_comms_pack_the_direct_row_stays(self):
+        self.capable = False
+        out = self._rooms({"SEAL-2/titulon": ["inbox:devnullboxx@gmail.com",
+                                               "mailfrom:a@b.it"]},
+                          {"DJ56K": ("SEAL-2", "titulon")})
+        self.assertEqual([(r.get("tag"), r["address"]) for r in out],
+                         [(None, "devnullboxx@gmail.com")])
+
+    def test_another_linked_mailbox_keeps_its_row(self):
+        out = self._rooms({"SEAL-2/titulon": ["inbox:studio@x.it", "mailfrom:a@b.it"]},
+                          {"DJ56K": ("SEAL-2", "titulon")})
+        self.assertEqual(sorted((r.get("tag") or "", r["address"]) for r in out),
+                         [("", "studio@x.it"), ("DJ56K", "devnullboxx@gmail.com")])
 
 
 class TagIsPartOfThePairTests(unittest.TestCase):
