@@ -480,7 +480,7 @@ _RAG_TOOLS: list[Tool] = [
     ),
     Tool(
         name="rag.ingest",
-        description=("Aggiunge un PDF (già nei files/ di un topic di cui sei "
+        description=("Aggiunge un file PDF, DOCX, PPTX, MD o TXT (già nei files/ di un topic di cui sei "
                      "participant) a una collection della knowledge base. Il gateway "
                      "legge i byte server-side, li estrae/chunka/embedda/indicizza. "
                      "Richiede grant di SCRITTURA sulla collection. Solo materiale "
@@ -491,7 +491,7 @@ _RAG_TOOLS: list[Tool] = [
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"],
                      "description": "tier del topic da cui leggere il file"},
             "name": {"type": "string", "description": "nome del topic da cui leggere il file"},
-            "path": {"type": "string", "description": "path del PDF nel topic, es. 'files/x.pdf'"},
+            "path": {"type": "string", "description": "path del file nel topic, es. 'files/x.pdf'"},
             "doc_name": {"type": "string", "description": "nome del documento nella collection"},
             "version": {"type": "string"},
             "url": {"type": "string"},
@@ -6392,6 +6392,14 @@ def _datastore_authorize_human(entry: dict, key: str, *, write: bool) -> dict:
     return entry
 
 
+def _refuse_tombstoned(collection: str) -> None:
+    """A collection deleted from the Databases page is not re-created by a
+    pack's provisioner or an ingest (#671): only an admin's explicit action
+    (create again, or restore) brings the name back."""
+    from . import data_catalog
+    data_catalog.refuse_tombstoned("rag", collection)
+
+
 def _dispatch_rag(name: str, a: dict):
     verb = name.split(".", 1)[1]
     if not instance_profile.rag_enabled():
@@ -6423,6 +6431,7 @@ def _dispatch_rag(name: str, a: dict):
         return res
     if verb == "create_collection":
         collection = a["collection"]
+        _refuse_tombstoned(collection)
         _rag_authorize(collection, write=True, verb="create_collection")
         tier = a.get("tier", "SEAL-1")
         if agent_name() in _rag_provisioners():
@@ -6460,6 +6469,7 @@ def _dispatch_rag(name: str, a: dict):
         _rag_authorize(collection, write=False)
         return eu_corpus.list_documents(collection)
     if verb == "ingest":
+        _refuse_tombstoned(collection)
         _rag_authorize(collection, write=True, verb="ingest")
         svc = _topics()
         tier, tname, path = a["tier"], a["name"], a["path"]
@@ -6467,6 +6477,20 @@ def _dispatch_rag(name: str, a: dict):
         _ingest_source_ok(collection, tier, tname)
         data = svc.read_file(tier, tname, path)
         filename = path.rsplit("/", 1)[-1]
+        if not filename.lower().endswith(".pdf"):
+            # DOCX, PPTX, MD, TXT (#671): the gateway extracts the text with the
+            # topic indexer's extractor and sends the text, as the upload does.
+            from . import databases
+            text = databases.extract_text(filename, data, formats=databases.AGENT_INGEST_EXT)
+            if not text.strip():
+                raise ValueError(f"nessun testo estraibile da '{filename}'")
+            # Same promises as the PDF path: `supersede` only when asked, the
+            # document's URL kept.
+            return eu_corpus.ingest_text(
+                collection, a["doc_name"], text, version=a["version"],
+                source=f"topic:{tier}/{tname}/{path}",
+                provenance=svc.provenance_of(tier, tname, path) or "untrusted",
+                supersede=bool(a.get("supersede", False)), url=a.get("url"))
         return eu_corpus.ingest_bytes(
             data, filename, a["doc_name"], a["version"],
             url=a.get("url"), supersede=bool(a.get("supersede", False)),
@@ -6514,11 +6538,83 @@ def _dispatch_artifact(a: dict):
     return {"ok": True, "path": "files/artifact.html", "bytes": len(data)}
 
 
+def _pptx_text(data: bytes) -> tuple[str, int]:
+    """Text of a PPTX, one section per slide: title, every text frame and
+    table (groups included), then the speaker notes (clodia-platform#671).
+    Returns (text, slides)."""
+    import io
+    from pptx import Presentation
+
+    def shapes_text(shapes, out):
+        for sh in shapes:
+            if getattr(sh, "shape_type", None) == 6 and hasattr(sh, "shapes"):   # GROUP
+                shapes_text(sh.shapes, out)
+                continue
+            if getattr(sh, "has_text_frame", False) and sh.has_text_frame:
+                t = sh.text_frame.text.strip()
+                if t:
+                    out.append(t)
+            if getattr(sh, "has_table", False) and sh.has_table:
+                for row in sh.table.rows:
+                    out.append("\t".join(c.text.strip() for c in row.cells))
+
+    prs = Presentation(io.BytesIO(data))
+    parts = []
+    for i, slide in enumerate(prs.slides, 1):
+        body: list[str] = []
+        shapes_text(slide.shapes, body)
+        if slide.has_notes_slide:
+            notes = (slide.notes_slide.notes_text_frame.text or "").strip() \
+                if slide.notes_slide.notes_text_frame is not None else ""
+            if notes:
+                body.append(f"Note: {notes}")
+        parts.append(f"## Slide {i}\n\n" + "\n".join(body))
+    return "\n\n".join(parts), len(prs.slides)
+
+
+#: Office files are ZIP archives: a few KB can inflate to gigabytes inside the
+#: parser (#671 review). Checked on the archive's own directory, before parsing.
+ZIP_MAX_TOTAL = 150 * 1024 * 1024
+ZIP_MAX_RATIO = 100
+ZIP_MAX_ENTRIES = 10_000
+#: Entries below this size are not ratio-checked: small XML parts compress far
+#: beyond 100:1 legitimately and cannot inflate to anything dangerous.
+_ZIP_RATIO_FLOOR = 1024 * 1024
+
+
+def _zip_guard(filename: str, data: bytes) -> None:
+    """ValueError when an Office (ZIP) file would inflate beyond the limits:
+    total uncompressed size, per-entry compression ratio, number of entries."""
+    import io
+    import zipfile
+    try:
+        infos = zipfile.ZipFile(io.BytesIO(data)).infolist()
+    except zipfile.BadZipFile as e:
+        raise ValueError(f"'{filename}' non è un file Office valido (archivio ZIP illeggibile)") from e
+    if len(infos) > ZIP_MAX_ENTRIES:
+        raise ValueError(f"'{filename}' rifiutato: {len(infos)} parti nell'archivio "
+                         f"(max {ZIP_MAX_ENTRIES})")
+    total = 0
+    for i in infos:
+        total += i.file_size
+        if total > ZIP_MAX_TOTAL:
+            raise ValueError(f"'{filename}' rifiutato: decompresso supera "
+                             f"{ZIP_MAX_TOTAL // (1024 * 1024)} MB (possibile zip bomb)")
+        if i.file_size > _ZIP_RATIO_FLOOR and \
+                i.file_size > ZIP_MAX_RATIO * max(i.compress_size, 1):
+            raise ValueError(f"'{filename}' rifiutato: la parte '{i.filename}' si espande "
+                             f"oltre {ZIP_MAX_RATIO}:1 (possibile zip bomb)")
+
+
 def _extract_document_text(filename: str, data: bytes) -> tuple[str, int | None]:
-    """Estrae testo da PDF/DOCX/XLSX (server-side). Ritorna (testo, n_pagine|None).
+    """Estrae testo da PDF/DOCX/PPTX/XLSX (server-side). Ritorna (testo, n_pagine|None).
     Fallback: prova a decodificare come testo UTF-8."""
     import io
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext in ("docx", "pptx", "xlsx", "xlsm"):
+        _zip_guard(filename, data)
+    if ext == "pptx":
+        return _pptx_text(data)
     if ext == "pdf":
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(data))

@@ -228,6 +228,8 @@ def build_app() -> Starlette:
     # Inventario collection RAG (pagina Databases della webui): lettura non
     # filtrata per grant, stesso principio di providers_api.
     from .rag_api import routes as rag_routes
+    # The Databases page (#671): catalogue, containers, content — a person's door.
+    from .databases_api import routes as databases_routes
     # Audit trail health and checkpoints (clodia-platform#431): server-to-server.
     from .audit_api import routes as audit_routes
     # Egress proxy records (#463): what the agents' proxy saw, joined to the turn.
@@ -246,7 +248,7 @@ def build_app() -> Starlette:
                 *imagegen_routes, *topics_routes, *profile_routes,
                 *telegram_routes, *channels_routes, *mail_courier_routes, *agents_routes, *vault_routes,
                 *tool_routes, *mint_routes, *gate_routes, *logic_routes,
-                *egress_routes, *proxy_auth_routes, *rag_routes,
+                *egress_routes, *proxy_auth_routes, *rag_routes, *databases_routes,
                 *audit_routes, *egress_proxy_routes, *connectors_routes,
                 *components_internal, *component_routes],
         # Chi è in volo, su tutte le rotte (clodia-platform#316). Attorno a tutto

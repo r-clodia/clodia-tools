@@ -160,3 +160,251 @@ def write(entry: dict, arguments: dict, *, agent: str) -> dict:
     conn.close()
     _audit(agent, "datastore.write", target, "OK", rowcount=rowcount)
     return {"ok": True, "datastore": target, "rowcount": rowcount}
+
+
+# ── The Databases page (clodia-platform#671) ─────────────────────────────────
+#
+# Structured operations for a PERSON's session: the webui never sends SQL for
+# content. Table and column names are identifiers — not bindable in SQL — so
+# every one is checked for equality against what the datastore itself declares
+# (`sqlite_master`, `PRAGMA table_info`) before a statement is built, and then
+# quoted. Values always travel as parameters. The caller has already decided
+# WHO may do this (`databases.authorize_person`); here: WHAT is done, audited.
+
+MAX_PAGE_ROWS = 200
+
+#: Column types the schema editor offers: SQLite's affinities, nothing else.
+COLUMN_TYPES = ("TEXT", "INTEGER", "REAL", "NUMERIC", "BLOB")
+
+_DDL_RE = re.compile(r"^\s*(create\s+table|alter\s+table|drop\s+table)\b", re.I)
+
+
+def _q(ident: str) -> str:
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _ro(entry: dict) -> sqlite3.Connection:
+    return sqlite3.connect(f"file:{quote(entry['abs_path'])}?mode=ro", uri=True, timeout=5)
+
+
+def _rw(entry: dict) -> sqlite3.Connection:
+    if not Path(entry["abs_path"]).is_file():
+        raise ValueError(f"datastore {entry['pack']}/{entry['name']}: file assente")
+    return sqlite3.connect(entry["abs_path"], timeout=5)
+
+
+def _objects(conn) -> dict[str, str]:
+    """`{name: 'table' | 'view'}`, internal objects excluded."""
+    rows = conn.execute("SELECT name, type FROM sqlite_master WHERE type IN ('table','view') "
+                        "AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
+    return {n: t for n, t in rows}
+
+
+def _columns(conn, table: str) -> list[dict]:
+    return [{"name": r[1], "type": r[2] or "", "notnull": bool(r[3]), "default": r[4],
+             "pk": int(r[5] or 0)}
+            for r in conn.execute(f"PRAGMA table_info({_q(table)})").fetchall()]
+
+
+def _has_rowid(conn, table: str) -> bool:
+    try:
+        conn.execute(f"SELECT rowid FROM {_q(table)} LIMIT 0")
+        return True
+    except sqlite3.Error:
+        return False                        # a view, or a WITHOUT ROWID table
+
+
+def tables(entry: dict, *, agent: str) -> dict:
+    """Every table and view with its columns and row count."""
+    target = f"{entry['pack']}/{entry['name']}"
+    if not Path(entry["abs_path"]).is_file():
+        return {"datastore": target, "tables": [], "missing": True}
+    conn = _ro(entry)
+    try:
+        out = []
+        for name, kind in _objects(conn).items():
+            try:
+                n = conn.execute(f"SELECT count(*) FROM {_q(name)}").fetchone()[0]
+            except sqlite3.Error:
+                n = None
+            out.append({"name": name, "type": kind, "rows": n,
+                        "columns": _columns(conn, name),
+                        "editable": kind == "table" and _has_rowid(conn, name)})
+    finally:
+        conn.close()
+    _audit(agent, "databases.tables", target, "OK", tables=len(out))
+    return {"datastore": target, "tables": out}
+
+
+def rows(entry: dict, table: str, *, limit: int = 50, offset: int = 0, q: str = "",
+         agent: str) -> dict:
+    """One page of `table`, with `__rowid__` when rows are addressable, and a
+    case-insensitive search over every column when `q` is given."""
+    target = f"{entry['pack']}/{entry['name']}"
+    limit = max(1, min(int(limit), MAX_PAGE_ROWS))
+    offset = max(0, int(offset))
+    conn = _ro(entry)
+    try:
+        objs = _objects(conn)
+        if table not in objs:
+            raise ValueError(f"tabella '{table}' non presente in '{target}'. "
+                             f"Tabelle: {', '.join(objs) or 'nessuna'}")
+        cols = _columns(conn, table)
+        rowid = objs[table] == "table" and _has_rowid(conn, table)
+        sel = ("rowid AS __rowid__, *" if rowid else "*")
+        where, params = "", []
+        if q and cols:
+            where = " WHERE " + " OR ".join(f"CAST({_q(c['name'])} AS TEXT) LIKE ?" for c in cols)
+            params = [f"%{q}%"] * len(cols)
+        total = conn.execute(f"SELECT count(*) FROM {_q(table)}{where}", params).fetchone()[0]
+        cur = conn.execute(f"SELECT {sel} FROM {_q(table)}{where} LIMIT ? OFFSET ?",
+                           params + [limit, offset])
+        names = [d[0] for d in cur.description or []]
+        data, size, truncated = [], 0, False
+        for r in cur:
+            row = dict(zip(names, r))
+            for k, v in row.items():
+                if isinstance(v, (bytes, bytearray)):
+                    row[k] = f"<blob {len(v)} byte>"
+            size += len(json.dumps(row, ensure_ascii=False, default=str))
+            if size > MAX_RESPONSE_BYTES:
+                truncated = True
+                break
+            data.append(row)
+    except sqlite3.Error as exc:
+        raise ValueError(f"lettura fallita: {exc}") from exc
+    finally:
+        conn.close()
+    _audit(agent, "databases.rows", target, "OK", table=table, rows=len(data))
+    return {"datastore": target, "table": table, "columns": cols, "rows": data,
+            "total": total, "limit": limit, "offset": offset, "editable": rowid,
+            "truncated": truncated}
+
+
+def row_op(entry: dict, op: str, table: str, *, rowid=None, values: dict | None = None,
+           agent: str) -> dict:
+    """insert | update | delete of one row, built from validated identifiers."""
+    target = f"{entry['pack']}/{entry['name']}"
+    if op not in ("insert", "update", "delete"):
+        raise ValueError("op: insert | update | delete")
+    values = values or {}
+    if not isinstance(values, dict):
+        raise ValueError("values deve essere un oggetto {colonna: valore}")
+    conn = _rw(entry)
+    try:
+        objs = _objects(conn)
+        if objs.get(table) != "table":
+            raise ValueError(f"'{table}' non è una tabella di '{target}'")
+        if op != "insert" and not _has_rowid(conn, table):
+            raise ValueError(f"'{table}' non ha rowid: righe non modificabili dalla UI")
+        known = {c["name"] for c in _columns(conn, table)}
+        bad = [k for k in values if k not in known]
+        if bad:
+            raise ValueError(f"colonne sconosciute in '{table}': {', '.join(bad)}")
+        for v in values.values():
+            if isinstance(v, (dict, list)):
+                raise ValueError("valori ammessi: testo, numero, booleano o null")
+        if op == "insert":
+            if values:
+                cols = ", ".join(_q(k) for k in values)
+                marks = ", ".join("?" for _ in values)
+                sql = f"INSERT INTO {_q(table)} ({cols}) VALUES ({marks})"
+            else:
+                sql = f"INSERT INTO {_q(table)} DEFAULT VALUES"
+            params = list(values.values())
+        else:
+            try:
+                rid = int(rowid)
+            except (TypeError, ValueError):
+                raise ValueError("rowid richiesto (intero)") from None
+            if op == "update":
+                if not values:
+                    raise ValueError("niente da aggiornare")
+                sets = ", ".join(f"{_q(k)} = ?" for k in values)
+                sql = f"UPDATE {_q(table)} SET {sets} WHERE rowid = ?"
+                params = list(values.values()) + [rid]
+            else:
+                sql = f"DELETE FROM {_q(table)} WHERE rowid = ?"
+                params = [rid]
+        cur = conn.execute(sql, params)
+        conn.commit()
+        out = {"ok": True, "datastore": target, "table": table, "op": op,
+               "rowcount": cur.rowcount}
+        if op == "insert":
+            out["rowid"] = cur.lastrowid
+    except sqlite3.Error as exc:
+        conn.rollback()
+        _audit(agent, f"databases.{op}", target, "ERROR", table=table, error=str(exc))
+        raise ValueError(f"istruzione fallita: {exc}") from exc
+    finally:
+        conn.close()
+    _audit(agent, f"databases.{op}", target, "OK", table=table, rowcount=out["rowcount"])
+    return out
+
+
+def _column_sql(col: dict) -> str:
+    name = str((col or {}).get("name") or "").strip()
+    if not name:
+        raise ValueError("ogni colonna ha un nome")
+    typ = str(col.get("type") or "TEXT").strip().upper()
+    if typ not in COLUMN_TYPES:
+        raise ValueError(f"tipo '{typ}' non ammesso ({', '.join(COLUMN_TYPES)})")
+    sql = f"{_q(name)} {typ}"
+    if col.get("pk"):
+        sql += " PRIMARY KEY"
+    if col.get("notnull"):
+        sql += " NOT NULL"
+    return sql
+
+
+def _deny_attach(action, *_args):
+    # SQLITE_ATTACH = 24, SQLITE_DETACH = 25: a schema change stays inside this file.
+    return sqlite3.SQLITE_DENY if action in (24, 25) else sqlite3.SQLITE_OK
+
+
+def ddl(entry: dict, body: dict, *, agent: str) -> dict:
+    """A schema change on one datastore, for an ADMIN's session (the caller
+    checks it): `create_table` {table, columns: [{name, type, pk?, notnull?}]},
+    `add_column` {table, column}, `drop_table` {table}, or `statement` — a
+    single CREATE/ALTER/DROP TABLE. `datastore.write` never accepts DDL."""
+    target = f"{entry['pack']}/{entry['name']}"
+    op = str((body or {}).get("op") or "")
+    table = str(body.get("table") or "").strip()
+    conn = _rw(entry)
+    try:
+        objs = _objects(conn)
+        if op == "create_table":
+            cols = body.get("columns") or []
+            if not table or not isinstance(cols, list) or not cols:
+                raise ValueError("create_table: table e almeno una colonna")
+            if table in objs or table.lower().startswith("sqlite_"):
+                raise ValueError(f"'{table}' esiste già o è un nome riservato")
+            sql = f"CREATE TABLE {_q(table)} ({', '.join(_column_sql(c) for c in cols)})"
+        elif op == "add_column":
+            if objs.get(table) != "table":
+                raise ValueError(f"'{table}' non è una tabella di '{target}'")
+            col = dict(body.get("column") or {})
+            if col.get("pk"):
+                raise ValueError("una colonna aggiunta non può essere PRIMARY KEY")
+            sql = f"ALTER TABLE {_q(table)} ADD COLUMN {_column_sql(col)}"
+        elif op == "drop_table":
+            if objs.get(table) != "table":
+                raise ValueError(f"'{table}' non è una tabella di '{target}'")
+            sql = f"DROP TABLE {_q(table)}"
+        elif op == "statement":
+            sql = _single_statement(str(body.get("statement") or ""))
+            if not _DDL_RE.match(sql):
+                raise ValueError("solo CREATE TABLE, ALTER TABLE o DROP TABLE")
+        else:
+            raise ValueError("op: create_table | add_column | drop_table | statement")
+        conn.set_authorizer(_deny_attach)
+        conn.execute(sql)
+        conn.commit()
+    except sqlite3.Error as exc:
+        conn.rollback()
+        _audit(agent, "databases.ddl", target, "ERROR", op=op, error=str(exc))
+        raise ValueError(f"modifica dello schema fallita: {exc}") from exc
+    finally:
+        conn.close()
+    _audit(agent, "databases.ddl", target, "OK", op=op, statement=sql[:300])
+    return {"ok": True, "datastore": target, "op": op, "statement": sql}

@@ -13,16 +13,20 @@ Endpoint:
   GET /search?q=...&k=5&doc=AGA    → {"query":..,"results":[{name,version,section,page,score,
                                       text,provenance,source}]}
   POST /ingest_text, /collections, /collections/tier, /collections/drop   (token)
+  GET /chunks?collection=X&name=D[&version=V]   (token) one document's chunks
+  GET /export?collection=X                      (token) JSONL of every row
 
 Collections named `topic-*` (a topic's own, clodia-platform#599) are private:
 search and documents need the token; their names are hidden from /collections.
 """
 import hmac
+import json
 import os
 import tempfile
 
 import psycopg
 from fastapi import Body, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from sentence_transformers import SentenceTransformer
 
 import ingest as ingest_mod
@@ -36,7 +40,7 @@ ROUTE_MODEL_NAME = "intfloat/multilingual-e5-small"
 _INGEST_TOKEN = os.environ.get("EU_RAG_INGEST_TOKEN")
 _MAX_INGEST_BYTES = 100 * 1024 * 1024  # 100 MB
 
-app = FastAPI(title="eu-rag-search", version="0.4.0")
+app = FastAPI(title="eu-rag-search", version="0.5.0")
 
 
 def _authorized(authorization: str | None) -> bool:
@@ -191,6 +195,34 @@ def documents(collection: str = Query("eu-normativa"),
     return {"collection": collection, "documents": ingest_mod.list_documents(collection)}
 
 
+@app.get("/chunks")
+def chunks(collection: str = Query(..., min_length=1), name: str = Query(..., min_length=1),
+           version: str | None = Query(None), limit: int = Query(50, ge=1, le=200),
+           offset: int = Query(0, ge=0), authorization: str | None = Header(None)):
+    """The chunks of one document, in order (clodia-platform#671). Token-gated:
+    a chunk is the content itself, and only the gateway (which decides who may
+    see it) holds the token."""
+    _require_token(authorization)
+    try:
+        return ingest_mod.list_chunks(collection, name, version, limit, offset)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.get("/export")
+def export(collection: str = Query(..., min_length=1),
+           authorization: str | None = Header(None)):
+    """Every row of a collection as JSONL (collection, documents, chunks with
+    their embedding): the gateway writes it under `deleted/` before a drop
+    (clodia-platform#671). Token-gated."""
+    _require_token(authorization)
+
+    def lines():
+        for row in ingest_mod.export_collection(collection):
+            yield json.dumps(row, ensure_ascii=False) + "\n"
+    return StreamingResponse(lines(), media_type="application/x-ndjson")
+
+
 @app.get("/collections")
 def collections(authorization: str | None = Header(None)):
     """Elenco delle collection con tier e conteggi. Senza token, le collection
@@ -239,7 +271,7 @@ def drop_collection(body: dict = Body(...), authorization: str | None = Header(N
 def ingest_text(body: dict = Body(...), authorization: str | None = Header(None)):
     """Testo (o chunk già pronti) → una collection, con la provenienza del
     documento (#600): {collection, name, version, text | chunks, source?,
-    provenance, tier?, supersede?}. Token-gated."""
+    provenance, tier?, supersede?, url?}. Token-gated."""
     _require_token(authorization)
     if _model is None:
         raise HTTPException(503, "modello non ancora caricato")
@@ -252,7 +284,8 @@ def ingest_text(body: dict = Body(...), authorization: str | None = Header(None)
             str(b.get("collection") or ""), str(b.get("name") or ""),
             str(b.get("version") or "1"), text=text, chunks=b.get("chunks"),
             source=b.get("source"), provenance=str(b.get("provenance") or "trusted"),
-            tier=b.get("tier"), supersede=bool(b.get("supersede")), model=_model)
+            tier=b.get("tier"), supersede=bool(b.get("supersede")), model=_model,
+            url=(str(b["url"]) if b.get("url") else None))
     except ValueError as e:
         raise HTTPException(422, str(e))
     return {"status": "ok", **res}

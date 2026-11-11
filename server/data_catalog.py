@@ -197,6 +197,97 @@ def may_import(entry: dict, principal: str, *, is_admin: bool, clearance: str | 
     return ""
 
 
+# ── Tombstones (clodia-platform#671) ────────────────────────────────────────
+#
+# A deleted datastore or collection keeps its pack declaration: the pack still
+# names it, and the next sync, pack update or provisioner run would bring it
+# back — empty, silently, under the same name. The tombstone says «deleted on
+# purpose»: `sync` skips it, the pack's datastore is no longer `declared`,
+# `rag.create_collection` and `rag.ingest` refuse it. Only an explicit admin
+# action (create again, or restore) clears it.
+
+def _tomb_path():
+    from . import state_paths
+    return state_paths.state_path("data-tombstones.json")
+
+
+def tombstones() -> dict:
+    """`{catalog key: {kind, name, deleted_at, by, export}}`. An unreadable
+    file is reported and read as empty: it must not take every datastore of
+    the instance down with it."""
+    try:
+        data = json.loads(_tomb_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        LOG.error("data catalog: tombstones unreadable (%s)", type(e).__name__)
+        return {}
+
+
+def tombstoned(kind: str, name: str) -> dict | None:
+    try:
+        return tombstones().get(key(kind, name))
+    except ValueError:
+        return None
+
+
+def refuse_tombstoned(kind: str, name: str) -> None:
+    """PermissionError when `kind:name` was deleted on purpose: the one check
+    every path that could write or re-create it calls (#671)."""
+    t = tombstoned(kind, name)
+    if t:
+        what = "la collection" if kind == "rag" else "il datastore"
+        done = "eliminata" if kind == "rag" else "eliminato"
+        raise PermissionError(
+            f"{what} '{name}' è stat{done[-1]} {done} il {t.get('deleted_at')} da "
+            f"{t.get('by') or '?'}: si ricrea solo esplicitamente, dalla pagina "
+            "Databases (nuova risorsa o ripristino)")
+
+
+def tombstone(kind: str, name: str, *, by: str, export: str = "",
+              tier: str | None = None) -> dict:
+    k = key(kind, name)
+    with _LOCK:
+        data = tombstones()
+        data[k] = {"kind": kind, "name": name, "deleted_at": _now(), "by": by,
+                   "export": export, "tier": norm_tier(tier) if tier else None}
+        p = _tomb_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=1, sort_keys=True, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(p)
+        return dict(data[k])
+
+
+def set_tombstone_export(kind: str, name: str, export: str) -> None:
+    k = key(kind, name)
+    with _LOCK:
+        data = tombstones()
+        if k in data:
+            data[k]["export"] = export
+            p = _tomb_path()
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=1, sort_keys=True, ensure_ascii=False),
+                           encoding="utf-8")
+            tmp.replace(p)
+
+
+def clear_tombstone(kind: str, name: str) -> bool:
+    k = key(kind, name)
+    with _LOCK:
+        data = tombstones()
+        if data.pop(k, None) is None:
+            return False
+        p = _tomb_path()
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=1, sort_keys=True, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(p)
+        return True
+
+
 _LAST_SYNC = [0.0]
 
 
@@ -214,12 +305,16 @@ def sync_due(every: float = 60.0) -> bool:
 def sync() -> int:
     """Register what exists and is not listed yet: the declared datastores
     (tier = their clearance) and the RAG collections (tier = the service's).
-    Returns how many entries were added. Never removes anything."""
+    Returns how many entries were added. Never removes anything, and never
+    brings back a resource deleted on purpose (a tombstone, #671)."""
     added = 0
+    dead = tombstones()
     try:
         from . import datastores
         for ds in datastores.declared():
             name = f"{ds['pack']}/{ds['name']}"
+            if f"datastore:{name}" in dead:
+                continue
             if get("datastore", name) is None:
                 register("datastore", name, tier=ds["clearance"], source=f"pack:{ds['pack']}")
                 added += 1
@@ -229,7 +324,7 @@ def sync() -> int:
         from .tools import eu_corpus
         for col in (eu_corpus.collections() or {}).get("collections") or []:
             name = str((col or {}).get("collection") or "").strip()
-            if name and get("rag", name) is None:
+            if name and f"rag:{name}" not in dead and get("rag", name) is None:
                 register("rag", name, tier=col.get("tier") or "SEAL-4", source="rag-service")
                 added += 1
     except Exception as e:  # noqa: BLE001
