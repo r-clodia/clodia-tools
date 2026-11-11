@@ -6237,13 +6237,44 @@ def _rag_provisioners() -> set[str]:
     }
 
 
+def _provisioner_tier(collection: str) -> str:
+    """The pack provisioner's exception (clodia-platform#669), narrowed after
+    review: only for a collection DECLARED by an installed pack (initial
+    provisioning — any other collection goes through a scope like for
+    everyone), at the level the catalogue gives it (`effective_tier`) or,
+    before the catalogue knows it, the level the pack declares — the higher
+    of the two. A level nobody knows is a refusal, never SEAL-0. The
+    provisioner's clearance must cover it. Returns the level."""
+    from . import data_catalog
+    declared = datastores.declared_collections().get(collection)
+    if declared is None:
+        raise PermissionError(
+            f"la collection '{collection}' non è dichiarata da un pack installato: "
+            "l'eccezione del provisioner vale solo per il provisioning iniziale")
+    tiers = [t for t in (declared.get("tier"),) if t]
+    entry = data_catalog.get("rag", collection)
+    if entry is not None:
+        tiers.append(data_catalog.effective_tier(entry))
+    if not tiers:
+        raise PermissionError(
+            f"livello della collection '{collection}' sconosciuto (né il catalogo né "
+            f"il pack '{declared.get('pack')}' lo dichiarano): rifiuto")
+    tier = max(tiers, key=_rank)
+    if _rank(current_clearance()) < _rank(tier):
+        raise PermissionError(
+            f"agent '{agent_name()}': clearance insufficiente per la collection "
+            f"'{collection}' (tier {tier})")
+    return tier
+
+
 def _rag_authorize(collection: str, write: bool, verb: str = "") -> None:
     """Reference monitor per-collection (clodia-platform#669): the collection
     is imported in the scope of the SIGNED claim (topic, DM or job), the agent
     is in that scope, and clearance and scope tier cover the collection's tier
     (`topic_data.authorize`). No seed list, no per-agent grant, no super-agent
     bypass. The one exception is the pack provisioner's create/ingest
-    (`CLODIA_RAG_PROVISIONERS`), checked on clearance only. The profile's
+    (`CLODIA_RAG_PROVISIONERS`) of a pack-declared collection
+    (`_provisioner_tier`). The profile's
     constraint (rag off/single) holds for everyone. Raises PermissionError."""
     instance_profile.rag_check_collection(collection)
     ag = agent_name()
@@ -6258,11 +6289,7 @@ def _rag_authorize(collection: str, write: bool, verb: str = "") -> None:
     # (decision 5 of #590): a provisioner's `remove` goes through the scope
     # like anyone's.
     if write and verb in ("create_collection", "ingest") and ag in _rag_provisioners():
-        tier = eu_corpus.collection_tier(collection)
-        if _rank(current_clearance()) < _rank(tier):
-            raise PermissionError(
-                f"agent '{ag}': clearance insufficiente per la collection "
-                f"'{collection}' (tier {tier})")
+        _provisioner_tier(collection)
         return
     topic_data.authorize("rag", collection, write=write, agent=ag,
                          clearance=current_clearance(), scope=topic_data.scope_of_call())
@@ -6398,6 +6425,13 @@ def _dispatch_rag(name: str, a: dict):
         collection = a["collection"]
         _rag_authorize(collection, write=True, verb="create_collection")
         tier = a.get("tier", "SEAL-1")
+        if agent_name() in _rag_provisioners():
+            # Never below the level the pack / catalogue gives it: the catalogue
+            # registers the collection at this tier (review of #473).
+            floor = _provisioner_tier(collection)
+            if _rank(tier) < _rank(floor):
+                raise PermissionError(
+                    f"la collection '{collection}' è {floor}: non si crea a {tier}")
         if _rank(current_clearance()) < _rank(tier):
             raise PermissionError(
                 f"agent '{agent_name()}': clearance insufficiente per creare "

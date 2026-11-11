@@ -5,6 +5,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import yaml
+
 from . import datastores
 
 
@@ -75,6 +77,26 @@ class ParseKeyTests(unittest.TestCase):
             with self.subTest(key=bad):
                 with self.assertRaises(ValueError):
                     datastores.parse_key(bad)
+
+
+class DeclaredCollectionsTests(unittest.TestCase):
+    """The collections the pack provisioner may create and feed (#669)."""
+
+    def test_names_and_levels_with_no_default(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdir = root / "plugins" / "legal-pack"
+            pdir.mkdir(parents=True)
+            (pdir / "plugin.yaml").write_text(yaml.safe_dump({"name": "legal-pack",
+                "rag_collections": [{"name": "kb", "tier": "p2"},
+                                    {"name": "nessuno"},
+                                    {"name": "strano", "tier": "SEAL-9"},
+                                    {"name": " "}, "x"]}), encoding="utf-8")
+            with patch.object(datastores, "DATADIR", str(root)):
+                found = datastores.declared_collections()
+        self.assertEqual(found, {"kb": {"pack": "legal-pack", "tier": "SEAL-2"},
+                                 "nessuno": {"pack": "legal-pack", "tier": None},
+                                 "strano": {"pack": "legal-pack", "tier": None}})
 
 
 if __name__ == "__main__":

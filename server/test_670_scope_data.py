@@ -241,6 +241,51 @@ class JobScopeTests(_Base):
                             principal="mario", is_admin=False, clearance="SEAL-3")
 
 
+class ArchivedScopeTests(_Base):
+    """An archived topic or DM opens nothing it imports, like A·V·R·Q, which
+    drops a room's tuples once archived (review of #473)."""
+
+    def test_an_archived_topic_refuses_with_its_reason(self):
+        self.imp()
+        self.assertEqual(self.auth("clodia")["name"], "tomato-pack/clienti")
+        self.svc.archive("SEAL-2", "commerciale")
+        with self.assertRaises(PermissionError) as c:
+            self.auth("clodia")
+        self.assertIn("il topic SEAL-2/commerciale è archiviato", str(c.exception))
+        self.assertEqual(td.visible("datastore", agent="clodia", scope="SEAL-2/commerciale",
+                                    clearance="SEAL-2"), set())
+
+    def test_an_archived_dm_refuses_too(self):
+        self.svc.new("SEAL-0", "dm-clodia--davide", {
+            "kind": "dm", "type": "dm", "owner": "davide", "participants": ["davide", "clodia"]})
+        cat.update("datastore", "tomato-pack/clienti", tier="SEAL-0")
+        self.imp(tier="SEAL-0", name="dm-clodia--davide")
+        self.svc.archive("SEAL-0", "dm-clodia--davide")
+        with self.assertRaises(PermissionError) as c:
+            self.auth("clodia", scope="SEAL-0/dm-clodia--davide", clearance="SEAL-1")
+        self.assertIn("il DM SEAL-0/dm-clodia--davide è archiviato", str(c.exception))
+
+
+class ClearanceBelowTierTests(_Base):
+    """A non-admin below the resource's level is refused, and told why."""
+
+    def test_a_non_admin_importer_below_the_resource_tier(self):
+        cat.update("datastore", "tomato-pack/clienti", importers=["mario"])
+        with self.assertRaises(PermissionError) as c:
+            self.imp(who="mario", admin=False, clearance="SEAL-1")       # clienti is SEAL-2
+        self.assertEqual(str(c.exception),
+                         "clearance di 'mario' (SEAL-1) insufficiente per datastore "
+                         "'tomato-pack/clienti' (SEAL-2)")
+
+    def test_an_agent_below_the_resource_tier(self):
+        self.imp()
+        with self.assertRaises(PermissionError) as c:
+            self.auth("tomato.commerciale", clearance="SEAL-1")
+        self.assertEqual(str(c.exception),
+                         "agent 'tomato.commerciale': clearance insufficiente per datastore "
+                         "'tomato-pack/clienti' (SEAL-2)")
+
+
 class ScopeTierRouteTests(_Base):
     def test_check_scope_tier_through_the_route(self):
         from starlette.applications import Starlette
@@ -298,26 +343,73 @@ class JobTuplesTests(_Base):
 
 
 class ProvisionerTests(_Base):
-    """`CLODIA_RAG_PROVISIONERS` keeps creating and ingesting for a pack, and
-    lists the collections within its clearance (#669 keeps the exception)."""
+    """`CLODIA_RAG_PROVISIONERS` creates and feeds ONLY collections declared by
+    an installed pack, at the catalogue's effective level (unknown → refused),
+    and lists the collections within its clearance (#669; review of #473)."""
 
-    def _call(self, agent, clearance, fn):
+    DECLARED = {"kb": {"pack": "legal-pack", "tier": "SEAL-1"},
+                "senza-tier": {"pack": "legal-pack", "tier": None}}
+
+    def _call(self, agent, clearance, fn, service_tier="SEAL-0"):
         from . import main
         with patch.object(main, "agent_name", lambda: agent), \
                 patch.object(main, "current_clearance", lambda: clearance), \
                 patch("server.topic_data.scope_of_call", lambda: None), \
                 patch.object(main.instance_profile, "rag_check_collection", lambda c: None), \
-                patch("server.tools.eu_corpus.collection_tier", lambda c: "SEAL-1"):
+                patch("server.datastores.declared_collections", lambda: dict(self.DECLARED)), \
+                patch("server.tools.eu_corpus.collection_tier", lambda c: service_tier):
             return fn(main)
 
-    def test_create_and_ingest_within_clearance(self):
+    def _refusal(self, *a, **k) -> str:
+        with self.assertRaises(PermissionError) as c:
+            self._call(*a, **k)
+        return str(c.exception)
+
+    def test_create_and_ingest_a_declared_collection_within_clearance(self):
+        self.assertEqual(self._call("sysadmin", "SEAL-2",
+                                    lambda m: m._provisioner_tier("kb")), "SEAL-1")
         self._call("sysadmin", "SEAL-2",
                    lambda m: m._rag_authorize("kb", write=True, verb="create_collection"))
         self._call("sysadmin", "SEAL-2",
                    lambda m: m._rag_authorize("kb", write=True, verb="ingest"))
-        with self.assertRaises(PermissionError):
-            self._call("sysadmin", "SEAL-0",
-                       lambda m: m._rag_authorize("kb", write=True, verb="ingest"))
+        why = self._refusal("sysadmin", "SEAL-0",
+                            lambda m: m._rag_authorize("kb", write=True, verb="ingest"))
+        self.assertIn("clearance insufficiente per la collection 'kb' (tier SEAL-1)", why)
+
+    def test_a_collection_no_pack_declares_is_not_provisioning(self):
+        """eu-normativa is in the catalogue but no installed pack declares it
+        here: the provisioner goes through a scope like everyone."""
+        why = self._refusal("sysadmin", "SEAL-4",
+                            lambda m: m._rag_authorize("eu-normativa", write=True, verb="ingest"))
+        self.assertIn("non è dichiarata da un pack installato", why)
+
+    def test_an_unknown_level_is_refused_not_seal0(self):
+        why = self._refusal("sysadmin", "SEAL-4",
+                            lambda m: m._rag_authorize("senza-tier", write=True, verb="ingest"))
+        self.assertIn("livello della collection 'senza-tier' sconosciuto", why)
+
+    def test_the_catalogue_level_wins_over_the_services_cache(self):
+        """The service answers SEAL-0 (cached/unknown); the admin set SEAL-3
+        in the catalogue: SEAL-3 decides."""
+        cat.register("rag", "kb", tier="SEAL-1", source="pack:legal-pack")
+        cat.update("rag", "kb", tier="SEAL-3")
+        why = self._refusal("sysadmin", "SEAL-2",
+                            lambda m: m._rag_authorize("kb", write=True, verb="ingest"),
+                            service_tier="SEAL-0")
+        self.assertIn("(tier SEAL-3)", why)
+        self._call("sysadmin", "SEAL-3",
+                   lambda m: m._rag_authorize("kb", write=True, verb="ingest"))
+
+    def test_a_declared_collection_is_not_created_below_its_level(self):
+        created = []
+        with patch("server.tools.eu_corpus.create_collection",
+                   lambda c, **k: created.append((c, k)) or {"ok": True}):
+            why = self._refusal("sysadmin", "SEAL-2", lambda m: m._dispatch_rag(
+                "rag.create_collection", {"collection": "kb", "tier": "SEAL-0"}))
+            self.assertIn("è SEAL-1: non si crea a SEAL-0", why)
+            self._call("sysadmin", "SEAL-2", lambda m: m._dispatch_rag(
+                "rag.create_collection", {"collection": "kb", "tier": "SEAL-1"}))
+        self.assertEqual([c for c, _ in created], ["kb"])
 
     def test_reading_is_not_part_of_the_exception(self):
         with self.assertRaises(PermissionError):

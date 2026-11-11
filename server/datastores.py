@@ -52,6 +52,37 @@ def declared() -> list[dict]:
     return found
 
 
+def declared_collections() -> dict[str, dict]:
+    """RAG collections declared by the installed packs (`rag_collections:` in
+    `plugins/*/plugin.yaml`): `{name: {pack, tier}}`. `tier` is the declared
+    level, `None` when missing or not a SEAL level — never a default. The pack
+    provisioner may create and feed only these (clodia-platform#669: the
+    exception is for initial provisioning). A manifest that does not parse
+    declares nothing; for one name declared twice the first pack in
+    alphabetical order wins (collection names are global in the RAG service)."""
+    import yaml
+
+    found: dict[str, dict] = {}
+    for manifest in sorted(Path(DATADIR).glob("plugins/*/plugin.yaml")):
+        try:
+            meta = yaml.safe_load(manifest.read_text()) or {}
+        except Exception:
+            continue
+        if not isinstance(meta, dict):
+            continue
+        for col in meta.get("rag_collections") or []:
+            if not isinstance(col, dict):
+                continue
+            name = str(col.get("name") or "").strip()
+            if not name or name in found:
+                continue
+            raw = str(col.get("tier") or "").strip().upper()
+            raw = {"P0": "SEAL-0", "P1": "SEAL-1", "P2": "SEAL-2", "P3": "SEAL-3"}.get(raw, raw)
+            tier = raw if raw in ("SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4") else None
+            found[name] = {"pack": manifest.parent.name, "tier": tier}
+    return found
+
+
 def find(pack: str, name: str) -> dict | None:
     """Un'entry per `<pack>/<name>` esatti, o `None`."""
     for ds in declared():

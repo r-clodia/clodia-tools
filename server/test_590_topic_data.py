@@ -243,7 +243,9 @@ class GatewayTests(_Base):
             with patch.object(m, "agent_name", lambda: "estraneo"):
                 with self.assertRaises(PermissionError):
                     m._rag_authorize("eu-normativa", write=False)
-            with patch.object(m, "agent_name", lambda: "sysadmin"):
+            with patch.object(m, "agent_name", lambda: "sysadmin"), \
+                    patch("server.datastores.declared_collections",       # business-pack's
+                          lambda: {"eu-normativa": {"pack": "business-pack", "tier": "SEAL-1"}}):
                 m._rag_authorize("eu-normativa", write=True, verb="ingest")   # the provisioner
 
 
@@ -386,6 +388,8 @@ class IngestTests(_Base):
         with patch.object(m, "agent_name", lambda: "sysadmin"), \
                 patch.object(m, "current_clearance", lambda: "SEAL-4"), \
                 patch("server.topic_data.scope_of_call", lambda: None), \
+                patch("server.datastores.declared_collections",
+                      lambda: {"eu-normativa": {"pack": "business-pack", "tier": "SEAL-1"}}), \
                 patch.object(m.instance_profile, "rag_check_collection", lambda c: None):
             m._rag_authorize("eu-normativa", write=True, verb="ingest")
             with self.assertRaises(PermissionError):

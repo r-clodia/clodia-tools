@@ -22,9 +22,9 @@ A topic declares in its meta the catalog resources it uses:
   the room's own index (`topic-*`): read-only, the indexer writes it. The old
   `grants` map is kept in the meta but no longer decides anything.
 - **Enforcement** (`authorize`): on the topic of the SIGNED claim, never an
-  argument. The resource is imported there, the agent is granted there, its
-  clearance covers the resource, and the topic's tier still covers it. No
-  topic → no access.
+  argument. The topic is not archived, the resource is imported there, the
+  agent is in it, its clearance covers the resource, and the topic's tier
+  still covers it. No topic → no access.
 
 - **Jobs** (#670): an agentic job's `data: [{kind, name}]` lives in the job
   record (agent-server, `scheduler/db.py`) and is read live from there
@@ -336,6 +336,11 @@ def _participant(meta: dict, agent: str) -> bool:
     return bool(agent) and agent in TopicService.participants_map(meta)
 
 
+def archived(meta: dict) -> bool:
+    """An archived topic or DM: its imports give no access (review of #473)."""
+    return str((meta or {}).get("status") or "").strip().lower() == "archived"
+
+
 def own_index(e: dict) -> bool:
     """The room's own RAG index: written by the indexer alone (#422 B2)."""
     return e["kind"] == "rag" and str(e["name"]).startswith("topic-")
@@ -370,6 +375,13 @@ def authorize(kind: str, resource: str, *, write: bool, agent: str,
         meta = _svc()._read_meta(tier, name)[0]     # meta only: this runs on every call
     except Exception as e:  # noqa: BLE001
         raise PermissionError(f"topic {scope} non leggibile: {type(e).__name__}") from e
+    if archived(meta):
+        # Like A·V·R·Q, which drops a room's tuples once it is archived: nobody
+        # works there any more, so its imports open nothing (review of #473).
+        what = "il DM" if (meta.get("kind") or meta.get("type")) == "dm" else "il topic"
+        raise PermissionError(
+            f"{what} {scope} è archiviato: i dati importati lì non sono più accessibili "
+            "(riattivalo per usarli)")
     imp = _find(meta, kind, resource)
     if imp is None:
         raise PermissionError(f"{kind} '{resource}' non è importato nel topic {scope}")
