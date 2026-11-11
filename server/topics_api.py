@@ -373,6 +373,28 @@ async def set_goal(request: Request):
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
+async def set_orchestrator(request: Request):
+    """The room's orchestrator (clodia-platform#667). Internal route like
+    `goal`: the agent-server has verified the owner and passes it in `by`."""
+    _, err = _authorize(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    body = body or {}
+    try:
+        res = _service().set_orchestrator(request.path_params["tier"],
+                                          request.path_params["name"],
+                                          body.get("orchestrator"),
+                                          by=str(body.get("by") or "").strip())
+        _invalidate_list_cache()
+        return JSONResponse(res)
+    except TopicError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
 async def todos(request: Request):
     """The topic's to-do list for a person (clodia-platform#658).
 
@@ -1755,6 +1777,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/todos", todos, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/todos/{todo_id}", todos, methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/goal", set_goal, methods=["POST"]),
+    Route("/internal/topics/{tier}/{name}/orchestrator", set_orchestrator, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/participants", participants, methods=["POST", "DELETE"]),
     Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),

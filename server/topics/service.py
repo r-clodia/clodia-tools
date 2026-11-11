@@ -229,6 +229,11 @@ def _unescape_leaked_json_string(text: str) -> str:
     return decoded
 
 
+#: The seeds that can orchestrate a room (#667), as in the agent-server's
+#: `coordinator.DECLARED`. The first is the default and is never stored.
+ORCHESTRATOR_SEEDS = ("segretario", "clodia", "ophelia")
+
+
 def _tldr(summary_text: str) -> str:
     for line in (summary_text or "").splitlines():
         line = line.strip().lstrip("#").strip()
@@ -3635,6 +3640,33 @@ class TopicService:
         meta["goal"] = g
         self._write_meta(tier, name, meta, base_version=ver)
         return {"goal": g, "previous": precedente}
+
+    def set_orchestrator(self, tier: str, name: str, who: str | None, by: str = "") -> dict:
+        """The room's ORCHESTRATOR (clodia-platform#667): one of the seeds that
+        can lead a room, already a participant; None = the default (the
+        secretary). An owner's act: the agent-server checks it and passes the
+        principal in `by`; no agent verb reaches this — an orchestrator that
+        could appoint itself would not be chosen."""
+        meta, ver = self._read_meta(tier, name)
+        prima = str(meta.get("orchestrator") or "") or None
+        w = str(who or "").strip().lower() or None
+        if w is not None:
+            if w not in ORCHESTRATOR_SEEDS:
+                raise TopicError(f"'{w}' non può orchestrare una stanza: "
+                                 f"ammessi {', '.join(ORCHESTRATOR_SEEDS)}")
+            raw = meta.get("participants")
+            parti = set(raw.keys()) if isinstance(raw, dict) else set(raw or [])
+            if w not in parti:
+                raise TopicError(f"'{w}' non è partecipante della stanza: "
+                                 "aggiungilo prima di sceglierlo come orchestratore")
+        if w == prima:
+            return {"orchestrator": w, "previous": prima, "changed": False}
+        if w is None:
+            meta.pop("orchestrator", None)
+        else:
+            meta["orchestrator"] = w
+        self._write_meta(tier, name, meta, base_version=ver)
+        return {"orchestrator": w, "previous": prima, "changed": True, "by": by}
 
     def advance_goal(self, tier: str, name: str, state: str,
                      strategy_path: str | None = None, by: str = "") -> dict:
