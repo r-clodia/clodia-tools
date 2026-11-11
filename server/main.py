@@ -14,7 +14,6 @@ from . import origin
 from . import instance_profile
 from . import proxy
 from . import datastores
-from . import rag_collections
 from . import taint as _taint
 from . import telemetry as _tlm
 from . import transfer_channel
@@ -4537,6 +4536,9 @@ def _denial_class(msg: str) -> str:
             # stesso fatto, e nel registro deve risultare uno solo.
             else "sender_not_vetted" if MITTENTE_NON_VAGLIATO in msg
             else "unattended" if "job schedulato" in msg
+            # A job's tier (#670): no tier, the agent below it, or a resource
+            # above it — the run record names it apart from a plain clearance.
+            else "job_tier" if "tier del job" in msg
             else "denied_tools" if "denied_tools" in msg
             else "whitelist" if "non in whitelist" in msg
             else "clearance" if "clearance" in msg.lower()
@@ -6228,131 +6230,6 @@ def _visible_topic_rows(rows: list, caller: str) -> list:
     return _scope_rows_to_this_room(righe, caller)
 
 
-def _time_monotonic() -> float:
-    """Istante monotono (`time.monotonic`) — funzione per rendere agganciabile
-    a mock il tempo dei fail-safe che lo usano (snapshot RAG del #500)."""
-    return time.monotonic()
-
-
-#: Pausa, in secondi, fra i tentativi di rilettura live dei grant RAG (retry
-#: con backoff, clodia-platform#500): un guasto transitorio della lettura dal
-#: core — mint PKI in timeout, un ciclo dell'event-loop trattenuto qualche
-#: secondo — NON è un diniego, è di nuovo una domanda. Retry corto: ogni
-#: tentativo in sé ha già i timeout di rete di `runtime._get`, e un core
-#: giù per minuti non si risolve aggiungendo attese.
-_RAG_GRANT_RETRY_PAUSES = (0.25,)
-
-#: Età massima, in secondi, di uno SNAPSHOT di ultimo-buono usato come ripiego
-#: quando la lettura live NON va a termine (clodia-platform#500: «cache breve
-#: dei grant»). Mai un sostituto della live — che resta la decisione, fatta
-#: sempre — solo un ponte sui secondi in cui il core non risponde.
-#: Oltre questa età, o senza snapshot, il comportamento resta quello di oggi:
-#: fail-closed, col messaggio che dice «guasto infrastrutturale».
-_RAG_GRANT_SNAPSHOT_TTL = 120.0
-
-#: Snapshot per agent dell'ultima lettura andata a buon fine: nome →
-#: (istante della lettura (`time.monotonic`), grants). Aggiornato SOLO ai
-#: successi, consultato SOLO quando la live fallisce: una revoca non è mai
-#: mascherata dalla cache, perché la revoca si vede alla prima lettura live
-#: riuscita e la cache non prevale mai su quella.
-_rag_grants_snapshots: dict[str, tuple[float, dict[str, set[str]]]] = {}
-
-
-def _rag_grants_live(agent: str) -> dict[str, set[str]]:
-    """Lettura live dei grant dal core, con retry breve sui guasti
-    transitori (#500). `PermissionError` di `runtime.rag_grants` (agent
-    NON esistente, grant malformati nel suo AgentSpec) è una DECISIONE
-    documentata, non un guasto: passa intatta e senza retry."""
-    attempts = len(_RAG_GRANT_RETRY_PAUSES) + 1
-    error: Exception | None = None
-    for attempt in range(attempts):
-        try:
-            return runtime.rag_grants(agent)
-        except PermissionError:
-            raise
-        except Exception as e:  # noqa: BLE001 — backend irraggiungibile/malformato
-            error = e
-            if attempt < attempts - 1:
-                time.sleep(_RAG_GRANT_RETRY_PAUSES[attempt])
-    assert error is not None
-    raise error
-
-
-def _rag_grants(agent: str) -> dict[str, set[str]]:
-    """Grant live dal core. Fail-closed COME PRIMA, ma non più fragile
-    (clodia-platform#500):
-
-    - un guasto transitorio della lettura si riprova (retry brevi sopra);
-    - se anche i retry falliscono, un errore può reggersi su uno snapshot di
-      ultimo buono NON PIÙ VECCHIO DI DUE MINUTI di QUESTO agent: la verifica
-      fallita («non so») e il grant assente («non ha») restano cose diverse,
-      e l'accesso ai corpus corre meglio su un consenso concesso pochi
-      minuti prima che su un diniego;
-    - senza snapshot, o con uno scaduto, resta il fail-closed di sempre, col
-      messaggio che DICE che si tratta di un guasto infrastrutturale — distinto
-      da quello di `runtime.rag_grants` per l'agent assente, che passa
-      intatto ("impossibile risolvere i grant RAG…").
-    """
-    now = _time_monotonic()
-    try:
-        grants = _rag_grants_live(agent)
-    except PermissionError:
-        # Decisione di runtime (agent non conosciuto, grant malformati):
-        # nessuna via di scampo, esattamente come prima del #500.
-        _rag_grants_snapshots.pop(agent, None)
-        raise
-    except Exception as e:  # noqa: BLE001 — backend irraggiungibile/malformato
-        snapshot = _rag_grants_snapshots.get(agent)
-        if snapshot is not None and now - snapshot[0] <= _RAG_GRANT_SNAPSHOT_TTL:
-            import logging as _lg
-            from .tools.logs import REFMON_LOGGER
-            _lg.getLogger(REFMON_LOGGER).warning(
-                "clodia-platform#500 · core non risponde per i grant RAG di "
-                "'%s': uso lo snapshot di %.1f s fa invece di negare "
-                "(guasto: %s: %s)",
-                agent, now - snapshot[0], type(e).__name__, e)
-            return snapshot[1]
-        raise PermissionError(
-            f"guasto infrastrutturale: impossibile verificare i grant RAG "
-            f"dell'agent '{agent}' (il core non risponde alla lettura live "
-            f"dei grant; rifiuto prudenziale — riprovare; "
-            f"causa: {type(e).__name__}: {e})") from e
-    _rag_grants_snapshots[agent] = (now, grants)
-    return grants
-
-
-def _rag_readable(grants: dict[str, set[str]]) -> set[str]:
-    """Collection su cui l'agent ha lettura (read grant OR write grant)."""
-    return set(grants.get("rag_read") or []) | set(grants.get("rag_write") or [])
-
-
-#: Wildcard dentro `rag_read`/`rag_write`: non è il NOME di una collection, è
-#: «tutte». Un seed non può dichiarare una collection che si chiama `*`.
-_RAG_ANY = "*"
-
-
-def _rag_covers(granted: set[str], collection: str) -> bool:
-    """UNICO punto in cui si decide se un insieme di grant RAG copre una
-    collection — e quindi l'unico punto in cui `*` ha un significato.
-
-    `*` concede TUTTE le collection, esattamente come in `_tool_allowed` per
-    `allowed_tools`. Prima era letterale: `rag_read: ["*"]` chiedeva una
-    collection di nome `*`, che non esiste, quindi la configurazione che sembra
-    concedere tutto concedeva ZERO (clodia-platform#354). È lo stesso
-    trabocchetto già corretto sull'asse dei verbi; averlo risolto in un verso
-    solo significava che la stessa sintassi voleva dire due cose diverse a
-    seconda dell'asse, e la member list a schermo (clodia-logic#413) raccontava
-    la versione che il gate non applicava.
-
-    La wildcard tocca UN asse solo, l'appartenenza. Il tiering resta a valle e
-    invariato: `*` non alza la clearance di nessuno, quindi chi lo dichiara
-    resta fuori dalle collection di tier superiore al proprio — l'allargamento
-    è «tutte le collection che potresti già leggere se ti fossero state
-    elencate», non «tutte».
-    """
-    return _RAG_ANY in granted or collection in granted
-
-
 def _rag_provisioners() -> set[str]:
     return {
         x.strip() for x in _os.environ.get("CLODIA_RAG_PROVISIONERS", "sysadmin").split(",")
@@ -6360,26 +6237,45 @@ def _rag_provisioners() -> set[str]:
     }
 
 
-def _rag_declared_members(collection: str) -> list[str] | None:
-    """Member list DICHIARATA dal pack per la collection, o `None` se nessun
-    pack installato si è pronunciato. Errore di lettura = accesso negato,
-    stessa scelta di `_rag_grants`: non sapere se una lista esiste non è la
-    stessa cosa che sapere che non esiste."""
-    try:
-        entry = rag_collections.find(collection)
-    except Exception as e:  # noqa: BLE001 — datadir illeggibile/malformata
+def _provisioner_tier(collection: str) -> str:
+    """The pack provisioner's exception (clodia-platform#669), narrowed after
+    review: only for a collection DECLARED by an installed pack (initial
+    provisioning — any other collection goes through a scope like for
+    everyone), at the level the catalogue gives it (`effective_tier`) or,
+    before the catalogue knows it, the level the pack declares — the higher
+    of the two. A level nobody knows is a refusal, never SEAL-0. The
+    provisioner's clearance must cover it. Returns the level."""
+    from . import data_catalog
+    declared = datastores.declared_collections().get(collection)
+    if declared is None:
         raise PermissionError(
-            f"impossibile verificare la member list della collection "
-            f"'{collection}'") from e
-    return entry.get("seeds") if entry else None
+            f"la collection '{collection}' non è dichiarata da un pack installato: "
+            "l'eccezione del provisioner vale solo per il provisioning iniziale")
+    tiers = [t for t in (declared.get("tier"),) if t]
+    entry = data_catalog.get("rag", collection)
+    if entry is not None:
+        tiers.append(data_catalog.effective_tier(entry))
+    if not tiers:
+        raise PermissionError(
+            f"livello della collection '{collection}' sconosciuto (né il catalogo né "
+            f"il pack '{declared.get('pack')}' lo dichiarano): rifiuto")
+    tier = max(tiers, key=_rank)
+    if _rank(current_clearance()) < _rank(tier):
+        raise PermissionError(
+            f"agent '{agent_name()}': clearance insufficiente per la collection "
+            f"'{collection}' (tier {tier})")
+    return tier
 
 
 def _rag_authorize(collection: str, write: bool, verb: str = "") -> None:
-    """Reference monitor per-collection: grant read/write (arg-aware, dal
-    AgentSpec autorevole nel core) + member list dichiarata dal pack che possiede
-    la collection + tiering (clearance ≥ tier della collection).
-    Super-agent → bypass dei grant, MA il vincolo del profilo (rag off/single)
-    è strutturale e vale per tutti. Solleva PermissionError su violazione."""
+    """Reference monitor per-collection (clodia-platform#669): the collection
+    is imported in the scope of the SIGNED claim (topic, DM or job), the agent
+    is in that scope, and clearance and scope tier cover the collection's tier
+    (`topic_data.authorize`). No seed list, no per-agent grant, no super-agent
+    bypass. The one exception is the pack provisioner's create/ingest
+    (`CLODIA_RAG_PROVISIONERS`) of a pack-declared collection
+    (`_provisioner_tier`). The profile's
+    constraint (rag off/single) holds for everyone. Raises PermissionError."""
     instance_profile.rag_check_collection(collection)
     ag = agent_name()
     from . import topic_data, topic_index
@@ -6389,68 +6285,14 @@ def _rag_authorize(collection: str, write: bool, verb: str = "") -> None:
         raise PermissionError(
             f"la collection '{collection}' è l'indice di un topic: la scrive solo "
             "l'indicizzatore")
-    if topic_data.mode() == "topic" or collection.startswith(topic_index.PREFIX):
-        # #590 D4: the topic of the signed claim decides — imported there,
-        # granted there. Super-agents included; the one exception is the
-        # provisioner's WRITE (create/ingest on behalf of a pack), checked on
-        # clearance as before.
-        # Only CREATING a collection or INGESTING into it (decision 5): a
-        # provisioner's `remove` goes through the topic like anyone's.
-        if write and verb in ("create_collection", "ingest") and ag in _rag_provisioners():
-            tier = eu_corpus.collection_tier(collection)
-            if _rank(current_clearance()) < _rank(tier):
-                raise PermissionError(
-                    f"agent '{ag}': clearance insufficiente per la collection "
-                    f"'{collection}' (tier {tier})")
-            return
-        from .egress import _scope_of_call
-        topic_data.authorize("rag", collection, write=write, agent=ag,
-                             clearance=current_clearance(), scope=_scope_of_call())
+    # Only CREATING a collection or INGESTING into it, on behalf of a pack
+    # (decision 5 of #590): a provisioner's `remove` goes through the scope
+    # like anyone's.
+    if write and verb in ("create_collection", "ingest") and ag in _rag_provisioners():
+        _provisioner_tier(collection)
         return
-    if _is_super(ag):
-        return
-    if write and ag in _rag_provisioners():
-        tier = eu_corpus.collection_tier(collection)
-        if _rank(current_clearance()) < _rank(tier):
-            raise PermissionError(
-                f"agent '{ag}': clearance insufficiente per la collection '{collection}' "
-                f"(tier {tier})")
-        return
-    grants = _rag_grants(ag)
-    if write:
-        if not _rag_covers(set(grants.get("rag_write") or []), collection):
-            raise PermissionError(
-                f"agent '{ag}' senza grant di SCRITTURA sulla collection '{collection}'")
-    else:
-        if not _rag_covers(_rag_readable(grants), collection):
-            raise PermissionError(
-                f"agent '{ag}' senza grant di LETTURA sulla collection '{collection}'")
-    # asse MEMBRI: la member list che la collection dichiara di sé nel manifest
-    # del pack (`rag_collections[].seeds`, clodia-platform#343). Congiuntiva al
-    # grant, mai alternativa: stare nella lista non concede la scrittura a chi
-    # ha solo `rag_read`, e il grant non basta più dove la lista esiste.
-    #
-    # Dichiarata → vincolante; NON dichiarata → si resta al regime dei soli
-    # grant. Negare in assenza avrebbe spento il RAG di ogni agente: nessun
-    # manifest dichiara ancora il campo, e ogni collection viva oggi si
-    # raggiunge per grant. Una dichiarazione può solo restringere.
-    #
-    # Sta DOPO i rami super/provisioner di proposito, e quindi non li tocca: il
-    # provisioner (sysadmin, pack_ops) crea e ingesta la collection PER CONTO
-    # del pack, e non è quasi mai nella member list del pack stesso —
-    # vincolarlo romperebbe il setup di ogni pack con un corpus. È lo stesso
-    # bypass che `_datastore_authorize` concede al super-agent sull'allowlist
-    # `seeds:` di un datastore.
-    members = _rag_declared_members(collection)
-    if members is not None and ag not in members:
-        raise PermissionError(
-            f"agent '{ag}' non è nella member list della collection '{collection}'")
-    # asse livello: clearance(agent) ≥ tier(collection). Difesa in profondità.
-    tier = eu_corpus.collection_tier(collection)
-    if _rank(current_clearance()) < _rank(tier):
-        raise PermissionError(
-            f"agent '{ag}': clearance insufficiente per la collection '{collection}' "
-            f"(tier {tier})")
+    topic_data.authorize("rag", collection, write=write, agent=ag,
+                         clearance=current_clearance(), scope=topic_data.scope_of_call())
 
 
 def _taint_from_hits(collection: str, res: object) -> None:
@@ -6470,13 +6312,11 @@ def _taint_from_hits(collection: str, res: object) -> None:
 
 
 def _ingest_source_ok(collection: str, tier: str, name: str) -> None:
-    """#590, review of clodia-tools#420: in topic mode, an ingest must not move
-    data down a level. The source file's topic must be the call's own topic
-    (provisioners excepted), and its tier at most the collection's: a SEAL-3
-    file in a SEAL-1 collection is readable by every SEAL-1 importer."""
-    from . import topic_data, data_catalog
-    if topic_data.mode() != "topic":
-        return
+    """#590, review of clodia-tools#420: an ingest must not move data down a
+    level. The source file's topic must be the call's own topic (provisioners
+    excepted), and its tier at most the collection's: a SEAL-3 file in a SEAL-1
+    collection is readable by every SEAL-1 importer."""
+    from . import data_catalog
     entry = data_catalog.get("rag", collection)
     need = data_catalog.effective_tier(entry) if entry else eu_corpus.collection_tier(collection)
     if data_catalog.rank(tier) > data_catalog.rank(need):
@@ -6484,29 +6324,25 @@ def _ingest_source_ok(collection: str, tier: str, name: str) -> None:
             f"il file viene da un topic {tier}: non entra nella collection '{collection}' "
             f"({need}), i dati non scendono di livello")
     if agent_name() not in _rag_provisioners():
-        from .egress import _scope_of_call
-        scope = _scope_of_call()
+        from . import topic_data
+        scope = topic_data.scope_of_call()      # a job scope never matches a topic file
         if not scope or data_catalog.norm_tier(scope.partition("/")[0]) != \
                 data_catalog.norm_tier(tier) or scope.partition("/")[2] != name:
             raise PermissionError(
-                "in modalità topic si ingesta solo un file del topic in cui si lavora "
+                "si ingesta solo un file del topic in cui si lavora "
                 "(e del livello della collection: i dati non scendono di livello)")
 
 
 def _datastore_authorize(key: str, *, write: bool) -> dict:
-    """Reference monitor per-datastore: stesso schema a due assi di
-    `_rag_authorize` sopra, ma con l'allowlist dichiarata DIRETTAMENTE nel
-    manifest del pack (`seeds:`) invece che in un grant store separato nel
-    core — un datastore non ha un provisioner che lo alimenta run-time come le
-    collection RAG, la sua fonte di verità è la dichiarazione del pack.
+    """Reference monitor per-datastore (clodia-platform#669): for an AGENT the
+    datastore must be imported in the scope of the signed claim (topic, DM or
+    job), with clearance and scope tier covering it (`topic_data.authorize`).
+    No seed list, no super-agent bypass.
 
     `key` in forma `<pack>/<nome>` (`server.datastores.parse_key`). Ritorna
     l'entry autorizzata (con `abs_path` già risolto) così il chiamante non
-    deve rileggerla. Super-agent bypassa l'allowlist ma NON la clearance: un
-    dato dichiarato SEAL-3 resta SEAL-3 anche per chi ha tutti i verbi.
-
-    DUE ASSI, ma non le stesse due domande per un agente e per una persona:
-    vedi il ramo `is_on_behalf()` qui sotto.
+    deve rileggerla. A PERSON reading on-behalf from the webui follows
+    `_datastore_authorize_human`.
     """
     pack, dsname = datastores.parse_key(key)
     entry = datastores.find(pack, dsname)
@@ -6514,36 +6350,17 @@ def _datastore_authorize(key: str, *, write: bool) -> dict:
         raise ValueError(f"datastore sconosciuto: '{key}'")
     if is_on_behalf():
         return _datastore_authorize_human(entry, key, write=write)
-    ag = agent_name()
     from . import topic_data
-    if topic_data.mode() == "topic":
-        # #590 D4: imported in the signed topic and granted there; the seed
-        # list no longer decides, for anyone.
-        from .egress import _scope_of_call
-        topic_data.authorize("datastore", f"{pack}/{dsname}", write=write, agent=ag,
-                             clearance=current_clearance(), scope=_scope_of_call())
-        return entry
-    if not (_is_super(ag) or ag in (entry["seeds"] or [])):
-        raise PermissionError(
-            f"agent '{ag}' non è nell'elenco seed del datastore '{key}'")
-    if _rank(current_clearance()) < _rank(entry["clearance"]):
-        raise PermissionError(
-            f"agent '{ag}': clearance insufficiente per il datastore '{key}' "
-            f"(richiesta {entry['clearance']})")
+    topic_data.authorize("datastore", f"{pack}/{dsname}", write=write, agent=agent_name(),
+                         clearance=current_clearance(), scope=topic_data.scope_of_call())
     return entry
 
 
 def _datastore_authorize_human(entry: dict, key: str, *, write: bool) -> dict:
     """L'asse di una PERSONA che legge on-behalf dalla webui (#342).
 
-    `seeds:` è un elenco di AGENTI e di una persona non dice nulla. Chiederlo
-    comunque — cioè chiedere «il CARRIER è nell'elenco?» — è la domanda
-    sbagliata posta a nome di qualcun altro, e dava due risposte entrambe
-    sbagliate: negava a un admin la lettura di un datastore della sua istanza
-    (nessun datastore era navigabile da un umano, che è la issue) e la
-    concedeva a CHIUNQUE quando il carrier tecnico `clodia` compariva per caso
-    nei seeds del pack — l'autorità di un agente ereditata da una persona che
-    non ce l'ha, cioè il difetto che `_human_tool_allowed` esiste per chiudere.
+    Never the carrier's authority: a person does not inherit what the
+    technical agent that carries the call could reach (`_human_tool_allowed`).
 
     Le domande che si possono porre di una persona sono i suoi claim FIRMATI
     dall'agent-server, e sono due come per gli agenti:
@@ -6555,16 +6372,14 @@ def _datastore_authorize_human(entry: dict, key: str, *, write: bool) -> dict:
       token on-behalf, un admin vede solo i datastore SEAL-0 — negato per
       difetto, mai concesso per difetto.
 
-    La SCRITTURA resta fuori: #342 chiede di navigare, e l'unico posto dove
-    qualcuno ha autorizzato una scrittura su questi dati è il manifest del
-    pack, che nomina agenti. Un `DELETE` dalla UI non l'ha chiesto nessuno.
+    La SCRITTURA resta fuori: #342 chiede di navigare. Content CRUD for a
+    person is #671's, not this monitor's.
     """
     chi = current_principal() or "sconosciuto"
     if write:
         raise PermissionError(
             f"scrittura sul datastore '{key}' non consentita da una sessione "
-            f"umana: la dichiara il pack, e nomina agenti ('{key}' → seeds). "
-            f"Dalla UI il datastore è navigabile in sola lettura.")
+            f"umana: dalla UI il datastore è navigabile in sola lettura.")
     if not _human_is_admin():
         raise PermissionError(
             f"datastore '{key}' riservato agli admin (umano '{chi}' ruolo "
@@ -6588,57 +6403,35 @@ def _dispatch_rag(name: str, a: dict):
             only = instance_profile.load()["rag"].get("collection") or ""
             res = {"collections": [c for c in res.get("collections", [])
                                    if c.get("collection") == only]}
-        from . import topic_data, topic_index
-        from .egress import _scope_of_call
-        if _is_super(agent_name()):
-            # A super-agent sees every collection but the topics' indexes,
-            # which it reads only where its topic grants them (review of #422).
-            mine = topic_data.visible("rag", agent=agent_name(), scope=_scope_of_call(),
-                                      clearance=current_clearance())
-            res = {"collections": [c for c in res.get("collections", [])
-                                   if not topic_index.is_topic_collection(c.get("collection"))
-                                   or c.get("collection") in mine]}
-        elif topic_data.mode() == "topic" and agent_name() not in _rag_provisioners():
-            # #590: the collections this agent may read in ITS topic.
-            mine = topic_data.visible("rag", agent=agent_name(), scope=_scope_of_call(),
+        from . import topic_data
+        if agent_name() in _rag_provisioners():
+            # The pack provisioner checks which declared collections exist
+            # (decision 5 of #590): every collection within its clearance, the
+            # topics' indexes excepted.
+            from . import topic_index
+            res = {"collections": [
+                c for c in res.get("collections", [])
+                if not topic_index.is_topic_collection(c.get("collection"))
+                and _rank(current_clearance()) >= _rank(c.get("tier", "SEAL-0"))]}
+        else:
+            # #669: the collections this agent may read in ITS scope, nothing else.
+            mine = topic_data.visible("rag", agent=agent_name(),
+                                      scope=topic_data.scope_of_call(),
                                       clearance=current_clearance())
             res = {"collections": [c for c in res.get("collections", [])
                                    if c.get("collection") in mine]}
-        elif not _is_super(agent_name()):
-            # A topic collection (#599) follows the topic rules in legacy mode too.
-            mine = topic_data.visible("rag", agent=agent_name(), scope=_scope_of_call(),
-                                      clearance=current_clearance())
-            topic_cols = [c for c in res.get("collections", [])
-                          if str(c.get("collection") or "").startswith(topic_index.PREFIX)
-                          and c.get("collection") in mine]
-            res = {"collections": [c for c in res.get("collections", [])
-                                   if not str(c.get("collection") or "").startswith(
-                                       topic_index.PREFIX)]}
-            if agent_name() in _rag_provisioners():
-                res = {"collections": [
-                    c for c in res.get("collections", [])
-                    if _rank(current_clearance()) >= _rank(c.get("tier", "SEAL-0"))
-                ]}
-            else:
-                # L'elenco deve coincidere con ciò che `_rag_authorize`
-                # concede, sui DUE assi: appartenenza (`_rag_covers`, quindi
-                # anche `*`) e clearance. Il filtro di livello mancava perché
-                # senza wildcard l'elenco era comunque scritto a mano, una
-                # collection alla volta; con `*` un agente vedrebbe i nomi
-                # delle collection di tier superiore al proprio pur restando
-                # respinto sul primo `search`.
-                allowed = _rag_readable(_rag_grants(agent_name()))
-                res = {"collections": [
-                    c for c in res.get("collections", [])
-                    if _rag_covers(allowed, c.get("collection"))
-                    and _rank(current_clearance()) >= _rank(c.get("tier", "SEAL-0"))
-                ]}
-            res = {"collections": res.get("collections", []) + topic_cols}
         return res
     if verb == "create_collection":
         collection = a["collection"]
         _rag_authorize(collection, write=True, verb="create_collection")
         tier = a.get("tier", "SEAL-1")
+        if agent_name() in _rag_provisioners():
+            # Never below the level the pack / catalogue gives it: the catalogue
+            # registers the collection at this tier (review of #473).
+            floor = _provisioner_tier(collection)
+            if _rank(tier) < _rank(floor):
+                raise PermissionError(
+                    f"la collection '{collection}' è {floor}: non si crea a {tier}")
         if _rank(current_clearance()) < _rank(tier):
             raise PermissionError(
                 f"agent '{agent_name()}': clearance insufficiente per creare "

@@ -1,5 +1,13 @@
-"""Data imported by a topic, and who may use it there (clodia-platform#590:
-D2 #592 import, D3 #593 per-agent grants, D4 #594 enforcement).
+"""Data imported by a scope, and who may use it there (clodia-platform#590:
+D2 #592 import, D3 #593 per-agent grants, D4 #594 enforcement; #669 the only
+data access; #670 DM and job scopes).
+
+A **scope** is where an agent works: a topic, a DM (a topic with `kind: dm`)
+or an agentic job. Imports into a scope are the ONLY way an agent reaches a
+datastore or a RAG collection (#669): no seed list, no `rag_read`/`rag_write`,
+no legacy mode. The scope comes from the signed `chat` claim
+(`scope_of_call`): `chan:<tier>:<name>:<agent>` → `<tier>/<name>`,
+`job:<id>:<suffix>` → `job:<id>`.
 
 A topic declares in its meta the catalog resources it uses:
 
@@ -14,9 +22,17 @@ A topic declares in its meta the catalog resources it uses:
   the room's own index (`topic-*`): read-only, the indexer writes it. The old
   `grants` map is kept in the meta but no longer decides anything.
 - **Enforcement** (`authorize`): on the topic of the SIGNED claim, never an
-  argument. The resource is imported there, the agent is granted there, its
-  clearance covers the resource, and the topic's tier still covers it. No
-  topic → no access.
+  argument. The topic is not archived, the resource is imported there, the
+  agent is in it, its clearance covers the resource, and the topic's tier
+  still covers it. No topic → no access.
+
+- **Jobs** (#670): an agentic job's `data: [{kind, name}]` lives in the job
+  record (agent-server, `scheduler/db.py`) and is read live from there
+  (`_job`). Whoever executes the job (its `agent`) uses it. A job that imports
+  data must declare a `tier` (owner, 11 Nov 2026): no tier, no data; the
+  resource's tier ≤ the job's tier ≤ the executing agent's clearance, checked
+  at every call. A `topic_trigger` job runs in its topic's channel and keeps
+  that topic's imports.
 
 Modelled on `drive_folders`: a declaration of the topic that narrows an
 authority which exists elsewhere (the catalog), never opens one.
@@ -65,22 +81,61 @@ def _write(svc, tier: str, name: str, mutate) -> dict:
     return result
 
 
-def import_resource(tier: str, name: str, kind: str, resource: str, *,
-                    principal: str, is_admin: bool, clearance: str | None) -> dict:
+def check_import(kind: str, resource: str, scope_tier: str | None, *,
+                 principal: str, is_admin: bool, clearance: str | None,
+                 scope_kind: str = "topic") -> dict:
+    """The import rules, for any scope (#670): the resource is in the catalog,
+    `principal` may import it, and the scope's tier covers the resource's.
+    Returns `{kind, name, tier}`; raises DataError / PermissionError."""
     entry = cat.get(kind, resource)
     if entry is None and cat.sync_due():
         cat.sync()                      # a pack installed since the last boot
         entry = cat.get(kind, resource)
     if entry is None:
         raise DataError(f"{kind} '{resource}' non è nel catalogo dei dati")
+    if scope_kind == "job" and kind == "rag" and str(resource).startswith("topic-"):
+        raise DataError("l'indice di un topic resta nel suo topic: non si importa in un job")
+    if scope_kind == "job" and not str(scope_tier or "").strip():
+        # Owner, 11 Nov 2026: a job that imports data declares its tier first.
+        raise DataError(JOB_NO_TIER)
     why = cat.may_import(entry, principal, is_admin=is_admin, clearance=clearance)
     if why:
         raise PermissionError(why)
     need = cat.effective_tier(entry)
-    if cat.rank_have(tier) < cat.rank(need):
+    if cat.rank_have(scope_tier) < cat.rank(need):
         raise PermissionError(
-            f"{kind} '{resource}' è {need}: non entra in un topic {cat.norm_tier(tier)} "
-            "(il tier del topic deve essere almeno quello della risorsa)")
+            f"{kind} '{resource}' è {need}: non entra in un {scope_kind} "
+            f"{cat.norm_tier(scope_tier)} (il tier dello scope deve essere almeno "
+            "quello della risorsa)")
+    return {"kind": kind, "name": resource, "tier": need}
+
+
+def check_imports_tier(entries: list[dict], new_tier: str | None, *,
+                       scope_kind: str = "job") -> None:
+    """A scope cannot go below the level of the data it imports: the rule of
+    `check_retier`, for a scope whose imports the gateway does not hold (a
+    job, #670). Raises DataError naming the first resource above `new_tier`."""
+    entries = imports({FIELD: entries})
+    if entries and scope_kind == "job" and not str(new_tier or "").strip():
+        raise DataError("un job che importa dati ha bisogno di un tier: togli prima "
+                        "i dati importati")
+    for e in entries:
+        try:
+            entry = cat.get(e["kind"], e["name"])
+        except RuntimeError as err:     # unreadable catalog: refuse, do not crash
+            raise DataError(str(err)) from err
+        need = cat.effective_tier(entry) if entry else "SEAL-0"
+        if cat.rank_have(new_tier) < cat.rank(need):
+            raise DataError(
+                f"il {scope_kind} importa {e['kind']} '{e['name']}' ({need}): non può "
+                f"scendere a {cat.norm_tier(new_tier)}. Rimuovi prima l'import.")
+
+
+def import_resource(tier: str, name: str, kind: str, resource: str, *,
+                    principal: str, is_admin: bool, clearance: str | None) -> dict:
+    checked = check_import(kind, resource, tier, principal=principal,
+                           is_admin=is_admin, clearance=clearance)
+    need = checked["tier"]
     svc = _svc()
 
     def mutate(meta, entries):
@@ -159,11 +214,116 @@ def check_retier(meta: dict, new_tier: str) -> None:
                 f"{cat.norm_tier(new_tier)}. Rimuovi prima l'import.")
 
 
-def mode() -> str:
-    """`legacy` (seed grants, as before #590) or `topic` (this module)."""
-    from . import whitelist
-    m = str(whitelist.CONFIG.get("data_access") or "legacy").strip().lower()
-    return m if m in ("legacy", "topic") else "legacy"
+#: Every refusal about a job's tier says this, so the run record can name its
+#: class (`main._denial_class` → `job_tier`).
+JOB_TIER_MARK = "tier del job"
+JOB_NO_TIER = ("imposta il tier del job prima di importare dati (un job che usa dati "
+               "dichiara il proprio tier)")
+
+#: The prefix of a job's chat id and data scope (#670): the agent-server
+#: names an agentic job's chat `job:<id>:<suffix>`, and that id is signed into
+#: the session token's `chat` claim.
+JOB_PREFIX = "job:"
+
+
+def scope_of_call() -> str | None:
+    """The DATA scope of the current call, from the signed `chat` claim:
+    `<tier>/<name>` in a topic or DM channel, `job:<id>` in an agentic job's
+    turn, None otherwise (an internal call, a Telegram 1:1). Never from an
+    argument: that would be the agent's word on where it is."""
+    try:
+        from .whitelist import current_channel, current_chat
+        ch = current_channel()
+        if ch:
+            return ch
+        c = current_chat() or ""
+    except Exception:  # noqa: BLE001
+        return None
+    if c.startswith(JOB_PREFIX):
+        jid = c[len(JOB_PREFIX):].split(":", 1)[0]
+        if jid.isdigit():
+            return f"{JOB_PREFIX}{int(jid)}"
+    return None
+
+
+def job_id(scope: str | None) -> int | None:
+    s = str(scope or "")
+    if not s.startswith(JOB_PREFIX):
+        return None
+    rest = s[len(JOB_PREFIX):]
+    return int(rest) if rest.isdigit() else None
+
+
+#: A few seconds of memory per job: every data call of a turn reads the job,
+#: and the job record lives in the agent-server. Short enough that an import
+#: removed by the owner is out before the next turn; an error is never cached.
+_JOB_TTL = 2.0
+_job_cache: dict[int, tuple[float, dict]] = {}
+
+
+def _job(jid: int) -> dict:
+    """The job record (agent-server), read live. Any failure is a refusal."""
+    import time as _time
+    now = _time.monotonic()
+    hit = _job_cache.get(jid)
+    if hit and now - hit[0] < _JOB_TTL:
+        return hit[1]
+    try:
+        from .tools import runtime
+        job = runtime.job_scope(jid)
+    except Exception as e:  # noqa: BLE001 — fail closed
+        raise PermissionError(f"job {jid} non leggibile: {type(e).__name__}") from e
+    if not isinstance(job, dict):
+        raise PermissionError(f"job {jid} non leggibile")
+    _job_cache[jid] = (now, job)
+    return job
+
+
+def job_tier(job: dict) -> str:
+    """The job's declared tier, "" when it declares none. No fallback (owner,
+    11 Nov 2026): a job without a tier uses no data."""
+    return str((job or {}).get("tier") or "").strip()
+
+
+def job_imports(job: dict) -> list[dict]:
+    return imports({FIELD: (job or {}).get(FIELD)})
+
+
+def _job_runs_as(job: dict, agent: str) -> bool:
+    return bool(agent) and (job.get("mode") or "agentic") == "agentic" \
+        and str(job.get("agent") or "") == agent
+
+
+def _authorize_job(jid: int, kind: str, resource: str, *, write: bool, agent: str,
+                   clearance: str | None) -> dict:
+    job = _job(jid)
+    if not _job_runs_as(job, agent):
+        raise PermissionError(
+            f"agent '{agent}' non esegue il job {jid}: i dati importati lì li usa "
+            "solo l'agente del job")
+    if not any(e["kind"] == kind and e["name"] == resource for e in job_imports(job)):
+        raise PermissionError(f"{kind} '{resource}' non è importato nel job {jid}")
+    entry = cat.get(kind, resource)
+    if entry is None:
+        raise PermissionError(f"{kind} '{resource}' non è più nel catalogo dei dati")
+    if write and kind == "rag" and str(resource).startswith("topic-"):
+        raise PermissionError(f"'{resource}' è l'indice di un topic: lo scrive solo "
+                              "l'indicizzazione automatica")
+    jt = job_tier(job)
+    if not jt:
+        raise PermissionError(f"il job {jid} non dichiara un tier: imposta il {JOB_TIER_MARK} "
+                              "per usarne i dati")
+    if cat.rank_have(clearance) < cat.rank(jt):
+        raise PermissionError(
+            f"agent '{agent}' ({cat.norm_tier(clearance)}) sotto il {JOB_TIER_MARK} {jid} "
+            f"({cat.norm_tier(jt)}): i dati del job restano chiusi in questo run")
+    need = cat.effective_tier(entry)
+    if cat.rank_have(jt) < cat.rank(need):
+        raise PermissionError(f"{kind} '{resource}' ({need}) sopra il {JOB_TIER_MARK} {jid}")
+    if cat.rank_have(clearance) < cat.rank(need):
+        raise PermissionError(
+            f"agent '{agent}': clearance insufficiente per {kind} '{resource}' ({need})")
+    return entry
 
 
 #: Kinds every PARTICIPANT reads once imported in the room (26 Oct 2026) —
@@ -174,6 +334,11 @@ READ_FOR_PARTICIPANTS = frozenset({"rag", "datastore"})
 def _participant(meta: dict, agent: str) -> bool:
     from .topics.service import TopicService
     return bool(agent) and agent in TopicService.participants_map(meta)
+
+
+def archived(meta: dict) -> bool:
+    """An archived topic or DM: its imports give no access (review of #473)."""
+    return str((meta or {}).get("status") or "").strip().lower() == "archived"
 
 
 def own_index(e: dict) -> bool:
@@ -195,17 +360,28 @@ def _writes(meta: dict, e: dict, agent: str) -> bool:
 
 def authorize(kind: str, resource: str, *, write: bool, agent: str,
               clearance: str | None, scope: str | None) -> dict:
-    """The topic-mode decision for an AGENT's call. Returns the catalog entry;
-    raises PermissionError with the reason."""
+    """The decision for an AGENT's call, in its scope (topic, DM or job).
+    Returns the catalog entry; raises PermissionError with the reason."""
     if not scope:
         raise PermissionError(
-            f"{kind} '{resource}': accesso solo dentro un topic che lo importa "
-            "(nessun topic in questa chiamata)")
+            f"{kind} '{resource}': accesso solo dentro un topic, un DM o un job che "
+            "lo importa (nessuno scope in questa chiamata)")
+    jid = job_id(scope)
+    if jid is not None:
+        return _authorize_job(jid, kind, resource, write=write, agent=agent,
+                              clearance=clearance)
     tier, _, name = scope.partition("/")
     try:
         meta = _svc()._read_meta(tier, name)[0]     # meta only: this runs on every call
     except Exception as e:  # noqa: BLE001
         raise PermissionError(f"topic {scope} non leggibile: {type(e).__name__}") from e
+    if archived(meta):
+        # Like A·V·R·Q, which drops a room's tuples once it is archived: nobody
+        # works there any more, so its imports open nothing (review of #473).
+        what = "il DM" if (meta.get("kind") or meta.get("type")) == "dm" else "il topic"
+        raise PermissionError(
+            f"{what} {scope} è archiviato: i dati importati lì non sono più accessibili "
+            "(riattivalo per usarli)")
     imp = _find(meta, kind, resource)
     if imp is None:
         raise PermissionError(f"{kind} '{resource}' non è importato nel topic {scope}")
@@ -231,11 +407,27 @@ def authorize(kind: str, resource: str, *, write: bool, agent: str,
 
 def visible(kind: str, *, agent: str, scope: str | None,
             clearance: str | None = None) -> set[str]:
-    """Names of `kind` the agent may read in its topic (for listings): the
+    """Names of `kind` the agent may read in its scope (for listings): the
     same answer `authorize` would give, without raising."""
     if not scope:
         return set()
     out = set()
+    jid = job_id(scope)
+    if jid is not None:
+        try:
+            job = _job(jid)
+        except PermissionError:
+            return set()
+        for e in job_imports(job):
+            if e["kind"] != kind:
+                continue
+            try:
+                _authorize_job(jid, kind, e["name"], write=False, agent=agent,
+                               clearance=clearance)
+            except PermissionError:
+                continue
+            out.add(e["name"])
+        return out
     tier, _, name = scope.partition("/")
     try:
         meta = _svc()._read_meta(tier, name)[0]

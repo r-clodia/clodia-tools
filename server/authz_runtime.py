@@ -80,6 +80,36 @@ def _data_tuples(meta: dict) -> list[A.Tuple]:
     return ok
 
 
+def _job_data_tuples(agent: str) -> list[A.Tuple]:
+    """An agentic job is a data scope too (clodia-platform#670): in a job's
+    turn (signed `chat` claim `job:<id>:…`), the data the job imports as
+    tuples for the agent that executes it — the same verbs a room's import
+    brings (`_data_tuples`). They join the GLOBAL level: a job is not a room,
+    so the global tuples that hold only outside rooms keep holding. Any
+    failure reading the job adds nothing (fail closed on data only)."""
+    from . import topic_data as _td
+    jid = _td.job_id(_td.scope_of_call())
+    if jid is None or not agent:
+        return []
+    try:
+        job = _td._job(jid)
+    except PermissionError:
+        return []
+    if not _td._job_runs_as(job, agent) or not _td.job_tier(job):
+        return []           # no tier, no data (owner, 11 Nov 2026)
+    raw = []
+    for imp in _td.job_imports(job):
+        res = f"{imp['kind']}:{imp['name']}"
+        verbs = _td._READ_VERBS.get(imp["kind"], ())
+        if not _td.own_index(imp):
+            verbs = verbs + _td._WRITE_VERBS.get(imp["kind"], ())
+        for v in verbs:
+            raw.append({"id": f"job-data:{jid}:{res}:{v}", "agent": agent, "verb": v,
+                        "resource": res, "rule": [{"effect": "allow", "match": "*"}]})
+    ok, _bad = A.parse_tuples(raw, level=A.TOPIC)
+    return ok
+
+
 def _resource_tuples(meta: dict) -> list[A.Tuple]:
     """The resource rows of the room's MCPs (#620) as topic tuples: per verb
     of the MCP that reaches the row's scheme (or the verbs the row names), a
@@ -214,10 +244,11 @@ def _room_view(scope: Optional[str]) -> dict:
 def tuples_for(agent: str, scope: Optional[str]) -> tuple[list[A.Tuple], Optional[list[A.Tuple]]]:
     """The tuples in force for THIS agent here. A room gives nothing to whoever
     does not take part in it and nothing from its panels once archived —
-    review of #435, B2. Outside a room: the global level only."""
+    review of #435, B2. Outside a room: the global level only — plus, in an
+    agentic job's turn, the job's imported data (#670)."""
     v = _room_view(scope)
     if not scope:
-        return v["global"], None
+        return v["global"] + _job_data_tuples(agent), None
     if agent not in v["members"] or v["archived"]:
         return v["global"], []
     return v["global"], v["explicit"] + v["derived"]

@@ -5,6 +5,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import yaml
+
 from . import datastores
 
 
@@ -23,6 +25,7 @@ class DeclaredTests(unittest.TestCase):
             _write_manifest(root, "base-pack", [
                 {"path": "data/contacts.db", "purpose": "CRM contatti", "pii": True,
                  "backup": True, "clearance": "SEAL-1", "seeds": ["messaggero", "clodia"]},
+                # an older manifest still listing seeds: ignored (#669)
             ])
             with patch.object(datastores, "DATADIR", str(root)):
                 found = datastores.declared()
@@ -31,19 +34,17 @@ class DeclaredTests(unittest.TestCase):
             self.assertEqual(entry["pack"], "base-pack")
             self.assertEqual(entry["name"], "contacts")
             self.assertEqual(entry["clearance"], "SEAL-1")
-            self.assertEqual(entry["seeds"], ["messaggero", "clodia"])
+            self.assertNotIn("seeds", entry)
             self.assertTrue(entry["abs_path"].endswith("data/contacts.db"))
 
-    def test_missing_clearance_and_seeds_default_to_most_restrictive(self) -> None:
-        """Un datastore dichiarato prima che questi campi esistessero non
-        concede nulla finché qualcuno non li scrive esplicitamente."""
+    def test_missing_clearance_defaults_to_most_restrictive(self) -> None:
+        """Un datastore senza `clearance` è SEAL-4: fail-closed."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_manifest(root, "tomato", [{"path": "data/leads.db"}])
             with patch.object(datastores, "DATADIR", str(root)):
                 found = datastores.declared()
             self.assertEqual(found[0]["clearance"], "SEAL-4")
-            self.assertEqual(found[0]["seeds"], [])
 
     def test_name_defaults_to_path_stem(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -76,6 +77,26 @@ class ParseKeyTests(unittest.TestCase):
             with self.subTest(key=bad):
                 with self.assertRaises(ValueError):
                     datastores.parse_key(bad)
+
+
+class DeclaredCollectionsTests(unittest.TestCase):
+    """The collections the pack provisioner may create and feed (#669)."""
+
+    def test_names_and_levels_with_no_default(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdir = root / "plugins" / "legal-pack"
+            pdir.mkdir(parents=True)
+            (pdir / "plugin.yaml").write_text(yaml.safe_dump({"name": "legal-pack",
+                "rag_collections": [{"name": "kb", "tier": "p2"},
+                                    {"name": "nessuno"},
+                                    {"name": "strano", "tier": "SEAL-9"},
+                                    {"name": " "}, "x"]}), encoding="utf-8")
+            with patch.object(datastores, "DATADIR", str(root)):
+                found = datastores.declared_collections()
+        self.assertEqual(found, {"kb": {"pack": "legal-pack", "tier": "SEAL-2"},
+                                 "nessuno": {"pack": "legal-pack", "tier": None},
+                                 "strano": {"pack": "legal-pack", "tier": None}})
 
 
 if __name__ == "__main__":

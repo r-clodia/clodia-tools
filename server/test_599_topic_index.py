@@ -424,20 +424,19 @@ class TaintTests(unittest.TestCase):
         self.assertEqual(len(marks), 2)
 
 
-class LegacyTopicCollectionTests(_Base):
-    def test_topic_collections_follow_topic_rules_in_legacy(self):
+class TopicCollectionScopeTests(_Base):
+    def test_topic_collections_follow_the_scope(self):
         from . import main
         ti.ensure("SEAL-2", "vendite")
         c = self.coll()
-        with patch.object(whitelist, "CONFIG", {"data_access": "legacy",
-                                                "agents": {"clodia": {}, "ophelia": {}}}), \
+        with patch.object(whitelist, "CONFIG", {"agents": {"clodia": {}, "ophelia": {}}}), \
                 patch.object(main, "agent_name", lambda: "clodia"), \
                 patch.object(main, "current_clearance", lambda: "SEAL-2"), \
-                patch("server.egress._scope_of_call", lambda: "SEAL-2/vendite"), \
+                patch("server.topic_data.scope_of_call", lambda: "SEAL-2/vendite"), \
                 patch.object(main.instance_profile, "rag_check_collection", lambda x: None), \
                 patch("server.tools.eu_corpus.collection_tier", lambda x: "SEAL-2"):
             main._rag_authorize(c, write=False)
-            with patch("server.egress._scope_of_call", lambda: "SEAL-2/altro"):
+            with patch("server.topic_data.scope_of_call", lambda: "SEAL-2/altro"):
                 with self.assertRaises(PermissionError):
                     main._rag_authorize(c, write=False)
             with self.assertRaises(PermissionError):

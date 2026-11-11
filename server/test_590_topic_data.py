@@ -12,7 +12,7 @@ from .topics.local_fs import LocalFsStorage
 from .topics.service import TopicError, TopicService
 
 DS = [{"pack": "tomato-pack", "name": "clienti", "clearance": "SEAL-2",
-       "abs_path": "/x", "seeds": ["vecchio"]}]
+       "abs_path": "/x"}]
 
 
 class _Base(unittest.TestCase):
@@ -29,7 +29,7 @@ class _Base(unittest.TestCase):
                   lambda: {"collections": [{"collection": "eu-normativa", "tier": "SEAL-0"}]}),
             patch("server.tools.eu_corpus.collection_tier", lambda c: "SEAL-0"),
             patch.object(td, "_svc", lambda: self.svc),
-            patch.object(whitelist, "CONFIG", {"data_access": "topic"}),
+            patch.object(whitelist, "CONFIG", {}),
         ]
         for p in self.patches:
             p.start()
@@ -86,7 +86,7 @@ class ImportTests(_Base):
     def test_data_never_moves_down_a_level(self):
         with self.assertRaises(PermissionError) as c:
             self.imp(tier="SEAL-1", name="blog")
-        self.assertIn("tier del topic", str(c.exception))
+        self.assertIn("tier dello scope", str(c.exception))
 
     def test_only_allowed_importers_with_clearance(self):
         with self.assertRaises(PermissionError):
@@ -200,7 +200,8 @@ class GrantTests(_Base):
 
 
 class GatewayTests(_Base):
-    """The two reference monitors in `main` follow the switch."""
+    """The two reference monitors in `main` decide on the scope's imports only
+    (#669: no legacy mode, no seed list, no super-agent bypass)."""
 
     def setUp(self):
         super().setUp()
@@ -213,35 +214,38 @@ class GatewayTests(_Base):
         with patch.object(m, "agent_name", lambda: agent), \
                 patch.object(m, "is_on_behalf", lambda: False), \
                 patch.object(m, "current_clearance", lambda: clearance), \
-                patch("server.egress._scope_of_call", lambda: scope), \
+                patch("server.topic_data.scope_of_call", lambda: scope), \
                 patch("server.datastores.find", lambda p, n: dict(DS[0])):
             return m._datastore_authorize("tomato-pack/clienti", write=write)
 
-    def test_topic_mode_ignores_the_seed_list(self):
+    def test_the_seed_list_grants_nothing(self):
         with self.assertRaises(PermissionError):
-            self.call_ds("vecchio")              # in the manifest's seeds, not granted here
-        td.grant("SEAL-2", "commerciale", "datastore", "tomato-pack/clienti", "clodia", "read")
+            self.call_ds("vecchio")              # not in the room: no seed list to fall back on
         self.assertEqual(self.call_ds("clodia")["name"], "clienti")
 
-    def test_legacy_mode_keeps_todays_rules(self):
-        with patch.object(whitelist, "CONFIG", {"data_access": "legacy"}):
-            self.assertEqual(self.call_ds("vecchio")["name"], "clienti")
+    def test_a_super_agent_has_no_bypass(self):
+        m = self.main
+        with patch.object(m, "_is_super", lambda a: True):
             with self.assertRaises(PermissionError):
-                self.call_ds("clodia")
+                self.call_ds("sysadmin")
+            with self.assertRaises(PermissionError):
+                self.call_ds("clodia", scope=None)   # no scope, no data
 
     def test_rag_in_topic_mode(self):
         self.imp(kind="rag", res="eu-normativa")
         m = self.main
         with patch.object(m, "agent_name", lambda: "clodia"), \
                 patch.object(m, "current_clearance", lambda: "SEAL-2"), \
-                patch("server.egress._scope_of_call", lambda: "SEAL-2/commerciale"), \
+                patch("server.topic_data.scope_of_call", lambda: "SEAL-2/commerciale"), \
                 patch.object(m.instance_profile, "rag_check_collection", lambda c: None):
             m._rag_authorize("eu-normativa", write=False)          # a participant reads
             m._rag_authorize("eu-normativa", write=True)           # and writes (#653)
             with patch.object(m, "agent_name", lambda: "estraneo"):
                 with self.assertRaises(PermissionError):
                     m._rag_authorize("eu-normativa", write=False)
-            with patch.object(m, "agent_name", lambda: "sysadmin"):
+            with patch.object(m, "agent_name", lambda: "sysadmin"), \
+                    patch("server.datastores.declared_collections",       # business-pack's
+                          lambda: {"eu-normativa": {"pack": "business-pack", "tier": "SEAL-1"}}):
                 m._rag_authorize("eu-normativa", write=True, verb="ingest")   # the provisioner
 
 
@@ -294,60 +298,26 @@ class RoutesTests(unittest.TestCase):
                          ("mario", False, "SEAL-1"))
 
     def test_only_admins_or_the_agent_server_write_the_catalog(self):
-        saved = {}
+        from . import topic_data
         patch.object(whitelist, "CONFIG", {}).start()
-        patch.object(whitelist, "save_config", lambda: saved.update(ok=True)).start()
+        patch.object(topic_data, "check_import",
+                     lambda *a, **k: {"kind": a[0], "name": a[1], "tier": "SEAL-0"}).start()
+        body = {"action": "check_import", "kind": "rag", "resource": "c", "tier": "SEAL-1",
+                "by": "davide", "by_admin": True}
         c = self._client({"agent": "clodia"})
-        self.assertEqual(c.post("/internal/data-catalog",
-                                json={"action": "set_mode", "mode": "topic"}).status_code, 403)
+        self.assertEqual(c.post("/internal/data-catalog", json=body).status_code, 403)
         c = self._client({"agent": "clodia", "role": "agent-server"})
-        r = c.post("/internal/data-catalog", json={"action": "set_mode", "mode": "topic"})
-        self.assertEqual((r.status_code, whitelist.CONFIG.get("data_access")), (200, "topic"))
-        self.assertEqual(c.post("/internal/data-catalog",
-                                json={"action": "set_mode", "mode": "x"}).status_code, 400)
+        self.assertEqual(c.post("/internal/data-catalog", json=body).status_code, 200)
 
-
-class MigrationTests(_Base):
-    def setUp(self):
-        super().setUp()
-        from . import data_migration as dm
-        self.dm = dm
-        p = patch("server.main._topics", lambda: self.svc)
-        p.start(); self.addCleanup(p.stop)
-        cfg = {"data_access": "legacy", "agents": {
-            "vecchio": {"allowed_tools": ["datastore.read", "datastore.write"]},
-            "lettore": {"allowed_tools": ["datastore.read"]},
-            "clodia": {"allowed_tools": ["*"]}}}
-        p = patch.object(whitelist, "CONFIG", cfg)
-        p.start(); self.addCleanup(p.stop)
-        DS[0]["seeds"] = ["vecchio", "lettore"]
-        self.addCleanup(lambda: DS[0].__setitem__("seeds", ["vecchio"]))
-        self.svc.new("SEAL-2", "vendite", {"owner": "davide",
-                                           "participants": ["davide", "vecchio", "lettore"]})
-        self.svc.new("SEAL-1", "basso", {"owner": "davide", "participants": ["davide", "vecchio"]})
-        grants = {"clodia": {"rag_read": {"eu-normativa"}, "rag_write": set()}}
-        p = patch("server.tools.runtime.rag_grants",
-                  lambda a: grants.get(a, {"rag_read": set(), "rag_write": set()}))
-        p.start(); self.addCleanup(p.stop)
-
-    def test_the_plan_maps_seed_grants_to_topics(self):
-        plan = self.dm.plan()
-        by = {(i["topic"], i["kind"], i["name"]): i for i in plan["items"]}
-        v = by[("SEAL-2/vendite", "datastore", "tomato-pack/clienti")]
-        self.assertEqual((v["status"], v["grants"]), ("ok", {"vecchio": "write", "lettore": "read"}))
-        self.assertEqual(by[("SEAL-1/basso", "datastore", "tomato-pack/clienti")]["status"], "skipped")
-        self.assertEqual(by[("SEAL-1/blog", "rag", "eu-normativa")]["grants"], {"clodia": "read"})
-        self.assertNotIn(("SEAL-2/commerciale", "datastore", "tomato-pack/clienti"), by)
-
-    def test_apply_writes_only_approved_items_and_never_switches(self):
-        plan = self.dm.plan()
-        out = self.dm.apply(plan["items"], by="davide", is_admin=True, clearance="SEAL-3")
-        self.assertEqual(out["failed"], [])
-        meta = self.svc._read_meta("SEAL-2", "vendite")[0]
-        self.assertEqual(td.imports(meta)[0]["grants"], {"vecchio": "write", "lettore": "read"})
-        basso = td.imports(self.svc._read_meta("SEAL-1", "basso")[0])
-        self.assertNotIn("datastore", {e["kind"] for e in basso})     # SEAL-2 data, SEAL-1 topic
-        self.assertEqual(whitelist.CONFIG["data_access"], "legacy")
+    def test_the_legacy_switch_and_the_migration_are_gone(self):
+        """#669: scope imports are the only mode — nothing to switch, nothing
+        to migrate."""
+        patch.object(whitelist, "CONFIG", {}).start()
+        c = self._client({"agent": "clodia", "role": "agent-server"})
+        for action in ("set_mode", "migration_plan", "migration_apply"):
+            r = c.post("/internal/data-catalog", json={"action": action, "mode": "topic"})
+            self.assertEqual(r.status_code, 400, action)
+        self.assertNotIn("data_access", whitelist.CONFIG)
 
 
 class ReviewFixesTests(_Base):
@@ -402,7 +372,7 @@ class IngestTests(_Base):
     def check(self, agent, scope, src_tier, src_name="x"):
         m = self.main
         with patch.object(m, "agent_name", lambda: agent), \
-                patch("server.egress._scope_of_call", lambda: scope):
+                patch("server.topic_data.scope_of_call", lambda: scope):
             return m._ingest_source_ok("eu-normativa", src_tier, src_name)
 
     def test_s1_data_never_moves_down_through_an_ingest(self):
@@ -413,35 +383,17 @@ class IngestTests(_Base):
             self.check("clodia", "SEAL-0/altro", "SEAL-0")     # not the call's own topic
         self.check("clodia", "SEAL-0/x", "SEAL-0")
 
-    def test_legacy_mode_does_not_check(self):
-        with patch.object(whitelist, "CONFIG", {"data_access": "legacy"}):
-            self.check("clodia", None, "SEAL-3")
-
     def test_s5_the_provisioner_removes_like_anyone(self):
         m = self.main
         with patch.object(m, "agent_name", lambda: "sysadmin"), \
                 patch.object(m, "current_clearance", lambda: "SEAL-4"), \
-                patch("server.egress._scope_of_call", lambda: None), \
+                patch("server.topic_data.scope_of_call", lambda: None), \
+                patch("server.datastores.declared_collections",
+                      lambda: {"eu-normativa": {"pack": "business-pack", "tier": "SEAL-1"}}), \
                 patch.object(m.instance_profile, "rag_check_collection", lambda c: None):
             m._rag_authorize("eu-normativa", write=True, verb="ingest")
             with self.assertRaises(PermissionError):
                 m._rag_authorize("eu-normativa", write=True)          # a remove
-
-
-class MigrationReviewTests(_Base):
-    def test_s4_the_plan_never_grants_beyond_the_member_list(self):
-        from . import data_migration as dm
-        cfg = {"data_access": "legacy", "agents": {"clodia": {"allowed_tools": ["*"]},
-                                                     "estraneo": {"allowed_tools": []}}}
-        with patch.object(whitelist, "CONFIG", cfg), \
-                patch("server.main._topics", lambda: self.svc), \
-                patch("server.main._rag_declared_members", lambda c: ["clodia"]), \
-                patch("server.tools.runtime.rag_grants",
-                      lambda a: {"rag_read": {"*"}, "rag_write": set()}):
-            self.svc.new("SEAL-1", "tutti", {"owner": "davide",
-                                            "participants": ["davide", "clodia", "estraneo"]})
-            items = [i for i in dm.plan()["items"] if i["topic"] == "SEAL-1/tutti"]
-        self.assertEqual(items[0]["grants"], {"clodia": "read"})
 
 
 class RoomVerbsTests(_Base):
