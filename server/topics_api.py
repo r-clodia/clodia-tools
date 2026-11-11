@@ -869,9 +869,10 @@ async def dm_tools_route(request: Request):
 
 async def data_catalog_route(request: Request):
     """GET  /internal/data-catalog → {entries}
-    POST /internal/data-catalog {action, ...} (#590 D1). `check_import` (#670)
-    validates an import into a scope the gateway does not hold (a job): the
-    agent-server asks it before writing the job's `data`.
+    POST /internal/data-catalog {action, ...} (#590 D1). `check_import` and
+    `check_scope_tier` (#670) validate an import into, and a tier change of, a
+    scope the gateway does not hold (a job): the agent-server asks before
+    writing the job's `data` or `tier`.
     Reading: a person (on-behalf) or the agent-server; `importing_topics` only
     for an admin or the agent-server (which filters for non-admins). Writing: a
     platform admin (on-behalf) or the agent-server, which checks admin first."""
@@ -941,6 +942,13 @@ async def data_catalog_route(request: Request):
                 str(body.get("resource") or ""), body.get("tier"), principal=who,
                 is_admin=admin, clearance=clearance,
                 scope_kind=str(body.get("scope_kind") or "job"))
+        elif action == "check_scope_tier":
+            # #670: may a job (whose imports the agent-server holds) take this
+            # tier? Refused below what it imports, or empty while it imports.
+            await asyncio.to_thread(topic_data.check_imports_tier, body.get("data") or [],
+                                    body.get("tier"),
+                                    scope_kind=str(body.get("scope_kind") or "job"))
+            out = {"ok": True, "tier": body.get("tier")}
         elif action == "retire":
             out = {"retired": await asyncio.to_thread(cat.retire, str(body.get("kind") or ""),
                                                       str(body.get("resource") or ""))}
@@ -950,7 +958,7 @@ async def data_catalog_route(request: Request):
         return JSONResponse({"error": str(e)[:300]}, status_code=400)
     except PermissionError as e:
         return JSONResponse({"error": str(e)[:300]}, status_code=403)
-    if action == "check_import":
+    if action in ("check_import", "check_scope_tier"):
         return JSONResponse(out)        # a question, not a change: no control event
     from .audit import control as _control
     _control.safe(_control.emit, "data_catalog", str(action), str(body.get("resource") or "*"),

@@ -4,7 +4,8 @@ job is a scope like a topic.
 - the scope comes from the signed `chat` claim (`topic_data.scope_of_call`);
 - a DM (`kind: dm`, SEAL-0) imports and authorizes exactly like a topic;
 - a job's `data` (read live from the agent-server) is used by the agent that
-  executes it, within the job's tier (declared, else the agent's clearance);
+  executes it; the job must declare a tier (owner, 11 Nov 2026) and resource
+  tier ≤ job tier ≤ the agent's clearance;
 - the A·V·R·Q global level carries a job's data tuples in that job's turn;
 - the pack provisioner keeps its create/ingest exception and its listing.
 """
@@ -18,7 +19,7 @@ from .test_590_topic_data import _Base
 
 
 def _job(**over):
-    j = {"id": 12, "agent": "clodia", "mode": "agentic", "tier": "",
+    j = {"id": 12, "agent": "clodia", "mode": "agentic", "tier": "SEAL-2",
          "data": [{"kind": "datastore", "name": "tomato-pack/clienti"},
                   {"kind": "rag", "name": "eu-normativa"}], "enabled": True}
     j.update(over)
@@ -64,11 +65,27 @@ class DmScopeTests(_Base):
         with self.assertRaises(PermissionError):
             self.auth("ophelia", scope="SEAL-0/dm-clodia--davide", clearance="SEAL-1")
 
-    def test_a_dm_takes_only_seal0_data(self):
-        """The owner decision of #670: DMs are fixed at SEAL-0 today."""
+    def test_a_seal0_dm_takes_only_seal0_data(self):
+        """A new DM is SEAL-0: SEAL-1 data needs the owner to raise it first."""
         cat.update("datastore", "tomato-pack/clienti", tier="SEAL-1")
         with self.assertRaises(PermissionError):
             self.imp(tier="SEAL-0", name="dm-clodia--davide")
+
+    def test_a_dm_follows_the_topic_retier_rules(self):
+        """Owner, 11 Nov 2026: the DM's owner sets its tier. Raised, it takes
+        the data of that level; it cannot go below what it imports."""
+        cat.update("datastore", "tomato-pack/clienti", tier="SEAL-1")
+        self.svc.set_tier("SEAL-0", "dm-clodia--davide", "SEAL-1", by="davide",
+                          reason="CRM nel DM")
+        self.imp(tier="SEAL-1", name="dm-clodia--davide")
+        self.assertEqual(self.auth("clodia", scope="SEAL-1/dm-clodia--davide",
+                                   clearance="SEAL-1")["name"], "tomato-pack/clienti")
+        meta = self.svc._read_meta("SEAL-1", "dm-clodia--davide")[0]
+        with self.assertRaises(td.DataError):
+            td.check_retier(meta, "SEAL-0")
+        # an agent below the DM's tier is out, as in a topic
+        with self.assertRaises(PermissionError):
+            self.auth("clodia", scope="SEAL-1/dm-clodia--davide", clearance="SEAL-0")
 
 
 class JobScopeTests(_Base):
@@ -110,10 +127,35 @@ class JobScopeTests(_Base):
         self.job["tier"] = "SEAL-3"
         self.jauth(clearance="SEAL-3")
 
-    def test_undeclared_tier_is_the_agents_clearance(self):
-        self.assertEqual(td.job_tier({"tier": ""}, "SEAL-2"), "SEAL-2")
-        with self.assertRaises(PermissionError):
-            self.jauth(clearance="SEAL-1")
+    def test_a_job_without_a_tier_uses_no_data(self):
+        """Owner, 11 Nov 2026: no fallback to the agent's clearance."""
+        self.assertEqual(td.job_tier({"tier": ""}), "")
+        self.job["tier"] = ""
+        with self.assertRaises(PermissionError) as c:
+            self.jauth(clearance="SEAL-4")
+        self.assertIn(td.JOB_TIER_MARK, str(c.exception))
+
+    def test_an_agent_below_the_job_tier_is_refused(self):
+        self.job["tier"] = "SEAL-3"                 # clienti is SEAL-2
+        with self.assertRaises(PermissionError) as c:
+            self.jauth(clearance="SEAL-2")
+        self.assertIn("sotto il tier del job 12", str(c.exception))
+        self.jauth(clearance="SEAL-3")
+
+    def test_the_run_record_names_the_job_tier(self):
+        """The refusal reaches the run record as its own class."""
+        from . import main
+        self.job["tier"] = "SEAL-3"
+        try:
+            self.jauth(clearance="SEAL-2")
+        except PermissionError as e:
+            self.assertEqual(main._denial_class(str(e)), "job_tier")
+        self.job["tier"] = ""
+        try:
+            self.jauth()
+        except PermissionError as e:
+            self.assertEqual(main._denial_class(str(e)), "job_tier")
+        self.assertEqual(main._denial_class("agent 'x': clearance insufficiente"), "clearance")
 
     def test_not_an_agentic_job_no_data(self):
         for mode in ("logic", "topic_trigger"):
@@ -167,6 +209,25 @@ class JobScopeTests(_Base):
             td.check_import("rag", "topic-abc", "SEAL-2", principal="davide",
                             is_admin=True, clearance="SEAL-3", scope_kind="job")
 
+    def test_importing_into_a_job_without_a_tier_is_refused(self):
+        for tier in ("", None):
+            with self.subTest(tier=tier):
+                with self.assertRaises(td.DataError) as c:
+                    td.check_import("rag", "eu-normativa", tier, principal="davide",
+                                    is_admin=True, clearance="SEAL-3", scope_kind="job")
+                self.assertIn("imposta il tier del job prima di importare dati",
+                              str(c.exception))
+
+    def test_a_job_cannot_go_below_its_imports(self):
+        data = [{"kind": "datastore", "name": "tomato-pack/clienti"}]   # SEAL-2
+        td.check_imports_tier(data, "SEAL-2")
+        td.check_imports_tier(data, "SEAL-4")
+        with self.assertRaises(td.DataError):
+            td.check_imports_tier(data, "SEAL-1")
+        with self.assertRaises(td.DataError):
+            td.check_imports_tier(data, "")                  # no tier while importing
+        td.check_imports_tier([], "")                        # nothing imported: free
+
     def test_check_import_applies_the_topic_rules(self):
         out = td.check_import("datastore", "tomato-pack/clienti", "SEAL-2",
                               principal="davide", is_admin=True, clearance="SEAL-3")
@@ -178,6 +239,26 @@ class JobScopeTests(_Base):
         with self.assertRaises(PermissionError):
             td.check_import("datastore", "tomato-pack/clienti", "SEAL-2",
                             principal="mario", is_admin=False, clearance="SEAL-3")
+
+
+class ScopeTierRouteTests(_Base):
+    def test_check_scope_tier_through_the_route(self):
+        from starlette.applications import Starlette
+        from starlette.testclient import TestClient
+        from . import topics_api
+
+        def fake_authorize(request):
+            request.state.auth_payload = {"agent": "agent-server", "role": "agent-server"}
+            return "agent-server", None
+        with patch.object(topics_api, "_authorize", fake_authorize):
+            c = TestClient(Starlette(routes=topics_api.routes))
+            body = {"action": "check_scope_tier",
+                    "data": [{"kind": "datastore", "name": "tomato-pack/clienti"}]}
+            self.assertEqual(c.post("/internal/data-catalog",
+                                    json={**body, "tier": "SEAL-2"}).status_code, 200)
+            r = c.post("/internal/data-catalog", json={**body, "tier": "SEAL-1"})
+            self.assertEqual(r.status_code, 400)
+            self.assertIn("non può scendere", r.json()["error"])
 
 
 class JobTuplesTests(_Base):
@@ -203,6 +284,11 @@ class JobTuplesTests(_Base):
         mine = {(x.verb, x.resource) for x in g if x.id.startswith("job-data:12:")}
         self.assertIn(("rag.search", "rag:eu-normativa"), mine)
         self.assertIn(("datastore.write", "datastore:tomato-pack/clienti"), mine)
+
+    def test_no_tier_no_tuples(self):
+        with patch("server.tools.runtime.job_scope", lambda jid: _job(tier="")):
+            g, _ = self._tuples("clodia", "job:12:20261111-x")
+        self.assertFalse([x for x in g if x.id.startswith("job-data:")])
 
     def test_nobody_else_and_nowhere_else(self):
         g, _ = self._tuples("ophelia", "job:12:20261111-x")

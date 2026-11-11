@@ -95,8 +95,8 @@ def _job_data_tuples(agent: str) -> list[A.Tuple]:
         job = _td._job(jid)
     except PermissionError:
         return []
-    if not _td._job_runs_as(job, agent):
-        return []
+    if not _td._job_runs_as(job, agent) or not _td.job_tier(job):
+        return []           # no tier, no data (owner, 11 Nov 2026)
     raw = []
     for imp in _td.job_imports(job):
         res = f"{imp['kind']}:{imp['name']}"

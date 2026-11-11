@@ -4536,6 +4536,9 @@ def _denial_class(msg: str) -> str:
             # stesso fatto, e nel registro deve risultare uno solo.
             else "sender_not_vetted" if MITTENTE_NON_VAGLIATO in msg
             else "unattended" if "job schedulato" in msg
+            # A job's tier (#670): no tier, the agent below it, or a resource
+            # above it — the run record names it apart from a plain clearance.
+            else "job_tier" if "tier del job" in msg
             else "denied_tools" if "denied_tools" in msg
             else "whitelist" if "non in whitelist" in msg
             else "clearance" if "clearance" in msg.lower()
