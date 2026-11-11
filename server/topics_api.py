@@ -868,8 +868,10 @@ async def dm_tools_route(request: Request):
 
 
 async def data_catalog_route(request: Request):
-    """GET  /internal/data-catalog → {entries, data_access}
-    POST /internal/data-catalog {action, ...} (#590 D1).
+    """GET  /internal/data-catalog → {entries}
+    POST /internal/data-catalog {action, ...} (#590 D1). `check_import` (#670)
+    validates an import into a scope the gateway does not hold (a job): the
+    agent-server asks it before writing the job's `data`.
     Reading: a person (on-behalf) or the agent-server; `importing_topics` only
     for an admin or the agent-server (which filters for non-admins). Writing: a
     platform admin (on-behalf) or the agent-server, which checks admin first."""
@@ -911,7 +913,7 @@ async def data_catalog_route(request: Request):
                             r["topic_status"] = status[r["topic"]]
             return rows
         rows = await asyncio.to_thread(_rows)
-        return JSONResponse({"entries": rows, "data_access": topic_data.mode()})
+        return JSONResponse({"entries": rows})
     from .human import _ADMIN_ROLES
     if not ((p.get("on_behalf") and (p.get("human_role") or "") in _ADMIN_ROLES)
             or p.get("role") == ROLE_AGENT_SERVER):
@@ -928,26 +930,17 @@ async def data_catalog_route(request: Request):
             out = await asyncio.to_thread(cat.update, str(body.get("kind") or ""),
                                           str(body.get("resource") or ""),
                                           tier=body.get("tier"), importers=body.get("importers"))
-        elif action == "migration_plan":
-            from . import data_migration
-            out = await asyncio.to_thread(data_migration.plan)
-        elif action == "migration_apply":
-            from . import data_migration
+        elif action == "check_import":
+            # #670: the import rules for a job scope (catalog, importer,
+            # clearance, scope tier ≥ resource tier). Nothing is written here.
             who, admin, clearance = _actor(request, body)
             if not who:
-                return JSONResponse({"error": "chi applica non è noto"}, status_code=400)
-            out = await asyncio.to_thread(data_migration.apply, body.get("items") or [],
-                                          by=who, is_admin=admin, clearance=clearance)
-        elif action == "set_mode":
-            # #596: `legacy` → `topic` once the migration is applied (and back,
-            # if it must be undone). Written like the other admin config keys.
-            from . import whitelist as _wl
-            m = str(body.get("mode") or "").strip().lower()
-            if m not in ("legacy", "topic"):
-                return JSONResponse({"error": "mode: legacy | topic"}, status_code=400)
-            _wl.CONFIG["data_access"] = m
-            _wl.save_config()
-            out = {"data_access": m}
+                return JSONResponse({"error": "chi importa non è noto"}, status_code=400)
+            out = await asyncio.to_thread(
+                topic_data.check_import, str(body.get("kind") or ""),
+                str(body.get("resource") or ""), body.get("tier"), principal=who,
+                is_admin=admin, clearance=clearance,
+                scope_kind=str(body.get("scope_kind") or "job"))
         elif action == "retire":
             out = {"retired": await asyncio.to_thread(cat.retire, str(body.get("kind") or ""),
                                                       str(body.get("resource") or ""))}
@@ -955,6 +948,10 @@ async def data_catalog_route(request: Request):
             return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
     except (ValueError, KeyError) as e:
         return JSONResponse({"error": str(e)[:300]}, status_code=400)
+    except PermissionError as e:
+        return JSONResponse({"error": str(e)[:300]}, status_code=403)
+    if action == "check_import":
+        return JSONResponse(out)        # a question, not a change: no control event
     from .audit import control as _control
     _control.safe(_control.emit, "data_catalog", str(action), str(body.get("resource") or "*"),
                   kind=body.get("kind"), tier=body.get("tier"))

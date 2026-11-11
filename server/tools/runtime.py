@@ -206,7 +206,7 @@ def _pick(d: dict, keys: tuple[str, ...]) -> dict:
 def agents() -> dict:
     """Gli agent dell'istanza con il quadro COMPLETO per decidere in autonomia
     (chi coinvolgere, chi è idoneo a un tier, chi costa meno): identità, ruolo,
-    dominio (expertise), skill e knowledge (rag_read), clearance SEAL, provider
+    dominio (expertise), skill, clearance SEAL, provider
     effettivo + il suo SEAL, modello, stato. Solo metadati, MAI segreti — la
     decisione spetta all'agente, non al tool."""
     data = _get("/api/agents")
@@ -215,41 +215,20 @@ def agents() -> dict:
         "name", "display_name", "type", "role", "agent_sdk", "model",
         "provider", "providers", "provider_connected", "provider_seal",
         "paused", "clearance", "expertise", "skills", "capabilities",
-        "rag_read", "rag_write", "rank_label",
+        "rank_label",
     )) for a in rows]
     return {"count": len(out), "agents": out}
 
 
-def rag_grants(agent: str) -> dict[str, set[str]]:
-    """Grant RAG autorevoli dell'AgentSpec nel core.
-
-    L'enforcement non deve leggere la whitelist locale del gateway: quella
-    descrive tool e filesystem, mentre rag_read/rag_write sono capability
-    amministrate dal core. La query resta live per rendere immediate le revoche.
-    """
-    data = _get("/api/agents")
-    rows = data.get("agents", []) if isinstance(data, dict) else data
-    row = next(
-        (item for item in (rows or [])
-         if isinstance(item, dict) and item.get("name") == agent),
-        None,
-    )
-    if row is None:
-        raise PermissionError(
-            f"impossibile risolvere i grant RAG dell'agent '{agent}'")
-
-    def _collections(key: str) -> set[str]:
-        values = row.get(key) or []
-        if not isinstance(values, (list, tuple, set)):
-            raise PermissionError(
-                f"grant RAG '{key}' non valido per l'agent '{agent}'")
-        return {value.strip() for value in values
-                if isinstance(value, str) and value.strip()}
-
-    return {
-        "rag_read": _collections("rag_read"),
-        "rag_write": _collections("rag_write"),
-    }
+def job_scope(job_id: int) -> dict:
+    """One agentic job as a DATA scope (clodia-platform#670): its `agent`,
+    `mode`, declared `tier` and imported `data`, read live from the
+    agent-server so that an import removed by the owner is out at once. A
+    `topic_trigger` job answers 404: it runs in its topic, not as a scope."""
+    data = _get(f"/clodia/jobs/{int(job_id)}")
+    if not isinstance(data, dict):
+        raise ValueError(f"job {job_id}: risposta non valida")
+    return {k: data.get(k) for k in ("id", "agent", "mode", "tier", "data", "enabled")}
 
 
 #: Esiti che un agente può dichiarare per il proprio run. Copia dell'insieme che

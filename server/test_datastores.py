@@ -23,6 +23,7 @@ class DeclaredTests(unittest.TestCase):
             _write_manifest(root, "base-pack", [
                 {"path": "data/contacts.db", "purpose": "CRM contatti", "pii": True,
                  "backup": True, "clearance": "SEAL-1", "seeds": ["messaggero", "clodia"]},
+                # an older manifest still listing seeds: ignored (#669)
             ])
             with patch.object(datastores, "DATADIR", str(root)):
                 found = datastores.declared()
@@ -31,19 +32,17 @@ class DeclaredTests(unittest.TestCase):
             self.assertEqual(entry["pack"], "base-pack")
             self.assertEqual(entry["name"], "contacts")
             self.assertEqual(entry["clearance"], "SEAL-1")
-            self.assertEqual(entry["seeds"], ["messaggero", "clodia"])
+            self.assertNotIn("seeds", entry)
             self.assertTrue(entry["abs_path"].endswith("data/contacts.db"))
 
-    def test_missing_clearance_and_seeds_default_to_most_restrictive(self) -> None:
-        """Un datastore dichiarato prima che questi campi esistessero non
-        concede nulla finché qualcuno non li scrive esplicitamente."""
+    def test_missing_clearance_defaults_to_most_restrictive(self) -> None:
+        """Un datastore senza `clearance` è SEAL-4: fail-closed."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_manifest(root, "tomato", [{"path": "data/leads.db"}])
             with patch.object(datastores, "DATADIR", str(root)):
                 found = datastores.declared()
             self.assertEqual(found[0]["clearance"], "SEAL-4")
-            self.assertEqual(found[0]["seeds"], [])
 
     def test_name_defaults_to_path_stem(self) -> None:
         with TemporaryDirectory() as tmp:

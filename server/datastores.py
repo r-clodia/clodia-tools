@@ -5,8 +5,9 @@ curated del pack developer, propagata dall'import a partire da plugin.json/
 pack.yaml — vedi clodia-logic `plugin_import.py::_sanitize_datastores`). Questo
 modulo è il solo punto che lo percorre nel gateway: prima viveva duplicato
 dentro `backup.py` (che lo usava per il perimetro di backup), ora serve anche
-`_datastore_authorize` in `main.py` (clearance + seed allowlist sui verbi
-`datastore.read`/`datastore.write`). Una lettura sola, due consumatori.
+`_datastore_authorize` in `main.py` (the catalog entry the scope import is
+checked against, clodia-platform#669: no seed allowlist). Una lettura sola,
+due consumatori.
 """
 from __future__ import annotations
 
@@ -18,12 +19,10 @@ DATADIR = os.environ.get("CLODIA_DATA", "/datadir")
 
 def declared() -> list[dict]:
     """Ogni entry: `{pack, name, path, abs_path, purpose, pii, backup,
-    clearance, seeds}`. `path` è relativo alla cartella del pack; `abs_path`
-    è già risolto sotto `CLODIA_DATA/plugins/<pack>/`. `clearance`/`seeds`
-    mancanti nel manifest → più restrittivo possibile (`SEAL-4`, nessun seed):
-    un datastore dichiarato prima che questi campi esistessero non concede
-    nulla finché qualcuno non li scrive esplicitamente — fail-closed, non un
-    default permissivo silenzioso."""
+    clearance}`. `path` è relativo alla cartella del pack; `abs_path` è già
+    risolto sotto `CLODIA_DATA/plugins/<pack>/`. `clearance` mancante nel
+    manifest → `SEAL-4`, fail-closed. A `seeds:` list in an older manifest is
+    ignored (clodia-platform#669)."""
     import yaml
 
     found: list[dict] = []
@@ -40,7 +39,6 @@ def declared() -> list[dict]:
                 continue
             rel = str(ds["path"])
             name = str(ds.get("name") or Path(rel).stem)
-            seeds = ds.get("seeds")
             found.append({
                 "pack": pack,
                 "name": name,
@@ -50,7 +48,6 @@ def declared() -> list[dict]:
                 "pii": bool(ds.get("pii", False)),
                 "backup": bool(ds.get("backup", True)),
                 "clearance": str(ds.get("clearance") or "SEAL-4"),
-                "seeds": list(seeds) if isinstance(seeds, list) else [],
             })
     return found
 

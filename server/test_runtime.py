@@ -24,20 +24,17 @@ class RuntimeIntrospectionTests(unittest.TestCase):
         # solo i campi whitelisted: nessun campo extra/segreto passa
         self.assertNotIn("secret_field", out["agents"][0])
 
-    def test_rag_grants_come_from_core_agent_spec(self) -> None:
-        runtime._get = lambda path: {"agents": [
-            {"name": "esperto-bandi",
-             "rag_read": ["eu-normativa", " eu-normativa "],
-             "rag_write": ["bandi-interni"]},
-        ]}
-        grants = runtime.rag_grants("esperto-bandi")
-        self.assertEqual(grants["rag_read"], {"eu-normativa"})
-        self.assertEqual(grants["rag_write"], {"bandi-interni"})
-
-    def test_rag_grants_fail_closed_for_unknown_agent(self) -> None:
-        runtime._get = lambda path: {"agents": []}
-        with self.assertRaises(PermissionError):
-            runtime.rag_grants("missing")
+    def test_job_scope_reads_the_job_record(self) -> None:
+        """#670: an agentic job as a data scope — agent, mode, tier, data —
+        nothing else of the record."""
+        seen = []
+        runtime._get = lambda path: seen.append(path) or {
+            "id": 7, "agent": "clodia", "mode": "agentic", "tier": "SEAL-2",
+            "data": [{"kind": "rag", "name": "kb"}], "prompt": "secret plan"}
+        out = runtime.job_scope(7)
+        self.assertEqual(seen, ["/clodia/jobs/7"])
+        self.assertEqual(out["data"], [{"kind": "rag", "name": "kb"}])
+        self.assertNotIn("prompt", out)
 
     def test_providers_no_secrets(self) -> None:
         runtime._get = lambda path: {"providers": [

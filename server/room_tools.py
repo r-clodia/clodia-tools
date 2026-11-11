@@ -653,7 +653,7 @@ def enable(tier: str, name: str, verb: str, on: bool = True) -> dict:
 def dm_toolbox() -> list[str]:
     """I verbi abilitati FUORI da una stanza (decisione 5 dell'epic).
 
-    Sta in `clodia-tools-config.yaml` come `data_access` di #596: è stato
+    Sta in `clodia-tools-config.yaml` come le altre chiavi admin: è stato
     decisionale del gateway, in una directory che l'agent-server non monta
     (#80). Non è un file nuovo di proposito — lo stato che decide va dove il
     resto dello stato che decide è già protetto.
