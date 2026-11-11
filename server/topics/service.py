@@ -237,6 +237,22 @@ def _tldr(summary_text: str) -> str:
     return ""
 
 
+#: The TLDR is ONE telegraphic line (owner, 9 Nov 2026, #664): state, key
+#: numbers, next action — «Discovery chiusa. Stima 3 mesi 300k euro. Next action
+#: decidere escrow.» Longer is not refused (a save must not fail on style),
+#: it is reported back so the agent rewrites it in the same turn.
+TLDR_MAX = 120
+
+
+def tldr_warning(tldr: str) -> str | None:
+    if len(tldr) <= TLDR_MAX:
+        return None
+    return (f"TLDR di {len(tldr)} caratteri: deve essere UNA riga telegrafica di al "
+            f"massimo {TLDR_MAX} — stato, numeri chiave, prossima azione, senza titolo "
+            "(es. 'Discovery chiusa. Stima 3 mesi 300k euro. Next action decidere "
+            "escrow.'). Riscrivi la prima riga e risalva con la nuova summary_version.")
+
+
 def _action_points(summary_text: str) -> list[str]:
     """Estrae i bullet sotto la sezione '## Prossimi passi' (fino alla prossima
     heading)."""
@@ -2320,7 +2336,11 @@ class TopicService:
             self._append_recap(tier, name, _tldr(text))
         except Exception:  # noqa: BLE001
             pass
-        return {"summary_version": new_v, "tldr": _tldr(text)}
+        out = {"summary_version": new_v, "tldr": _tldr(text)}
+        w = tldr_warning(out["tldr"])
+        if w:
+            out["tldr_warning"] = w
+        return out
 
     def save_agents_md(self, tier: str, name: str, text: str,
                        base_version: str | None) -> dict:
