@@ -41,6 +41,8 @@ LOG = logging.getLogger("clodia-tools.databases")
 #: Upload ceiling (bytes), and the formats the indexer can read.
 UPLOAD_MAX_BYTES = 20 * 1024 * 1024
 UPLOAD_EXT = (".pdf", ".docx", ".pptx", ".md", ".txt")
+#: An agent's `rag.ingest` of a topic file also takes spreadsheets, as before.
+AGENT_INGEST_EXT = UPLOAD_EXT + (".xlsx", ".xlsm")
 TOPIC_PREFIX = "topic-"
 
 
@@ -228,10 +230,12 @@ def _valid_name(name: str) -> str:
     return name
 
 
-def create_datastore(name: str, *, purpose: str, tier: str, pii: bool, by: str) -> dict:
+def create_datastore(name: str, *, purpose: str, tier: str, pii: bool, by: str,
+                     clearance: str | None) -> dict:
     name = _valid_name(name)
     if not cat.valid_tier(tier):
         raise ValueError(f"tier sconosciuto: '{tier}' (SEAL-0 … SEAL-4)")
+    _require_clearance(clearance, tier, f"creare un datastore {cat.norm_tier(tier)}")
     reg = datastores.platform_registry()
     path = datastores.platform_dir() / f"{name}.db"
     if name in reg or path.exists():
@@ -253,12 +257,14 @@ def create_datastore(name: str, *, purpose: str, tier: str, pii: bool, by: str) 
     return {"ok": True, "created": {"kind": "datastore", "name": key, "tier": entry["tier"]}}
 
 
-def create_collection(name: str, *, tier: str, description: str = "", by: str) -> dict:
+def create_collection(name: str, *, tier: str, description: str = "", by: str,
+                      clearance: str | None) -> dict:
     name = _valid_name(name)
     if name.startswith(TOPIC_PREFIX):
         raise ValueError("i nomi 'topic-*' sono degli indici dei topic")
     if not cat.valid_tier(tier):
         raise ValueError(f"tier sconosciuto: '{tier}' (SEAL-0 … SEAL-4)")
+    _require_clearance(clearance, tier, f"creare una collection {cat.norm_tier(tier)}")
     from .tools import eu_corpus
     existing = {c.get("collection") for c in
                 (eu_corpus.collections() or {}).get("collections") or []}
@@ -271,11 +277,15 @@ def create_collection(name: str, *, tier: str, description: str = "", by: str) -
             "service": out}
 
 
-def restore(kind: str, name: str, *, by: str) -> dict:
+def restore(kind: str, name: str, *, by: str, clearance: str | None) -> dict:
     """Clear a tombstone: the resource may be re-created by its pack again,
-    and the next sync lists what exists under that name."""
-    if not cat.clear_tombstone(kind, name):
+    and the next sync lists what exists under that name. The level is the one
+    the resource had when deleted (unknown → the highest)."""
+    t = cat.tombstoned(kind, name)
+    if not t:
         raise NotFound(f"nessuna eliminazione registrata per {kind} '{name}'")
+    _require_clearance(clearance, t.get("tier") or "SEAL-4", f"ripristinare {kind} '{name}'")
+    cat.clear_tombstone(kind, name)
     cat.sync()
     return {"ok": True, "restored": {"kind": kind, "name": name}}
 
@@ -310,8 +320,9 @@ def _export_datastore(ds: dict | None, name: str, d: Path) -> dict:
     return {"file": dst_path.name, "bytes": dst_path.stat().st_size}
 
 
-def _export_collection(name: str, d: Path) -> dict:
-    """documents.jsonl + chunks.jsonl, checked against the service's own count."""
+def _export_collection(name: str, d: Path, *, expected_chunks: int) -> dict:
+    """documents.jsonl + chunks.jsonl, checked against the service's own counts
+    of documents and of chunks."""
     from .tools import eu_corpus
     expected = len((eu_corpus.list_documents(name) or {}).get("documents") or [])
     counts = {"documents": 0, "chunks": 0}
@@ -326,25 +337,44 @@ def _export_collection(name: str, d: Path) -> dict:
                 docs.write(json.dumps(row, ensure_ascii=False) + "\n")
                 if t == "document":
                     counts["documents"] += 1
-    if counts["documents"] != expected:
+    if counts["documents"] != expected or counts["chunks"] != expected_chunks:
         raise RuntimeError(
-            f"export di '{name}' incompleto ({counts['documents']} documenti su {expected}): "
-            "eliminazione annullata")
+            f"export di '{name}' incompleto ({counts['documents']} documenti su {expected}, "
+            f"{counts['chunks']} chunk su {expected_chunks}): eliminazione annullata")
     return counts
 
 
-def delete(kind: str, name: str, *, by: str) -> dict:
-    """Export, tombstone, imports out of every scope, data, catalogue entry —
-    in this order: nothing is removed before the export is written and
-    checked, and the tombstone comes before the data so that a sync running
-    in between does not list the resource again."""
+def _require_clearance(clearance: str | None, need: str, what: str) -> None:
+    if cat.rank_have(clearance) < cat.rank(need):
+        raise PermissionError(
+            f"clearance ({clearance or 'nessuna'}) inferiore a {cat.norm_tier(need)}: "
+            f"{what} è riservato a chi ha almeno quel livello")
+
+
+def delete(kind: str, name: str, *, by: str, clearance: str | None,
+           job_scopes: list[str] | None = None) -> dict:
+    """Tombstone, export, imports out of every scope, data, catalogue entry —
+    in this order (#671 review):
+
+    1. the **tombstone first** freezes the resource: `datastores.declared`
+       hides it (so `datastore.*` refuse it) and every `eu_corpus` write path
+       refuses it, so nothing is written between the export and the drop;
+    2. the **export** is written and checked (documents AND chunks for a
+       collection). If it fails the tombstone is lifted and nothing changes;
+    3. imports, data and catalogue entry go.
+
+    `job_scopes`: the jobs importing it, which the agent-server holds and
+    removes itself after this returns (`job:<id>`); recorded in the export."""
     from . import topic_data
     if kind not in cat.KINDS:
         raise ValueError("kind: datastore | rag")
     if _is_topic_index(kind, name):
         raise PermissionError("l'indice di un topic si spegne dal topic, non da qui")
+    if cat.tombstoned(kind, name):
+        raise ValueError(f"{kind} '{name}' è già stato eliminato")
     entry = cat.get(kind, name)
     ds = None
+    col = None
     if kind == "datastore":
         pack, dsname = datastores.parse_key(name)
         ds = datastores.find(pack, dsname)
@@ -352,28 +382,37 @@ def delete(kind: str, name: str, *, by: str) -> dict:
             raise NotFound(f"datastore '{name}' sconosciuto")
     else:
         from .tools import eu_corpus
-        exists = name in {c.get("collection") for c in
-                          (eu_corpus.collections() or {}).get("collections") or []}
-        if not exists and entry is None:
+        col = {c.get("collection"): c for c in
+               (eu_corpus.collections() or {}).get("collections") or []}.get(name)
+        if col is None and entry is None:
             raise NotFound(f"collection '{name}' sconosciuta")
-    d = _export_dir(kind, name)
-    try:
+    need = _need(kind, name)
+    _require_clearance(clearance, need, f"eliminare {kind} '{name}'")
+    cat.tombstone(kind, name, by=by, tier=need)                      # 1. freeze
+    d = None
+    try:                                                              # 2. export
+        d = _export_dir(kind, name)
         if kind == "datastore":
             exported = _export_datastore(ds, name, d)
+        elif col is not None:
+            exported = _export_collection(name, d, expected_chunks=int(col.get("chunks") or 0))
         else:
-            exported = _export_collection(name, d) if exists else {"documents": 0, "chunks": 0}
+            exported = {"documents": 0, "chunks": 0}
+        scopes = topic_data.importing_topics().get(f"{kind}:{name}", [])
+        (d / "meta.json").write_text(json.dumps({
+            "kind": kind, "name": name, "deleted_by": by,
+            "deleted_at": _now().isoformat(timespec="seconds"), "catalog": entry,
+            "declaration": ds, "imported_by_scopes": scopes + list(job_scopes or []),
+            "export": exported,
+        }, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
     except Exception:
-        shutil.rmtree(d, ignore_errors=True)
+        cat.clear_tombstone(kind, name)
+        if d is not None:
+            shutil.rmtree(d, ignore_errors=True)
         raise
-    scopes = topic_data.importing_topics().get(f"{kind}:{name}", [])
-    (d / "meta.json").write_text(json.dumps({
-        "kind": kind, "name": name, "deleted_by": by,
-        "deleted_at": _now().isoformat(timespec="seconds"), "catalog": entry,
-        "declaration": ds, "imported_by_scopes": scopes, "export": exported,
-    }, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
     rel = str(d.relative_to(Path(datastores.DATADIR)))
-    cat.tombstone(kind, name, by=by, export=rel)
-    removed, failed = [], []
+    cat.set_tombstone_export(kind, name, rel)
+    removed, failed = [], []                                          # 3. the rest
     for s in scopes:
         tier, _, tname = s.partition("/")
         try:
@@ -395,22 +434,23 @@ def delete(kind: str, name: str, *, by: str) -> dict:
             reg = datastores.platform_registry()
             if reg.pop(dsname, None) is not None:
                 datastores.save_platform_registry(reg)
-    elif exists:
+    elif col is not None:
         from .tools import eu_corpus
         eu_corpus.drop_collection(name)
     cat.retire(kind, name)
     return {"ok": True, "deleted": {"kind": kind, "name": name}, "export_dir": rel,
-            "export": exported, "imports_removed": removed, "imports_failed": failed}
+            "export": exported, "imports_removed": removed, "imports_failed": failed,
+            "job_scopes": list(job_scopes or [])}
 
 
 # ── Collection content ───────────────────────────────────────────────────────
 
-def extract_text(filename: str, data: bytes) -> str:
+def extract_text(filename: str, data: bytes, formats: tuple[str, ...] = UPLOAD_EXT) -> str:
     """The topic indexer's extractor (`main._extract_document_text`), PPTX
-    included, limited to the upload formats."""
+    included (and its ZIP-bomb guard), limited to `formats`."""
     low = filename.lower()
-    if not low.endswith(UPLOAD_EXT):
-        raise ValueError(f"formato non ammesso: {', '.join(UPLOAD_EXT)}")
+    if not low.endswith(formats):
+        raise ValueError(f"formato non ammesso: {', '.join(formats)}")
     if low.endswith((".md", ".txt")):
         return data.decode("utf-8", errors="replace")
     from . import main

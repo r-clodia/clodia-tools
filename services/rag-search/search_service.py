@@ -271,7 +271,7 @@ def drop_collection(body: dict = Body(...), authorization: str | None = Header(N
 def ingest_text(body: dict = Body(...), authorization: str | None = Header(None)):
     """Testo (o chunk già pronti) → una collection, con la provenienza del
     documento (#600): {collection, name, version, text | chunks, source?,
-    provenance, tier?, supersede?}. Token-gated."""
+    provenance, tier?, supersede?, url?}. Token-gated."""
     _require_token(authorization)
     if _model is None:
         raise HTTPException(503, "modello non ancora caricato")
@@ -284,7 +284,8 @@ def ingest_text(body: dict = Body(...), authorization: str | None = Header(None)
             str(b.get("collection") or ""), str(b.get("name") or ""),
             str(b.get("version") or "1"), text=text, chunks=b.get("chunks"),
             source=b.get("source"), provenance=str(b.get("provenance") or "trusted"),
-            tier=b.get("tier"), supersede=bool(b.get("supersede")), model=_model)
+            tier=b.get("tier"), supersede=bool(b.get("supersede")), model=_model,
+            url=(str(b["url"]) if b.get("url") else None))
     except ValueError as e:
         raise HTTPException(422, str(e))
     return {"status": "ok", **res}

@@ -232,12 +232,26 @@ def tombstoned(kind: str, name: str) -> dict | None:
         return None
 
 
-def tombstone(kind: str, name: str, *, by: str, export: str = "") -> dict:
+def refuse_tombstoned(kind: str, name: str) -> None:
+    """PermissionError when `kind:name` was deleted on purpose: the one check
+    every path that could write or re-create it calls (#671)."""
+    t = tombstoned(kind, name)
+    if t:
+        what = "la collection" if kind == "rag" else "il datastore"
+        done = "eliminata" if kind == "rag" else "eliminato"
+        raise PermissionError(
+            f"{what} '{name}' è stat{done[-1]} {done} il {t.get('deleted_at')} da "
+            f"{t.get('by') or '?'}: si ricrea solo esplicitamente, dalla pagina "
+            "Databases (nuova risorsa o ripristino)")
+
+
+def tombstone(kind: str, name: str, *, by: str, export: str = "",
+              tier: str | None = None) -> dict:
     k = key(kind, name)
     with _LOCK:
         data = tombstones()
         data[k] = {"kind": kind, "name": name, "deleted_at": _now(), "by": by,
-                   "export": export}
+                   "export": export, "tier": norm_tier(tier) if tier else None}
         p = _tomb_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".tmp")
@@ -245,6 +259,19 @@ def tombstone(kind: str, name: str, *, by: str, export: str = "") -> dict:
                        encoding="utf-8")
         tmp.replace(p)
         return dict(data[k])
+
+
+def set_tombstone_export(kind: str, name: str, export: str) -> None:
+    k = key(kind, name)
+    with _LOCK:
+        data = tombstones()
+        if k in data:
+            data[k]["export"] = export
+            p = _tomb_path()
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=1, sort_keys=True, ensure_ascii=False),
+                           encoding="utf-8")
+            tmp.replace(p)
 
 
 def clear_tombstone(kind: str, name: str) -> bool:

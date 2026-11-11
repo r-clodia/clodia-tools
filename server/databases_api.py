@@ -102,37 +102,46 @@ async def catalogue_route(request: Request):
         except Exception as e:  # noqa: BLE001
             return _error(e)
         return JSONResponse(out)
-    if not admin:
-        return JSONResponse({"error": "creare ed eliminare datastore e collection è "
-                             "riservato agli admin"}, status_code=403)
+    body: dict = {}
+    action, name = "?", ""
     try:
         body = await _json(request)
-        action = body.get("action")
+        action = str(body.get("action") or "?")
         name = str(body.get("name") or "").strip()
+        if not admin:
+            raise PermissionError("creare ed eliminare datastore e collection è "
+                                  "riservato agli admin")
         if action == "create_datastore":
             out = await asyncio.to_thread(
                 databases.create_datastore, name, purpose=str(body.get("purpose") or ""),
-                tier=str(body.get("tier") or ""), pii=bool(body.get("pii")), by=who)
+                tier=str(body.get("tier") or ""), pii=bool(body.get("pii")), by=who,
+                clearance=clearance)
         elif action == "create_collection":
             out = await asyncio.to_thread(
                 databases.create_collection, name, tier=str(body.get("tier") or ""),
-                description=str(body.get("description") or ""), by=who)
+                description=str(body.get("description") or ""), by=who, clearance=clearance)
         elif action == "delete":
             kind = str(body.get("kind") or "")
             # The typed-name confirmation travels to the server too: a client
             # that skips the dialog does not skip the check.
             if str(body.get("confirm") or "") != name:
                 raise ValueError("conferma: scrivi esattamente il nome della risorsa")
-            out = await asyncio.to_thread(databases.delete, kind, name, by=who)
+            jobs = [str(j) for j in (body.get("job_scopes") or []) if str(j).startswith("job:")]
+            out = await asyncio.to_thread(databases.delete, kind, name, by=who,
+                                          clearance=clearance, job_scopes=jobs)
         elif action == "restore":
             out = await asyncio.to_thread(databases.restore, str(body.get("kind") or ""),
-                                          name, by=who)
+                                          name, by=who, clearance=clearance)
         else:
             raise ValueError("azione: create_datastore | create_collection | delete | restore")
     except Exception as e:  # noqa: BLE001
+        # Refused and failed container actions are recorded too (#671 review).
+        _audit(action, name or "*", who, resource_kind=body.get("kind"), tier=body.get("tier"),
+               result="refused" if isinstance(e, (PermissionError, ValueError, LookupError))
+               else "failed", error=str(e)[:200])
         return _error(e)
-    _audit(str(action), name or "*", who, resource_kind=body.get("kind"), tier=body.get("tier"),
-           export=out.get("export_dir"))
+    _audit(action, name or "*", who, resource_kind=body.get("kind"), tier=body.get("tier"),
+           result="ok", export=out.get("export_dir"))
     return JSONResponse(out)
 
 

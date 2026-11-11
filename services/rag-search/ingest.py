@@ -249,7 +249,7 @@ def chunk_text(text, target=CHUNK_TARGET, hard=CHUNK_MAX):
 
 
 def ingest_text(collection, name, version, text=None, chunks=None, source=None,
-                provenance="trusted", tier=None, supersede=False, model=None):
+                provenance="trusted", tier=None, supersede=False, model=None, url=None):
     """Text (or ready chunks [{text, section?}]) → embeddings → pgvector, as one
     document with its provenance (#600). Idempotent per (collection, name,
     version). Returns {collection, name, version, chunks, doc_id}."""
@@ -277,12 +277,13 @@ def ingest_text(collection, name, version, text=None, chunks=None, source=None,
         cur.execute(
             """INSERT INTO documents (collection, name, version, source_url, hash, status,
                                       provenance, source)
-               VALUES (%s,%s,%s,NULL,%s,'active',%s,%s)
+               VALUES (%s,%s,%s,%s,%s,'active',%s,%s)
                ON CONFLICT (collection, name, version)
                DO UPDATE SET hash=EXCLUDED.hash, status='active', ingested_at=now(),
-                             provenance=EXCLUDED.provenance, source=EXCLUDED.source
+                             provenance=EXCLUDED.provenance, source=EXCLUDED.source,
+                             source_url=EXCLUDED.source_url
                RETURNING id""",
-            (collection, name, version, digest, provenance, source))
+            (collection, name, version, url, digest, provenance, source))
         doc_id = cur.fetchone()[0]
         cur.execute("DELETE FROM chunks WHERE document_id=%s", (doc_id,))
         for c, v in zip(items, vecs):

@@ -6397,12 +6397,7 @@ def _refuse_tombstoned(collection: str) -> None:
     pack's provisioner or an ingest (#671): only an admin's explicit action
     (create again, or restore) brings the name back."""
     from . import data_catalog
-    t = data_catalog.tombstoned("rag", collection)
-    if t:
-        raise PermissionError(
-            f"la collection '{collection}' è stata eliminata il {t.get('deleted_at')} "
-            f"da {t.get('by') or '?'}: si ricrea solo esplicitamente, dalla pagina "
-            "Databases (nuova collection o ripristino)")
+    data_catalog.refuse_tombstoned("rag", collection)
 
 
 def _dispatch_rag(name: str, a: dict):
@@ -6486,14 +6481,16 @@ def _dispatch_rag(name: str, a: dict):
             # DOCX, PPTX, MD, TXT (#671): the gateway extracts the text with the
             # topic indexer's extractor and sends the text, as the upload does.
             from . import databases
-            text = databases.extract_text(filename, data)
+            text = databases.extract_text(filename, data, formats=databases.AGENT_INGEST_EXT)
             if not text.strip():
                 raise ValueError(f"nessun testo estraibile da '{filename}'")
-            # `eu_corpus.ingest_text` supersedes the document's other versions.
+            # Same promises as the PDF path: `supersede` only when asked, the
+            # document's URL kept.
             return eu_corpus.ingest_text(
                 collection, a["doc_name"], text, version=a["version"],
                 source=f"topic:{tier}/{tname}/{path}",
-                provenance=svc.provenance_of(tier, tname, path) or "untrusted")
+                provenance=svc.provenance_of(tier, tname, path) or "untrusted",
+                supersede=bool(a.get("supersede", False)), url=a.get("url"))
         return eu_corpus.ingest_bytes(
             data, filename, a["doc_name"], a["version"],
             url=a.get("url"), supersede=bool(a.get("supersede", False)),
@@ -6575,11 +6572,47 @@ def _pptx_text(data: bytes) -> tuple[str, int]:
     return "\n\n".join(parts), len(prs.slides)
 
 
+#: Office files are ZIP archives: a few KB can inflate to gigabytes inside the
+#: parser (#671 review). Checked on the archive's own directory, before parsing.
+ZIP_MAX_TOTAL = 150 * 1024 * 1024
+ZIP_MAX_RATIO = 100
+ZIP_MAX_ENTRIES = 10_000
+#: Entries below this size are not ratio-checked: small XML parts compress far
+#: beyond 100:1 legitimately and cannot inflate to anything dangerous.
+_ZIP_RATIO_FLOOR = 1024 * 1024
+
+
+def _zip_guard(filename: str, data: bytes) -> None:
+    """ValueError when an Office (ZIP) file would inflate beyond the limits:
+    total uncompressed size, per-entry compression ratio, number of entries."""
+    import io
+    import zipfile
+    try:
+        infos = zipfile.ZipFile(io.BytesIO(data)).infolist()
+    except zipfile.BadZipFile as e:
+        raise ValueError(f"'{filename}' non è un file Office valido (archivio ZIP illeggibile)") from e
+    if len(infos) > ZIP_MAX_ENTRIES:
+        raise ValueError(f"'{filename}' rifiutato: {len(infos)} parti nell'archivio "
+                         f"(max {ZIP_MAX_ENTRIES})")
+    total = 0
+    for i in infos:
+        total += i.file_size
+        if total > ZIP_MAX_TOTAL:
+            raise ValueError(f"'{filename}' rifiutato: decompresso supera "
+                             f"{ZIP_MAX_TOTAL // (1024 * 1024)} MB (possibile zip bomb)")
+        if i.file_size > _ZIP_RATIO_FLOOR and \
+                i.file_size > ZIP_MAX_RATIO * max(i.compress_size, 1):
+            raise ValueError(f"'{filename}' rifiutato: la parte '{i.filename}' si espande "
+                             f"oltre {ZIP_MAX_RATIO}:1 (possibile zip bomb)")
+
+
 def _extract_document_text(filename: str, data: bytes) -> tuple[str, int | None]:
     """Estrae testo da PDF/DOCX/PPTX/XLSX (server-side). Ritorna (testo, n_pagine|None).
     Fallback: prova a decodificare come testo UTF-8."""
     import io
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext in ("docx", "pptx", "xlsx", "xlsm"):
+        _zip_guard(filename, data)
     if ext == "pptx":
         return _pptx_text(data)
     if ext == "pdf":

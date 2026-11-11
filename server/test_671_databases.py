@@ -14,7 +14,11 @@ from unittest.mock import patch
 from . import data_catalog as cat, databases, datastores, topic_data as td, whitelist
 from .topics.local_fs import LocalFsStorage
 from .topics.service import TopicService
-from .tools import datastore_sql
+from .tools import datastore_sql, eu_corpus as _eu
+
+#: The real client functions, before any fixture replaces them with fakes.
+_REAL_EU = {n: getattr(_eu, n) for n in ("ingest_text", "ingest_bytes", "create_collection",
+                                         "set_collection_tier")}
 
 
 class FakeRag:
@@ -282,21 +286,22 @@ class ContentTests(_Base):
 class ContainerTests(_Base):
     def test_create_a_platform_datastore(self):
         out = databases.create_datastore("note-interne", purpose="appunti", tier="SEAL-1",
-                                         pii=False, by="davide")
+                                         pii=False, by="davide", clearance="SEAL-4")
         self.assertEqual(out["created"]["name"], "platform/note-interne")
         e = datastores.find("platform", "note-interne")
         self.assertTrue(Path(e["abs_path"]).is_file())
         self.assertEqual(cat.get("datastore", "platform/note-interne")["tier"], "SEAL-1")
         with self.assertRaises(ValueError):
             databases.create_datastore("note-interne", purpose="", tier="SEAL-1", pii=False,
-                                       by="davide")
+                                       by="davide", clearance="SEAL-4")
         for bad in ("Note", "../x", "", "a" * 70):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
-                databases.create_datastore(bad, purpose="", tier="SEAL-1", pii=False, by="d")
+                databases.create_datastore(bad, purpose="", tier="SEAL-1", pii=False, by="d",
+                                           clearance="SEAL-4")
 
     def test_delete_datastore_exports_then_removes_everything(self):
         path = Path(self.entry()["abs_path"])
-        out = databases.delete("datastore", "tomato-pack/clienti", by="davide")
+        out = databases.delete("datastore", "tomato-pack/clienti", by="davide", clearance="SEAL-4")
         export = Path(datastores.DATADIR) / out["export_dir"]
         self.assertTrue(out["export_dir"].startswith("deleted/datastore-tomato-pack__clienti-"))
         conn = sqlite3.connect(export / "clienti.db")
@@ -311,7 +316,7 @@ class ContainerTests(_Base):
         self.assertEqual([e["name"] for e in td.imports(meta_t)], ["manuali"])
 
     def test_delete_collection_exports_jsonl_then_drops(self):
-        out = databases.delete("rag", "manuali", by="davide")
+        out = databases.delete("rag", "manuali", by="davide", clearance="SEAL-4")
         export = Path(datastores.DATADIR) / out["export_dir"]
         docs = [json.loads(x) for x in (export / "documents.jsonl").read_text().splitlines()]
         chunks = (export / "chunks.jsonl").read_text().splitlines()
@@ -326,7 +331,7 @@ class ContainerTests(_Base):
         from .tools import eu_corpus
         with patch.object(eu_corpus, "export_rows", self.rag.export_rows):
             with self.assertRaisesRegex(RuntimeError, "incompleto"):
-                databases.delete("rag", "manuali", by="davide")
+                databases.delete("rag", "manuali", by="davide", clearance="SEAL-4")
         self.assertEqual(self.rag.dropped, [])
         self.assertIsNotNone(cat.get("rag", "manuali"))
         self.assertIsNone(cat.tombstoned("rag", "manuali"))
@@ -334,11 +339,11 @@ class ContainerTests(_Base):
 
     def test_topic_indexes_cannot_be_deleted_from_here(self):
         with self.assertRaises(PermissionError):
-            databases.delete("rag", "topic-abc123", by="davide")
+            databases.delete("rag", "topic-abc123", by="davide", clearance="SEAL-4")
 
     def test_the_tombstone_stops_a_silent_recreation(self):
-        databases.delete("datastore", "tomato-pack/clienti", by="davide")
-        databases.delete("rag", "manuali", by="davide")
+        databases.delete("datastore", "tomato-pack/clienti", by="davide", clearance="SEAL-4")
+        databases.delete("rag", "manuali", by="davide", clearance="SEAL-4")
         # The pack update brings the file back and the service the collection:
         conn = sqlite3.connect(Path(datastores.DATADIR) / "plugins/tomato-pack/clienti.db")
         conn.close()
@@ -352,21 +357,163 @@ class ContainerTests(_Base):
         with self.assertRaisesRegex(PermissionError, "eliminata"):
             main._refuse_tombstoned("manuali")
         # Only an explicit action brings them back.
-        databases.restore("datastore", "tomato-pack/clienti", by="davide")
+        databases.restore("datastore", "tomato-pack/clienti", by="davide", clearance="SEAL-4")
         self.assertIsNotNone(datastores.find("tomato-pack", "clienti"))
         self.assertIsNotNone(cat.get("datastore", "tomato-pack/clienti"))
         self.rag.cols.pop("manuali")
-        databases.create_collection("manuali", tier="SEAL-2", by="davide")
+        databases.create_collection("manuali", tier="SEAL-2", by="davide", clearance="SEAL-4")
         self.assertIsNone(cat.tombstoned("rag", "manuali"))
         main._refuse_tombstoned("manuali")
 
     def test_create_collection_refuses_topic_names_and_duplicates(self):
         with self.assertRaises(ValueError):
-            databases.create_collection("topic-x", tier="SEAL-1", by="davide")
+            databases.create_collection("topic-x", tier="SEAL-1", by="davide", clearance="SEAL-4")
         with self.assertRaises(ValueError):
-            databases.create_collection("manuali", tier="SEAL-1", by="davide")
-        out = databases.create_collection("procedure", tier="SEAL-1", by="davide")
+            databases.create_collection("manuali", tier="SEAL-1", by="davide", clearance="SEAL-4")
+        out = databases.create_collection("procedure", tier="SEAL-1", by="davide", clearance="SEAL-4")
         self.assertEqual(out["created"], {"kind": "rag", "name": "procedure", "tier": "SEAL-1"})
+
+
+class ReviewFixTests(_Base):
+    """The independent review of #671 (should-fix 1-5, minor 10-11)."""
+
+    def test_1_every_eu_corpus_write_path_refuses_a_tombstone(self):
+        from .tools import eu_corpus
+        cat.tombstone("rag", "manuali", by="davide")
+        sent = []
+        euc = type("RealClient", (), {k: staticmethod(v) for k, v in _REAL_EU.items()})
+        p = patch.object(eu_corpus, "_post_json", lambda *a, **k: sent.append(a) or {})
+        p.start()
+        self.addCleanup(p.stop)
+        for call in (lambda: euc.ingest_text("manuali", "d", "testo"),
+                     lambda: euc.ingest_bytes(b"%PDF", "a.pdf", "d", "1", collection="manuali"),
+                     lambda: euc.create_collection("manuali", tier="SEAL-0"),
+                     lambda: euc.set_collection_tier("manuali", "SEAL-0")):
+            with self.assertRaisesRegex(PermissionError, "eliminat"):
+                call()
+        with self.assertRaisesRegex(PermissionError, "eliminat"):
+            # eu_corpus.ingest's own default collection, the reviewed bypass
+            cat.tombstone("rag", "eu-normativa", by="davide")
+            euc.ingest_bytes(b"%PDF", "a.pdf", "d", "1")
+        self.assertEqual(sent, [])
+        euc.ingest_text("eu-altro", "d", "testo")
+        self.assertEqual(len(sent), 1)
+
+    def test_3_the_tombstone_freezes_before_the_export(self):
+        seen = {}
+        real = databases._export_datastore
+
+        def export(ds, name, d):
+            seen["declared"] = datastores.find("tomato-pack", "clienti")
+            seen["tomb"] = cat.tombstoned("datastore", "tomato-pack/clienti")
+            return real(ds, name, d)
+        with patch.object(databases, "_export_datastore", export):
+            databases.delete("datastore", "tomato-pack/clienti", by="davide", clearance="SEAL-4")
+        self.assertIsNone(seen["declared"])           # datastore.* refuse it during the export
+        self.assertIsNotNone(seen["tomb"])
+        t = cat.tombstoned("datastore", "tomato-pack/clienti")
+        self.assertTrue(t["export"].startswith("deleted/"))
+        self.assertEqual(t["tier"], "SEAL-2")
+
+    def test_3_an_export_failure_lifts_the_tombstone(self):
+        with patch.object(databases, "_export_datastore",
+                          lambda *a: (_ for _ in ()).throw(RuntimeError("disco pieno"))):
+            with self.assertRaises(RuntimeError):
+                databases.delete("datastore", "tomato-pack/clienti", by="davide",
+                                 clearance="SEAL-4")
+        self.assertIsNone(cat.tombstoned("datastore", "tomato-pack/clienti"))
+        self.assertIsNotNone(datastores.find("tomato-pack", "clienti"))
+        self.assertTrue(Path(self.entry()["abs_path"]).is_file())
+
+    def test_3_the_chunk_count_is_checked_too(self):
+        real = self.rag.export_rows
+
+        def short(c):
+            rows = list(real(c))
+            return iter(rows[:-1])                     # every document, one chunk missing
+        from .tools import eu_corpus
+        with patch.object(eu_corpus, "export_rows", short):
+            with self.assertRaisesRegex(RuntimeError, "1 chunk su 2"):
+                databases.delete("rag", "manuali", by="davide", clearance="SEAL-4")
+        self.assertEqual(self.rag.dropped, [])
+        self.assertIsNone(cat.tombstoned("rag", "manuali"))
+
+    def test_2_job_scopes_are_recorded_and_returned(self):
+        out = databases.delete("rag", "manuali", by="davide", clearance="SEAL-4",
+                               job_scopes=["job:7"])
+        meta = json.loads((Path(datastores.DATADIR) / out["export_dir"] / "meta.json").read_text())
+        self.assertEqual(meta["imported_by_scopes"], ["SEAL-2/commerciale", "job:7"])
+        self.assertEqual(out["job_scopes"], ["job:7"])
+
+    def test_4_container_actions_need_the_clearance(self):
+        with self.assertRaisesRegex(PermissionError, "clearance"):
+            databases.delete("datastore", "tomato-pack/clienti", by="davide", clearance="SEAL-1")
+        self.assertIsNone(cat.tombstoned("datastore", "tomato-pack/clienti"))
+        with self.assertRaisesRegex(PermissionError, "clearance"):
+            databases.create_datastore("alto", purpose="", tier="SEAL-3", pii=False,
+                                       by="davide", clearance="SEAL-2")
+        with self.assertRaisesRegex(PermissionError, "clearance"):
+            databases.create_collection("alta", tier="SEAL-3", by="davide", clearance="SEAL-2")
+        databases.delete("datastore", "tomato-pack/clienti", by="davide", clearance="SEAL-2")
+        with self.assertRaisesRegex(PermissionError, "clearance"):
+            databases.restore("datastore", "tomato-pack/clienti", by="davide", clearance="SEAL-1")
+        databases.restore("datastore", "tomato-pack/clienti", by="davide", clearance="SEAL-2")
+
+    def _zip(self, entries):
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for n, data in entries:
+                z.writestr(n, data)
+        return buf.getvalue()
+
+    def test_5_zip_bombs_are_refused_before_parsing(self):
+        from . import main
+        bomb = self._zip([("word/document.xml", b"\0" * (5 * 1024 * 1024))])
+        for fn in ("a.docx", "a.pptx"):
+            with self.subTest(fn=fn), self.assertRaisesRegex(ValueError, "zip bomb"):
+                databases.extract_text(fn, bomb)
+        with self.assertRaisesRegex(ValueError, "zip bomb"):     # agents' rag.ingest path
+            databases.extract_text("a.xlsx", bomb, formats=databases.AGENT_INGEST_EXT)
+        with patch.object(main, "ZIP_MAX_TOTAL", 1000):
+            with self.assertRaisesRegex(ValueError, "decompresso"):
+                databases.extract_text("a.docx", self._zip([("a", b"x" * 600), ("b", b"y" * 600)]))
+        with self.assertRaisesRegex(ValueError, "non è un file Office"):
+            databases.extract_text("a.docx", b"not a zip")
+
+    def test_10_agent_ingest_of_a_non_pdf_keeps_supersede_url_and_xlsx(self):
+        from . import main
+        from .tools import eu_corpus
+        from openpyxl import Workbook
+        wb = Workbook()
+        wb.active["A1"] = "cella"
+        buf = io.BytesIO()
+        wb.save(buf)
+        files = {"files/t.xlsx": buf.getvalue(), "files/n.md": b"# nota"}
+        sent = []
+
+        class Svc:
+            def read_file(self, t, n, path):
+                return files[path]
+
+            def provenance_of(self, *a):
+                return "trusted"
+        with patch.object(main, "_rag_authorize", lambda *a, **k: None), \
+                patch.object(main, "_topics", lambda: Svc()), \
+                patch.object(main, "_require_topic_member", lambda *a: None), \
+                patch.object(main, "_ingest_source_ok", lambda *a: None), \
+                patch.object(eu_corpus, "ingest_text", lambda *a, **k: sent.append((a, k)) or {}):
+            main._dispatch_rag("rag.ingest", {"collection": "manuali", "tier": "SEAL-2",
+                                              "name": "commerciale", "path": "files/t.xlsx",
+                                              "doc_name": "T", "version": "1"})
+            main._dispatch_rag("rag.ingest", {"collection": "manuali", "tier": "SEAL-2",
+                                              "name": "commerciale", "path": "files/n.md",
+                                              "doc_name": "N", "version": "2", "supersede": True,
+                                              "url": "https://x/n"})
+        (a1, k1), (a2, k2) = sent
+        self.assertIn("cella", a1[2])
+        self.assertEqual((k1["supersede"], k1["url"]), (False, None))
+        self.assertEqual((k2["supersede"], k2["url"]), (True, "https://x/n"))
 
 
 class CatalogueTests(_Base):
@@ -446,6 +593,26 @@ class RouteTests(_Base):
                                                 "name": "manuali", "confirm": "manuali"})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertTrue(r.json()["export_dir"].startswith("deleted/rag-manuali-"))
+
+    def test_11_refused_and_failed_container_actions_are_audited(self):
+        from . import databases_api
+        seen = []
+        p = patch.object(databases_api, "_audit", lambda *a, **k: seen.append((a, k)))
+        p.start()
+        self.addCleanup(p.stop)
+        self.person("mario").post("/internal/databases", json={
+            "action": "delete", "kind": "rag", "name": "manuali", "confirm": "manuali"})
+        a = self.person("davide", role="admin", clearance="SEAL-1")
+        a.post("/internal/databases", json={"action": "delete", "kind": "rag",
+                                            "name": "manuali", "confirm": "manuali"})
+        with patch.object(databases, "delete", lambda *x, **k: (_ for _ in ()).throw(
+                RuntimeError("servizio giù"))):
+            self.person("davide", role="admin", clearance="SEAL-4").post(
+                "/internal/databases", json={"action": "delete", "kind": "rag",
+                                             "name": "manuali", "confirm": "manuali"})
+        self.assertEqual([(x[0][0], x[0][2], x[1]["result"]) for x in seen],
+                         [("delete", "mario", "refused"), ("delete", "davide", "refused"),
+                          ("delete", "davide", "failed")])
 
     def test_upload_route_limits(self):
         a = self.person("davide", role="admin", clearance="SEAL-4")

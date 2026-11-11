@@ -220,6 +220,21 @@ class AuthTests(unittest.TestCase):
         r = self.c.get("/export", params={"collection": "x"}, headers=ok)
         self.assertEqual(r.text.strip(), '{"type": "collection", "name": "x"}')
 
+    def test_ingest_text_keeps_the_url_and_the_supersede_choice(self):
+        from unittest.mock import patch
+        seen = {}
+        self.s._model = object()
+        self.addCleanup(setattr, self.s, "_model", None)
+        p = patch.object(self.s.ingest_mod, "ingest_text",
+                         lambda *a, **k: seen.update(k) or {"chunks": 1})
+        p.start()
+        self.addCleanup(p.stop)
+        r = self.c.post("/ingest_text", headers={"Authorization": "Bearer t0k"},
+                        json={"collection": "c", "name": "d", "text": "x", "url": "https://x/d",
+                              "supersede": False, "provenance": "untrusted"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual((seen["url"], seen["supersede"]), ("https://x/d", False))
+
     def test_an_unknown_document_is_404(self):
         from unittest.mock import patch
 

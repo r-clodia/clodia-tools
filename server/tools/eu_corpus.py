@@ -61,18 +61,32 @@ def _post_json(path: str, body: dict, timeout: float | None = None) -> dict:
         raise RuntimeError(f"eu-rag {path} irraggiungibile ({_BASE}): {e.reason}")
 
 
+def _refuse_tombstoned(collection: str) -> None:
+    """The single choke point (#671): every path of this client that writes a
+    collection, and can therefore create it in the service, refuses a name
+    deleted on purpose — whoever calls it, provisioners and indexers included."""
+    from .. import data_catalog
+    data_catalog.refuse_tombstoned("rag", collection)
+
+
 def ingest_text(collection: str, name: str, text: str, *, version: str = "1",
-                source: str = "", provenance: str = "untrusted", tier: str | None = None) -> dict:
-    """Text as one document of `collection`, with its provenance (#600)."""
-    return _post_json("/ingest_text", {"collection": collection, "name": name,
-                                       "version": version, "text": text, "source": source,
-                                       "provenance": provenance, "tier": tier,
-                                       "supersede": True})
+                source: str = "", provenance: str = "untrusted", tier: str | None = None,
+                supersede: bool = True, url: str | None = None) -> dict:
+    """Text as one document of `collection`, with its provenance (#600).
+    `url` is stored as the document's source URL (rag-search >= 0.5.0)."""
+    _refuse_tombstoned(collection)
+    body = {"collection": collection, "name": name, "version": version, "text": text,
+            "source": source, "provenance": provenance, "tier": tier,
+            "supersede": bool(supersede)}
+    if url:
+        body["url"] = url
+    return _post_json("/ingest_text", body)
 
 
 def set_collection_tier(collection: str, tier: str) -> dict:
     """Set `collection`'s tier, creating it if needed: only the topic index
     uses it, to follow its topic's tier (#599)."""
+    _refuse_tombstoned(collection)
     _tier_cache["at"] = 0.0
     return _post_json("/collections/tier", {"collection": collection, "tier": tier}, _TIMEOUT)
 
@@ -163,6 +177,7 @@ def create_collection(collection: str, tier: str = "SEAL-1",
                       description: str | None = None) -> dict:
     """Crea una collection RAG (rag-search ≥ 0.4.0: `POST /collections`, JSON).
     Una collection esistente tiene il suo tier: crearla non lo cambia."""
+    _refuse_tombstoned(collection)
     _tier_cache["at"] = 0.0
     return _post_json("/collections", {"collection": collection, "tier": tier}, _TIMEOUT)
 
@@ -236,6 +251,7 @@ def ingest_bytes(content: bytes, filename: str, doc_name: str, version: str,
     Chiamato server-side dal gateway dopo aver letto il file dal topic (i byte
     NON passano dal modello). Ritorna {status, collection, name, version, chunks}.
     """
+    _refuse_tombstoned(collection)
     body, boundary = _multipart(
         {"name": doc_name, "version": version, "url": url, "collection": collection,
          "supersede": "true" if supersede else "false", "provenance": provenance},
