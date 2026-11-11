@@ -153,7 +153,17 @@ def rooms(indexed: bool = False) -> list[dict]:
                    **_senders(f"{tier}/{name}")}
             if addr in boxes and row not in out:
                 out.append(row)
-    out.extend(_colony_rooms(out, indexed))
+    # A room that links the colony mailbox itself as its `inbox:` has, on the
+    # same mailbox, its own address too (the message box, `box+CODE@…`). The
+    # direct row only delivers declared senders; the tagged row delivers
+    # whoever writes to the room's address (owner, 27 Oct 2026). The tagged
+    # row wins: on 9–10 Nov a room linked the colony mailbox from the Email
+    # card and its message box went silent (#665, the second cause of #645).
+    # The direct row stays where no tagged row can be built (older comms-pack).
+    colony = _colony_rooms([], indexed)
+    tagged = {(r["tier"], r["name"], r["address"]) for r in colony}
+    out = [r for r in out if (r["tier"], r["name"], r["address"]) not in tagged]
+    out.extend(colony)
     # A·V·R·Q (owner, 27 Oct 2026): mail enters a room only where the room
     # authorised the Email MCP. The courier saved envelopes and attachments
     # in bilancio-tomato-2026 although Email was not authorised there.
@@ -179,9 +189,9 @@ def _email_authorised(tier: str, name: str) -> bool:
 
 def _colony_rooms(existing: list[dict], indexed_ok: bool = False) -> list[dict]:
     """One row per topic reachable through the colony mailbox (#583): it has a
-    message-box code and at least one sender, its own or global (#585). A room that
-    already reads the colony mailbox through its own `inbox:` gets no second
-    row (the same mail would arrive twice)."""
+    message-box code and at least one sender, its own or global (#585). A room
+    that also reads the colony mailbox through its own `inbox:` keeps only this
+    row: `rooms()` drops the direct one (#665)."""
     from . import egress
     from . import main
     acct, addr = colony_mailbox()
