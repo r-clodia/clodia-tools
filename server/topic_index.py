@@ -59,7 +59,7 @@ LOG = logging.getLogger("clodia-tools.topic_index")
 
 PREFIX = "topic-"
 TEXT_EXT = (".md", ".txt", ".csv", ".json", ".html", ".htm", ".xml", ".yaml", ".yml")
-DOC_EXT = (".pdf", ".docx", ".xlsx")
+DOC_EXT = (".pdf", ".docx", ".pptx", ".xlsx")
 EML_EXT = (".eml",)
 ROOTS = ("files", "local")
 MAX_FILES = 15

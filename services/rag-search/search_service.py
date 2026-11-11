@@ -13,16 +13,20 @@ Endpoint:
   GET /search?q=...&k=5&doc=AGA    → {"query":..,"results":[{name,version,section,page,score,
                                       text,provenance,source}]}
   POST /ingest_text, /collections, /collections/tier, /collections/drop   (token)
+  GET /chunks?collection=X&name=D[&version=V]   (token) one document's chunks
+  GET /export?collection=X                      (token) JSONL of every row
 
 Collections named `topic-*` (a topic's own, clodia-platform#599) are private:
 search and documents need the token; their names are hidden from /collections.
 """
 import hmac
+import json
 import os
 import tempfile
 
 import psycopg
 from fastapi import Body, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from sentence_transformers import SentenceTransformer
 
 import ingest as ingest_mod
@@ -36,7 +40,7 @@ ROUTE_MODEL_NAME = "intfloat/multilingual-e5-small"
 _INGEST_TOKEN = os.environ.get("EU_RAG_INGEST_TOKEN")
 _MAX_INGEST_BYTES = 100 * 1024 * 1024  # 100 MB
 
-app = FastAPI(title="eu-rag-search", version="0.4.0")
+app = FastAPI(title="eu-rag-search", version="0.5.0")
 
 
 def _authorized(authorization: str | None) -> bool:
@@ -189,6 +193,34 @@ def documents(collection: str = Query("eu-normativa"),
     """Elenco dei documenti di una collection (nome, versione, status, n. chunk)."""
     _guard_read(collection, authorization)
     return {"collection": collection, "documents": ingest_mod.list_documents(collection)}
+
+
+@app.get("/chunks")
+def chunks(collection: str = Query(..., min_length=1), name: str = Query(..., min_length=1),
+           version: str | None = Query(None), limit: int = Query(50, ge=1, le=200),
+           offset: int = Query(0, ge=0), authorization: str | None = Header(None)):
+    """The chunks of one document, in order (clodia-platform#671). Token-gated:
+    a chunk is the content itself, and only the gateway (which decides who may
+    see it) holds the token."""
+    _require_token(authorization)
+    try:
+        return ingest_mod.list_chunks(collection, name, version, limit, offset)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.get("/export")
+def export(collection: str = Query(..., min_length=1),
+           authorization: str | None = Header(None)):
+    """Every row of a collection as JSONL (collection, documents, chunks with
+    their embedding): the gateway writes it under `deleted/` before a drop
+    (clodia-platform#671). Token-gated."""
+    _require_token(authorization)
+
+    def lines():
+        for row in ingest_mod.export_collection(collection):
+            yield json.dumps(row, ensure_ascii=False) + "\n"
+    return StreamingResponse(lines(), media_type="application/x-ndjson")
 
 
 @app.get("/collections")

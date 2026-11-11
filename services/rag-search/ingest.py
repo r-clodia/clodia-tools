@@ -385,18 +385,92 @@ def list_documents(collection=DEFAULT_COLLECTION):
 
 
 def list_collections():
-    """Elenco collection: [{collection, tier, documents, chunks}]."""
+    """Elenco collection: [{collection, tier, documents, chunks, updated_at}].
+    `updated_at`: the last ingest into the collection (its creation when empty)."""
     with _db() as conn, conn.cursor() as cur:
         cur.execute(
             """SELECT col.name, col.tier,
-                      count(DISTINCT d.id) AS docs, count(c.id) AS chunks
+                      count(DISTINCT d.id) AS docs, count(c.id) AS chunks,
+                      coalesce(max(d.ingested_at), col.created_at) AS updated_at
                FROM collections col
                LEFT JOIN documents d ON d.collection=col.name
                LEFT JOIN chunks c ON c.document_id=d.id
-               GROUP BY col.name, col.tier ORDER BY col.name"""
+               GROUP BY col.name, col.tier, col.created_at ORDER BY col.name"""
         )
-        return [{"collection": n, "tier": t, "documents": docs, "chunks": ch}
-                for n, t, docs, ch in cur.fetchall()]
+        return [{"collection": n, "tier": t, "documents": docs, "chunks": ch,
+                 "updated_at": ts.isoformat() if ts else None}
+                for n, t, docs, ch, ts in cur.fetchall()]
+
+
+#: Chunks per page of `list_chunks`: a ceiling, not the client's default.
+MAX_CHUNKS_PAGE = 200
+
+
+def list_chunks(collection, name, version=None, limit=50, offset=0):
+    """The chunks of ONE document, in reading order (clodia-platform#671):
+    {collection, name, version, total, chunks: [{ordinal, section, page, text}]}.
+    Without `version`, the active version (the latest ingested if none is
+    active). Raises LookupError when the document does not exist."""
+    limit = max(1, min(int(limit), MAX_CHUNKS_PAGE))
+    offset = max(0, int(offset))
+    with _db() as conn, conn.cursor() as cur:
+        if version is None:
+            cur.execute(
+                """SELECT id, version FROM documents WHERE collection=%s AND name=%s
+                   ORDER BY (status='active') DESC, ingested_at DESC LIMIT 1""",
+                (collection, name))
+        else:
+            cur.execute(
+                "SELECT id, version FROM documents WHERE collection=%s AND name=%s AND version=%s",
+                (collection, name, version))
+        row = cur.fetchone()
+        if not row:
+            raise LookupError(f"documento '{name}' non presente in '{collection}'")
+        doc_id, ver = row
+        cur.execute("SELECT count(*) FROM chunks WHERE document_id=%s", (doc_id,))
+        total = cur.fetchone()[0]
+        cur.execute(
+            """SELECT ordinal, section, page, text FROM chunks WHERE document_id=%s
+               ORDER BY ordinal NULLS LAST, id LIMIT %s OFFSET %s""",
+            (doc_id, limit, offset))
+        rows = cur.fetchall()
+    return {"collection": collection, "name": name, "version": ver, "total": total,
+            "limit": limit, "offset": offset,
+            "chunks": [{"ordinal": o, "section": s, "page": p, "text": t}
+                       for o, s, p, t in rows]}
+
+
+def export_collection(collection):
+    """Every row of a collection, as dicts to write one per line (JSONL): the
+    collection first, then its documents, then their chunks with the embedding
+    as text. The pre-delete export of clodia-platform#671 — pgvector is not in
+    the restic backup, so this file is the only copy left after a drop."""
+    with _db() as conn, conn.cursor() as cur:
+        ensure_schema(cur)
+        cur.execute("SELECT name, tier, created_at FROM collections WHERE name=%s",
+                    (collection,))
+        col = cur.fetchone()
+        if col:
+            yield {"type": "collection", "name": col[0], "tier": col[1],
+                   "created_at": col[2].isoformat() if col[2] else None}
+        cur.execute(
+            """SELECT id, name, version, source_url, hash, status, ingested_at, provenance, source
+               FROM documents WHERE collection=%s ORDER BY id""", (collection,))
+        for (i, n, v, url, h, st, ts, prov, src) in cur.fetchall():
+            yield {"type": "document", "id": i, "name": n, "version": v, "source_url": url,
+                   "hash": h, "status": st, "ingested_at": ts.isoformat() if ts else None,
+                   "provenance": prov, "source": src}
+        cur.execute(
+            """SELECT id, document_id, section, page, ordinal, text, embedding::text
+               FROM chunks WHERE collection=%s ORDER BY document_id, ordinal, id""",
+            (collection,))
+        while True:
+            batch = cur.fetchmany(500)
+            if not batch:
+                break
+            for (i, d, sec, page, o, t, emb) in batch:
+                yield {"type": "chunk", "id": i, "document_id": d, "section": sec,
+                       "page": page, "ordinal": o, "text": t, "embedding": emb}
 
 
 def remove_document(name, version=None, collection=DEFAULT_COLLECTION):

@@ -111,6 +111,46 @@ def list_documents(collection: str = DEFAULT_COLLECTION) -> dict:
         raise RuntimeError(f"eu-rag-search irraggiungibile ({_BASE}): {getattr(e, 'reason', e)}")
 
 
+def list_chunks(collection: str, name: str, version: str | None = None,
+                limit: int = 50, offset: int = 0) -> dict:
+    """The chunks of one document, in reading order (rag-search >= 0.5.0,
+    clodia-platform#671). LookupError when the document does not exist."""
+    params = {"collection": collection, "name": name, "limit": int(limit),
+              "offset": int(offset)}
+    if version:
+        params["version"] = version
+    url = f"{_BASE}/chunks?" + urllib.parse.urlencode(params)
+    try:
+        return _get(url)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise LookupError(f"documento '{name}' non presente in '{collection}'") from e
+        raise RuntimeError(f"eu-rag chunks HTTP {e.code}: "
+                           f"{e.read().decode('utf-8', 'ignore')[:200]}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"eu-rag-search irraggiungibile ({_BASE}): {e.reason}") from e
+
+
+def export_rows(collection: str):
+    """Every row of `collection` (rag-search >= 0.5.0 `GET /export`), one dict
+    at a time: {type: collection|document|chunk, ...}. Token required. The
+    pre-delete export of clodia-platform#671 reads it."""
+    url = f"{_BASE}/export?" + urllib.parse.urlencode({"collection": collection})
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {_ingest_token()}"})
+    try:
+        resp = urllib.request.urlopen(req, timeout=_INGEST_TIMEOUT)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"eu-rag export HTTP {e.code}: "
+                           f"{e.read().decode('utf-8', 'ignore')[:200]}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"eu-rag export irraggiungibile ({_BASE}): {e.reason}") from e
+    with resp:
+        for line in resp:
+            line = line.strip()
+            if line:
+                yield json.loads(line)
+
+
 def collections() -> dict:
     """Elenca le collection con tier e conteggi."""
     try:

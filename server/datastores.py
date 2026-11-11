@@ -11,10 +11,74 @@ due consumatori.
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
+import re
 from pathlib import Path
 
 DATADIR = os.environ.get("CLODIA_DATA", "/datadir")
+LOG = logging.getLogger("clodia-tools.datastores")
+
+#: The pseudo-pack of the datastores an admin creates from the Databases page
+#: (clodia-platform#671): `platform/<name>`, file `CLODIA_DATA/datastores/<name>.db`.
+#: A pack cannot take this name (`plugin_import` refuses it, and `declared`
+#: below skips a pack folder called so).
+PLATFORM = "platform"
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+
+
+def platform_dir() -> Path:
+    return Path(DATADIR) / "datastores"
+
+
+def _platform_registry() -> Path:
+    return platform_dir() / "registry.json"
+
+
+def platform_registry() -> dict:
+    """`{name: {purpose, pii, clearance, created_by, created_at}}`."""
+    try:
+        data = json.loads(_platform_registry().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        LOG.error("platform datastores: registry unreadable (%s)", type(e).__name__)
+        return {}
+
+
+def save_platform_registry(data: dict) -> None:
+    p = _platform_registry()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=1, sort_keys=True, ensure_ascii=False),
+                   encoding="utf-8")
+    tmp.replace(p)
+
+
+def _platform_declared() -> list[dict]:
+    out = []
+    for name, meta in sorted(platform_registry().items()):
+        if not NAME_RE.match(str(name)) or not isinstance(meta, dict):
+            continue
+        out.append({
+            "pack": PLATFORM, "name": name, "path": f"{name}.db",
+            "abs_path": str((platform_dir() / f"{name}.db").resolve()),
+            "purpose": str(meta.get("purpose") or ""), "pii": bool(meta.get("pii", False)),
+            "backup": True, "clearance": str(meta.get("clearance") or "SEAL-4"),
+            "seeds": [],
+        })
+    return out
+
+
+def _tombstoned_keys() -> set[str]:
+    try:
+        from . import data_catalog
+        return {k.split(":", 1)[1] for k in data_catalog.tombstones()
+                if k.startswith("datastore:")}
+    except Exception:  # noqa: BLE001 — no tombstones readable, none applied
+        return set()
 
 
 def declared() -> list[dict]:
@@ -34,6 +98,8 @@ def declared() -> list[dict]:
         if not isinstance(meta, dict):
             continue
         pack = manifest.parent.name
+        if pack == PLATFORM:
+            continue
         for ds in meta.get("datastores") or []:
             if not isinstance(ds, dict) or not ds.get("path"):
                 continue
@@ -49,7 +115,12 @@ def declared() -> list[dict]:
                 "backup": bool(ds.get("backup", True)),
                 "clearance": str(ds.get("clearance") or "SEAL-4"),
             })
-    return found
+    # The datastores created from the Databases page, then the tombstones:
+    # a datastore deleted on purpose is not declared any more, even if its
+    # pack still names it (#671).
+    found += _platform_declared()
+    dead = _tombstoned_keys()
+    return [ds for ds in found if f"{ds['pack']}/{ds['name']}" not in dead]
 
 
 def declared_collections() -> dict[str, dict]:

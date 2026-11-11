@@ -13,6 +13,7 @@ The RAG micro-service (pgvector + local MiniLM embeddings) behind the gateway's 
 | `GET /search`, `/documents` | open, except `topic-*` collections (token) |
 | `GET /collections` | open; `topic-*` collections listed only with the token |
 | `POST /ingest` (PDF), `/ingest_text`, `/remove`, `/collections`, `/collections/drop` | token |
+| `GET /chunks` (one document's chunks, paginated), `/export` (JSONL of a collection) | token |
 
 The token is `EU_RAG_INGEST_TOKEN` (service env) and `/datadir/eu-rag-ingest-token` on the gateway side.
 

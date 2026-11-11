@@ -16,9 +16,10 @@ La seconda è il contenuto della prima: una collection con «12 documenti» e
 nessun modo di sapere QUALI non si può amministrare — si vede il conteggio di
 ciò che è stato iniettato, non ciò che è stato iniettato (clodia-platform#342).
 
-Sola lettura: non esiste ancora un modo di cancellare una collection (il
-servizio `eu-rag-search` non espone l'endpoint — clodia-platform, decisione
-9 set 2026). Aggiungere qui un DELETE quando quel servizio lo supporterà.
+Read-only on purpose: creating, deleting (with its pre-delete export) and
+editing a collection are a person's actions on the Databases page, behind
+`databases_api.py` (clodia-platform#671) — the service supports them
+(`POST /collections`, `/collections/drop`, `/remove`, `/ingest_text`).
 """
 from __future__ import annotations
 

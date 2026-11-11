@@ -17,3 +17,5 @@ python-docx>=1.1.0
 mammoth>=1.8.0        # DOCX -> HTML semantico (BSD-2)
 markdownify>=0.13.1   # HTML -> Markdown (MIT)
 openpyxl>=3.1.0
+# PPTX text for the Databases upload and the topic index (clodia-platform#671).
+python-pptx>=1.0.0
