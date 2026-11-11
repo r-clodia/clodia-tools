@@ -121,19 +121,8 @@ def _readable_scopes(kind: str, name: str, scopes: list[str], *, who: str,
 # ── Catalogue ────────────────────────────────────────────────────────────────
 
 def _collection_packs() -> dict[str, str]:
-    """`{collection: pack}` from the installed packs' `rag_collections:`
-    (names only — who may use a collection is not the manifest's business)."""
-    import yaml
-    out: dict[str, str] = {}
-    for manifest in sorted(Path(datastores.DATADIR).glob("plugins/*/plugin.yaml")):
-        try:
-            meta = yaml.safe_load(manifest.read_text()) or {}
-        except Exception:  # noqa: BLE001
-            continue
-        for col in (meta.get("rag_collections") if isinstance(meta, dict) else None) or []:
-            if isinstance(col, dict) and str(col.get("name") or "").strip():
-                out.setdefault(str(col["name"]).strip(), manifest.parent.name)
-    return out
+    """`{collection: pack}` from the installed packs' `rag_collections:`."""
+    return {n: v["pack"] for n, v in datastores.declared_collections().items()}
 
 
 def _datastore_stats(ds: dict) -> tuple[dict, str | None, str]:
