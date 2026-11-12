@@ -77,6 +77,7 @@ extending nothing, is empty and refused.
 | `taint` | no | verb names or prefixes, inside the connector's namespace, whose answers DO taint the channel they land in — content nobody vouched for (`taint.taints`); e.g. comms-pack's `telegram.inbox`, google-pack's `gcalendar.list_events` |
 | `unmapped` | no | verbs of the namespace that deliberately have NO egress/source mapping (#558); see below |
 | `topic_actions` | no | buttons the connector adds to a topic |
+| `listen` | no | kinds of source a room can listen to through this connector (#676); see below |
 | `tools_card` | no | what the Tools page shows: `setup_label`, `status_verb`, `test_verb`, `docs_url`, `blurb`, `scope`, `icon` |
 | `services` | no | long-running processes, see #515 |
 | `storage_remote` | no | topic storage backend the pack provides. No consumer: topic storage on Drive was repealed (decision record #40), see #524 |
@@ -306,6 +307,44 @@ Free text is the client's, and is then checked against the scheme's forms.
 Without the distinction, the mailbox action would take the address to authorise
 from the request body, and a whitelist written by whoever is subject to it is not
 a whitelist. A pack may *point at* an option set, never define one.
+
+### `listen[]` (clodia-platform#676)
+
+The kinds of source a room can **listen to** through this connector: the room's
+«In ascolto» list. The owner picks a kind, gives an address, and the connector
+does the rest. Listening = trusted (owner, 12 Nov 2026): what a kind writes is
+a trusted ingress entry, as every ingress entry is. Vocabulary owners only, like
+`topic_actions`.
+
+Two shapes, never both:
+
+```
+    listen:
+      - kind: sender                    # a TEMPLATE kind: the owner types the address
+        label: Mittente email
+        field: {name: sender, placeholder: nome@dominio.it}
+        ingress: 'mailfrom:{sender}'    # the trusted source written
+        egress: 'mailto:{sender}'       # written when the room replies
+        reply: choice                   # none | choice (the owner ticks it) | implicit
+      - kind: chat                      # an ACTION kind: the source is the chat
+        label: Chat Telegram            # a `binding: channel` topic action binds
+        action: telegram-link
+```
+
+A template kind's `ingress`/`egress` interpolate exactly the field and END with
+it (the address is the tail: that is how the list is read back), start with one
+of the connector's own schemes and, for a pack, a scheme with `forms` — the same
+rules as `topic_actions`. `reply` other than `none` needs `egress`. An action
+kind names a topic action of the same connector with `binding: channel`; its
+reply is `implicit` (a chat is answered where it is). Unknown keys and duplicate
+kinds are refused.
+
+The room's list is **derived**, never stored: a template kind's sources are the
+room's ingress entries of its shape, an action kind's source is the chat its
+action bound. `GET /internal/topics/{tier}/{name}/listen` → `{kinds, sources}`;
+`POST … {action: add|remove, connector, kind, address, reply?}` for template kinds
+(owner or admin, like the lists). An action kind is added and removed by running
+its topic action. `GET /internal/connectors` shows each connector's `listen`.
 
 ### `context[]`
 
@@ -1068,6 +1107,10 @@ connectors:
             - 'tg:{chat_id}'
           egress:
             - 'tg:{chat_id}'
+    listen:
+      - kind: chat
+        label: Chat Telegram
+        action: telegram-link
     tools_card:
       setup_label: Connect a bot
       status_verb: telegram.status
@@ -1163,6 +1206,13 @@ connectors:
             - 'inbox:{address}'
           egress:
             - 'outbox:{address}'
+    listen:
+      - kind: sender
+        label: Mittente email
+        field: {name: sender, placeholder: nome@dominio.it}
+        ingress: 'mailfrom:{sender}'
+        egress: 'mailto:{sender}'
+        reply: choice
     tools_card:
       setup_label: Add a mailbox
 ```
