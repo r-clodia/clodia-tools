@@ -445,3 +445,100 @@ class TopicCollectionScopeTests(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharedFolderTests(_Base):
+    """clodia-platform#682: the Mac-shared `shared/` mount (#571) is indexed,
+    as `file/shared/…`, through the real topic service (no listing faked)."""
+
+    def setUp(self):
+        super().setUp()
+        from .topics.storage import LOCAL_SHARED_ROOT
+        self.shared_root = LOCAL_SHARED_ROOT
+        self.svc.s.write(f"{LOCAL_SHARED_ROOT}/.keep", b"")   # the shared root exists
+        p = patch("server.main._extract_document_text", lambda n, d: ("pdf", 1), create=True)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def attach(self, tier="SEAL-2", name="vendite") -> str:
+        self.svc.local_folder_add(tier, name)
+        from .topics.service import shared_folder
+        return shared_folder(self.svc._read_meta(tier, name)[0])
+
+    def mac(self, slug, rel, data=b"testo condiviso"):
+        """A file dropped into `ClodiaShared/<slug>/` from the Mac side."""
+        self.svc.s.write(f"{self.shared_root}/{slug}/{rel}", data)
+
+    def docs(self):
+        c = self.coll()
+        return sorted(k[1] for k in self.rag.docs if k[0] == c and k[1].startswith("file/"))
+
+    def test_a_shared_folder_gets_its_files_indexed_and_dot_files_are_skipped(self):
+        slug = self.attach()
+        self.mac(slug, "fatture/f1.xml", b"<FatturaElettronica/>")
+        self.mac(slug, "nota.md")
+        self.mac(slug, ".DS_Store", b"\x00\x01")
+        self.mac(slug, "fatture/._f1.xml", b"appledouble")
+        self.mac(slug, ".Trashes/old.md", b"cestino")
+        self.svc.put_file("SEAL-2", "vendite", "local/mio.md", b"locale")
+        self.flip(True)
+        self.assertEqual(self.docs(), ["file/local/mio.md", "file/shared/fatture/f1.xml",
+                                       "file/shared/nota.md"])
+
+    def test_the_periodic_pass_indexes_and_removes_shared_files(self):
+        slug = self.attach()
+        self.mac(slug, "a.md")
+        self.mac(slug, "b.txt")
+        out = ti.sync("SEAL-2", "vendite")
+        self.assertEqual(out["files"], 2)
+        self.assertFalse(out["pending"])
+        self.assertEqual(self.docs(), ["file/shared/a.md", "file/shared/b.txt"])
+        self.svc.s.delete(f"{self.shared_root}/{slug}/a.md")        # removed on the Mac
+        out = ti.sync("SEAL-2", "vendite")
+        self.assertEqual(out["removed"], 1)
+        self.assertEqual(self.docs(), ["file/shared/b.txt"])
+
+    def test_a_topic_without_a_shared_folder_is_unaffected(self):
+        self.svc.put_file("SEAL-2", "vendite", "local/a.md", b"locale")
+        out = ti.sync("SEAL-2", "vendite")
+        self.assertEqual((out["files"], out["removed"], out["pending"]), (1, 0, False))
+        self.assertEqual(self.docs(), ["file/local/a.md"])
+        self.svc.s.delete(f"{self.svc._dir('SEAL-2', 'vendite')}/files/a.md")
+        out = ti.sync("SEAL-2", "vendite")        # `local/` still cleans up after itself
+        self.assertEqual((out["removed"], out["pending"]), (1, False))
+        self.assertEqual(self.docs(), [])
+
+    def test_an_unreachable_shared_folder_removes_nothing_and_local_still_cleans(self):
+        slug = self.attach()
+        self.mac(slug, "a.md")
+        self.svc.put_file("SEAL-2", "vendite", "local/l.md", b"locale")
+        ti.sync("SEAL-2", "vendite")
+        self.assertEqual(self.docs(), ["file/local/l.md", "file/shared/a.md"])
+        import shutil
+        shutil.rmtree(Path(self.svc.s._abs(f"{self.shared_root}/{slug}")))   # share unmounted
+        self.svc.s.delete(f"{self.svc._dir('SEAL-2', 'vendite')}/files/l.md")
+        out = ti.sync("SEAL-2", "vendite")
+        self.assertEqual(out["removed"], 1)
+        self.assertEqual(self.docs(), ["file/shared/a.md"])
+
+    def test_a_shared_file_written_or_deleted_reaches_the_rag_at_once(self):
+        slug = self.attach()
+        ti.ensure("SEAL-2", "vendite")
+        self.svc.put_file("SEAL-2", "vendite", "shared/verbale.md", b"verbale")
+        self.mac(slug, ".DS_Store", b"\x00")       # a verb refuses dot-names; the Mac does not
+        ti._apply("file", "SEAL-2", "vendite", {"paths": ["shared/.DS_Store"]})
+        self.assertEqual(self.docs(), ["file/shared/verbale.md"])
+        self.svc.move_file("SEAL-2", "vendite", "shared/verbale.md", "shared/arch/verbale.md")
+        self.assertEqual(self.docs(), ["file/shared/arch/verbale.md"])
+        # deleted by its pre-#571 alias: the indexed `shared/` document still goes
+        self.svc.delete_file("SEAL-2", "vendite", f"local/{slug}/arch/verbale.md")
+        self.assertEqual(self.docs(), [])
+
+    def test_an_archived_topic_is_still_skipped(self):
+        slug = self.attach()
+        self.mac(slug, "a.md")
+        meta, ver = self.svc._read_meta("SEAL-2", "vendite")
+        meta["status"] = "archived"
+        self.svc._write_meta("SEAL-2", "vendite", meta, ver)
+        self.assertEqual(ti.sync("SEAL-2", "vendite"), {"skipped": "topic archiviato"})
+        self.assertEqual(self.rag.docs, {})

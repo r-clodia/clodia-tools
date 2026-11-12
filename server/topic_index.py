@@ -4,7 +4,7 @@ D7 #599 the collection, D9 #601 the indexer; #648 the toggle).
 **#648 (owner, 5 Nov 2026): one toggle per room.** `meta.index.on` is the
 switch, OFF unless the owner turns it on (every room starts off at release).
 - ON: a JOB indexes, at once, every file of the room (`files/`, `local/`,
-  courier mail included) and the content of its linked Google Drive folders,
+  the Mac-shared `shared/` of #571 — clodia-platform#682 —, courier mail included) and the content of its linked Google Drive folders,
   then keeps them current; chat messages are indexed one by one AS THEY ARE
   POSTED from that moment (`index.since`) — earlier messages are not.
 - OFF: a JOB empties the collection — files, Drive, messages.
@@ -35,8 +35,9 @@ model).
     connector spoke, or if the channel was tainted that day (an agent may
     have echoed what it read); else `agent` if an agent spoke; else `trusted`;
   - `summary`: the summary (`agent`);
-  - `file/<path>`: the text of the topic's files (`files/`, `local/`) with
-    the file's own label (none → `untrusted`).
+  - `file/<path>`: the text of the topic's files (`files/`, `local/`,
+    `shared/`) with the file's own label (none → `untrusted`). Dot-files
+    (`.DS_Store`, `._*` from the Mac) are never indexed.
 - **Incremental and bounded**: per-collection state (message count per day,
   file size+mtime), saved after every document; one character budget per
   call across days and files; a topic is synced by one call at a time. A root
@@ -61,7 +62,13 @@ PREFIX = "topic-"
 TEXT_EXT = (".md", ".txt", ".csv", ".json", ".html", ".htm", ".xml", ".yaml", ".yml")
 DOC_EXT = (".pdf", ".docx", ".pptx", ".xlsx")
 EML_EXT = (".eml",)
-ROOTS = ("files", "local")
+#: `shared` is the Mac-shared folder mount (clodia-platform#571); until #682 it
+#: was missing here, so a ClodiaShared folder was never indexed. A topic without
+#: one simply has no `shared/` root (see `_missing_root`).
+ROOTS = ("files", "local", "shared")
+#: `files/x` is the legacy spelling of `local/x`: the listing of both emits
+#: `local/…` paths, so the two roots are one family when deciding removals.
+_FAMILY = {"files": "local"}
 MAX_FILES = 15
 MAX_BYTES = 15 * 1024 * 1024
 MAX_CHARS = 400_000
@@ -380,9 +387,7 @@ def _index_all(tier: str, name: str) -> None:
     st = _fresh_state()
     _save(coll, st)
     meta = svc._read_meta(tier, name)[0]
-    files: list[dict] = []
-    for root in ROOTS:
-        _walk(svc, tier, name, root, files)
+    files, _oks = _collect(svc, tier, name)
     drive = _drive_files(meta)
     drive_rows = drive["files"] if drive else []
     msgs = _messages_since(svc, tier, name, settings(meta)["since"])
@@ -481,7 +486,11 @@ def _walk(svc, tier: str, name: str, root: str, out: list, depth: int = 0) -> bo
     except Exception:  # noqa: BLE001
         return depth == 0 and root in ROOTS and _missing_root(svc, tier, name, root)
     ok = True
+    if depth == 0 and root == "shared" and not entries and _shared_unreachable(svc, tier, name):
+        return False
     for e in entries:
+        if _hidden(e.get("path")):
+            continue
         if e.get("kind") == "dir":
             ok = _walk(svc, tier, name, e["path"], out, depth + 1) and ok
         elif str(e.get("path") or "").lower().endswith(TEXT_EXT + DOC_EXT + EML_EXT):
@@ -489,9 +498,58 @@ def _walk(svc, tier: str, name: str, root: str, out: list, depth: int = 0) -> bo
     return ok
 
 
+def _hidden(path) -> bool:
+    """A dot-file or anything under a dot-folder (`.DS_Store`, `._x.pdf`,
+    `.Trashes/…`): Mac housekeeping, never a document of the room."""
+    return any(seg.startswith(".") for seg in str(path or "").split("/") if seg)
+
+
+def _family(root: str) -> str:
+    return _FAMILY.get(root, root)
+
+
+def _collect(svc, tier: str, name: str) -> tuple[list[dict], dict]:
+    """Every indexable file of the room, once each (`files/` and `local/` list
+    the same bytes), and `{family: listed completely}`: a root that failed to
+    list removes nothing of ITS files, and nothing more (#682 — an unreachable
+    Mac share must not freeze the removals of `local/`)."""
+    found: list[dict] = []
+    oks: dict[str, bool] = {}
+    for root in ROOTS:
+        ok = _walk(svc, tier, name, root, found)
+        oks[_family(root)] = oks.get(_family(root), True) and ok
+    seen, out = set(), []
+    for e in found:
+        if e["path"] not in seen:
+            seen.add(e["path"])
+            out.append(e)
+    return out, oks
+
+
+def _removable(path: str, oks: dict) -> bool:
+    """May `path`, no longer listed, leave the index? Only if its root listed
+    completely; a path of no known root follows all of them."""
+    return oks.get(_family(path.split("/", 1)[0]), all(oks.values()))
+
+
+def _shared_unreachable(svc, tier: str, name: str) -> bool:
+    """The topic HAS a shared folder but its directory is not on the shared
+    root (the Mac share not mounted, a folder renamed on the Mac): a folder
+    unreachable, not a folder emptied (S3) — its files stay indexed."""
+    from .topics.service import shared_folder
+    from .topics.storage import LOCAL_SHARED_ROOT
+    try:
+        slug = shared_folder(svc._read_meta(tier, name)[0])
+        return bool(slug) and not svc.s.exists(f"{LOCAL_SHARED_ROOT}/{slug}")
+    except Exception:  # noqa: BLE001 — unsure: keep what is indexed
+        return True
+
+
 def _missing_root(svc, tier: str, name: str, root: str) -> bool:
-    """A top root that is not there at all (a topic without `local/`) is
-    fine; anything else is a failure."""
+    """A top root that is not there at all (a topic without `local/`, or
+    without a shared folder, hence without `shared/` — #682) is fine: nothing
+    there, nothing removed by it, no error, nothing pending. Anything else is
+    a failure."""
     try:
         top = svc.list_files(tier, name, "")
     except Exception:  # noqa: BLE001
@@ -766,7 +824,7 @@ def _apply_locked(svc, meta, ix, event, tier, name, kw) -> None:
         st = _load(coll)
         for path in kw.get("paths") or []:
             path = str(path or "").strip("/")
-            if not path or path.split("/", 1)[0] not in ROOTS:
+            if not path or path.split("/", 1)[0] not in ROOTS or _hidden(path):
                 continue
             gone = [p for p in st["files"] if p == path or p.startswith(path + "/")]
             for p in gone:
@@ -862,8 +920,7 @@ def _sync(tier: str, name: str) -> dict:
     pending = False
     _ingest_summary(svc, rag, tier, name, coll, t, st)
     # room files
-    found: list[dict] = []
-    roots_ok = all([_walk(svc, tier, name, root, found) for root in ROOTS])
+    found, oks = _collect(svc, tier, name)
     present = {}
     left = MAX_FILES
     for e in found:
@@ -876,16 +933,15 @@ def _sync(tier: str, name: str) -> dict:
             continue
         left -= 1
         done["files"] += int(_ingest_file(svc, rag, tier, name, coll, t, st, e))
-    if roots_ok:
-        for path in [p for p in st["files"] if p not in present]:
-            try:
-                rag.remove(f"file/{path}", None, coll)
-            except Exception:  # noqa: BLE001 — retried next pass (S3)
-                pending = True
-                continue
-            st["files"].pop(path, None)
-            _save(coll, st)
-            done["removed"] += 1
+    for path in [p for p in st["files"] if p not in present and _removable(p, oks)]:
+        try:
+            rag.remove(f"file/{path}", None, coll)
+        except Exception:  # noqa: BLE001 — retried next pass (S3)
+            pending = True
+            continue
+        st["files"].pop(path, None)
+        _save(coll, st)
+        done["removed"] += 1
     # Drive: changes there are picked up here (Drive does not tell us)
     budget = [left]
     d_done, d_removed, d_pending = _sync_drive(svc, meta, rag, tier, name, coll, t, st, budget)
