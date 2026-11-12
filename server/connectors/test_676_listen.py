@@ -27,6 +27,17 @@ def _conn(cid, listen):
 
 
 class GrammarTests(unittest.TestCase):
+    def test_a_pack_scheme_without_forms_is_accepted(self):
+        """comms-pack's `mailfrom`/`mailto` declare no forms; listening to a
+        sender must not get the whole pack refused."""
+        entry = copy.deepcopy(next(c for c in _examples()["comms-pack"]["connectors"]
+                                   if c["id"] == "mail"))
+        for sch in entry["schemes"]:
+            if sch["scheme"] in ("mailfrom", "mailto"):
+                sch.pop("forms", None)
+        entry["listen"] = [SENDER]
+        self.assertEqual(M.parse_connector(entry, pack="comms-pack").listen[0].kind, "sender")
+
     def test_a_template_kind(self):
         (k,) = _conn("mail", [SENDER]).listen
         self.assertEqual((k.kind, k.ingress, k.egress, k.reply, k.field.name),

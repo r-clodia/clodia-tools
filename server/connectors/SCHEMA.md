@@ -332,9 +332,11 @@ Two shapes, never both:
 ```
 
 A template kind's `ingress`/`egress` interpolate exactly the field and END with
-it (the address is the tail: that is how the list is read back), start with one
-of the connector's own schemes and, for a pack, a scheme with `forms` — the same
-rules as `topic_actions`. `reply` other than `none` needs `egress`. An action
+it (the address is the tail: that is how the list is read back) and start with
+one of the connector's own schemes. Unlike a pack's topic action, the scheme
+need not declare `forms`: the address is the owner's, written through the room's
+lists, whose `check_grantable` refuses degenerate entries and whole-scheme
+wildcards (and `mailfrom:*@dominio.it` must stay possible). `reply` other than `none` needs `egress`. An action
 kind names a topic action of the same connector with `binding: channel`; its
 reply is `implicit` (a chat is answered where it is). Unknown keys and duplicate
 kinds are refused.

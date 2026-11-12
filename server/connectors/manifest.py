@@ -2127,15 +2127,18 @@ def parse_connector(raw: Any, *, pack: str,
         _parse_listen(x, f"{where}.listen[{i}]", actions)
         for i, x in enumerate(_seq(data.get("listen"), f"{where}.listen")))
     if listen:
-        # A template kind writes like an action: only the connector's own
-        # schemes, and only schemes that say what their addresses look like.
+        # A template kind writes only into the connector's own schemes. No
+        # `forms` requirement (unlike a pack's topic action): the address is
+        # the OWNER's, written through the room's lists, where
+        # `egress.check_grantable` already refuses degenerate entries and a
+        # whole-scheme wildcard — and `mailfrom:` must keep accepting
+        # `*@dominio.it`, which comms-pack's scheme declares no form for.
         _check_action_schemes(
             [TopicAction(id=k.kind, label=k.label,
                          adds_ingress=(k.ingress,) if k.ingress else (),
                          adds_egress=(k.egress,) if k.egress else ())
              for k in listen if not k.action],
-            {sch.name: sch for sch in schemes}, f"{where}.listen",
-            require_forms=not builtin)
+            {sch.name: sch for sch in schemes}, f"{where}.listen")
         kinds = [k.kind for k in listen]
         if len(set(kinds)) != len(kinds):
             raise ManifestError(f"{where}.listen: duplicate kind")
