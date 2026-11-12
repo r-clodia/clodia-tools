@@ -22,6 +22,10 @@ CAT = {
               "enumerable": True, "verbs": ["email.read", "email.send"], "write": ["email.send"],
               "schemes": [{"scheme": "mailfrom", "direction": "source", "verbs": ["email.read"]},
                           {"scheme": "mailto", "direction": "egress", "verbs": ["email.send"]}]},
+    "google": {"id": "google", "label": "Google", "kind": "connector",
+               "namespaces": ["gdrive"], "enumerable": True, "verbs": ["gdrive.update"],
+               "write": ["gdrive.update"],
+               "schemes": [{"scheme": "gdrive", "direction": "egress", "verbs": ["gdrive.update"]}]},
     "telegram": {"id": "telegram", "label": "Telegram", "kind": "connector",
                  "namespaces": ["telegram"], "enumerable": True, "verbs": ["telegram.send"],
                  "write": ["telegram.send"],
@@ -38,7 +42,7 @@ class RoomListTests(_Env):
         p.start(); self.addCleanup(p.stop)
         # The schemes come from the connector manifests, not loaded here.
         d = patch.dict(egress._DIRECTIONS, {
-            "egress": ("egress_allow", lambda: ("http", "https", "mailto", "tg", "wa"),
+            "egress": ("egress_allow", lambda: ("http", "https", "mailto", "tg", "wa", "gdrive"),
                        "destinazione ammessa"),
             "ingress": ("source_allow", lambda: ("http", "https", "mailfrom", "tg", "wa", "topic"),
                         "fonte fidata")})
@@ -82,6 +86,11 @@ class RoomListTests(_Env):
         self.assertIn("email", self.mcp())
         self.assertEqual(self.mcp()["email"]["resources"],
                          [{"uri": "mailto:x@y.it", "effect": "deny"}])
+
+    def test_a_drive_destination_is_allowed_on_google(self):
+        egress.scope_allow("egress", SCOPE, "gdrive:folder/F1")
+        self.assertEqual(self.mcp()["google"]["resources"],
+                         [{"uri": "gdrive:folder/F1", "effect": "allow"}])
 
     def test_an_entry_of_no_tool_changes_nothing(self):
         egress.scope_allow("ingress", SCOPE, "topic:SEAL-1/altro")

@@ -2540,6 +2540,21 @@ def _current_spawn_safe() -> str:
     return _cs() or "-"
 
 
+def _authz_arguments(name: str, arguments: dict) -> dict:
+    """The arguments A·V·R·Q judges a call on: for a COMPONENT verb, those the
+    egress PDP reads (`_component_pdp_arguments`), so the facts the component
+    establishes — the parent folder of `gdrive.update` — are the target here
+    too. A failing lookup leaves the raw arguments: no target, so it asks, as
+    before. Reads Drive for `gdrive.update`: call it off the event loop."""
+    spec = _component_verb(name)
+    if spec is None:
+        return arguments
+    try:
+        return _component_pdp_arguments(spec, name, arguments)
+    except PermissionError:
+        return arguments
+
+
 def _component_pdp_arguments(spec, name: str, arguments: dict) -> dict:
     """The arguments the egress PDP reads for a COMPONENT verb (#558).
 
@@ -5015,7 +5030,15 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # it reads the working tree's origin with git.
                 _comp_targets = await asyncio.to_thread(
                     _azr.component_targets, name, arguments)
-                _azd = _azr.check(_ag or "", name, arguments, _eg_r._scope_of_call(),
+                # The facts a component establishes for the PDP (`pdp_arguments`:
+                # the parent folder of `gdrive.update`) are what the call acts
+                # on for A·V·R·Q too. Judged on the raw arguments, an update
+                # carried only a file id: «no target», a write that asked on
+                # every call — in a room linked to that very folder too — and
+                # an approval that could not be remembered (12 Nov 2026).
+                _azr_args = (arguments if _comp_targets is not None else
+                             await asyncio.to_thread(_authz_arguments, name, arguments))
+                _azd = _azr.check(_ag or "", name, _azr_args, _eg_r._scope_of_call(),
                                   bool(_taint_r.status(current_chat()).get("tainted")),
                                   targets=_comp_targets)
                 if _comp_targets:
