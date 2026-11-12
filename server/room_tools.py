@@ -576,6 +576,10 @@ LIST_TOOLS = {
     ("egress", "mailto"): "email", ("egress", "outbox"): "email",
     ("ingress", "tg"): "telegram", ("egress", "tg"): "telegram",
     ("ingress", "wa"): "whatsapp", ("egress", "wa"): "whatsapp",
+    # A Drive folder among the room's Destinazioni is a folder the room writes
+    # to: the Google row allows it, or A·V·R·Q asks at every update while the
+    # egress PDP lets it through (12 Nov 2026, tomato-raci).
+    ("ingress", "gdrive"): "google", ("egress", "gdrive"): "google",
 }
 
 
