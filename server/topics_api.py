@@ -613,6 +613,55 @@ async def topic_data_route(request: Request):
     return JSONResponse(out)
 
 
+async def topic_listen_route(request: Request):
+    """GET  /internal/topics/{tier}/{name}/listen → {kinds, sources}
+    POST /internal/topics/{tier}/{name}/listen {action: add|remove, connector,
+         kind, address, reply?} (clodia-platform#676).
+
+    The room's «In ascolto» list, derived from its lists and channel bindings
+    (`room_listen`). Reading is the agent-server's (it checks membership);
+    writing moves the room's walls, so it is the owner's (or an admin's), like
+    the lists themselves (`_authorize_topic_owner`). Action kinds (a chat a
+    topic action binds) are not written here: their action route is."""
+    from . import room_listen
+    tier = request.path_params["tier"]; name = request.path_params["name"]
+    if request.method == "GET":
+        _, err = _authorize(request)
+        if err:
+            return err
+        def _read():
+            _service()._read_meta(tier, name)        # an unknown topic is a 404
+            return {"kinds": room_listen.kinds(),
+                    "sources": room_listen.sources(tier, name)}
+        try:
+            return JSONResponse(await asyncio.to_thread(_read))
+        except TopicError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+    _, err = _authorize_topic_owner(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    body = body or {}
+    action = body.get("action")
+    args = (tier, name, str(body.get("connector") or ""), str(body.get("kind") or ""),
+            str(body.get("address") or ""))
+    try:
+        if action == "add":
+            out = await asyncio.to_thread(room_listen.add, *args,
+                                          reply=bool(body.get("reply")))
+        elif action == "remove":
+            out = await asyncio.to_thread(room_listen.remove, *args)
+        else:
+            return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
+    except (room_listen.ListenError, ValueError) as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    _invalidate_list_cache()
+    return JSONResponse({"ok": True, **out})
+
+
 async def topic_tools_route(request: Request):
     """GET  /internal/topics/{tier}/{name}/tools → {enabled, enablable, gated,
          mcp_catalogue, mcp, linked_folders}
@@ -1783,6 +1832,7 @@ routes = [
     Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/data", topic_data_route, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/tools", topic_tools_route, methods=["GET", "POST"]),
+    Route("/internal/topics/{tier}/{name}/listen", topic_listen_route, methods=["GET", "POST"]),
     Route("/internal/topics/{tier}/{name}/tools-epoch", topic_tools_epoch_route, methods=["GET"]),
     Route("/internal/dm-tools", dm_tools_route, methods=["GET", "POST"]),
     Route("/internal/authz/shadow", authz_shadow_route, methods=["GET"]),

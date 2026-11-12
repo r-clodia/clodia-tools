@@ -138,6 +138,13 @@ def summary(connector) -> dict:
                            "adds": {"ingress": list(a.adds_ingress),
                                     "egress": list(a.adds_egress)}}
                           for a in connector.topic_actions],
+        # #676: the kinds of source a room can listen to through it.
+        "listen": [{"kind": k.kind, "label": k.label, "reply": k.reply,
+                    "action": k.action,
+                    "field": ({"name": k.field.name, "label": k.field.label,
+                               "placeholder": k.field.placeholder}
+                              if k.field else None)}
+                   for k in connector.listen],
         "tools_card": ({"setup_label": connector.tools_card.setup_label,
                         "status_verb": connector.tools_card.status_verb,
                         "docs_url": connector.tools_card.docs_url,

@@ -940,6 +940,31 @@ class TopicAction:
 
 
 @dataclass(frozen=True)
+class ListenKind:
+    """A kind of source a room can LISTEN to (clodia-platform#675/#676).
+
+    Two shapes, never both:
+    - a TEMPLATE kind (`field` + `ingress`): the source is an address the owner
+      types (a mail sender); listening writes `ingress` as a trusted entry and,
+      when the owner chooses to reply (`reply: choice`) or always
+      (`reply: implicit`), `egress` too;
+    - an ACTION kind (`action`): the source is the chat a topic action binds
+      (a Telegram group); listening runs that action, and the source is the
+      bound chat.
+    Listening = trusted (owner, 12 Nov 2026): the entries written are the
+    room's trusted sources, as every ingress entry is.
+    """
+
+    kind: str
+    label: str
+    field: ActionField | None = None
+    ingress: str = ""
+    egress: str = ""
+    reply: str = "none"
+    action: str = ""
+
+
+@dataclass(frozen=True)
 class ToolsCard:
     """What the Tools page shows for this connector: setup, status, test.
 
@@ -1099,6 +1124,8 @@ class Connector:
     #: which is otherwise denied as unclassified (`components.loader`).
     unmapped_verbs: tuple[str, ...] = ()
     topic_actions: tuple[TopicAction, ...] = ()
+    #: The kinds of source a room can listen to through this connector (#676).
+    listen: tuple[ListenKind, ...] = ()
     tools_card: ToolsCard | None = None
     services: tuple[Service, ...] = ()
     storage_remote: StorageRemote | None = None
@@ -1485,6 +1512,56 @@ def _parse_topic_action(raw: Any, where: str) -> TopicAction:
     )
 
 
+#: What listening to a source implies for replying (#676).
+LISTEN_REPLY = ("none", "choice", "implicit")
+
+
+def _parse_listen(raw: Any, where: str, actions: tuple[TopicAction, ...]) -> ListenKind:
+    data = _mapping(raw, where)
+    unknown = sorted(set(data) - {"kind", "label", "field", "ingress", "egress",
+                                  "reply", "action"})
+    if unknown:
+        raise ManifestError(f"{where}: unknown keys {', '.join(unknown)}")
+    kind = _matching(_text(data.get("kind"), f"{where}.kind"), _ID, f"{where}.kind")
+    label = _text(data.get("label"), f"{where}.label")
+    action = _text(data.get("action"), f"{where}.action", required=False)
+    reply = _one_of(_text(data.get("reply"), f"{where}.reply", required=False,
+                          default="none") or "none", LISTEN_REPLY, f"{where}.reply")
+    if action:
+        if any(data.get(k) for k in ("field", "ingress", "egress")):
+            raise ManifestError(f"{where}: an action kind names its action only; "
+                                "the action declares fields and entries")
+        a = next((x for x in actions if x.id == action), None)
+        if a is None or a.binding != "channel":
+            raise ManifestError(f"{where}.action: '{action}' is not a topic action "
+                                "of this connector with `binding: channel`")
+        return ListenKind(kind=kind, label=label, action=action,
+                          reply=reply if data.get("reply") else "implicit")
+    fdata = _mapping(data.get("field"), f"{where}.field")
+    field = ActionField(
+        name=_matching(_text(fdata.get("name"), f"{where}.field.name"),
+                       _FIELD_NAME, f"{where}.field.name"),
+        label=_text(fdata.get("label"), f"{where}.field.label", required=False),
+        placeholder=_text(fdata.get("placeholder"), f"{where}.field.placeholder",
+                          required=False))
+    ingress = _text(data.get("ingress"), f"{where}.ingress")
+    egress = _text(data.get("egress"), f"{where}.egress", required=False)
+    for key, tpl in (("ingress", ingress), ("egress", egress)):
+        if not tpl:
+            continue
+        refs = set(_placeholders(tpl))
+        if refs != {field.name}:
+            raise ManifestError(f"{where}.{key}: '{tpl}' must interpolate exactly "
+                                f"'{{{field.name}}}'")
+        if not tpl.endswith("{" + field.name + "}"):
+            raise ManifestError(f"{where}.{key}: '{tpl}' must END with "
+                                f"'{{{field.name}}}' (the address is the tail)")
+    if reply != "none" and not egress:
+        raise ManifestError(f"{where}: reply '{reply}' needs an `egress` template")
+    return ListenKind(kind=kind, label=label, field=field, ingress=ingress,
+                      egress=egress, reply=reply)
+
+
 def _binding(raw: Any, where: str) -> str:
     """`binding` is a closed set: a typo (`chanel`) is a refusal, not an action
     that silently adds the whitelist entries and skips the binding."""
@@ -1672,7 +1749,7 @@ def _parse_service(raw: Any, where: str, *, pack: str) -> Service:
 #: `relay` and `pairing` (#638, #639) as well: a transport speaks the
 #: vocabulary's own URIs, and the vocabulary is its owner's.
 _OWNER_ONLY = ("schemes", "verbs", "taint", "topic_actions", "context",
-               "files", "defaults", "relay", "pairing")
+               "files", "defaults", "relay", "pairing", "listen")
 
 #: Hosts a relay or pairing `base` may name: the gateway's own loopback, as
 #: `services.launch.LOOPBACK` (a service listens on loopback only, #515).
@@ -2046,6 +2123,25 @@ def parse_connector(raw: Any, *, pack: str,
         # it joins, in `build_registry`, once that is resolved.
         _check_action_schemes(actions, {sch.name: sch for sch in schemes},
                               where, require_forms=not builtin)
+    listen = tuple(
+        _parse_listen(x, f"{where}.listen[{i}]", actions)
+        for i, x in enumerate(_seq(data.get("listen"), f"{where}.listen")))
+    if listen:
+        # A template kind writes only into the connector's own schemes. No
+        # `forms` requirement (unlike a pack's topic action): the address is
+        # the OWNER's, written through the room's lists, where
+        # `egress.check_grantable` already refuses degenerate entries and a
+        # whole-scheme wildcard — and `mailfrom:` must keep accepting
+        # `*@dominio.it`, which comms-pack's scheme declares no form for.
+        _check_action_schemes(
+            [TopicAction(id=k.kind, label=k.label,
+                         adds_ingress=(k.ingress,) if k.ingress else (),
+                         adds_egress=(k.egress,) if k.egress else ())
+             for k in listen if not k.action],
+            {sch.name: sch for sch in schemes}, f"{where}.listen")
+        kinds = [k.kind for k in listen]
+        if len(set(kinds)) != len(kinds):
+            raise ManifestError(f"{where}.listen: duplicate kind")
     services = tuple(
         _parse_service(s, f"{where}.services[{i}]", pack=pack)
         for i, s in enumerate(_seq(data.get("services"), f"{where}.services")))
@@ -2151,6 +2247,7 @@ def parse_connector(raw: Any, *, pack: str,
         taint_prefixes=taint,
         unmapped_verbs=tuple(unmapped),
         topic_actions=actions,
+        listen=listen,
         tools_card=_parse_tools_card(card, f"{where}.tools_card") if card else None,
         services=services,
         storage_remote=storage,
