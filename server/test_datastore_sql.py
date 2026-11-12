@@ -102,6 +102,32 @@ class ReadTests(unittest.TestCase):
         self.assertLess(len(out["rows"]), 2000)
 
 
+class BrokenViewTests(unittest.TestCase):
+    """A view naming a dropped column fails PRAGMA table_info: the listing
+    shows it with its error and keeps every other table (12 Nov 2026)."""
+
+    def test_a_broken_view_does_not_take_the_listing_down(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = _seeded_db(tmp)
+            conn = sqlite3.connect(db)
+            # How the CRM got there: the table rebuilt without `task`, the
+            # view left behind (SQLite does not check views on DROP TABLE).
+            conn.execute("ALTER TABLE contacts ADD COLUMN task TEXT")
+            conn.execute("CREATE VIEW active_contacts AS SELECT * FROM contacts WHERE task = 'agire'")
+            conn.execute("DROP TABLE contacts")
+            conn.execute("CREATE TABLE contacts (id INTEGER PRIMARY KEY, name TEXT)")
+            conn.execute("INSERT INTO contacts (name) VALUES ('Ada Lovelace')")
+            conn.commit()
+            conn.close()
+            with patch.object(datastore_sql, "_audit", lambda *a, **k: None):
+                out = datastore_sql.tables(_entry(db), agent="human:davide")
+        by = {t["name"]: t for t in out["tables"]}
+        self.assertEqual(by["contacts"]["rows"], 1)
+        self.assertTrue(by["contacts"]["columns"])
+        self.assertIn("task", by["active_contacts"]["error"])
+        self.assertEqual(by["active_contacts"]["columns"], [])
+
+
 class WriteTests(unittest.TestCase):
     def test_insert_is_committed(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -227,9 +227,21 @@ def tables(entry: dict, *, agent: str) -> dict:
                 n = conn.execute(f"SELECT count(*) FROM {_q(name)}").fetchone()[0]
             except sqlite3.Error:
                 n = None
-            out.append({"name": name, "type": kind, "rows": n,
-                        "columns": _columns(conn, name),
-                        "editable": kind == "table" and _has_rowid(conn, name)})
+            # A view whose definition names a column that no longer exists
+            # fails PRAGMA table_info too: shown with its error, never taking
+            # the whole datastore page down with it (contacts.db, view
+            # active_contacts on the dropped `task` column, 12 Nov 2026).
+            try:
+                cols = _columns(conn, name)
+                editable = kind == "table" and _has_rowid(conn, name)
+                err = None
+            except sqlite3.Error as e:
+                cols, editable, err = [], False, str(e)[:200]
+            row = {"name": name, "type": kind, "rows": n, "columns": cols,
+                   "editable": editable}
+            if err:
+                row["error"] = err
+            out.append(row)
     finally:
         conn.close()
     _audit(agent, "databases.tables", target, "OK", tables=len(out))
