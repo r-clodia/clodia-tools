@@ -66,15 +66,40 @@ def _render(template: str, field: str, address: str) -> str:
     return template.replace("{" + field + "}", address)
 
 
+def _inbox(tier: str, name: str) -> dict | None:
+    """The room's own address, the message box (#583): always listening,
+    whoever writes, so it is source number one (owner, 13 Nov 2026). Fixed:
+    it cannot be removed. `active` is false while the colony mailbox is not
+    set, and then the address is the bare code."""
+    try:
+        from . import main
+        from .mail_courier_api import message_box_address
+        codes = main._topics().mailbox_codes()
+        code = next((c for c, room in codes.items() if room == (tier, name)), "")
+    except Exception as e:  # noqa: BLE001 — a room without a code lists no inbox
+        LOG.warning("listen %s/%s: inbox del canale non leggibile (%s)", tier, name,
+                    type(e).__name__)
+        return None
+    if not code:
+        return None
+    addr = message_box_address(code)
+    return {"connector": "mail", "kind": "inbox", "label": "Inbox del canale",
+            "address": addr or code, "reply": False, "action": "",
+            "fixed": True, "active": bool(addr)}
+
+
 def sources(tier: str, name: str) -> list[dict]:
-    """The sources the room listens to now, derived from its lists and its
-    channel bindings."""
+    """The sources the room listens to now: its own inbox first, then those
+    derived from its lists and its channel bindings."""
     from . import egress
     from .connectors import actions as _actions
     scope = f"{tier}/{name}"
     ingress = list(egress.scope_uris("ingress", scope))
     out_egress = set(egress.scope_uris("egress", scope))
     out = []
+    inbox = _inbox(tier, name)
+    if inbox:
+        out.append(inbox)
     for c in _connectors():
         for k in c.listen:
             if k.action:
