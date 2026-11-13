@@ -91,6 +91,7 @@ class RoomListenTests(unittest.TestCase):
                   lambda d, s, u: self.calls.append(("revoke", d, u)) or {"uri": u}),
             patch("server.connectors.actions._bound_chat",
                   lambda cid, t, n: "-100123" if cid == "telegram" else None),
+            patch.object(R, "_inbox", lambda t, n: None),
         ]
         for p in ps:
             p.start(); self.addCleanup(p.stop)
@@ -100,6 +101,15 @@ class RoomListenTests(unittest.TestCase):
                      for s in self.R.sources("SEAL-1", "acme"))
         self.assertEqual(got, [("chat", "-100123", True), ("sender", "*@c.it", False),
                                ("sender", "a@b.it", True)])
+
+    def test_the_room_inbox_is_source_number_one(self):
+        inbox = {"connector": "mail", "kind": "inbox", "label": "Inbox del canale",
+                 "address": "box+ABCDE@x.it", "reply": False, "action": "",
+                 "fixed": True, "active": True}
+        with patch.object(self.R, "_inbox", lambda t, n: inbox):
+            got = self.R.sources("SEAL-1", "acme")
+        self.assertEqual(got[0], inbox)
+        self.assertEqual(len(got), 4)
 
     def test_add_without_reply_writes_only_the_trusted_source(self):
         self.R.add("SEAL-1", "acme", "mail", "sender", "x@y.it")
@@ -122,6 +132,30 @@ class RoomListenTests(unittest.TestCase):
     def test_kinds_for_the_dialog(self):
         ks = {(k["connector"], k["kind"], k["reply"]) for k in self.R.kinds()}
         self.assertEqual(ks, {("mail", "sender", "choice"), ("telegram", "chat", "implicit")})
+
+
+class InboxTests(unittest.TestCase):
+    """The room's own address, read from its message-box code."""
+
+    def _inbox(self, codes, addr_of):
+        from .. import room_listen as R
+        fake = SimpleNamespace(mailbox_codes=lambda: codes)
+        with patch("server.main._topics", lambda: fake), \
+                patch("server.mail_courier_api.message_box_address", addr_of):
+            return R._inbox("SEAL-1", "acme")
+
+    def test_the_address_of_the_room_code(self):
+        got = self._inbox({"ABCDE": ("SEAL-1", "acme"), "ZZZZZ": ("SEAL-1", "other")},
+                          lambda c: f"box+{c}@x.it")
+        self.assertEqual((got["address"], got["fixed"], got["active"]),
+                         ("box+ABCDE@x.it", True, True))
+
+    def test_without_the_colony_mailbox_the_code_is_shown_inactive(self):
+        got = self._inbox({"ABCDE": ("SEAL-1", "acme")}, lambda c: "")
+        self.assertEqual((got["address"], got["active"]), ("ABCDE", False))
+
+    def test_a_room_without_a_code_lists_no_inbox(self):
+        self.assertIsNone(self._inbox({"ZZZZZ": ("SEAL-1", "other")}, lambda c: "x"))
 
 
 if __name__ == "__main__":
