@@ -131,9 +131,14 @@ def summary(connector) -> dict:
                   for v in connector.verbs],
         "topic_actions": [{"id": a.id, "label": a.label, "binding": a.binding,
                            "admin_only": a.admin_only,
+                           # `options` (the NAME of a gateway option set, e.g.
+                           # `mailboxes`) travels too: without it the webui
+                           # could not tell a mailbox action from a chat one
+                           # and showed «Autorizza una casella» in Strumenti.
                            "fields": [{"name": f.name, "label": f.label,
                                        "required": f.required,
-                                       "placeholder": f.placeholder}
+                                       "placeholder": f.placeholder,
+                                       **({"options": f.options} if f.options else {})}
                                       for f in a.fields],
                            "adds": {"ingress": list(a.adds_ingress),
                                     "egress": list(a.adds_egress)}}
