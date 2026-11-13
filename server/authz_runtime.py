@@ -218,6 +218,9 @@ def _room_view(scope: Optional[str]) -> dict:
     if hit and now - hit[0] < _TTL:
         return hit[1]
     g, gbad = S.global_tuples()
+    # The platform's own rules first (#… owner 14 Nov 2026: email is the
+    # courier's): code, not configuration, so no edit of authz.json lifts them.
+    g = S.platform_tuples() + g
     view = {"global": g, "global_problems": gbad, "explicit": [], "derived": [],
             "members": set(), "archived": False}
     if scope:

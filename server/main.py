@@ -839,6 +839,20 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name", "path", "to"]},
     ),
     Tool(
+        name="topic.mail_check",
+        description=("Chiede al CORRIERE di controllare subito la posta di questa stanza "
+                     "invece di aspettare il suo giro periodico. Leggere la posta è solo "
+                     "del corriere: tu non hai verbi email.*. Le mail nuove dei mittenti "
+                     "in ascolto e quelle inviate all'indirizzo della stanza arrivano "
+                     "nel canale come messaggi di 'posta', con gli allegati in files/ e "
+                     "il messaggio intero in local/mailbox/. Risponde con quante ne ha "
+                     "consegnate."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+        }, "required": ["tier", "name"]},
+    ),
+    Tool(
         name="topic.goal_progress",
         description=("Fa avanzare l'OBIETTIVO fissato dall'owner su questo canale "
                      "(lo leggi in topic.open, campo meta.goal). Serve a dichiarare a "
@@ -5893,7 +5907,7 @@ _TOPIC_SCOPED_VERBS = {
     "open", "save_summary",
     "files", "read_file",
     "read_document", "convert_document", "write_document", "write_file", "fetch",
-    "put", "delete_file", "move_file", "goal_progress",
+    "put", "delete_file", "move_file", "goal_progress", "mail_check",
     "todo_add", "todo_update", "todo_remove",
     "post_message", "messages", "my_mentions", "mark_seen",
     "drive_folder_add", "local_folder_add",
@@ -7000,6 +7014,13 @@ def _dispatch_topic(name: str, a: dict):
         return svc.delete_file(a["tier"], a["name"], a["path"])
     if verb == "move_file":
         return svc.move_file(a["tier"], a["name"], a["path"], a["to"])
+    if verb == "mail_check":
+        # The courier checks the room now (owner, 14 Nov 2026): the agent-server
+        # runs one pass for this room only, serialised with its periodic loop.
+        # Reading mail stays the courier's; the agent gets a count.
+        out = transfer_channel._post("/internal/courier/check",
+                                     {"tier": a["tier"], "name": a["name"]})
+        return {"delivered": int((out or {}).get("delivered") or 0)}
     if verb == "goal_progress":
         # Avanzamento, non pin: creare e togliere un obiettivo restano
         # dell'owner (TopicService.advance_goal).
