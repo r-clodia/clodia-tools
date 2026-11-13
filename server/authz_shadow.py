@@ -120,7 +120,28 @@ def _global_path() -> Path:
     return state_paths.state_path(GLOBAL_FILE)
 
 
+#: Rules of the PLATFORM, in code: no admin edit of `authz.json` removes them.
+#: Reading mail is the courier's alone (owner, 14 Nov 2026): deterministic
+#: code, never an agent. No agent uses the email MCP's verbs; the courier
+#: reads through its own internal routes, an agent asks it to check now with
+#: `topic.mail_check`, and replies by mail with `channel.deliver` (decided on
+#: `channel.deliver`, to the room's recipients).
+PLATFORM_TUPLES = [
+    {"id": "platform-email-courier-only", "agent": "*", "verb": "email.*",
+     "resource": "*", "rule": [{"effect": "deny", "match": "*"}]},
+]
+
+
+def platform_tuples() -> list[A.Tuple]:
+    ok, bad = A.parse_tuples(PLATFORM_TUPLES, internal=True)
+    assert not bad, bad          # a platform rule that does not parse is a bug
+    return ok
+
+
 def global_tuples() -> tuple[list[A.Tuple], list[str]]:
+    """The tuples of `authz.json` — what the owner applied. The platform's own
+    rules (`platform_tuples`) are added where decisions are taken
+    (`authz_runtime`), not here: this is also what tells «a plan was applied»."""
     try:
         raw = json.loads(_global_path().read_text())
     except FileNotFoundError:

@@ -45,23 +45,25 @@ class _Env(unittest.TestCase):
         R.invalidate()
 
 
-def _t(id, agent="*", verb="email.send", rule=None, **kw):
+# `notify.*` is a neutral example namespace: `email.*` is denied to every
+# agent by a platform rule (mail is the courier's, owner 14 Nov 2026).
+def _t(id, agent="*", verb="notify.send", rule=None, **kw):
     return {"id": id, "agent": agent, "verb": verb, "resource": "*",
             "rule": rule or [{"effect": "allow", "match": "*"}], **kw}
 
 
 class AvailabilityTests(_Env):
     def test_the_seed_grants_nothing_the_tuples_decide(self):
-        self.assertFalse(R.available("clodia", "email.send", "SEAL-1/blog"))
+        self.assertFalse(R.available("clodia", "notify.send", "SEAL-1/blog"))
         self.meta_set(authz=[_t("t1", agent="clodia")])
-        self.assertTrue(R.available("clodia", "email.send", "SEAL-1/blog"))
-        self.assertFalse(R.available("officer", "email.send", "SEAL-1/blog"))
-        self.assertFalse(R.available("clodia", "email.send", "SEAL-1/altro"))
+        self.assertTrue(R.available("clodia", "notify.send", "SEAL-1/blog"))
+        self.assertFalse(R.available("officer", "notify.send", "SEAL-1/blog"))
+        self.assertFalse(R.available("clodia", "notify.send", "SEAL-1/altro"))
 
     def test_outside_tuples_hold_only_outside_rooms(self):
         self.glob([_t("g1", agent="clodia", where="outside")])
-        self.assertTrue(R.available("clodia", "email.send", None))
-        self.assertFalse(R.available("clodia", "email.send", "SEAL-1/blog"))
+        self.assertTrue(R.available("clodia", "notify.send", None))
+        self.assertFalse(R.available("clodia", "notify.send", "SEAL-1/blog"))
 
     def test_the_panels_of_the_room_are_tuples(self):
         self.meta_set(tools={"enabled": ["web.*"]},
@@ -83,14 +85,14 @@ class AvailabilityTests(_Env):
         """#656: the seed-based path is gone. `shadow`/`off` set explicitly no
         longer bring back the seed's `allowed_tools`: the tuples decide."""
         self.meta_set(authz=[_t("t1", agent="clodia")])
-        whitelist.CONFIG["agents"] = {"officer": {"allowed_tools": ["email.*", "*"]}}
+        whitelist.CONFIG["agents"] = {"officer": {"allowed_tools": ["notify.*", "*"]}}
         with patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"):
             for m in ("enforce", "shadow", "off"):
                 whitelist.CONFIG["authz_mode"] = m
                 R.invalidate()
-                self.assertTrue(main._agent_tool_reachable("email.send", "clodia"), m)
+                self.assertTrue(main._agent_tool_reachable("notify.send", "clodia"), m)
                 # The seed's list grants nothing, `*` included.
-                self.assertFalse(main._agent_tool_reachable("email.send", "officer"), m)
+                self.assertFalse(main._agent_tool_reachable("notify.send", "officer"), m)
 
     def test_the_adapter_gate_reads_the_tuples_not_the_seed(self):
         """`whitelist.tool_allowed`, the third reader: no `effective_tools`
@@ -101,9 +103,9 @@ class AvailabilityTests(_Env):
                 patch.object(whitelist, "agent_name", lambda: "officer"), \
                 patch.object(whitelist, "_SUPER_AGENTS", set()):
             with self.assertRaises(PermissionError):
-                whitelist.tool_allowed("email.send")
+                whitelist.tool_allowed("notify.send")
             self.meta_set(authz=[_t("t1", agent="officer")])
-            whitelist.tool_allowed("email.send")
+            whitelist.tool_allowed("notify.send")
 
 
 class ModeDefaultTests(unittest.TestCase):
@@ -137,7 +139,7 @@ class ModeDefaultTests(unittest.TestCase):
     def test_an_unreadable_global_file_fails_closed(self):
         S._global_path().write_text("{rotto")
         R.invalidate()
-        self.assertFalse(R.available("clodia", "email.send", None))
+        self.assertFalse(R.available("clodia", "notify.send", None))
 
 
 class DispatchTests(_Env):
@@ -225,31 +227,31 @@ class ReviewOf435Tests(_Env):
         self.assertFalse(R.available("clodia", "web.fetch", "SEAL-1/blog"))
 
     def test_the_toolbox_does_not_decide_targets(self):
-        self.meta_set(tools={"enabled": ["email.*"]},
+        self.meta_set(tools={"enabled": ["notify.*"]},
                       authz=[_t("t1", agent="clodia",
                                 rule=[{"effect": "allow", "match": "mailto:a@foo.bar"}])])
         g, t = R.tuples_for("clodia", "SEAL-1/blog")
-        dec = A.decide(g, t, agent="clodia", verb="email.send", resource="mail:default",
+        dec = A.decide(g, t, agent="clodia", verb="notify.send", resource="mail:default",
                        targets=["mailto:b@evil.com"], kind=A.WRITE)
         self.assertEqual(dec.effect, A.ASK)
 
     def test_one_consent_names_every_asked_recipient(self):
         d = A.Decision(A.ASK, True, [A.TargetDecision("mailto:b@x.it", A.ASK, A.GLOBAL),
                                      A.TargetDecision("mailto:evil@y.com", A.ASK, A.TOPIC)], "r")
-        k = R.gate_key(d, "email.send")
-        self.assertTrue(k.startswith("authz-global:email.send|"))
+        k = R.gate_key(d, "notify.send")
+        self.assertTrue(k.startswith("authz-global:notify.send|"))
         self.assertIn("mailto:evil@y.com", k)
         self.assertIn("mailto:b@x.it", k)
 
     def test_an_unreadable_room_denies(self):
-        d = R.check("clodia", "email.send", {}, "SEAL-1/inesistente", False)
+        d = R.check("clodia", "notify.send", {}, "SEAL-1/inesistente", False)
         self.assertEqual(d.effect, A.DENY)
 
 
 class GateAndStripTests(_Env):
     def test_who_answers_an_ask(self):
-        self.assertEqual(gate.gate_class("authz:email.send|mailto:a@b.it"), gate.GATE_WALLS)
-        self.assertEqual(gate.gate_class("authz-global:email.send|*"), gate.GATE_SYSTEM)
+        self.assertEqual(gate.gate_class("authz:notify.send|mailto:a@b.it"), gate.GATE_WALLS)
+        self.assertEqual(gate.gate_class("authz-global:notify.send|*"), gate.GATE_SYSTEM)
 
     def test_a_creator_never_brings_rules(self):
         self.svc.new("SEAL-1", "x", {"owner": "davide", "authz": [_t("t")]})
@@ -330,14 +332,14 @@ class AdapterAndCopybrainTests(_Env):
 
     def test_the_adapter_gate_answers_with_the_room(self):
         from . import whitelist as W
-        self.meta_set(authz=[_t("t1", verb="email.list")])
+        self.meta_set(authz=[_t("t1", verb="notify.list")])
         with patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"), \
                 patch.object(W, "agent_name", lambda: "clodia"), \
                 patch.object(W, "agent_denies", lambda *a, **k: False), \
                 patch.object(W, "effective_tools", lambda a: set()):
-            W.tool_allowed("email.list")
+            W.tool_allowed("notify.list")
             with self.assertRaises(PermissionError):
-                W.tool_allowed("email.send")
+                W.tool_allowed("notify.send")
 
     def test_copybrain_is_refused_when_enforcing(self):
         import asyncio
@@ -414,9 +416,9 @@ class AvailableRouteTests(_Env):
     def test_the_agent_server_asks_the_room(self):
         self.meta_set(tools={"enabled": ["web.*"]})
         r = self._get({"agent": "agent-server", "role": "agent-server"},
-                      "agent=clodia&scope=SEAL-1/blog&verbs=web.fetch,email.send")
+                      "agent=clodia&scope=SEAL-1/blog&verbs=web.fetch,notify.send")
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(r.json()["available"], {"web.fetch": True, "email.send": False})
+        self.assertEqual(r.json()["available"], {"web.fetch": True, "notify.send": False})
 
     def test_only_the_agent_server(self):
         r = self._get({"principal": "davide", "on_behalf": True, "human_role": "admin"},
@@ -428,4 +430,4 @@ class AvailableRouteTests(_Env):
         self.meta_set(tools={"enabled": ["web.*"]})
         with patch("server.egress._scope_of_call", lambda: "SEAL-1/blog"):
             self.assertTrue(origin._agent_may("officer", "web.fetch"))
-            self.assertFalse(origin._agent_may("officer", "email.send"))
+            self.assertFalse(origin._agent_may("officer", "notify.send"))
