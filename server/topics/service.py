@@ -3321,7 +3321,11 @@ class TopicService:
             ts = _now().strftime("%Y%m%d-%H%M%S")
             trash_rel = f".trash/{ts}/{rel}"
             self.s.move(target, f"{self._dir(tier, name)}/{trash_rel}")
-            _index_notify("file", tier, name, paths=[rel])
+            # The index keys a file by its MOUNT path (`local/x`, `shared/x`),
+            # as `put_file`/`move_file` notify: a delete asked by an old alias
+            # (`files/x`, `local/<slug>/x`) must still reach the indexed
+            # document (clodia-platform#682).
+            _index_notify("file", tier, name, paths=[f"{_mount}/{sub}"])
             return {"trashed": rel, "trash_path": trash_rel, "recoverable": True}
         # drive → trash nativo di Drive (recuperabile dal Cestino dell'account).
         store.delete(target)
