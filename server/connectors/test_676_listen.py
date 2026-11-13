@@ -160,3 +160,21 @@ class InboxTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SummaryOptionsTests(unittest.TestCase):
+    """The registry tells the webui which field is a gateway option set: a
+    mailbox action is recognised as such and kept out of Strumenti."""
+
+    def test_an_option_set_field_carries_its_name(self):
+        from . import validate as V
+        entry = copy.deepcopy(next(c for c in _examples()["comms-pack"]["connectors"]
+                                   if c["id"] == "mail"))
+        entry["topic_actions"][0]["fields"] = [{"name": "account", "options": "mailboxes"}]
+        row = V.summary(M.parse_connector(entry, pack="comms-pack"))
+        self.assertEqual(row["topic_actions"][0]["fields"][0].get("options"), "mailboxes")
+
+    def test_a_free_field_carries_none(self):
+        from . import validate as V
+        row = V.summary(_conn("telegram", [CHAT]))
+        self.assertNotIn("options", row["topic_actions"][0]["fields"][0])
