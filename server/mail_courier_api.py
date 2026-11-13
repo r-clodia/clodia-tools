@@ -126,9 +126,14 @@ def _topic_exists(tier: str, name: str) -> bool:
 
 
 def rooms(indexed: bool = False) -> list[dict]:
-    """The rooms with a mailbox in their OWN `inbox:` list, one row per
-    mailbox the instance has. Global entries are not a room: the courier
-    posts only where a room declared the mailbox."""
+    """One row per (room, mailbox) the courier reads.
+
+    Since 14 Nov 2026 (owner) mailboxes are configured GLOBALLY and a room
+    only says which senders it listens to: every room with senders of its own
+    gets a row for every globally authorised receiving mailbox (`inbox:` in the
+    global ingress list), the colony mailbox excepted — that one reaches a room
+    through its own address (the message box). A room's own `inbox:` entries
+    still make rows, for the links made before the switch."""
     from . import egress
     from . import whitelist
     from .tools import mail_switch
@@ -153,6 +158,31 @@ def rooms(indexed: bool = False) -> list[dict]:
                    **_senders(f"{tier}/{name}")}
             if addr in boxes and row not in out:
                 out.append(row)
+    # The globally authorised mailboxes, read for every room's OWN senders.
+    _colony_acct, colony_addr = colony_mailbox()
+    globali = [str(u)[len("inbox:"):].strip().lower()
+               for u in egress.source_uris() if str(u).startswith("inbox:")]
+    globali = [a for a in globali if a in boxes and a != colony_addr]
+    if globali:
+        presenti = {(r["tier"], r["name"], r["address"]) for r in out}
+        for scope in sorted(per_scope):
+            tier, _, name = egress._norm_scope_key(str(scope)).partition("/")
+            if not (tier and name):
+                continue
+            sig = _senders(f"{tier}/{name}")
+            # A STRICT room reads only its own list (`mailbox_allowed`): a
+            # global mailbox would be refused at every cycle, so no row.
+            if (not sig["senders"] or egress.ingress_strict(f"{tier}/{name}")
+                    or not _topic_exists(tier, name)):
+                continue
+            for addr in globali:
+                if (tier, name, addr) in presenti:
+                    continue
+                out.append({"tier": tier, "name": name, "account": boxes[addr],
+                            "address": addr,
+                            "strict": bool(egress.ingress_strict(f"{tier}/{name}")),
+                            **sig})
+                presenti.add((tier, name, addr))
     # A room that links the colony mailbox itself as its `inbox:` has, on the
     # same mailbox, its own address too (the message box, `box+CODE@…`). The
     # direct row only delivers declared senders; the tagged row delivers
