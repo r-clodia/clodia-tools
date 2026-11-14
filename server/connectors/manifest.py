@@ -1181,7 +1181,22 @@ def core_namespaces() -> frozenset[str]:
         name.split(".", 1)[0] for name in all_native_verb_names()
         if "." in name and not (name in _GATEWAY_RETAINED_VERBS
                                 and name.split(".", 1)[0] in packaged)
-    ) | reserved_namespaces()
+    ) | reserved_namespaces() | _builtin_namespaces()
+
+
+def _builtin_namespaces() -> frozenset[str]:
+    """The namespaces of the gateway's own manifests (`builtin_manifests/`).
+
+    Since #683 one of them has no native verb in any catalogue: `email`, whose
+    only verb (`email.send`) exists inside a `channel.deliver`. It is the
+    gateway's all the same, so no pack connector and no gateway component may
+    claim it. In doubt (an unreadable builtin file) nothing is added here: the
+    registry is then degraded and fails closed on its own."""
+    from . import builtin as _builtin
+    try:
+        return _builtin.namespaces()
+    except Exception:  # noqa: BLE001
+        return frozenset()
 
 
 def check_namespace(namespace: str, verbs: Iterable[str], *,
@@ -2588,9 +2603,8 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
             if ns and ns in builtin_namespaces:
                 refused.append(
                     f"{_at(pack, str((entry or {}).get('id') or '?'))}: namespace "
-                    f"'{ns}' is still implemented by this gateway, so the pack's "
-                    f"connector is ignored. It becomes effective when that "
-                    f"implementation moves into a pack (epic clodia-platform#527)")
+                    f"'{ns}' belongs to this gateway, so the pack's connector "
+                    f"is ignored")
                 continue
             try:
                 connector = parse_connector(entry, pack=pack,
@@ -2611,10 +2625,8 @@ def build_registry(manifests: Mapping[str, Mapping[str, Any]], *,
                     clash = f"scheme '{taken[0]}'"
             if clash:
                 refused.append(
-                    f"{_at(pack, connector.id)}: {clash} is still implemented by "
-                    f"this gateway, so the pack's connector is ignored. It "
-                    f"becomes effective when that implementation moves into a "
-                    f"pack (epic clodia-platform#527)")
+                    f"{_at(pack, connector.id)}: {clash} belongs to this "
+                    f"gateway, so the pack's connector is ignored")
                 continue
             parsed.append(connector)
         reserved_set.update(

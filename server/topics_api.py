@@ -1395,8 +1395,7 @@ def _mailbox_state(scope: str) -> dict:
         "outbox": set(eg.scope_uris("egress", scope)),
     }
     out = []
-    # From the side in charge of mail (#558): comms-pack's component on
-    # `mail: pack`, nothing when it is not serving.
+    # The operational mailboxes, from the gateway's mail code (#683).
     for row in mail_switch.system_mailboxes():
         addr = row["email"]
         out.append({

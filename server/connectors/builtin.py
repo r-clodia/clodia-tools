@@ -6,12 +6,14 @@ declared here in the same grammar:
 
     core.yaml       http: https: topic: mcp: — the platform-intrinsic schemes.
     datastore.yaml  datastore: — the gateway's own store.
+    mail.yaml       mailto: mailfrom: inbox: outbox: — mail, back in the
+                    gateway (clodia-platform#683): the courier, the
+                    delivery-only `email.send`, the mailboxes of Tools.
 
-Both are schema-only: no provider, no tools card. These files are code, not
-input: they live in the image and are the only manifests allowed to declare
-the intrinsic schemes or to span namespaces.
+These files are code, not input: they live in the image and are the only
+manifests allowed to declare the intrinsic schemes or to span namespaces.
 
-The connectors the gateway used to implement — mail, Telegram, Google, GitHub,
+The connectors the gateway used to implement — Telegram, Google, GitHub,
 image generation — are served by first-party packs (epic #527); the per-instance
 `native|pack` switch that moved them one at a time is retired (#526). What the
 gateway still knows about them is in the tables below (`RELEASED_TO`,
@@ -79,7 +81,6 @@ CONNECTOR_FAMILY: dict[str, str] = {
 #: official mount and its credential (review of clodia-tools#379).
 RELEASED_TO: dict[str, str] = {
     "telegram": "comms-pack",
-    "mail": "comms-pack",
     "github": "it-pack",
     "openai-images": "it-pack",
     # #524: the four Google connectors, and Gmail's provider of the mail
@@ -96,7 +97,6 @@ RELEASED_TO: dict[str, str] = {
 #: manifests declared for them before the packs took over (#522–#525).
 #: `mail-gmail` has none of its own: it `extends:` the mail vocabulary.
 RELEASED_NAMESPACES: dict[str, str] = {
-    "mail": "email",
     "telegram": "telegram",
     "github": "github",
     "openai-images": "openai",
@@ -113,7 +113,6 @@ RELEASED_NAMESPACES: dict[str, str] = {
 #: first-party connector out in the scheme clash and set that scheme's
 #: canonicalisation and warnings.
 RELEASED_SCHEMES: dict[str, tuple[str, ...]] = {
-    "mail": ("mailto", "mailfrom", "inbox", "outbox"),
     "telegram": ("tg",),
     "google": ("gdrive", "gsheets", "gcal"),
 }
@@ -163,15 +162,13 @@ FIRST_PARTY_PACKS: frozenset[str] = frozenset(FIRST_PARTY_SOURCES)
 #: stay in the gateway vault — no re-consent — and the component that now
 #: implements the verbs reaches them through the host, scoped.
 #:
-#: `mailbox_` follows `mail` for the same reason (#558): mail declares no
-#: provider credential either, the IMAP/SMTP mailboxes stay in the gateway
-#: vault, and comms-pack's gateway component reaches them through the host.
+#: `mailbox_` is not here since #683: mail is the gateway's own code again
+#: (`server/mail/`), so no component may reach the IMAP/SMTP mailboxes.
 CORE_CREDENTIALS_FOLLOW: dict[str, str] = {
     "google_": "google",
     "gworkspace_": "google",
     "gmail_": "google",
     "app_google_oauth": "google",
-    "mailbox_": "mail",
 }
 
 
@@ -192,15 +189,10 @@ RETIRED_TRANSPORTS: dict[str, frozenset[str]] = {
 #: service), …}}`. Code, not datadir, and closed by default: a component calls
 #: no other component unless the pair is listed here.
 #:
-#: comms-pack owns the mail vocabulary and serves `email.*` for every
-#: account; a Google account's credential is google-pack's and never in
-#: comms-pack's scope, so comms-pack asks google-pack for exactly two
-#: things — the Google mail accounts (names and addresses, no secret) and one
-#: client run on an account's own XOAUTH2 files, which google-pack writes.
-COMPONENT_SERVICES: dict[str, frozenset[tuple[str, str]]] = {
-    "comms-pack": frozenset({("google-pack", "mail_accounts"),
-                             ("google-pack", "mail_exec")}),
-}
+#: Empty since #683: the one caller was comms-pack's mail, which asked
+#: google-pack for the Google mail accounts and one client run. The gateway's
+#: own mail code (`server/mail/_host.py`) asks those two services itself.
+COMPONENT_SERVICES: dict[str, frozenset[tuple[str, str]]] = {}
 
 
 #: The browser hosts whose URLs a first-party pack connector may canonicalise
@@ -312,6 +304,21 @@ def _released_for(ids: frozenset[str]) -> tuple[frozenset[str], frozenset[str]]:
     out = (frozenset(partiti[0]), frozenset(prefixes))
     _RELEASED[ids] = out
     return out
+
+
+_NAMESPACES: frozenset[str] | None = None
+
+
+def namespaces() -> frozenset[str]:
+    """The namespaces the builtin manifests declare (`web`, `datastore`,
+    `email`). Memoised: these files are code, they change with the image."""
+    global _NAMESPACES
+    if _NAMESPACES is None:
+        _NAMESPACES = frozenset(
+            str(entry["namespace"])
+            for doc in _all().values() for entry in doc.get("connectors") or []
+            if isinstance(entry, dict) and entry.get("namespace"))
+    return _NAMESPACES
 
 
 def names() -> tuple[str, ...]:

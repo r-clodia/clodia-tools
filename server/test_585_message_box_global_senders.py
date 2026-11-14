@@ -116,7 +116,7 @@ class PerimeterTests(unittest.TestCase):
 
 class IndexGateTests(unittest.TestCase):
     """Global senders make every topic with a code a row: only with the
-    one-search index of comms-pack ≥ 2.6.0 (the 2.128.0 lesson)."""
+    one-search index, which the courier asks for (the 2.128.0 lesson)."""
 
     def _rooms(self, cfg, services):
         fake = type("T", (), {"mailbox_codes": lambda self: {"UD54G": ("SEAL-1", "tomato-blogging")}})()
@@ -136,12 +136,6 @@ class IndexGateTests(unittest.TestCase):
         self.indexed = False
         cfg = _cfg(glob=["mailfrom:dcarboni@gmail.com"])
         self.assertEqual(self._rooms(cfg, {"courier_message_box", "courier_box_index"}), [])
-
-    def test_without_the_index_global_senders_do_not_count(self):
-        cfg = _cfg(glob=["mailfrom:dcarboni@gmail.com"])
-        self.assertEqual(self._rooms(cfg, {"courier_message_box"}), [])
-        (row,) = self._rooms(_cfg(own=["mailfrom:a@b.it"]), {"courier_message_box"})
-        self.assertIs(row["indexed"], False)
 
     def test_with_the_index_a_room_without_senders_gets_its_row(self):
         """The room's own address delivers whoever writes (owner, 27 Oct

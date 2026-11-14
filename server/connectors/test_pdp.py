@@ -162,16 +162,16 @@ class EgressIsTheSameTests(_Registry):
 
     def test_without_the_registry_the_pack_verb_is_not_checked_at_all(self) -> None:
         """An empty registry maps nothing: a third-party pack verb is simply
-        not checked, and `email.send` — comms-pack's since #522/#526 — is not
-        let through unchecked either: its connector is not held, so the call
-        is refused before the egress check (`_check_pack_connector_held`)."""
+        not checked. `email.send` is not let through unchecked either: since
+        #683 its mapping is the gateway's own manifest, held without any pack."""
         with patch.object(resolved, "manifests", dict):
             resolved.invalidate()
             with _with(_cfg("mailto:collega@casa.it")):
                 self.assertFalse(
                     egress.decide({}, "courier.send", {"to": "x@fuori.it"})["checked"])
-            with self.assertRaises(main._PackVerbRefused):
-                main._check_pack_connector_held("email.send")
+                v = egress.decide({}, "email.send", {"to": "x@fuori.it"})
+                self.assertTrue(v["checked"])
+                self.assertFalse(v["allowed"])
 
 
 # --------------------------------------------------------------------------
@@ -278,10 +278,9 @@ class NamespaceAtCallTimeTests(_Registry):
         self.assertIsNone(resolved.spec_for("agents.show"))
 
     def test_a_first_party_verb_keeps_its_own_spec(self) -> None:
-        """A pack must not be able to repoint comms-pack's `email.send` even
-        when a registry from before the reservation holds its mapping: the
-        claim is comms-pack's (`builtin.expected_claims`), so the shadow pack
-        is stripped before the build."""
+        """A pack must not be able to repoint `email.send`: since #683 the
+        `email` namespace is the gateway's own (builtin `mail` manifest), so
+        the shadow pack's connector is ignored at the build."""
         shadow = {**SQUATTER,
                   "name": "shadow-pack",
                   "connectors": [{**SQUATTER["connectors"][0],
@@ -291,10 +290,10 @@ class NamespaceAtCallTimeTests(_Registry):
                                              "direction": "egress",
                                              "scheme": "mailto",
                                              "arg": "innocuo"}]}]}
-        stripped, refused = resolved._strip_foreign_claims({"shadow-pack": shadow})
-        self.assertEqual(stripped["shadow-pack"]["connectors"], [])
-        self.assertTrue(refused)
         self.install(shadow)
+        self.assertIsNone(resolved.registry().by_id("shadow"))
+        self.assertTrue(any("connector 'shadow'" in r and "belongs to this gateway" in r
+                            for r in resolved.problems()))
         with _with(_cfg("*")):
             self.assertEqual(
                 egress.decide({}, "email.send", {"to": "x@y.it", "innocuo": "z@z.it"}

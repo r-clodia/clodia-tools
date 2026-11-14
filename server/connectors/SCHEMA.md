@@ -954,10 +954,20 @@ registry:
 |---|---|
 | `core.yaml` | `http:`, `https:`, `topic:`, `mcp:` and `web.post`: the core manifest |
 | `datastore.yaml` | `datastore:` and `datastore.read` |
+| `mail.yaml` | `mailto:`, `mailfrom:`, `inbox:`, `outbox:`, the delivery-only `email.send`, the `imap` provider, the mailbox topic action, the `sender` listen kind and the Tools card (#683) |
 
-Both are schema-only (no provider, no Tools card): the edition's
-`integrations.connectors` never filters them (`instance_profile
+`core` and `datastore` are schema-only (no provider, no Tools card): the
+edition's `integrations.connectors` never filters them (`instance_profile
 .connector_allowed`), because every whitelist is written in their schemes.
+`mail` is filtered like any connector with a card.
+
+Mail came back here in #683: the courier reads it, `email.send` exists only
+inside a `channel.deliver` to a `mailto:` destination, and no agent has an
+`email.*` verb. The code is `server/mail/`. The read verbs that are gone
+(`email.read`, `email.list`, `email.search`, `email.get_attachment`,
+`email.reply`) stay declared in `mail.yaml` as a failsafe: the dispatcher
+refuses their names, and if one ever reached the PDP or the taint engine it
+would taint and, for `email.reply`, resolve to no destination (denied).
 
 They are code, not input: they live in the image. Three privileges follow, and
 nothing on disk can obtain them: they may declare the intrinsic schemes, they
@@ -968,12 +978,14 @@ registry down with it.
 
 ### The first-party connectors (#522–#526)
 
-Mail, Telegram, Google, GitHub and image generation used to be builtin files
+Telegram, Google, GitHub and image generation used to be builtin files
 here too. The migrations of the epic #527 moved each into a first-party pack —
-comms-pack (`mail`, `telegram`), google-pack (`google`, `google-sheets`,
+comms-pack (`telegram`), google-pack (`google`, `google-sheets`,
 `google-docs`, `google-calendar`, and Gmail's `mail-gmail`), it-pack
 (`github`, `openai-images`) — whose **gateway component** implements the
-verbs inside the reference monitor (see «Components»). For a while an
+verbs inside the reference monitor (see «Components»). Mail went to
+comms-pack too (#522–#558) and came back as a builtin in #683 (above). For a
+while an
 instance switch (`profile.yaml`, `connectors: {<id>: native|pack}`) chose per
 connector between the gateway's code and the pack's; the native code is gone
 and #526 retired the switch. A profile that still carries `connectors:` keeps
@@ -982,16 +994,18 @@ loading; a `native` value is ignored with one boot warning.
 What the gateway keeps about them is in `connectors/builtin.py`, as code:
 
 - **Who owns them.** `RELEASED_TO` names the ONE pack each connector belongs
-  to, and `RELEASED_NAMESPACES` its namespace (`email`, `telegram`, `github`,
+  to, and `RELEASED_NAMESPACES` its namespace (`telegram`, `github`,
   `openai`, `gdrive`, `gsheets`, `gdocs`, `gcalendar`). Any other pack that
   declares one of those connector ids or namespaces has that entry stripped
   before the registry is built (`resolved._strip_foreign_claims`), and the
   install preview reports it as `ignored`: a third-party pack can never answer
-  `email.send` or receive `github_pat`.
+  `telegram.send` or receive `github_pat`. `email` is a builtin namespace
+  (#683), refused to every pack by the build itself.
 - **The credentials stay in the gateway's custody.** `mailbox_<acct>`,
   `google_`/`gworkspace_`/`gmail_` and `app_google_oauth` remain reserved vault
-  prefixes with the same names and shapes; the owning pack's component reaches
-  them through `host.credentials(...)` (`CORE_CREDENTIALS_FOLLOW`). The adopted
+  prefixes with the same names and shapes; google-pack's component reaches
+  its own through `host.credentials(...)` (`CORE_CREDENTIALS_FOLLOW`), and
+  `mailbox_` is read by the gateway's mail code only (#683). The adopted
   entries `telegram_bot_token`, `github_pat` and `openai_api_key`
   (`ADOPTED_VAULT_ENTRIES`) keep their legacy shapes; `github_pat` and
   `openai_api_key` are still written by their legacy handlers
@@ -1006,11 +1020,11 @@ What the gateway keeps about them is in `connectors/builtin.py`, as code:
   longer declares (`mail-transport`, comms-pack 1.4.0):
   `RETIRED_TRANSPORTS` keeps such a stamped mount gateway-internal (never
   listed, DENIED) until an admin removes it.
-- **The gateway's own code** that still needs mail or Google (the mailbox
-  routes and topic button, the confinement API, whitelist labels, the token
-  cache, the Tools card tests) asks the component's services
-  (`server/tools/mail_switch.py`, `server/tools/google_switch.py`) and fails
-  closed without them. `/tools/google/{app,auth,connect}` forward to
+- **The gateway's own code** that needs mail or Google (the mailbox routes
+  and topic button, the courier, the confinement API, whitelist labels, the
+  token cache, the Tools card tests) goes through `server/tools/mail_switch.py`
+  (the native mail code) and `server/tools/google_switch.py` (google-pack's
+  component services, failing closed without them). `/tools/google/{app,auth,connect}` forward to
   google-pack's component routes with the component's own authentication and
   audit; the OAuth redirect URI the owner registered points there.
 
@@ -1018,10 +1032,11 @@ What the gateway keeps about them is in `connectors/builtin.py`, as code:
 
 ## Examples
 
-They describe the shape of the first-party packs (abridged): `telegram.`,
-`mail.` and `github.` are namespaces of packs, not of the gateway.
+They describe the shape of the first-party packs (abridged): `telegram.` and
+`github.` are namespaces of packs, not of the gateway. The mail vocabulary is
+the gateway's own `builtin_manifests/mail.yaml` since #683.
 
-### comms-pack — Telegram, and the mail vocabulary with its IMAP provider
+### comms-pack — Telegram (and, until #683, the mail vocabulary)
 
 ```yaml
 name: comms-pack
@@ -1126,6 +1141,11 @@ connectors:
       - arg: agent
         value: agent
 
+  # The `mail` entry below is the shape comms-pack declared until #683, kept
+  # as the reference example of a vocabulary whose providers come from two
+  # packs (google-pack's `mail-gmail` extends it). On a gateway ≥ 2.174.0 the
+  # gateway declares `mail` itself (`builtin_manifests/mail.yaml`) and a pack
+  # declaring it has that connector ignored.
   - id: mail
     manifest_version: 1
     namespace: mail

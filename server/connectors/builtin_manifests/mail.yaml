@@ -1,0 +1,149 @@
+# Mail, as the gateway implements it (clodia-platform#683).
+#
+# The vocabulary is the gateway's again: comms-pack's gateway component served
+# it from #558 to #683, and its agent verbs are gone (owner, 14 Nov 2026: no
+# agent reads mail; the courier does, deterministically). What is left:
+#
+#   - the courier, which delivers a room's mail into its topic;
+#   - `email.send`, reached ONLY through `channel.deliver` to a `mailto:`
+#     destination (`main._DELIVERY_ONLY_VERBS`);
+#   - the mailboxes of the instance, managed from Tools.
+#
+# A pack declaring this vocabulary (comms-pack ≤ 2.8) has its `mail`
+# connector ignored, loudly, while its other connectors stay. google-pack's
+# `mail-gmail` still `extends: mail`: Gmail is a provider of this vocabulary.
+name: gateway-mail
+connectors:
+  - id: mail
+    manifest_version: 1
+    namespace: email
+    label: Email
+    schemes:
+      # `mailto:` = the RECIPIENT of a message.
+      - scheme: mailto
+        direction: egress
+        label: Destinatario
+        lowercase: true
+        danger: >-
+          un indirizzo email. Una volta inviato, il messaggio non è più
+          richiamabile e la copia resta sul server del destinatario.
+      # `mailfrom:` = the SENDER of a message the courier delivers: it decides
+      # which room the mail goes to and the taint of its content.
+      - scheme: mailfrom
+        direction: source
+        label: Mittente
+        lowercase: true
+      # `inbox:`/`outbox:` = the MAILBOX the courier reads from or a delivery
+      # sends with. The question is WHERE, not WHO.
+      - scheme: inbox
+        direction: source
+        label: Casella in lettura
+        lowercase: true
+        forms:
+          - label: address
+            pattern: '^[^@\s]+@[A-Za-z0-9.-]+$'
+            example: 'studio@example.org'
+      - scheme: outbox
+        direction: egress
+        label: Casella in scrittura
+        lowercase: true
+        forms:
+          - label: address
+            pattern: '^[^@\s]+@[A-Za-z0-9.-]+$'
+            example: 'studio@example.org'
+    providers:
+      - id: imap
+        label: IMAP/SMTP
+    verbs:
+      # One field may carry several addresses: `multi` splits them on comma
+      # and semicolon.
+      - verb: email.send
+        direction: egress
+        scheme: mailto
+        arg: to
+        multi: true
+        dtype: email
+      - verb: email.send
+        direction: egress
+        scheme: mailto
+        arg: cc
+        multi: true
+        dtype: email
+      - verb: email.send
+        direction: egress
+        scheme: mailto
+        arg: bcc
+        multi: true
+        dtype: email
+      # The agent verbs below are gone (#683): the dispatcher refuses their
+      # names (`main._check_component`). They stay DECLARED as a failsafe, so
+      # that a name reaching the PDP or the taint engine anyway is judged for
+      # what it would be — mail from outside. `email.reply` reads no recipient
+      # from its arguments: no destination → UNKNOWN → denied.
+      - verb: email.reply
+        direction: egress
+        scheme: mailto
+        arg: to
+        multi: true
+        dtype: email
+      - verb: email.reply
+        direction: egress
+        scheme: mailto
+        arg: cc
+        multi: true
+        dtype: email
+      - verb: email.reply
+        direction: egress
+        scheme: mailto
+        arg: bcc
+        multi: true
+        dtype: email
+      # The source of a mail that was read is in the RESULT, not the arguments.
+      - verb: email.read
+        direction: source
+        scheme: mailfrom
+        arg: from
+        reads: result
+        normalise: email_from
+    # The topic button: pick a mailbox ALREADY configured on the instance and
+    # it becomes ingress and egress of this topic in one go. Admin only: a
+    # system mailbox is mail that does not belong to the topic's owner
+    # (decision of 27 Sep 2026).
+    topic_actions:
+      - id: mailbox-link
+        label: Autorizza una casella
+        admin_only: true
+        fields:
+          - name: account
+            label: Casella di sistema
+            options: mailboxes
+        adds:
+          ingress:
+            - 'inbox:{address}'
+          egress:
+            - 'outbox:{address}'
+    # The room's «In ascolto» (clodia-platform#677): a sender whose mail the
+    # courier delivers into the room. Listening = trusted. Replying by mail is
+    # not part of listening: recipients are Strumenti → Email → Destinatari.
+    listen:
+      - kind: sender
+        label: Mittente email
+        field:
+          name: sender
+          label: Indirizzo o dominio
+          placeholder: 'nome@dominio.it oppure *@dominio.it'
+        ingress: 'mailfrom:{sender}'
+        reply: none
+    tools_card:
+      icon: email
+      setup_label: Gestisci caselle
+      blurb: >-
+        Connettore multi-casella: aggiungi/togli mailbox IMAP/SMTP (info@,
+        IONOS, …). La posta la legge il corriere e la consegna nei canali.
+      scope: IMAP/SMTP
+    # Incoming mail mixes several senders in one answer: these taint (the
+    # retired read verbs, kept as a failsafe like the mappings above).
+    taint:
+      - email.list
+      - email.search
+      - email.get_attachment

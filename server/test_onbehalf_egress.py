@@ -60,22 +60,12 @@ class _Persona:
 
 
 def _comms_component(spediti: list):
-    """`email.send` served the way it is now — by comms-pack's gateway
-    component (#523: the native mail code is gone) — with a handler that only
-    records. Everything before the handler (whitelist, origin, gates, the
-    egress PDP on the mail mapping) runs as in production."""
-    from types import SimpleNamespace as NS
-    from mcp.types import Tool
-    spec = NS(pack="comms-pack", component="comms-pack/comms", offload=False,
-              tool=Tool(name="email.send", description="",
-                        inputSchema={"type": "object", "properties": {
-                            "to": {}, "cc": {}, "subject": {}, "body": {}}}),
-              handler=lambda a: spediti.append(a) or {"sent": True})
-    return (patch.object(M, "_component_verb",
-                         lambda n: spec if n == "email.send" else None),
-            patch.object(M, "_component_pdp_arguments", lambda _s, _n, a: a),
-            patch.object(M, "_check_component", lambda n: None),
-            patch.object(M, "_check_pack_connector_held", lambda n: None))
+    """`email.send` as it runs now (#683): the gateway's delivery-only verb,
+    with a handler that only records. Everything before the handler
+    (whitelist, origin, gates, the egress PDP on the mail mapping) runs as in
+    production; `_send` runs the call inside a delivery (`_DELIVER_VIA`)."""
+    return (patch("server.mail.verbs.send",
+                  lambda a: spediti.append(a) or {"sent": True}),)
 
 
 def _send(to, *, ruolo="user", destinazioni=(), on_behalf=True, modo="on"):
@@ -111,8 +101,14 @@ def _send(to, *, ruolo="user", destinazioni=(), on_behalf=True, modo="on"):
             patch.object(M._tlm, "record"):
         for _p in _comms_component(spediti):
             _stack.enter_context(_p)
-        out = asyncio.run(M.call_tool(
-            "email.send", {"to": to, "subject": "s", "body": "b"}))
+        async def _deliver():
+            tok = M._DELIVER_VIA.set(frozenset({"email.send"}))
+            try:
+                return await M.call_tool(
+                    "email.send", {"to": to, "subject": "s", "body": "b"})
+            finally:
+                M._DELIVER_VIA.reset(tok)
+        out = asyncio.run(_deliver())
     return out[0].text, bool(spediti), gate
 
 

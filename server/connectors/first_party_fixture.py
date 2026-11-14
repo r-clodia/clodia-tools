@@ -65,8 +65,10 @@ def telegram_connector() -> dict:
 
 
 def comms_pack() -> dict:
-    return {"name": "comms-pack",
-            "connectors": [telegram_connector(), mail_connector()]}
+    """comms-pack as the gateway holds it since #683: Telegram only. Its
+    `mail` connector (`mail_connector()`, kept for the tests of a pack that
+    still declares it) is ignored, because mail is the gateway's again."""
+    return {"name": "comms-pack", "connectors": [telegram_connector()]}
 
 
 # --------------------------------------------------------------------------

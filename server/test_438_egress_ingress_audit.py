@@ -61,47 +61,29 @@ class _Env(unittest.TestCase):
                 ctx += [patch.object(*p) for p in patches.values()]
                 for c in ctx:
                     c.start()
+                # A delivery-only verb (#683: `email.send`) exists inside a
+                # `channel.deliver` only: run it as that delivery would.
+                tok = (main._DELIVER_VIA.set(frozenset({name}))
+                       if name in main._DELIVERY_ONLY_VERBS else None)
                 try:
                     return await main.call_tool(name, args)
                 finally:
+                    if tok is not None:
+                        main._DELIVER_VIA.reset(tok)
                     for c in ctx:
                         c.stop()
         return asyncio.run(go())
 
 
 def _mail_component(send):
-    """`email.send` served the way it is now — by comms-pack's gateway
-    component (#523: the native mail code is gone) — with the component's own
-    attachment handling (confined through `host.scratch_path`, hashed through
-    `host.note_crossing`, as `verbs.py` does), then `send`. The audit record
-    under test is the gateway's."""
-    import stat as _stat
-    from types import SimpleNamespace as NS
-    from mcp.types import Tool
-
-    def handler(a):
-        own = []
-        for raw in a.get("attachments") or []:
-            try:
-                rp = main._safe_scratch_path(str(raw))
-            except ValueError:
-                raise ValueError(f"attachment outside your scratch: '{raw}'") from None
-            if not _stat.S_ISREG(os.stat(rp).st_mode):
-                raise ValueError(f"attachment is not a regular file: '{raw}'")
-            own.append(rp)
-        for p in own:
-            main._note_crossing(p, kind="attachment")
-        return send(a)
-    spec = NS(pack="comms-pack", component="comms-pack/comms", offload=True,
-              tool=Tool(name="email.send", description="", inputSchema={
-                  "type": "object", "properties": {
-                      "to": {}, "cc": {}, "subject": {}, "body": {}, "attachments": {}}}),
-              handler=handler)
-    return {"component": (main, "_component_verb",
-                          lambda n: spec if n == "email.send" else None),
-            "pdp": (main, "_component_pdp_arguments", lambda _s, _n, a: a),
-            "check": (main, "_check_component", lambda n: None),
-            "held": (main, "_check_pack_connector_held", lambda n: None)}
+    """`email.send` as it runs now (#683): the gateway's own delivery-only verb
+    (`server/mail/verbs.py`), with its real attachment handling — confined to
+    the caller's scratch, hashed into the call's record as `attachment` — and
+    the SMTP side replaced by `send`. The audit record under test is the
+    gateway's. `run_call` runs it inside a delivery (`_DELIVER_VIA`)."""
+    from .mail import mail as _mail, verbs as _verbs
+    return {"send": (_mail, "send", lambda *a, **k: send(k)),
+            "account": (_verbs, "_email_account", lambda a: "info")}
 
 
 class EgressTests(_Env):

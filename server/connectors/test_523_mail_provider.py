@@ -15,9 +15,10 @@ mail code is the pack's GATEWAY COMPONENT (`test_558_mail_switch.py`,
    parity with the former builtin was the acceptance of #522/#523);
 4. fail closed: no held connector → `email.*` DENIED.
 
-The suites of #503/#461/#420/#428 run against the REAL component in
-`server/test_558_mail_component.py`. Since #526 the `native|pack` switch is
-retired: a profile still saying `native` changes nothing.
+Since #683 mail is the gateway's own code again (`server/mail/`) and its
+vocabulary the builtin `mail` manifest: a pack still declaring it (comms-pack
+1.4.0 here) is ignored, so nothing it says — transport, mappings — has any
+effect, and every `email.*` verb an agent names is refused.
 """
 from __future__ import annotations
 
@@ -194,14 +195,14 @@ class GrammarTests(unittest.TestCase):
 # 2. resolution
 # --------------------------------------------------------------------------
 class TransportResolutionTests(_Istanza):
-    def test_in_pack_position_the_held_connector_names_it(self):
-        self.assertEqual(resolved.transport_for("mail"), (BACKEND, TOOL))
-
-    def test_a_profile_saying_native_changes_nothing(self):
-        for pos in ("native", None):
+    def test_mail_is_the_gateways_so_no_pack_transport_is_named(self):
+        """#683: the pack's `mail` connector is ignored, so its transport is
+        never the one the gateway hands a mailbox to — whatever the profile."""
+        for pos in ("pack", "native", None):
             with self.subTest(posizione=pos):
                 self.posizione(pos)
-                self.assertEqual(resolved.transport_for("mail"), (BACKEND, TOOL))
+                self.assertEqual(resolved.registry().by_id("mail").pack, "gateway-mail")
+                self.assertIsNone(resolved.transport_for("mail"))
 
     def test_without_the_pack_there_is_none(self):
         (self.dir / "packs" / PACK / "pack.yaml").unlink()
@@ -303,15 +304,15 @@ class AnswersTests(_Istanza):
                 self.assertIn("mailto", r["schemi"][0])
                 self.assertEqual(r["azione"][2], ("inbox:x@y.it",))
 
-    def test_the_pins_can_fail(self):
-        """A dropped `cc` mapping in the pack shows up as a difference."""
+    def test_a_pack_cannot_change_them(self):
+        """#683: a `cc` mapping dropped in a pack's `mail` changes nothing: the
+        answers are the gateway's manifest's."""
         nativo = _risposte()
         entry = _mail_connector()
         entry["verbs"] = [v for v in entry["verbs"]
                           if not (v["verb"] == "email.send" and v["arg"] == "cc")]
         self.scrivi_pack({"name": PACK, "connectors": [entry]})
-        self.assertNotEqual(nativo["spec:email.send"],
-                            _risposte()["spec:email.send"])
+        self.assertEqual(nativo["spec:email.send"], _risposte()["spec:email.send"])
 
 
 # --------------------------------------------------------------------------
@@ -341,25 +342,17 @@ class FailClosedTests(_Istanza):
         resolved.invalidate()
         self.assertTrue(_call("email.send", {"to": "x@y.it"}).startswith("DENIED:"))
 
-    def test_without_the_pack_the_others_fail_closed_not_the_registry(self):
-        """`gdrive.upload` shares with a person on `mailto:`, which comms-pack
-        declares. Without it google-pack cannot be held — its outbound verbs
-        fail closed — but the gateway's own registry is not degraded."""
+    def test_without_the_pack_mail_stays_mapped(self):
+        """#683: `mailto:` is the gateway's own scheme. Without comms-pack the
+        mail vocabulary is still there — `email.send` keeps its mapping for a
+        delivery, and nothing else fails closed for want of it."""
         (self.dir / "packs" / PACK / "pack.yaml").unlink()
         resolved.invalidate()
         self.assertEqual(resolved.degraded(), "")
-        self.assertIsNone(egress.spec_for("gdrive.upload"))
-        self.assertTrue(resolved.failsafe_denied("gdrive.upload"))
+        self.assertIsNotNone(egress.spec_for("email.send"))
+        self.assertFalse(resolved.failsafe_denied("email.send"))
         self.assertFalse(resolved.held_by_pack("email"))
-        self.assertIsNone(resolved.transport_for("mail"))
         self.assertTrue(_call("email.send", {"to": "x@y.it"}).startswith("DENIED:"))
-
-    def test_a_profile_saying_native_does_not_lift_the_refusal(self):
-        from .. import main
-        self.posizione("native")
-        self._rifiuta_il_connettore()
-        with self.assertRaises(main._PackVerbRefused):
-            main._check_pack_connector_held("email.send")
 
 class TelegramBindingVerbsFailClosedTests(unittest.TestCase):
     """The retained Telegram binding verbs follow the same rule now: in `pack`

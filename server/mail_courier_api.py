@@ -7,9 +7,9 @@ topic's files. It never receives a message body.
 
 Same door as `/internal/telegram/*`: `internal_auth` restricted to a privileged
 principal (the agent-server), not a per-agent MCP grant. Each call runs inside
-the ROOM's claims, so comms-pack's component applies that room's rules exactly
-as for an agent working there: the mailbox must be in the room's `inbox:`
-list, and on a strict room (#503) only declared senders pass.
+the ROOM's claims, so the gateway's mail code (`server/mail/`, #683) applies
+that room's rules: the mailbox must be in the room's `inbox:` list, and only
+the senders the room declares pass.
 
 - `GET  /internal/mail/courier/rooms`       → `[{tier, name, account, address, strict}]`
 - `POST /internal/mail/courier/envelopes`   {tier, name, account, folder?, limit?, skip?}
@@ -47,7 +47,7 @@ COURIER = "courier"
 #: The message-box tag of the courier call in progress (#583): set ONLY by
 #: `_in_room` for a row `rooms()` offered with a tag, never from a token or an
 #: argument. While it is set, and only then, the colony mailbox may be read for
-#: that room — and comms-pack keeps only the mail addressed to `box+TAG@…`.
+#: that room — and the mail code keeps only the mail addressed to `box+TAG@…`.
 COURIER_TAG: contextvars.ContextVar[str] = contextvars.ContextVar(
     "courier_tag", default="")
 
@@ -189,7 +189,7 @@ def rooms(indexed: bool = False) -> list[dict]:
     # whoever writes to the room's address (owner, 27 Oct 2026). The tagged
     # row wins: on 9–10 Nov a room linked the colony mailbox from the Email
     # card and its message box went silent (#665, the second cause of #645).
-    # The direct row stays where no tagged row can be built (older comms-pack).
+    # The direct row stays where no tagged row can be built (no colony mailbox).
     colony = _colony_rooms([], indexed)
     tagged = {(r["tier"], r["name"], r["address"]) for r in colony}
     out = [r for r in out if (r["tier"], r["name"], r["address"]) not in tagged]
@@ -227,23 +227,13 @@ def _colony_rooms(existing: list[dict], indexed_ok: bool = False) -> list[dict]:
     acct, addr = colony_mailbox()
     if not acct:
         return []
-    # Only a comms-pack that FILTERS by tag may be handed a tagged row: an
-    # older one would ignore the tag and deliver every declared sender's mail
-    # of the colony mailbox to every topic (second review of #416). The
-    # capability is a service only comms-pack ≥ 2.5.0 registers.
-    try:
-        from .components import loader as _components
-        if _components.service("comms-pack", "courier_message_box") is None:
-            return []
-        # Global senders count on the message box (#585), but they make EVERY
-        # topic with a code a row: only when BOTH sides read through the
-        # one-search index — comms-pack ≥ 2.6.0 and a courier that asked for
-        # indexed rows (`indexed_ok`). An older courier would search each row
-        # (review of clodia-logic#558).
-        indexed = bool(indexed_ok) and _components.service(
-            "comms-pack", "courier_box_index") is not None
-    except Exception:  # noqa: BLE001 — unknown → off
-        return []
+    # Global senders count on the message box (#585), but they make EVERY
+    # topic with a code a row: only when the courier asked for indexed rows
+    # (`indexed_ok`), i.e. reads them through the one-search index. An older
+    # courier would search each row (review of clodia-logic#558). The mail
+    # code filters by tag and serves the index since #683 (it is the
+    # gateway's own): no capability to ask any more.
+    indexed = bool(indexed_ok)
     already = {(r["tier"], r["name"]) for r in existing if r.get("address") == addr}
     out = []
     try:
@@ -383,13 +373,6 @@ async def box_route(request: Request):
     payload, err = _authorize(request)
     if err:
         return err
-    try:
-        from .components import loader as _components
-        if _components.service("comms-pack", "courier_box_index") is None:
-            return JSONResponse({"error": "comms-pack has no courier_box_index"},
-                                status_code=404)
-    except Exception:  # noqa: BLE001
-        return JSONResponse({"error": "components unavailable"}, status_code=404)
     try:
         return JSONResponse(await asyncio.to_thread(box_index, payload))
     except PermissionError as e:

@@ -127,9 +127,10 @@ class BuiltinConnectorsTests(unittest.TestCase):
         reg = resolved.registry()
         self.assertEqual(resolved.problems(), ())
         ids = {c.id for c in reg.connectors if c.builtin}
-        # Only the schema-only ones since #526; the rest are the packs'.
-        self.assertEqual(ids, {"core", "datastore"})
-        self.assertEqual(ids, builtin.SCHEMA_ONLY_CONNECTORS)
+        # The schema-only ones since #526, and mail again since #683; the
+        # rest are the packs'.
+        self.assertEqual(ids, {"core", "datastore", "mail"})
+        self.assertEqual(ids, builtin.SCHEMA_ONLY_CONNECTORS | {"mail"})
         dei_pack = {c.id: c.pack for c in reg.connectors if not c.builtin}
         self.assertEqual(dei_pack, builtin.RELEASED_TO)
 

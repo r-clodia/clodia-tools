@@ -116,11 +116,6 @@ class ColonyRoomsTests(unittest.TestCase):
 
     capable = True
 
-    def test_an_older_comms_pack_gets_no_tagged_row(self):
-        self.capable = False
-        self.assertEqual(self._rooms({"SEAL-2/titulon": ["mailfrom:a@b.it"]},
-                                     {"DJ56K": ("SEAL-2", "titulon")}), [])
-
     def test_a_topic_with_a_code_and_a_sender_is_reached_by_tag(self):
         out = self._rooms({"SEAL-2/titulon": ["mailfrom:*@brightnode.io"]},
                           {"DJ56K": ("SEAL-2", "titulon")})
@@ -140,14 +135,6 @@ class ColonyRoomsTests(unittest.TestCase):
                                                "mailfrom:a@b.it"]},
                           {"DJ56K": ("SEAL-2", "titulon")})
         self.assertEqual([r.get("tag") for r in out], ["DJ56K"])
-
-    def test_with_an_older_comms_pack_the_direct_row_stays(self):
-        self.capable = False
-        out = self._rooms({"SEAL-2/titulon": ["inbox:devnullboxx@gmail.com",
-                                               "mailfrom:a@b.it"]},
-                          {"DJ56K": ("SEAL-2", "titulon")})
-        self.assertEqual([(r.get("tag"), r["address"]) for r in out],
-                         [(None, "devnullboxx@gmail.com")])
 
     def test_another_linked_mailbox_keeps_its_row(self):
         out = self._rooms({"SEAL-2/titulon": ["inbox:studio@x.it", "mailfrom:a@b.it"]},
