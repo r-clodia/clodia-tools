@@ -64,8 +64,7 @@ def _mailbox_options() -> list[dict]:
     compares. Keeping both is the whole reason a chosen option is richer than
     the string that was chosen.
     """
-    # From the side in charge of mail (#558): comms-pack's component on
-    # `mail: pack`, and no option at all when it is not serving.
+    # The operational mailboxes, from the gateway's mail code (#683).
     from ..tools import mail_switch
     return [{"value": row["account"],
              "label": f"{row['account']} · {row['email']}",

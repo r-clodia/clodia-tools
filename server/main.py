@@ -68,9 +68,10 @@ def _topics() -> TopicService:
 
 
 
-#: The eight `email.*` verbs. Their native implementation is gone
-#: (clodia-platform#523): comms-pack's gateway component serves them, and only
-#: it — a mounted backend exposing `email.*` is never a fallback
+#: The eight `email.*` verbs of comms-pack's former component. No agent reads
+#: or sends mail by name (clodia-platform#683): the courier reads, and
+#: `email.send` exists only inside a `channel.deliver` (`_DELIVERY_ONLY_VERBS`).
+#: A mounted backend exposing these names is never served either
 #: (`_check_component`).
 _EMAIL_VERB_NAMES: frozenset[str] = frozenset({
     "email.send",
@@ -2201,10 +2202,6 @@ def runtime_configuration_warnings() -> list[str]:
                     "ma non esposto da tool nativi o backend MCP"
                 )
     from .tools import mail_switch as _mail_switch
-    try:
-        _mail_switch.service("diagnostics")
-    except _mail_switch.ComponentUnavailable as e:
-        warnings.append(f"email: {e}")
     for row in _mail_switch.credential_diagnostics():
         if row["operational"]:
             continue
@@ -4242,8 +4239,10 @@ _DELIVER_VIA: "_contextvars.ContextVar[frozenset]" = _contextvars.ContextVar(
 #: them, no grant reaches them, and `_verb_implemented` answers «unknown tool»
 #: outside a delivery. `channel.relay_send` carries a pack relay's text; its
 #: egress mapping (destination = the whole URI) is in the core manifest, so the
-#: PDP judges it like any other outbound verb.
-_DELIVERY_ONLY_VERBS = frozenset({"channel.relay_send"})
+#: PDP judges it like any other outbound verb. `email.send` (#683) carries a
+#: `mailto:` delivery: its `to`/`cc`/`bcc` mappings are in the builtin `mail`
+#: manifest, the mailbox whitelist (`outbox:`) is checked by the mail code.
+_DELIVERY_ONLY_VERBS = frozenset({"channel.relay_send", "email.send"})
 
 _AUDIT_PARENT: "_contextvars.ContextVar[str | None]" = _contextvars.ContextVar(
     "audit_parent_span", default=None)
@@ -4737,9 +4736,12 @@ def _check_component(name: str) -> None:
         if name in _GOOGLE_NATIVE_NAMES:
             why = (f"'{name}' is served by google-pack's gateway component, "
                    "which is not serving it now (see GET /internal/components)")
-        elif name in _EMAIL_VERB_NAMES:
-            why = (f"'{name}' is served by comms-pack's gateway component, "
-                   "which is not serving it now (see GET /internal/components)")
+        elif name in _EMAIL_VERB_NAMES and not (
+                name in _DELIVERY_ONLY_VERBS and name in _DELIVER_VIA.get()):
+            why = (f"'{name}': nessun agente usa la posta direttamente "
+                   "(clodia-platform#683). La legge il corriere e la consegna "
+                   "nel canale (topic.mail_check per un controllo subito); per "
+                   "spedire si usa channel.deliver verso mailto:<indirizzo>")
         elif name.startswith("telegram.") and name not in _GATEWAY_RETAINED_VERBS:
             why = (f"'{name}' is served by comms-pack's gateway component "
                    "(comms-pack ≥ 2.2.0), which is not serving it now "
@@ -5378,8 +5380,7 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             if (_cpdp := _component_verb(name)) is not None:
                 # A component verb (#558): the facts the PDP needs and the
                 # call does not carry come from the component's own service
-                # (google-pack: the parent folder of `gdrive.update`;
-                # comms-pack: the recipient of `email.reply`). FIRST: a
+                # (google-pack: the parent folder of `gdrive.update`). FIRST: a
                 # component verb never reaches a native lookup below.
                 _eargs = await asyncio.to_thread(
                     _component_pdp_arguments, _cpdp, name, arguments)
@@ -5389,13 +5390,6 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                     # resolved by substring into whichever chat matches
                     # (review of clodia-logic#542).
                     _telegram_chat_id_or_raise(arguments)
-            elif name == "email.reply":
-                # The reply goes to the ORIGINAL sender, whatever `to` the
-                # caller wrote (clodia-platform#559): only comms-pack's
-                # component can read it (`pdp_arguments`, above). Reaching here
-                # means no component serves the verb: the destination is
-                # unknown, hence refused (#523, no native lookup any more).
-                _eargs = {**arguments, "to": ""}
             elif name == "telegram.send":
                 # Un `chat_id` che non è una chat Telegram (il TITOLO del gruppo,
                 # «Clodia Sviluppo») diventava `tg:Clodia Sviluppo`, che nessuna
@@ -5515,6 +5509,11 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             result = await _dispatch_channel_deliver(arguments)
         elif name == "channel.relay_send" and name in _DELIVER_VIA.get():
             result = await _dispatch_channel_relay_send(arguments)
+        elif name == "email.send" and name in _DELIVER_VIA.get():
+            # #683: the gateway's own mail code (SMTP, or Gmail through
+            # google-pack's component). Blocking I/O: off the event loop.
+            from .mail import verbs as _mail_verbs
+            result = await asyncio.to_thread(_mail_verbs.send, arguments)
         elif name == "web.post":
             result = await asyncio.to_thread(web_post.post, arguments, agent=_ag or "")
         elif name == "logs.tail":

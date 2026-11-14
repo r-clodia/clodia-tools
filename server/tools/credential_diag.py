@@ -3,8 +3,8 @@
 secret value, never a network call.
 
 Kept from the native mail module (`tools/email.py`, removed with
-clodia-platform#523) because the Tools card of Google reads it whichever side
-serves mail; the mailboxes card on `mail: pack` asks comms-pack's component.
+clodia-platform#523) because the Tools card of Google reads it; the
+mailboxes card asks the gateway's mail code (`server/mail/`, #683).
 """
 from __future__ import annotations
 

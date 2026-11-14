@@ -1,8 +1,8 @@
-"""clodia-platform#558, mail: what comms-pack's component needed from the host.
+"""clodia-platform#558, mail: what comms-pack's component needed from the host,
+and what is left of it since mail is the gateway's own code again (#683).
 
-- `host.service(pack, name)`: another pack's component service, ONLY for the
-  pairs `builtin.COMPONENT_SERVICES` grants (comms-pack → google-pack's
-  `mail_accounts`, `mail_exec`), None when that component is not serving;
+- `host.service(pack, name)`: no pair is granted any more (the one caller was
+  comms-pack's mail); the gateway's mail code asks google-pack itself;
 - `host.perimeter` mail facts: `mailbox_allowed`, `strict_scope`,
   `address_of`, `source_vetted`, `legacy_mail_accounts` — the gateway's own
   answers, read live;
@@ -11,8 +11,7 @@
 - `host.audit_decision`: a decision record; `AuditUnavailable` when the trail
   cannot be written (fail-closed callers refuse on it);
 - `host.tool_allowed`, `host.current_topic`;
-- the `mailbox_` scope is comms-pack's only (the `mail` switch that used to
-  gate it is retired, #526).
+- the `mailbox_` scope is no component's (#683).
 """
 from __future__ import annotations
 
@@ -76,73 +75,52 @@ class _Profile:
 
 
 class ServiceLookupTests(_Profile, unittest.TestCase):
+    """#683: the only caller of another pack's services was comms-pack's mail.
+    Mail is the gateway's own code again, so no component is granted any."""
+
     def setUp(self) -> None:
         super().setUp()
-        self.position(mail="pack", google="pack")
         self.addCleanup(loader.reset)
         loader.reset()
         services = {n: ServiceSpec(component=GOOGLE.key, pack="google-pack", name=n,
                                    handler=lambda *a, _n=n: (_n, a))
-                    for n in ("mail_accounts", "mail_exec", "accounts")}
+                    for n in ("mail_accounts", "mail_exec")}
         loader._STATES[GOOGLE.key] = loader.State(component=GOOGLE, status="loaded",
                                                   services=services)
 
-    def test_the_granted_pairs_are_found(self) -> None:
-        h = _host(COMMS)
-        self.assertEqual(h.service("google-pack", "mail_accounts")(), ("mail_accounts", ()))
-        self.assertEqual(h.service("google-pack", "mail_exec")({"x": 1}),
-                         ("mail_exec", ({"x": 1},)))
-
-    def test_anything_else_is_refused(self) -> None:
-        h = _host(COMMS)
-        for pack, name in (("google-pack", "accounts"), ("google-pack", "mail_run"),
-                           ("comms-pack", "diagnostics"), ("it-pack", "mail_exec")):
+    def test_no_component_reaches_another_ones_services(self) -> None:
+        for pack, name in (("google-pack", "mail_accounts"), ("google-pack", "mail_exec"),
+                           ("comms-pack", "diagnostics")):
             with self.subTest(pair=(pack, name)), self.assertRaises(HostError):
-                h.service(pack, name)
-        # Nobody else is granted anything: not even the callee, the other way.
-        with self.assertRaises(HostError):
-            _host(GOOGLE).service("comms-pack", "diagnostics")
+                _host(COMMS).service(pack, name)
 
-    def test_none_when_the_callee_is_not_serving(self) -> None:
-        h = _host(COMMS)
-        self.position(mail="pack", google="native")      # ignored (#526)
-        self.assertIsNotNone(h.service("google-pack", "mail_exec"))
+    def test_the_grant_table_is_code_and_empty(self) -> None:
+        self.assertEqual(dict(builtin.COMPONENT_SERVICES), {})
+
+    def test_the_gateways_mail_code_asks_google_pack_itself(self) -> None:
+        from ..mail import _host as mail_host
+        self.assertEqual(mail_host.google_service("mail_exec")({"x": 1}),
+                         ("mail_exec", ({"x": 1},)))
+        with self.assertRaises(PermissionError):
+            mail_host.get().service("google-pack", "accounts")
         loader._STATES[GOOGLE.key].status = "failed"
-        self.assertIsNone(h.service("google-pack", "mail_exec"))
-        loader.reset()
-        self.assertIsNone(h.service("google-pack", "mail_exec"))
-
-    def test_the_grant_table_is_code_and_closed(self) -> None:
-        self.assertEqual(dict(builtin.COMPONENT_SERVICES), {
-            "comms-pack": frozenset({("google-pack", "mail_accounts"),
-                                     ("google-pack", "mail_exec")})})
+        self.assertIsNone(mail_host.google_service("mail_exec"))
 
 
 class MailboxScopeTests(_Profile, unittest.TestCase):
-    def test_comms_packs_only_whatever_the_profile_says(self) -> None:
-        for mode in ("pack", "native"):
-            with self.subTest(mode=mode):
-                self.position(mail=mode)
-                self.assertEqual(trust.credential_problem(COMMS, "mailbox_"), "")
-        other = _component("google-pack", "google", credentials=("mailbox_",))
-        self.assertTrue(trust.credential_problem(other, "mailbox_"))
+    def test_no_component_reaches_the_mailboxes(self) -> None:
+        """#683: `mailbox_` is the gateway's mail code's; comms-pack (≤ 2.8
+        still declares it) and any other pack are refused."""
+        for pack in ("comms-pack", "google-pack"):
+            with self.subTest(pack=pack):
+                comp = _component(pack, "x", credentials=("mailbox_",))
+                self.assertTrue(trust.credential_problem(comp, "mailbox_"))
+                with self.assertRaises(HostError):
+                    _host(comp).credentials("mailbox_")
 
     def test_comms_pack_cannot_reach_google_credentials(self) -> None:
-        self.position(mail="pack", google="pack")
         sneaky = _component("comms-pack", "mail", credentials=("mailbox_", "google_"))
         self.assertTrue(trust.credential_problem(sneaky, "google_"))
-
-    def test_the_scope_is_checked_at_every_access(self) -> None:
-        self.position(mail="pack")
-        creds = _host(COMMS).credentials("mailbox_")
-        with patch("server.vault.has_credential", return_value=True):
-            self.assertTrue(creds.has("mailbox_studio"))
-            with self.assertRaises(HostError):
-                creds.has("google_studio")
-            # The connector handed to another pack: revoked at the next access.
-            with patch.dict(builtin.RELEASED_TO, {"mail": "other-pack"}), \
-                    self.assertRaises(HostError):
-                creds.has("mailbox_studio")
 
 
 class PerimeterMailTests(unittest.TestCase):

@@ -335,20 +335,15 @@ def connectors_snapshot() -> list[dict]:
             for row in google_rows if not row["operational"]
         ],
     }]
-    # The mailboxes from comms-pack's component (#558), which reads
-    # `mailbox_*`, and says nothing if absent.
+    # The mailboxes, from the gateway's mail code (#683), which reads
+    # `mailbox_*`.
     from .tools import mail_switch
     mailbox_issue = []
     mailbox_rows = [row for row in mail_switch.credential_diagnostics()
                     if row["kind"] == "mailbox"]
-    try:
-        mail_switch.service("diagnostics")
-    except mail_switch.ComponentUnavailable:
-        mailbox_issue = [{"account": "-", "missing": [],
-                          "error": "component_unavailable"}]
     mailbox_accounts = sorted(row["account"] for row in mailbox_rows if row["operational"])
     connectors.append({
-        # The registry's id (comms-pack's `mail`), not the historical
+        # The registry's id (the builtin `mail`), not the historical
         # `mailboxes` (#526): the Tools page merges this row with the
         # registry's card by id, and a different name drew the card twice.
         # `mailboxes` stays a valid profile name (`CONNECTOR_ALIASES`).
@@ -1062,8 +1057,7 @@ def _mail_component_unavailable(e: Exception) -> JSONResponse:
 async def email_mailboxes(request: Request):
     """GET → lista delle caselle generiche (mailbox_*) nel vault (solo nomi).
 
-    The list is comms-pack's component's (service `mailboxes_list`, #558);
-    this URL, its authentication and its answer stay."""
+    The list is the gateway's mail code's (`server/mail/mailboxes.py`)."""
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     from .tools import mail_switch
@@ -1088,9 +1082,9 @@ async def email_mailbox_add(request: Request):
     except Exception:
         return JSONResponse({"error": "bad_json"}, status_code=400)
     from .tools import mail_switch
-    # #558: what a mailbox is (shape, validation, the deposit under
-    # `mailbox_<acct>`) is comms-pack's component's; the URL, the guard, the
-    # authentication and the parsing stay here.
+    # What a mailbox is (shape, validation, the deposit under
+    # `mailbox_<acct>`) is `server/mail/mailboxes.py`'s; the URL, the guard,
+    # the authentication and the parsing are here.
     if not isinstance(b, dict):
         b = {}
     try:
@@ -1117,9 +1111,8 @@ async def email_mailbox_remove(request: Request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     account = request.path_params["account"]
     from .tools import mail_switch
-    # #558: the credential is removed by comms-pack's component, which reads
-    # the address first; the whitelist entries are withdrawn HERE, by the
-    # gateway that owns the lists.
+    # The mail code removes the credential, reading the address first; the
+    # whitelist entries are withdrawn HERE, with the lists.
     try:
         info = await asyncio.to_thread(mail_switch.call, "mailbox_remove", account)
     except mail_switch.ComponentUnavailable as e:
@@ -1501,7 +1494,6 @@ def _test_connector(cid: str) -> dict:
 
         if cid in ("mail", "mailboxes"):
             from .tools import mail_switch
-            # #558: the mailboxes card is comms-pack's component's.
             return mail_switch.component_test_mailboxes()
 
         if cid == "topic-storage":

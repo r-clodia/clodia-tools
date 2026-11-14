@@ -32,7 +32,7 @@ class _Env:
                                     "to", "subject", "body", "account", "topic_files",
                                     "tier", "name", "chat_id", "text", "path", "thread_id")}}),
                       handler=lambda a, _v=v: self.sent.append((_v, a)) or {"sent": True})
-                for v in ("email.send", "telegram.send", "telegram.send_file")}
+                for v in ("telegram.send", "telegram.send_file")}
         tok = whitelist.set_current_agent("segretario")
         test.addCleanup(whitelist.reset_current_agent, tok)
         stack = contextlib.ExitStack()
@@ -43,6 +43,9 @@ class _Env:
                   patch("server.tools.mail_switch.system_mailboxes",
                         return_value=[{"account": "info", "email": "info@tomato.blue"}]),
                   patch.object(M, "_component_verb", lambda n: spec.get(n)),
+                  # #683: `email.send` is the gateway's own delivery-only verb.
+                  patch("server.mail.verbs.send",
+                        lambda a: self.sent.append(("email.send", a)) or {"sent": True}),
                   patch.object(M, "_component_pdp_arguments", lambda _s, _n, a: a),
                   patch.object(M, "_check_component", lambda n: None),
                   patch.object(M, "_check_pack_connector_held", lambda n: None),
@@ -140,6 +143,40 @@ class ChannelDeliverTests(unittest.TestCase):
         self.assertTrue(out.startswith("ERROR"), out)
         self.assertIn("file troppo grande", out)
         self.assertIn("già consegnato: telegram.send", out)
+
+class NativeMailDeliveryTests(unittest.TestCase):
+    """#683: the delivery reaches the gateway's own `email.send`, whose send
+    does NOT ask the agent's whitelist again. With `email.*` denied to every
+    agent (`authz_shadow.PLATFORM_TUPLES`), asking again refused the delivery
+    the gateway had just allowed (the regression of 2.173.0)."""
+
+    def test_the_send_does_not_ask_the_agents_whitelist(self):
+        from .mail import mail
+        runs = []
+        with patch.object(mail, "_run_cli",
+                          lambda acct, argv, **k: runs.append((acct, argv)) or {"stdout": "ok"}), \
+                patch("server.whitelist.tool_allowed",
+                      side_effect=AssertionError("asked the whitelist")):
+            out = mail.send("cliente@x.it", "Offerta", "Testo", account="info")
+        self.assertTrue(out["ok"])
+        (acct, argv), = runs
+        self.assertEqual(acct, "info")
+        self.assertEqual(argv[:3], ["send", "--to", "cliente@x.it"])
+
+    def test_a_delivery_runs_the_native_verb(self):
+        from .mail import verbs
+        real_send = verbs.send          # before `_Env` stands a recorder in
+        env = _Env(self)
+        got = []
+        with patch.object(verbs.mail, "send",
+                          lambda to, subject, body, **k: got.append((to, k["account"])) or {"ok": True}), \
+                patch("server.mail.verbs.send", real_send), \
+                patch.object(verbs.mail, "available_accounts", lambda _a: ["info"]):
+            out = env.call("channel.deliver", {"destination": "mailto:cliente@x.it",
+                                               "text": "x"})
+        self.assertFalse(out.startswith(("DENIED", "ERROR")), out)
+        self.assertEqual(got, [("cliente@x.it", "info")])
+
 
 if __name__ == "__main__":
     unittest.main()

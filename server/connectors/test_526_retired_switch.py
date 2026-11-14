@@ -59,17 +59,20 @@ class NothingNativeIsLeftTests(unittest.TestCase):
     def test_the_builtins_are_schema_only(self):
         ids = {e["id"] for doc in B.manifests().values()
                for e in doc.get("connectors") or []}
-        self.assertEqual(ids, set(B.SCHEMA_ONLY_CONNECTORS))
+        # Mail is the gateway's again (#683): a builtin with its provider and
+        # its Tools card, and the only one that is not schema-only.
+        self.assertEqual(ids, set(B.SCHEMA_ONLY_CONNECTORS) | {"mail"})
         for doc in B.manifests().values():
             for e in doc.get("connectors") or []:
-                self.assertFalse(e.get("providers") or e.get("tools_card"), e["id"])
+                if e["id"] != "mail":
+                    self.assertFalse(e.get("providers") or e.get("tools_card"), e["id"])
 
     def test_every_first_party_connector_has_its_pack_and_namespace(self):
         self.assertEqual(set(B.RELEASED_NAMESPACES) | {"mail-gmail"}, set(B.RELEASED_TO))
         for cid, pack in B.RELEASED_TO.items():
             self.assertIn(pack, B.FIRST_PARTY_PACKS, cid)
         # The namespaces are the ones the former builtins declared.
-        for stem in ("mail", "telegram", "google", "github", "openai"):
+        for stem in ("telegram", "google", "github", "openai"):
             for e in FP.former(stem)["connectors"]:
                 self.assertEqual(B.RELEASED_NAMESPACES[e["id"]], e["namespace"])
 
@@ -107,7 +110,7 @@ class ThirdPartyCannotClaimTests(unittest.TestCase):
                     self.assertTrue(any(f"connector 'acme-{ns}'" in r and "belongs to" in r
                                         for r in reg.refused), reg.refused)
                     self.assertIsNone(reg.by_id(f"acme-{ns}"))
-            self.assertEqual(resolved.registry().by_id("mail").pack, "comms-pack")
+            self.assertEqual(resolved.registry().by_id("mail").pack, "gateway-mail")
 
     def test_even_when_the_owner_is_not_installed(self):
         """No comms-pack/it-pack/google-pack: the namespace stays free for
@@ -153,7 +156,7 @@ class ThirdPartyCannotClaimTests(unittest.TestCase):
                     owner = reg.scheme(sch)
                     self.assertIsNotNone(owner)
         resolved.invalidate()
-        self.assertEqual(resolved.registry().by_id("mail").pack, "comms-pack")
+        self.assertEqual(resolved.registry().by_id("mail").pack, "gateway-mail")
 
     def test_the_install_preview_says_so(self):
         with patch.object(resolved, "manifests", dict):
