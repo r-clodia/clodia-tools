@@ -1,7 +1,7 @@
 """A room's «In ascolto» list (clodia-platform#675/#676).
 
-The owner puts a room in listening on sources — a mail sender, a Telegram
-group, a pack connector's chat — and the connector does the rest. The list is
+The owner puts a room in listening on sources — a mail sender, a pack
+connector's chat — and the connector does the rest. The list is
 DERIVED, not stored: a template kind's sources are the room's ingress entries
 of that kind's shape (`mailfrom:{sender}`), an action kind's source is the chat
 its topic action bound to the room. Existing rooms therefore show their

@@ -100,7 +100,7 @@ async def _lifespan(_app):
     async with _sm.run():
         LOG.info("clodia-tools MCP HTTP: session manager attivo")
         # OFFLOAD + WATCHDOG (clodia-platform#316). `asyncio.to_thread` — che
-        # qui serve topic, github, telegram, web.fetch e imagegen — usa
+        # qui serve topic, github, posta, web.fetch e imagegen — usa
         # l'executor di default, che asyncio crea da sé con `min(32, cpu+4)`
         # thread: su un'istanza da 2 vCPU sono 6, un tetto implicito e derivato
         # dalle CPU per lavoro che aspetta disco e rete. Preso qui, il tetto è
@@ -198,8 +198,6 @@ def build_app() -> Starlette:
     # Topic v2 (lettura per la webui): endpoint interni ckt1.
     from .topics_api import routes as topics_routes
     from .profile_api import routes as profile_routes
-    # Telegram channel-runner (server-side): endpoint interni ckt1 per drenare/inviare.
-    from .telegram_api import routes as telegram_routes
     # Relay transports declared by pack connectors (#638): poll/send/download
     # forwarded to the connector's own loopback service.
     from .channels_api import routes as channels_routes
@@ -246,7 +244,7 @@ def build_app() -> Starlette:
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
                 *imagegen_routes, *topics_routes, *profile_routes,
-                *telegram_routes, *channels_routes, *mail_courier_routes, *agents_routes, *vault_routes,
+                *channels_routes, *mail_courier_routes, *agents_routes, *vault_routes,
                 *tool_routes, *mint_routes, *gate_routes, *logic_routes,
                 *egress_routes, *proxy_auth_routes, *rag_routes, *databases_routes,
                 *audit_routes, *egress_proxy_routes, *connectors_routes,

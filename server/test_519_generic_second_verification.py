@@ -56,7 +56,7 @@ class _As:
 def _calls(t):
     base = f"/internal/topics/{t.tier}/{t.name}"
     return [
-        (_url(t, "telegram", "telegram-link"),
+        (_url(t, "chat", "chat-link"),
          {"action": "connect", "chat": "-100777"}),
         (f"{base}/mailbox-link", {"action": "connect", "account": "studio"}),
         (f"{base}/drive-folder", {"action": "add", "folder": "F"}),
@@ -99,7 +99,7 @@ class TopicOwnerOnlyTests(unittest.TestCase):
 
     def test_the_state_read_follows_the_same_rule(self):
         with _Topic() as t, _As(AGENT_RUNTIME):
-            r = _client().get(_url(t, "telegram", "telegram-link"), headers=_H)
+            r = _client().get(_url(t, "chat", "chat-link"), headers=_H)
             self.assertEqual(r.status_code, 403)
 
 
@@ -135,7 +135,7 @@ from .connectors import first_party_fixture as _first_party
 def setUpModule() -> None:
     # The first-party packs, installed as on every instance: since the switch
     # was retired (#526) the tables pinned here are theirs, not the gateway's.
-    _first_party.install()
+    _first_party.install(chat=True)
 
 
 def tearDownModule() -> None:

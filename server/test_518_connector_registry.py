@@ -295,10 +295,14 @@ class FormMatchesTheWholeValueTests(unittest.TestCase):
         self.assertFalse(form.matches("-100123garbage"))
 
     def test_a_chat_id_with_a_tail_is_not_grantable(self):
+        # A pack chat scheme with a group form (Telegram's until #683).
+        from .connectors import first_party_fixture as FP
+        FP.install(chat=True)
+        self.addCleanup(FP.uninstall)
         with self.assertRaises(ValueError):
-            egress.check_grantable("egress", "tg:-100123garbage")
-        self.assertEqual(egress.check_grantable("egress", "tg:-100123"),
-                         "tg:-100123")
+            egress.check_grantable("egress", "chat:-100123garbage")
+        self.assertEqual(egress.check_grantable("egress", "chat:-100123"),
+                         "chat:-100123")
 
     def test_an_over_long_value_is_refused_before_matching(self):
         import re

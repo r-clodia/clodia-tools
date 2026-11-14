@@ -7,7 +7,7 @@ Two questions, and they are not the same:
   installation: a manifest that is **wrong** (anywhere, any day) against a
   connector that is merely **inert** on this instance — it names a scheme of
   the gateway's own manifests, or a first-party connector's id or namespace
-  (`telegram.` is comms-pack's, #526).
+  (`github.` is it-pack's, #526).
 * `GET /internal/connectors` — what is installed, for the webui of #520, with
   the instance profile applied and **no secret in the payload**.
 
@@ -55,13 +55,13 @@ SMS = {
                "arg": "to", "dtype": "sms"}],
 }
 
-#: Una dichiarazione ben formata di `telegram.`: di comms-pack, e di nessun
+#: Una dichiarazione ben formata di `github.`: di it-pack, e di nessun
 #: altro (`builtin.expected_claims`, #526).
-COMMS_TELEGRAM = {
-    "id": "telegram-pack", "manifest_version": 1, "namespace": "telegram",
-    "label": "Telegram", "schemes": [{"scheme": "tg2", "direction": "both"}],
-    "verbs": [{"verb": "telegram.send", "direction": "egress", "scheme": "tg2",
-               "arg": "chat_id"}],
+IT_GITHUB = {
+    "id": "github-pack", "manifest_version": 1, "namespace": "github",
+    "label": "GitHub", "schemes": [{"scheme": "gh2", "direction": "both"}],
+    "verbs": [{"verb": "github.push", "direction": "egress", "scheme": "gh2",
+               "arg": "repo"}],
 }
 
 
@@ -147,31 +147,32 @@ class ValidateTests(unittest.TestCase):
 
     def test_a_first_party_namespace_claimed_by_another_pack_is_ignored(self):
         """The whole point of the two classes: the pack installs, and the
-        connector that claims comms-pack's `telegram` stays inactive — the
+        connector that claims it-pack's `github` stays inactive — the
         same answer the registry gives at runtime (#526)."""
-        out = cv.validate("acme-pack", [COMMS_TELEGRAM])
+        out = cv.validate("acme-pack", [IT_GITHUB])
         self.assertTrue(out["ok"], out)
         self.assertEqual(out["errors"], [])
         self.assertEqual(len(out["ignored"]), 1)
-        self.assertIn("telegram", out["ignored"][0])
-        self.assertIn("comms-pack", out["ignored"][0])
+        self.assertIn("github", out["ignored"][0])
+        self.assertIn("it-pack", out["ignored"][0])
         self.assertEqual(out["connectors"], [])
 
     def test_the_ignored_connector_really_stays_out_of_the_registry(self) -> None:
-        """«Ignored» has to mean inactive, not merely reported: comms-pack's
+        """«Ignored» has to mean inactive, not merely reported: it-pack's
         mapping must still be the one that answers."""
         with patch.object(resolved, "manifests",
                           lambda: {**_first_party.manifests(),
                                    "acme-pack": {"name": "acme-pack",
-                                                 "connectors": [COMMS_TELEGRAM]}}):
+                                                 "connectors": [IT_GITHUB]}}):
             resolved.invalidate()
             reg = resolved.registry()
             self.assertEqual([c.id for c in reg.connectors
                               if c.pack == "acme-pack"], [])
             self.assertTrue(reg.refused)
-            spec = egress.spec_for("telegram.send")
-            self.assertEqual(spec[1]({"chat_id": "-100"}), ["tg:-100"])
-            self.assertNotIn("tg2", reg.scheme_names("egress"))
+            spec = egress.spec_for("github.push")
+            self.assertEqual(spec[1]({"repo": "https://github.com/o/r"}),
+                             ["https://github.com/o/r"])
+            self.assertNotIn("gh2", reg.scheme_names("egress"))
 
     def test_a_refused_block_is_inert_even_if_it_was_never_validated(self) -> None:
         """Validation is a courtesy to whoever installs; it is NOT what protects
@@ -210,9 +211,9 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         body = r.json()
         ids = {c["id"] for c in body["connectors"]}
-        self.assertIn("telegram", ids)
+        self.assertIn("github", ids)
         self.assertIn("mail", ids)
-        self.assertIn("tg", body["schemes"]["egress"])
+        self.assertIn("gdrive", body["schemes"]["egress"])
         self.assertIn("mailfrom", body["schemes"]["source"])
 
     def test_the_listing_carries_no_secret(self) -> None:

@@ -132,7 +132,7 @@ _AGENT_TOOLS: list[Tool] = [
              "required": ["agent", "skill"]}),
     Tool(name="agents.grant_tool",
          description=("Concede un permesso tool a un agent editabile. Può essere un "
-                      "tool puntuale (es. `email.send`) o un namespace (`fs.*`). "
+                      "tool puntuale (es. `web.post`) o un namespace (`fs.*`). "
                       "L'esito è MISURATO dopo la scrittura: `effective` dice se il "
                       "verbo è davvero concesso, `ok: false` che non lo è. Vale su "
                       "questa istanza (`persistence`): la permanenza sta nel seed."),
@@ -214,7 +214,7 @@ _WEB_TOOLS: list[Tool] = [
             "Non richiede approvazione (leggere non è un'uscita), ma la FONTE conta: "
             "un URL dichiarato fidato in `ingress` non contamina il canale, uno "
             "sconosciuto sì — e da un canale contaminato ogni uscita (email, "
-            "Telegram, POST) chiederà conferma umana. Non segue i redirect: li "
+            "chat, POST) chiederà conferma umana. Non segue i redirect: li "
             "riporta, perché la destinazione va vagliata per conto suo. Solo "
             "destinazioni pubbliche (niente rete interna), solo contenuto testuale, "
             "corpo tenuto fino a 64 KB (alzabile con `max_bytes`, tetto 512 KB): un risultato grosso resta nel contesto e viene riletto a ogni azione successiva del turno."
@@ -997,10 +997,8 @@ _TOPIC_TOOLS: list[Tool] = [
     Tool(
         name="topic.ingress_remove",
         description=("Toglie una fonte fidata locale a questo canale. Non tocca la "
-                     "whitelist globale. Se la fonte è una chat Telegram agganciata "
-                     "a questo topic, ne scollega anche il binding e lo dice "
-                     "(`unbound` nel risultato): togliere la dichiarazione non deve "
-                     "lasciare in piedi il relay che ne dipendeva. Richiede "
+                     "whitelist globale. Una chat collegata con il bottone del suo "
+                     "connettore si scollega da lì (Strumenti/In ascolto). Richiede "
                      "approvazione dell'owner dello scope."),
         inputSchema={"type": "object", "properties": {
             "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
@@ -1458,7 +1456,7 @@ _EGRESS_ADMIN_TOOLS: list[Tool] = [
     Tool(name="egress.allow",
          description=("Aggiunge una DESTINAZIONE ammessa in uscita, per tutti gli "
                       "agenti. Notazione URI: mailto:x@y.it · mailto:*@dominio · "
-                      "tg:<chat> · https://host/ · https://github.com/owner/repo · "
+                      "https://host/ · https://github.com/owner/repo · "
                       "gdrive://<folder-id> (o l'URL del browser) · gsheets:<id>. "
                       "Richiede approvazione umana."),
          inputSchema={"type": "object", "properties": {"uri": {"type": "string"}},
@@ -1476,7 +1474,6 @@ _EGRESS_ADMIN_TOOLS: list[Tool] = [
     Tool(name="ingress.allow",
          description=("Aggiunge una FONTE FIDATA: leggere da lì non contaminerà "
                       "più il canale. Notazione URI: mailfrom:x@y.it · "
-                      "tg:<chat_id> (gruppo) · tg:@handle (persona) · "
                       "https://host/prefisso/ · gdrive://<folder-id> · "
                       "gsheets:<id>. Richiede approvazione umana, e il dialog "
                       "avverte che da quel momento le istruzioni nascoste in quella "
@@ -1495,16 +1492,9 @@ _EGRESS_ADMIN_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {}}),
 ]
 
-# telegram.* — invio + inbound con lease per-chat. Un agente scrive solo a chat
-# che hanno già scritto e di cui detiene il lease; chat diverse → lease
-# indipendenti. Il bot token vive nel vault, mai nel modello.
-#: Only the gateway's OWN Telegram verbs: the channel bindings registry and
-#: the join-by-link tokens (#549). The agent verbs (`inbox`, `send`, `poll`,
-#: `roster`, …) are comms-pack's gateway component's; their native
-#: implementation is gone (clodia-platform#522).
 #: The topic's outbound verb (clodia-platform#531): what the messaggero agent
 #: did, now a verb any agent of the room may hold. It runs the destination's own
-#: verb (`email.send`, `telegram.send`, `telegram.send_file`) through the same
+#: verb (`email.send`, a pack relay's `channel.relay_send`) through the same
 #: `call_tool` path — origin chain, egress PDP, gates, taint, audit — with the
 #: caller's grant
 #: on `channel.deliver` standing in for a grant on that verb only.
@@ -1512,75 +1502,29 @@ _CHANNEL_TOOLS: list[Tool] = [
     Tool(name="channel.deliver",
          description=("Consegna un messaggio FUORI dal topic, a una destinazione già "
                       "dichiarata nelle uscite della stanza: `mailto:<indirizzo>` (o "
-                      "l'indirizzo nudo) per la posta, `tg:<chat_id>` per Telegram, "
-                      "`<schema>:<chat>` per il canale di un pack (es. `sms:+39…`). Il "
+                      "l'indirizzo nudo) per la posta, `<schema>:<chat>` per il "
+                      "canale di un pack (es. `sms:+39…`). Il "
                       "testo parte com'è scritto; gli allegati sono file del topic "
                       "(`attachments: [\"files/x.pdf\"]`). Valgono le stesse regole "
                       "dell'invio diretto: destinazioni non dichiarate negate, "
                       "approvazione dove serve. Per la posta la casella mittente è "
                       "quella della stanza (`account` se ce n'è più d'una)."),
          inputSchema={"type": "object", "properties": {
-             "destination": {"type": "string", "description": "mailto:x@y.it | x@y.it | tg:<chat_id>"},
+             "destination": {"type": "string", "description": "mailto:x@y.it | x@y.it | <schema>:<chat>"},
              "text": {"type": "string"},
              "subject": {"type": "string", "description": "solo posta; default: il titolo del topic"},
              "attachments": {"type": "array", "items": {"type": "string"},
                              "description": "file del topic, es. files/offerta.pdf"},
              "account": {"type": "string", "description": "solo posta, se la stanza ha più caselle"},
-             "thread_id": {"type": "integer", "description": "solo Telegram: thread del forum"}},
+             "thread_id": {"type": "integer", "description": "solo canali di un pack che lo supportano: thread del forum"}},
              "required": ["destination", "text"]}),
 ]
 
 
-_TELEGRAM_TOOLS: list[Tool] = [
-    Tool(name="telegram.listen",
-         description=("Collega una chat Telegram a un topic: da ora il messaggero ne "
-                      "riporta VERBATIM i messaggi nella chat del topic, con l'handle "
-                      "autenticato del mittente. Il messaggero NON esegue né risponde "
-                      "ai messaggi: riportano soltanto, decidono gli agenti del topic. "
-                      "Richiede che tu sia partecipante del topic E che la chat sia "
-                      "GIÀ una fonte dichiarata di QUEL topic: `tg:<chat_id>` passato "
-                      "a topic.ingress_add, che lo chiede all'owner dello scope. "
-                      "Non è il binding ad autorizzare l'ingresso, è la dichiarazione. "
-                      "Binding a livello di istanza: puoi ascoltare più chat."),
-         inputSchema={"type": "object", "properties": {
-             "tier": {"type": "string"}, "name": {"type": "string"},
-             "chat_id": {"type": "string"}},
-             "required": ["tier", "name", "chat_id"]}),
-    Tool(name="telegram.unlisten",
-         description=("Scollega una chat Telegram da un topic: il messaggero smette di "
-                      "riportarne i messaggi. Simmetrico a telegram.listen."),
-         inputSchema={"type": "object", "properties": {
-             "tier": {"type": "string"}, "name": {"type": "string"},
-             "chat_id": {"type": "string"}},
-             "required": ["tier", "name", "chat_id"]}),
-    Tool(name="telegram.join_link",
-         description=("Link per far entrare il bot in un gruppo Telegram per QUESTO "
-                      "topic (clodia-platform#549). Un bot non può unirsi da un link "
-                      "d'invito: è un umano che lo aggiunge. Questo verbo ritorna un "
-                      "link `t.me/<bot>?startgroup=<token>` (monouso, scade in 1 ora) "
-                      "da dare a chi amministra il gruppo: aprendolo sceglie il gruppo "
-                      "e il bot entra. Il gateway riconosce il token e propone il "
-                      "gruppo all'OWNER del topic, che approva ingress+egress dal "
-                      "pulsante Telegram del topic. Non scrivere mai chat_id a mano. "
-                      "Richiede che tu sia partecipante del topic."),
-         inputSchema={"type": "object", "properties": {
-             "tier": {"type": "string"}, "name": {"type": "string"}},
-             "required": ["tier", "name"]}),
-    # Stava in `_TOPIC_TOOLS` (serviva a mappare le persone di un topic) ed è
-    # un verbo `telegram.`, dispatchato da `_dispatch_telegram`. Portato qui da
-    # #373: il namespace si libera solo se se ne va TUTTO, e un verbo elencato
-    # altrove è l'unico modo in cui una migrazione può sembrare fatta e non
-    # esserlo. Non è ciò che FA cadere il namespace — quello lo deriva
-    # `_packaged_namespaces()` dal manifest, e trova questo verbo ovunque
-    # stia — ma è dove il verbo va letto, e rende la PR 3 la cancellazione di
-    # una lista sola.
-]
-
-
 def _packaged_namespaces() -> frozenset[str]:
-    """The namespaces of the connectors first-party packs serve (`email`,
-    `telegram`, `github`, `gdrive`, …): the gateway is not their owner, their
-    verbs come from the pack's gateway component (#522–#526).
+    """The namespaces of the connectors first-party packs serve (`github`,
+    `gdrive`, …): the gateway is not their owner, their verbs come from the
+    pack's gateway component (#522–#526).
 
     Derived from `builtin.released()`, never a second list here. Never raises:
     in doubt, nothing.
@@ -1635,9 +1579,9 @@ _GOOGLE_NATIVE_NAMES: frozenset[str] = frozenset({
     "gsheets.write_range",
 })
 
-_GATEWAY_RETAINED_VERBS = frozenset({
-    "telegram.listen", "telegram.unlisten", "telegram.join_link",
-})
+#: Empty since Telegram's removal (clodia-platform#683): its binding verbs were
+#: the only ones. Kept as the place where such a verb would be named.
+_GATEWAY_RETAINED_VERBS: frozenset[str] = frozenset()
 
 
 def _is_packaged_verb(name: str) -> bool:
@@ -1835,9 +1779,9 @@ async def _dispatch_channel_deliver(a: dict) -> dict:
     if not text.strip():
         raise ValueError("'text' non può essere vuoto")
     allegati = [str(x) for x in (a.get("attachments") or []) if str(x).strip()]
-    _relay = None if destinazione.lower().startswith(("tg:", "mailto:")) \
+    _relay = None if destinazione.lower().startswith("mailto:") \
         else _relay_connector_for(destinazione)
-    if _relay is None and not destinazione.lower().startswith(("tg:", "mailto:")):
+    if _relay is None and not destinazione.lower().startswith("mailto:"):
         # A URI of a scheme some pack connector owns never falls into the mail
         # branch below (#638): `sms:+39…` with its relay down or absent is a
         # refused delivery, said as such — not an «address» to mail.
@@ -1849,8 +1793,8 @@ async def _dispatch_channel_deliver(a: dict) -> dict:
                 f"canale di consegna disponibile")
     if _relay is not None:
         # A pack connector's relay transport (#638): its own `/send`, reached
-        # through `channel.relay_send` so the call takes the same path as
-        # `telegram.send` above — origin chain, gates, egress PDP on the
+        # through `channel.relay_send` so the call takes the same path as any
+        # outbound verb — origin chain, gates, egress PDP on the
         # destination URI, context gate, audit.
         from . import channels_api as _ch
         scheme, _, rest = destinazione.partition(":")
@@ -1863,20 +1807,12 @@ async def _dispatch_channel_deliver(a: dict) -> dict:
                              "gli allegati non sono supportati")
         calls = [("channel.relay_send", {"destination": uri, "text": text,
                                          **({"thread_id": a["thread_id"]} if a.get("thread_id") else {})})]
-    elif destinazione.lower().startswith("tg:"):
-        chat = destinazione[3:].strip()
-        calls = [("telegram.send", {"chat_id": chat, "text": text,
-                                    **({"thread_id": a["thread_id"]} if a.get("thread_id") else {})})]
-        calls += [("telegram.send_file", {"chat_id": chat, "path": p, "tier": tier,
-                                          "name": tname,
-                                          **({"thread_id": a["thread_id"]} if a.get("thread_id") else {})})
-                  for p in allegati]
     else:
         addr = destinazione[len("mailto:"):] if destinazione.lower().startswith("mailto:") else destinazione
         addr = addr.strip()
         if "@" not in addr:
             raise ValueError(f"destinazione '{destinazione}' non riconosciuta: usa "
-                             "mailto:<indirizzo> oppure tg:<chat_id>")
+                             "mailto:<indirizzo> oppure <schema>:<chat> di un canale")
         account = str(a.get("account") or "").strip() or _room_outbox_account(tier, tname)
         meta = (_topics().open(tier, tname) or {}).get("meta") or {}
         args = {"to": addr, "subject": str(a.get("subject") or meta.get("title") or tname),
@@ -1991,90 +1927,6 @@ def _room_outbox_account(tier: str, tname: str) -> str:
                      "indica quale con 'account'")
 
 
-def _telegram_bot_username() -> str:
-    """The bot's @username: as stored with its credential, else as
-    comms-pack's component knows it (`telegram_status`, which asks `getMe`
-    when the credential holds the token only — #522)."""
-    try:
-        from . import vault as _vault
-        if not _vault.has_credential("telegram_bot_token"):
-            return ""
-        stored = str((_vault.read_internal("telegram_bot_token") or {}).get("bot_username") or "")
-        if stored:
-            return stored
-        from .components import loader as _components
-        svc = _components.service("comms-pack", "telegram_status")
-        return str(((svc.handler({}) if svc is not None else None) or {}).get("bot_username") or "")
-    except Exception:  # noqa: BLE001 — unreadable: unknown, the caller says so
-        return ""
-
-
-def _dispatch_telegram(name: str, a: dict):
-    """The gateway's own Telegram verbs (`join_link`, `listen`, `unlisten`):
-    they write the gateway's registries, never call Telegram."""
-    verb = name.split(NS_SEP_DOT, 1)[1]
-    if verb == "join_link":
-        # The link only asks Telegram to add the bot; what it authorises is
-        # decided later by the topic owner (clodia-platform#549).
-        from .tools import telegram_join as tj
-        tier, tname = a["tier"], a["name"]
-        _require_topic_member(_topics(), tier, tname)
-        uname = _telegram_bot_username()
-        if not uname:
-            raise ValueError("bot Telegram non configurato (username sconosciuto): "
-                             "collega prima un bot dalla scheda Tools")
-        out = tj.mint(tier, tname, by=agent_name())
-        return {"link": f"https://t.me/{uname}?startgroup={out['token']}",
-                "expires_in_s": out["expires_in"], "topic": f"{tier}/{tname}",
-                "next": ("dai il link a chi amministra il gruppo; quando il bot entra "
-                         "l'owner del topic riceve la proposta da approvare")}
-    if verb in ("listen", "unlisten"):
-        # Binding sull'ISTANZA del messaggero (telegram-bindings.json), NON nel
-        # meta del topic. Il messaggero dev'essere partecipante del topic in cui
-        # ripeterà. Enforcement compartimento come i topic.*.
-        from .tools import telegram_bindings as tb
-        from .topics.service import _check_channel_cap
-        cid = str(a["chat_id"])
-        tier, tname = a["tier"], a["name"]
-        _require_topic_member(_topics(), tier, tname)
-        if verb == "unlisten":
-            return {"ok": True, "chat_id": cid, "removed": tb.remove(cid)}
-        # listen: SEAL-cap (telegram cappa a SEAL-1) + una chat → un solo binding.
-        meta = _topics().open(tier, tname).get("meta", {})
-        # `meta` porta anche l'eventuale presa d'atto dell'owner sul cap
-        # (clodia-platform#405). La si LEGGE e basta: un agente non ha modo di
-        # scriverla — nasce solo dalla rotta interna dove il principal è l'umano
-        # owner del topic. Senza, il rifiuto è quello di sempre.
-        _check_channel_cap({"type": "telegram"}, meta.get("tier", tier), meta)
-        # La chat dev'essere già dichiarata FONTE del topic bersaglio
-        # (clodia-platform#364). Prima di questo controllo agganciare un gruppo a
-        # un topic non chiedeva niente a nessuno, mentre il meccanismo che questo
-        # sostituisce (`topic.telegram_bind`) era WALLS: il binding, da solo, era
-        # diventato l'atto di autorizzazione senza esserne mai stato incaricato.
-        #
-        # Lo scope si passa ESPLICITO perché il bersaglio sta negli argomenti e
-        # non è detto coincida col canale da cui il messaggero chiama: dedurlo
-        # dal chiamante vaglierebbe la lista della stanza sbagliata, e in modo
-        # permissivo. `telegram-bindings.json` resta quello che è sempre stato —
-        # quale istanza ascolta quale chat — e torna a non essere un permesso.
-        from . import egress as _eg
-        if not _eg.is_vetted_source(f"tg:{cid}", scope=f"{tier}/{tname}"):
-            raise ValueError(
-                f"chat {cid} non è una fonte dichiarata di {tier}/{tname}: "
-                f"fai prima topic.ingress_add(\"{tier}\", \"{tname}\", "
-                f"\"tg:{cid}\") — che chiede all'owner dello scope, il quale "
-                f"decide chi può parlare nella sua stanza.")
-        ex = tb.get(cid)
-        if ex and (ex.get("tier"), ex.get("topic")) != (tier, tname):
-            raise ValueError(
-                f"chat {cid} già collegata a {ex.get('tier')}/{ex.get('topic')}: "
-                f"fai prima telegram.unlisten lì (una chat → un solo topic)")
-        tb.set_binding(cid, agent_name(), tier, tname)
-        return {"ok": True, "chat_id": cid, "instance": agent_name(),
-                "topic": f"{tier}/{tname}"}
-    raise ValueError(f"unknown telegram verb: {name}")
-
-
 def _dispatch_memory(name: str, a: dict):
     from .tools import memory as mem
     verb = name.split(NS_SEP_DOT, 1)[1]
@@ -2161,14 +2013,12 @@ def _native_tool_namespaces() -> list[str]:
     soppiatto: clodia-platform#140.
     """
     tools = (_FS_TOOLS + _WEB_TOOLS + _DATASTORE_TOOLS + _LOGS_TOOLS + _TOPIC_TOOLS + _IMAGE_TOOLS
-             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _CHANNEL_TOOLS + _MEMORY_TOOLS
+             + _RUNTIME_TOOLS + _JOBS_TOOLS + _PROFILE_TOOLS + _CHANNEL_TOOLS + _MEMORY_TOOLS
              + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS
              + _PACKS_TOOLS + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS
              + _copybrain.TOOLS + _NATIVE_CONSENT_TOOLS)
     if instance_profile.rag_enabled():
         tools = tools + _EU_CORPUS_TOOLS + _RAG_TOOLS
-    # `telegram` is listed for the binding verbs the gateway retains there:
-    # without it they would be ungrantable.
     return sorted({t.name.split(NS_SEP_DOT, 1)[0] for t in tools})
 
 
@@ -2607,36 +2457,6 @@ def _component_pdp_arguments(spec, name: str, arguments: dict) -> dict:
                             for k, v in extra.items() if k in owned}}
 
 
-def _telegram_chat_id_or_raise(arguments: dict) -> None:
-    """`chat_id` di `telegram.send` in una delle due forme di `tg:` — l'id
-    numerico di un gruppo o `@handle` — altrimenti ValueError con la via giusta.
-
-    Il messaggio nomina la chat legata al canale corrente, se esiste: è quasi
-    sempre quella che si intendeva, e dirlo evita un secondo tentativo a vuoto.
-    """
-    from . import egress as _eg
-    cid = str(arguments.get("chat_id") or "").strip()
-    # Le forme ammesse le dichiara lo schema del connettore, non una regex qui:
-    # una seconda copia di «com'è fatta una chat» divergerebbe dalla prima al
-    # primo cambiamento, e il valore accettato qui ma non concedibile là
-    # produrrebbe un invio che nessuno può mettere in whitelist.
-    if _eg.scheme_form_ok("tg", cid) and cid:
-        return
-    legato = None
-    canale = current_channel()
-    if canale and "/" in canale:
-        try:
-            from .topics_api import _telegram_binding_for
-            legato, _b = _telegram_binding_for(*canale.split("/", 1))
-        except Exception:  # noqa: BLE001 — il suggerimento è un aiuto, non un requisito
-            legato = None
-    via = (f" In questo canale il gruppo legato è chat_id='{legato}': usa quello."
-           if legato else " Usa l'id numerico del gruppo (negativo per i supergruppi).")
-    raise ValueError(
-        f"telegram.send: chat_id '{cid}' non è una chat Telegram — serve l'id numerico "
-        f"di un gruppo o '@handle' di una persona, non il nome del gruppo." + via)
-
-
 def _is_super(name: str | None) -> bool:
     return (name or "") in _SUPER_AGENTS
 
@@ -2868,7 +2688,7 @@ def _all_native_tools() -> list:
     """
     native = list(_FS_TOOLS + _WEB_TOOLS + _DATASTORE_TOOLS + _LOGS_TOOLS
                   + _TOPIC_TOOLS + _IMAGE_TOOLS + _RUNTIME_TOOLS + _JOBS_TOOLS
-                  + _SETTINGS_TOOLS + _PROFILE_TOOLS + _TELEGRAM_TOOLS + _CHANNEL_TOOLS + _MEMORY_TOOLS
+                  + _SETTINGS_TOOLS + _PROFILE_TOOLS + _CHANNEL_TOOLS + _MEMORY_TOOLS
                   + _EGRESS_ADMIN_TOOLS + _AGENT_TOOLS + _PACKS_TOOLS
                   + _PROVIDERS_TOOLS + _INTEGRATIONS_TOOLS + _MCP_TOOLS
                   + _copybrain.TOOLS + _NATIVE_CONSENT_TOOLS)
@@ -3093,42 +2913,6 @@ async def list_tools() -> list[Tool]:
     return [t for t in (native + proxied)
             if _agent_tool_reachable(t.name, me)
             and not agent_denies(t.name, me)]
-
-
-def _gate_notify_principal(agent: str, gate_key: str, principal: str | None) -> bool:
-    """Notifica best-effort un gate in attesa al PRINCIPAL sui suoi canali di contatto
-    (telegram/email dalla scheda agent). Se il principal non è umano/assente, ripiega
-    sul superadmin umano dell'istanza. Non solleva mai (best-effort)."""
-    try:
-        import httpx as _hx
-        from .tools.runtime import AGENT_SERVER_URL
-        with _hx.Client(timeout=6.0) as c:
-            data = c.get(f"{AGENT_SERVER_URL}/api/agents").json()
-        rows = data.get("agents", data) if isinstance(data, dict) else data
-        by_name = {a.get("name"): a for a in rows}
-        target = by_name.get(principal) if principal else None
-        if not target or target.get("type") != "human":
-            target = next((a for a in rows if a.get("type") == "human"
-                           and a.get("role") == "superadmin"),
-                          next((a for a in rows if a.get("type") == "human"), None))
-        if not target:
-            return False
-        ch = target.get("contact_channels") or {}
-        tg_id = ch.get("telegram") or target.get("telegram")
-        msg = (f"🔐 Gate in attesa: '{agent}' vuole usare `{gate_key}` (azione non "
-               f"presidiata). Approva/nega dalla sezione gate della webui.")
-        if tg_id:
-            # comms-pack's component sends it (#522): the gateway has no
-            # Telegram client. No component → no notification (best effort).
-            from .components import loader as _components
-            svc = _components.service("comms-pack", "telegram_notify")
-            if svc is None:
-                return False
-            svc.handler({"chat_id": str(tg_id), "text": msg})
-            return True
-    except Exception:  # noqa: BLE001 — notifica best-effort, mai bloccante
-        pass
-    return False
 
 
 #: Gate key prefix of a web read from a source not in the ingress lists
@@ -3435,15 +3219,12 @@ async def _require_gate_consent(
                           f"<!-- gate={req.get('id')} -->"), kind="ai")
             except Exception:  # noqa: BLE001 — il gate resta valido anche senza marker
                 pass
-        # Un gate in canale ha una card nella stanza, ma questo non prova che
-        # l'umano stia guardando quella stanza. Un gate fuori canale non ha
-        # nemmeno la card. In entrambi i casi si notifica best-effort il
-        # principal sui suoi canali di contatto; l'approvazione resta sempre la
-        # stessa capability di gate.
+        # Un gate in canale ha una card nella stanza; un gate fuori canale si
+        # approva dalla sezione gate della webui. Nessuna notifica esterna: il
+        # solo canale che la portava, Telegram, è stato tolto (#683).
         import os as _os
         is_channel_gate = _ch.startswith("chan:")
         loops = int(_os.environ.get("GATE_WAIT_LOOPS", "30"))  # 30 = ~60s
-        _gate_notify_principal(agent, gate_key, current_principal())
         if not is_channel_gate:
             loops = int(_os.environ.get("GATE_WAIT_LOOPS_ASYNC", "3600"))  # ~2 ore (loop 2s)
         import asyncio as _aio
@@ -3769,7 +3550,7 @@ def _source_vetted(verb: str, a: dict, result: object = None) -> bool | None:
       un'informazione che abbiamo in mano.
 
     Regola generale: si valuta solo una chiamata con UNA fonte identificabile.
-    `email.list`, `telegram.inbox`, `gcalendar.list_events`
+    `email.list`, `gcalendar.list_events`
     mescolano più mittenti/autori in una risposta: non c'è una fonte da vagliare,
     e dichiararne una sarebbe peggio che ammettere di non poterlo fare.
     """
@@ -3862,20 +3643,18 @@ def agent_name_safe() -> str:
 #: chiesto aiuto in chat. Un rifiuto senza alternativa è un vicolo cieco, e il
 #: modello ci sbatte dentro con l'insistenza di chi non ha altre mosse.
 _DENY_HINT = {
-    "topic.put": ("Per archiviare un allegato di posta usa "
-                  "email.save_attachment(email_id, filename) — senza tier/name "
-                  "va nel topic del canale, e i byte non passano da te. Per un "
+    "topic.put": ("Gli allegati della posta li salva il corriere nei file del "
+                  "topic (topic.mail_check per un controllo subito). Per un "
                   "file che hai prodotto, chiedilo a un agente che ha topic.put."),
-    "topic.write_file": ("Per archiviare un allegato di posta usa "
-                         "email.save_attachment(email_id, filename)."),
+    "topic.write_file": ("Gli allegati della posta li salva il corriere nei "
+                         "file del topic: non serve archiviarli a mano."),
     "topic.read_file": ("Non ti serve leggerlo per spedirlo: "
-                        "email.send(topic_files=['files/x.pdf']) e "
-                        "telegram.send_file(path='files/x.pdf') li allegano "
+                        "channel.deliver(attachments=['files/x.pdf']) lo allega "
                         "senza che il contenuto passi da te."),
     "topic.read_document": ("Per spedire un documento usa "
-                            "email.send(topic_files=[...]) senza leggerlo."),
+                            "channel.deliver(attachments=[...]) senza leggerlo."),
     "topic.fetch": ("Per spedire un file del topic non serve portarselo nello "
-                    "scratch: email.send(topic_files=[...])."),
+                    "scratch: channel.deliver(attachments=[...])."),
     "topic.files": ("Non hai l'elenco dei file di proposito. Il path di ciò che "
                     "devi spedire arriva nella conversazione."),
     "mcp.add": "Si installa dalla pagina Packs, non da un turno di chat.",
@@ -4728,8 +4507,9 @@ def _check_component(name: str) -> None:
             why = (f"'{name}' is implemented by a pack on this instance, but no "
                    "gateway component and no mounted backend of that pack serves "
                    "it (see GET /internal/components)")
-    # Mail, Google, Telegram and the git verbs are served by their pack's
-    # gateway component and by nothing else: a mounted backend that shares
+    # Google and the git verbs are served by their pack's gateway component
+    # and by nothing else, mail by the gateway itself (#683), Telegram by
+    # nobody (removed, #683): a mounted backend that shares
     # the namespace (the GitHub MCP backend) or exposes the same names is
     # never a fallback.
     if not why and _component_verb(name) is None:
@@ -4742,10 +4522,9 @@ def _check_component(name: str) -> None:
                    "(clodia-platform#683). La legge il corriere e la consegna "
                    "nel canale (topic.mail_check per un controllo subito); per "
                    "spedire si usa channel.deliver verso mailto:<indirizzo>")
-        elif name.startswith("telegram.") and name not in _GATEWAY_RETAINED_VERBS:
-            why = (f"'{name}' is served by comms-pack's gateway component "
-                   "(comms-pack ≥ 2.2.0), which is not serving it now "
-                   "(see GET /internal/components)")
+        elif name.startswith("telegram."):
+            why = (f"'{name}': Telegram non è più un canale della piattaforma "
+                   "(clodia-platform#683)")
         elif name in _GITHUB_NATIVE_NAMES:
             why = (f"'{name}' is served by it-pack's gateway component "
                    "(it-pack ≥ 0.20.0), which is not serving it now "
@@ -4952,8 +4731,8 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
         # Enforcement whitelist per-richiesta: in HTTP multi-agente non basta
         # il filtro di list_tools (un client può invocare un tool non elencato).
         # I super-agent (clodia/ophelia) bypassano: accesso a tutti i tool. I
-        # tool dei connettori (email.*, telegram.*) sono concessi anche a chi ha il
-        # relativo grant nel vault (delega per-agent, persistente).
+        # tool dei connettori sono concessi anche a chi ha il relativo grant
+        # nel vault (delega per-agent, persistente).
         _ag = agent_name()
         if is_on_behalf():
             # Richiesta ON-BEHALF di un umano: autorizza sul RUOLO umano (PDP
@@ -5149,8 +4928,7 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             # A delivery-only verb (#638) is not a verb the agent chose: it is
             # how `channel.deliver` carries a relay's text. Its profile
             # question is the one asked of `channel.deliver`, which the agent
-            # declares — not of a name no profile can list. (Telegram's verbs
-            # keep being asked as before.)
+            # declares — not of a name no profile can list.
             _off_profile = outside_profile(
                 "channel.deliver" if (name in _DELIVERY_ONLY_VERBS
                                       and name in _DELIVER_VIA.get()) else name,
@@ -5384,20 +5162,6 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # component verb never reaches a native lookup below.
                 _eargs = await asyncio.to_thread(
                     _component_pdp_arguments, _cpdp, name, arguments)
-                if name in ("telegram.send", "telegram.send_file"):
-                    # #402 holds whoever implements the verb: a `chat_id` that
-                    # is a group TITLE is refused before the verdict, never
-                    # resolved by substring into whichever chat matches
-                    # (review of clodia-logic#542).
-                    _telegram_chat_id_or_raise(arguments)
-            elif name == "telegram.send":
-                # Un `chat_id` che non è una chat Telegram (il TITOLO del gruppo,
-                # «Clodia Sviluppo») diventava `tg:Clodia Sviluppo`, che nessuna
-                # lista contiene: il gateway apriva un gate per approvare un
-                # indirizzo che non esiste, mentre il gruppo vero era già in
-                # whitelist (clodia-platform#402). Si rifiuta PRIMA del verdetto,
-                # dicendo l'id giusto quando il canale ne ha uno legato.
-                _telegram_chat_id_or_raise(arguments)
             elif name == "gdrive.update":
                 # Its destination is the file's parent folder, which only
                 # google-pack's component can read (`pdp_arguments`, above).
@@ -5534,10 +5298,6 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_profile(name, arguments, _ag)
         elif name.startswith("settings."):
             result = _dispatch_settings(name, arguments, _ag)
-        elif name in _GATEWAY_RETAINED_VERBS and name.startswith("telegram."):
-            # Only the gateway's own verbs (bindings, join links): the agent
-            # verbs are comms-pack's component's, dispatched below (#522).
-            result = await asyncio.to_thread(_dispatch_telegram, name, arguments)
         elif name.startswith("memory."):
             result = _dispatch_memory(name, arguments)
         elif name.startswith(("egress.", "ingress.")):
@@ -5876,17 +5636,15 @@ def _safe_scratch_path(p: str) -> str:
     if not rp.startswith(root + "/"):
         raise ValueError(
             f"path non consentito (deve stare sotto {_SPAWNS_ROOT}): {p}. "
-            f"Se stai archiviando un allegato di posta non serve un file locale: "
-            f"email.save_attachment(email_id, filename) lo scrive nel topic del "
-            f"canale, e i byte non passano da te.")
+            f"Gli allegati della posta non servono in locale: li salva il "
+            f"corriere nei file del topic.")
     resto = rp[len(root) + 1:]
     if "/" not in resto:
         raise ValueError(
             f"path non consentito: '{p}' finirebbe nella RADICE del cortile "
             f"degli spawn, non nello scratch di uno spawn. Usa un path dentro la "
-            f"tua directory di lavoro (es. `{_SPAWNS_ROOT}/<spawn>/{resto}`), "
-            f"oppure — se stai archiviando un allegato — `email.save_attachment` "
-            f"senza `dest`, che lo scrive nel topic del canale.")
+            f"tua directory di lavoro (es. `{_SPAWNS_ROOT}/<spawn>/{resto}`). "
+            f"Gli allegati della posta li salva il corriere nel topic.")
     from .whitelist import current_spawn
     mio = current_spawn()
     suo = resto.split("/", 1)[0]
@@ -7064,28 +6822,6 @@ def _dispatch_topic(name: str, a: dict):
         direction = "ingress"
         scope = f"{a['tier']}/{a['name']}"
         out = eg.scope_revoke(direction, scope, a["uri"])
-        # Togliere una chat dalle fonti SCOLLEGA anche il binding che ne
-        # dipendeva (clodia-platform#364). Se restasse in piedi, la revoca non
-        # revocherebbe: i messaggi continuerebbero ad arrivare da un gruppo che
-        # l'owner ha appena de-autorizzato, e la lista direbbe una cosa mentre il
-        # relay ne fa un'altra. Fra le due, quella che si rilegge è la lista.
-        #
-        # È qui e non in `scope_revoke` perché il binding è un fatto del
-        # gateway, non della whitelist: `egress.py` non sa che esista Telegram.
-        # L'effetto torna nel risultato — un effetto collaterale che non si
-        # racconta si scopre solo quando qualcuno chiede perché ha smesso.
-        #
-        # Il confronto passa dal normalizzatore di `egress`, non da `==` sulle
-        # stringhe: `P1/acme` e `SEAL-1/acme` sono la stessa stanza, e un alias
-        # legacy farebbe fallire lo scollegamento in SILENZIO — la fonte via
-        # dalla lista, il relay che continua a riportare.
-        if direction == "ingress" and str(out.get("uri", "")).startswith("tg:"):
-            from .tools import telegram_bindings as tb
-            cid = str(out["uri"])[len("tg:"):]
-            b = tb.get(cid)
-            if b and eg._norm_scope_key(f"{b.get('tier')}/{b.get('topic')}") \
-                    == eg._norm_scope_key(scope):
-                out["unbound"] = tb.remove(cid)
         return out
     raise ValueError(f"unknown topic verb: {name}")
 

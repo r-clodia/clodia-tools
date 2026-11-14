@@ -1,8 +1,6 @@
 """channels_api — the relay transport a pack connector declares (clodia-platform#638).
 
-Telegram's relay routes (`/internal/telegram/{poll,send,download}`) are wired to
-comms-pack's component. A pack that brings another chat channel declares a
-`relay:` block on its connector instead (`connectors/manifest.Relay`): one of
+A pack that brings a chat channel declares a `relay:` block on its connector (`connectors/manifest.Relay`): one of
 its own services, listening on loopback, speaking a three-operation HTTP JSON
 contract. These routes are the agent-server's door to it:
 
@@ -28,7 +26,7 @@ Rules, each closing a way the door could be misused:
   operations are the backend's tools `relay_poll`/`relay_send`/
   `relay_download` (`call_backend`); everything else here is identical.
 
-Same authorisation as `telegram_api`: `internal_auth.authorize`, the
+Authorisation: `internal_auth.authorize`, the
 privileged principal of the agent-server's runner, no on-behalf sessions.
 """
 from __future__ import annotations
@@ -46,7 +44,7 @@ from .connectors.manifest import Connector, loopback_base_problem
 
 LOG = logging.getLogger("clodia-tools.channels_api")
 
-#: Poll timeout bounds, as `/internal/telegram/poll`.
+#: Poll timeout bounds (seconds).
 POLL_MIN, POLL_MAX, POLL_DEFAULT = 1, 50, 25
 #: What the HTTP client waits beyond the poll timeout the service was given.
 POLL_MARGIN = 10.0
@@ -394,7 +392,7 @@ async def relay_download(connector: Connector, file_id: str) -> dict:
 # --------------------------------------------------------------------------
 
 def _authorize(request: Request):
-    """The rule of every internal relay route (`telegram_api._authorize`)."""
+    """The rule of every internal relay route."""
     payload, err = internal_auth.authorize(request, log=LOG)
     return (str(payload.get("agent")) if payload else None), err
 

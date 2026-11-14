@@ -70,7 +70,7 @@ class RootIsNotADestinationTests(unittest.TestCase):
             M._safe_scratch_path(_in("allegato.pdf"))
         t = str(cm.exception)
         self.assertIn("<spawn>", t)
-        self.assertIn("save_attachment", t)
+        self.assertIn("corriere", t)
 
 
 class EscapeTests(unittest.TestCase):

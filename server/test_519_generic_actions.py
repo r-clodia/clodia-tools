@@ -2,7 +2,8 @@
 
 Le rotte di ieri (`telegram-link`, `mailbox-link`) sono diventate **una**
 implementazione guidata dal manifest; l'alias `telegram-link` è stato tolto
-con #526 (la webui chiama solo la rotta generica, e `test_telegram_link.py`
+con #526, e Telegram stesso con #683: il connettore di canale qui è il
+`chat-pack` di esempio (la webui chiama solo la rotta generica, e `test_telegram_link.py`
 gira su quella), `mailbox-link` resta finché la webui ne legge la forma. Qui si
 verifica:
 
@@ -64,7 +65,7 @@ class _Topic:
     def __enter__(self):
         from . import egress as eg
         from .tools import mail_switch
-        from .tools import telegram_bindings as tb
+        from .tools import channel_bindings as cb
 
         def _allow(direction, scope, uri):
             self.liste.setdefault((direction, scope), [])
@@ -91,13 +92,13 @@ class _Topic:
                                  ("ingress" if direction == "inbox" else "egress",
                                   scope or self.scope), []))),
             patch.object(mail_switch, "system_mailboxes", lambda: list(CASELLE)),
-            patch.object(tb, "load", lambda: dict(self.bindings)),
-            patch.object(tb, "get", lambda c: self.bindings.get(str(c))),
-            patch.object(tb, "set_binding",
-                         lambda chat, who, tier, topic: self.bindings.__setitem__(
+            patch.object(cb, "load", lambda conn=None, **k: dict(self.bindings)),
+            patch.object(cb, "get", lambda conn, c, **k: self.bindings.get(str(c))),
+            patch.object(cb, "set_binding",
+                         lambda conn, chat, who, tier, topic, **k: self.bindings.__setitem__(
                              str(chat), {"tier": tier, "topic": topic,
                                          "agent": who})),
-            patch.object(tb, "remove", lambda c: self.bindings.pop(str(c), None)),
+            patch.object(cb, "remove", lambda conn, c, **k: self.bindings.pop(str(c), None)),
             patch.object(topics_api, "_service", lambda: svc),
             patch.object(topics_api.internal_auth, "authorize",
                          lambda *a, **k: (_HUMAN, None)),
@@ -125,27 +126,28 @@ def _url(t: _Topic, cid: str, action: str) -> str:
 class TopicActionTests(unittest.TestCase):
     def test_a_declared_action_writes_exactly_its_own_entries(self) -> None:
         with _Topic() as t:
-            r = _client().post(_url(t, "telegram", "telegram-link"),
+            r = _client().post(_url(t, "chat", "chat-link"),
                                json={"action": "connect", "chat": "-100123"},
                                headers=_H)
             self.assertEqual(r.status_code, 200, r.text)
-            self.assertEqual(t.liste[("egress", t.scope)], ["tg:-100123"])
-            self.assertEqual(t.liste[("ingress", t.scope)], ["tg:-100123"])
+            self.assertEqual(t.liste[("egress", t.scope)], ["chat:-100123"])
+            self.assertEqual(t.liste[("ingress", t.scope)], ["chat:-100123"])
             self.assertEqual(t.bindings["-100123"]["topic"], "acme")
 
     def test_disconnect_takes_back_what_it_wrote(self) -> None:
         with _Topic() as t:
             c = _client()
-            c.post(_url(t, "telegram", "telegram-link"),
+            c.post(_url(t, "chat", "chat-link"),
                    json={"action": "connect", "chat": "-100123"}, headers=_H)
-            r = c.post(_url(t, "telegram", "telegram-link"),
+            r = c.post(_url(t, "chat", "chat-link"),
                        json={"action": "disconnect"}, headers=_H)
             self.assertEqual(r.status_code, 200, r.text)
             self.assertEqual(t.liste[("egress", t.scope)], [])
             self.assertEqual(t.bindings, {})
 
     def test_the_telegram_alias_is_gone(self) -> None:
-        """#526: one URL for the Telegram button, the generic one."""
+        """#526: one URL for a chat button, the generic one (Telegram's old
+        alias stays gone)."""
         with _Topic() as t:
             r = _client().post(f"/internal/topics/{t.tier}/{t.name}/telegram-link",
                                json={"action": "connect", "chat_id": "-100123"},
@@ -155,10 +157,10 @@ class TopicActionTests(unittest.TestCase):
 
     def test_an_undeclared_action_is_refused(self) -> None:
         with _Topic() as t:
-            r = _client().post(_url(t, "telegram", "inventata"),
+            r = _client().post(_url(t, "chat", "inventata"),
                                json={"action": "connect"}, headers=_H)
             self.assertEqual(r.status_code, 400)
-            self.assertIn("telegram-link", r.json()["error"])
+            self.assertIn("chat-link", r.json()["error"])
 
     def test_an_unknown_connector_is_refused(self) -> None:
         with _Topic() as t:
@@ -170,17 +172,17 @@ class TopicActionTests(unittest.TestCase):
     def test_the_state_shows_the_fields_and_what_is_written(self) -> None:
         with _Topic() as t:
             c = _client()
-            vuoto = c.get(_url(t, "telegram", "telegram-link"),
+            vuoto = c.get(_url(t, "chat", "chat-link"),
                           headers=_H).json()
             self.assertFalse(vuoto["connected"])
             self.assertEqual([f["name"] for f in vuoto["fields"]], ["chat"])
             self.assertIn("seal", vuoto)
-            c.post(_url(t, "telegram", "telegram-link"),
+            c.post(_url(t, "chat", "chat-link"),
                    json={"action": "connect", "chat": "-100123"}, headers=_H)
-            pieno = c.get(_url(t, "telegram", "telegram-link"),
+            pieno = c.get(_url(t, "chat", "chat-link"),
                           headers=_H).json()
             self.assertTrue(pieno["connected"])
-            self.assertEqual(pieno["entries"]["egress"], ["tg:-100123"])
+            self.assertEqual(pieno["entries"]["egress"], ["chat:-100123"])
 
 
 class OptionSetTests(unittest.TestCase):
@@ -334,59 +336,13 @@ if __name__ == "__main__":  # pragma: no cover
     unittest.main()
 
 
-TELEGRAM_PACK = {"name": "comms-pack", "connectors": [{
-    "id": "telegram", "manifest_version": 1, "namespace": "telegram",
-    "label": "Telegram",
-    "providers": [{"id": "bot", "label": "Bot", "credential": {
-        "kind": "form", "vault_entry": "telegram_bot_token",
-        "fields": [{"name": "token", "secret": True}]}}]}]}
-
-
-class TelegramEntryAdoptionTests(unittest.TestCase):
-    """#522: the entry the removed native handler wrote (type `api_key`) is
-    adopted by comms-pack's connector, so the bot can still be rotated or
-    disconnected from the Tools page. Any other foreign type stays refused."""
-
-    def setUp(self) -> None:
-        from . import tools_api
-        resolved.invalidate()
-        self.addCleanup(resolved.invalidate)
-        self.tipo = "api_key"
-        self.depositi: list[tuple] = []
-        for p in (patch.object(tools_api, "_authorized", lambda request: True),
-                  patch.object(resolved, "manifests",
-                               lambda: {"comms-pack": TELEGRAM_PACK}),
-                  patch.object(vault, "credential_type", lambda e: self.tipo),
-                  patch.object(vault, "deposit",
-                               lambda e, b, **k: self.depositi.append((e, b, k))),
-                  patch.object(vault, "remove", lambda e: None)):
-            p.start()
-            self.addCleanup(p.stop)
-        self.c = TestClient(Starlette(routes=connectors_api.routes))
-
-    def test_the_old_native_entry_is_rotated(self) -> None:
-        r = self.c.post("/internal/tools/connectors/telegram/connect",
-                        json={"token": "123:NEW"}, headers=_H)
-        self.assertEqual(r.status_code, 200, r.text)
-        (entry, bundle, kw), = self.depositi
-        self.assertEqual((entry, bundle), ("telegram_bot_token", {"token": "123:NEW"}))
-        self.assertEqual(kw.get("cred_type"), "connector:telegram")
-
-    def test_another_foreign_type_is_still_refused(self) -> None:
-        self.tipo = "mcp_secret"
-        r = self.c.post("/internal/tools/connectors/telegram/connect",
-                        json={"token": "123:NEW"}, headers=_H)
-        self.assertEqual(r.status_code, 409, r.text)
-        self.assertEqual(self.depositi, [])
-
-
 from .connectors import first_party_fixture as _first_party
 
 
 def setUpModule() -> None:
     # The first-party packs, installed as on every instance: since the switch
     # was retired (#526) the tables pinned here are theirs, not the gateway's.
-    _first_party.install()
+    _first_party.install(chat=True)
 
 
 def tearDownModule() -> None:

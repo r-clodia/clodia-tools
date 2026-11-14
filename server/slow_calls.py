@@ -8,8 +8,8 @@ one agent's burst.
 
 A burst now queues behind its OWN cap: at most `CAP` slow calls per agent run
 at the same time, the rest wait their turn (bounded), and other agents are not
-touched. "Slow" means the families that leave the machine: mail, Telegram,
-Google, the web.
+touched. "Slow" means the families that leave the machine: mail, Google,
+the web.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import contextlib
 import os
 
 #: Families whose calls do network round trips of seconds.
-SLOW_PREFIXES = ("email.", "telegram.", "gdrive.", "gdocs.", "gsheets.",
+SLOW_PREFIXES = ("email.", "gdrive.", "gdocs.", "gsheets.",
                  "gcalendar.", "web.")
 
 

@@ -46,9 +46,10 @@ class UriExtractionTests(unittest.TestCase):
             self._dests("email.send", {"to": "A@Tomato.blue, b@x.it", "cc": "c@y.it"}),
             ["mailto:a@tomato.blue", "mailto:b@x.it", "mailto:c@y.it"])
 
-    def test_telegram_becomes_tg(self):
-        self.assertEqual(self._dests("telegram.send", {"chat_id": "76632169"}),
-                         ["tg:76632169"])
+    def test_a_chat_id_becomes_a_chat_uri(self):
+        # A pack chat connector (`chat-pack`; Telegram's shape until #683).
+        self.assertEqual(self._dests("chat.send", {"chat_id": "76632169"}),
+                         ["chat:76632169"])
 
     def test_http_keeps_scheme_and_host_only(self):
         """Su TLS il path non è visibile a un proxy: una whitelist che promette
@@ -127,7 +128,7 @@ class MatchingTests(unittest.TestCase):
 
     def test_a_wildcard_stays_inside_its_scheme(self):
         """`mailto:*@x.it` non deve autorizzare una chat o un repo."""
-        self.assertFalse(self._allowed(["mailto:*@x.it"], "telegram.send",
+        self.assertFalse(self._allowed(["mailto:*@x.it"], "chat.send",
                                        {"chat_id": "*@x.it"}))
 
     def test_a_prefix_works_where_hierarchy_exists(self):
@@ -143,7 +144,7 @@ class MatchingTests(unittest.TestCase):
                                        {"to": "a@b.it.evil.com"}))
 
     def test_a_prefix_does_not_apply_to_a_chat_id(self):
-        self.assertFalse(self._allowed(["tg:766"], "telegram.send",
+        self.assertFalse(self._allowed(["chat:766"], "chat.send",
                                        {"chat_id": "76632169"}))
 
     def test_one_refused_recipient_refuses_the_whole_call(self):
@@ -219,15 +220,13 @@ class LegacyMigrationTests(unittest.TestCase):
     def test_per_agent_entries_are_promoted_to_the_global_list(self):
         cfg = {"agents": {
             "sysadmin": {"egress_allow": {"github": ["r-clodia/clodia-platform"]}},
-            "messaggero": {"egress_allow": {"email": ["@tomato.blue", "d@x.it"],
-                                            "telegram": ["76632169"]}},
+            "messaggero": {"egress_allow": {"email": ["@tomato.blue", "d@x.it"]}},
         }}
         with _with(cfg):
             rules = egress.allowed_uris()
         self.assertIn("https://github.com/r-clodia/clodia-platform", rules)
         self.assertIn("mailto:*@tomato.blue", rules)
         self.assertIn("mailto:d@x.it", rules)
-        self.assertIn("tg:76632169", rules)
 
     def test_a_per_type_star_is_not_promoted_to_a_global_star(self):
         """Aprire un tipo per un agente non è aprire tutto per tutti: promuoverlo
@@ -386,7 +385,7 @@ class DangerNoteTests(unittest.TestCase):
 
     def test_each_scheme_has_its_own_note(self):
         for uri, needle in (("mailto:x@y.it", "non è più richiamabile"),
-                            ("tg:123", "non tua"),
+                            ("chat:123", "non tua"),
                             ("gsheets:1abc", "chi ha il link")):
             with self.subTest(uri=uri):
                 self.assertIn(needle, egress.danger_note(uri))
@@ -625,94 +624,15 @@ class ScopeAdminVerbTests(unittest.TestCase):
         self.assertIn("mailto:global@x.it", egress.allowed_uris())
 
 
-class TelegramSourceTests(unittest.TestCase):
-    """`tg:` come FONTE, con due forme per lo stesso schema (#363).
-
-    Telegram entra dal lato ingresso con una distinzione che non ha un parametro
-    dedicato: **è la forma a dire di che cosa si parla**. `tg:-100…` è un
-    gruppo, `tg:@handle` è una persona, e non esiste un terzo modo di scriverlo.
-    Un utente senza handle non è registrabile: è un limite deciso nell'epic
-    #359, non un limite tecnico.
-
-    La convalida della forma sta in `check_grantable`, cioè nel punto che
-    attraversano tutti i verbi che concedono (globale e per scope) e la
-    preview dell'installazione di un pack: una regola `tg:` malformata non
-    fallirebbe rumorosamente, resterebbe in lista senza combaciare mai — e in
-    ingresso «non combacia mai» vuol dire un taint che nessuno ha chiesto di
-    spegnere ma nemmeno di accendere.
-    """
-
-    def setUp(self):
-        from . import whitelist as wl
-        self.cfg = {"agents": {}, "egress_allow": [], "source_allow": []}
-        for pt in (patch.object(wl, "CONFIG", self.cfg),
-                   patch.object(wl, "save_config", lambda: None)):
-            pt.start()
-            self.addCleanup(pt.stop)
-
-    def test_tg_is_a_source_scheme(self):
-        self.assertIn("tg", egress.source_schemes())
-
-    def test_a_group_chat_id_is_grantable_as_a_source(self):
-        self.assertEqual(egress.check_grantable("ingress", "tg:-1001234567890"),
-                         "tg:-1001234567890")
-
-    def test_a_user_handle_is_grantable_as_a_source(self):
-        self.assertEqual(egress.check_grantable("ingress", "tg:@therealdadabit"),
-                         "tg:@therealdadabit")
-
-    def test_only_the_form_tells_a_user_from_a_group(self):
-        """`tg:123` è un gruppo perché è scritto come un gruppo. Chi intendeva
-        una persona ha sbagliato a scriverlo, e non c'è un parametro che possa
-        correggerlo dopo: la forma È la dichiarazione."""
-        self.assertEqual(egress.check_grantable("ingress", "tg:123"), "tg:123")
-        with self.assertRaises(ValueError):
-            egress.check_grantable("ingress", "tg:therealdadabit")
-
-    def test_a_handle_shorter_than_telegram_allows_is_refused(self):
-        with self.assertRaises(ValueError) as cm:
-            egress.check_grantable("ingress", "tg:@ab")
-        self.assertIn("tg:", str(cm.exception))
-
-    def test_a_wildcard_under_tg_is_refused(self):
-        """`tg:*` è l'intero Telegram. Come fonte spegnerebbe il taint su
-        qualunque messaggio arrivi da lì, che è il guadagno durevole che una
-        injection cercherebbe."""
-        for u in ("tg:*", "tg:@*", "tg:-100*"):
-            with self.subTest(u=u), self.assertRaises(ValueError):
-                egress.check_grantable("ingress", u)
-
-    def test_a_path_under_tg_is_refused(self):
-        """Come per `mailfrom:`, un uid non è un percorso."""
-        with self.assertRaises(ValueError):
-            egress.check_grantable("ingress", "tg:-100123/thread/7")
-
-    def test_the_same_form_is_required_in_the_egress_direction(self):
-        """Una destinazione `tg:` malformata sarebbe approvata e inefficace:
-        `_chat()` produce sempre `tg:<chat_id>`, quindi `tg:pippo` non
-        combacerebbe mai — e il sintomo sarebbe «l'ho messa in lista e chiede
-        ancora»."""
-        self.assertEqual(egress.check_grantable("egress", "tg:76632169"),
-                         "tg:76632169")
-        with self.assertRaises(ValueError):
-            egress.check_grantable("egress", "tg:pippo")
-
-    def test_a_granted_telegram_source_is_vetted(self):
-        egress.allow("ingress", "tg:@therealdadabit")
-        with _with(self.cfg):
-            self.assertTrue(egress.is_vetted_source("tg:@TheRealDadabit"))
-            self.assertFalse(egress.is_vetted_source("tg:@qualcunaltro"))
-
-
 class VettedSourceScopeTests(unittest.TestCase):
     """Il vaglio di una fonte sa guardare uno scope DIVERSO da quello del chiamante.
 
     `is_vetted_source` ricavava lo scope solo da `_scope_of_call()`, cioè dal
     claim FIRMATO del canale corrente. Va benissimo finché chi chiede e il
     bersaglio coincidono — la posta in arrivo di questa stanza. Non basta più
-    quando il bersaglio è NEGLI ARGOMENTI: `telegram.listen(tier, name, chat_id)`
-    aggancia un topic che non è necessariamente quello da cui parte la chiamata
-    (clodia-platform#364), e senza scope esplicito il vaglio finirebbe sulla
+    quando il bersaglio è NEGLI ARGOMENTI: un aggancio di chat (allora
+    `telegram.listen(tier, name, chat_id)`, clodia-platform#364) riguarda un
+    topic che non è necessariamente quello da cui parte la chiamata, e senza scope esplicito il vaglio finirebbe sulla
     lista della stanza sbagliata.
 
     L'errore cadrebbe nella direzione permissiva — una chat dichiarata ingress
@@ -737,33 +657,33 @@ class VettedSourceScopeTests(unittest.TestCase):
         return patch.object(egress, "_scope_of_call", lambda: scope)
 
     def test_a_source_of_the_target_scope_is_vetted_even_from_elsewhere(self):
-        egress.scope_allow("ingress", "SEAL-1/bersaglio", "tg:-1001")
+        egress.scope_allow("ingress", "SEAL-1/bersaglio", "chat:-1001")
         with self._chiamante("SEAL-1/altrove"):
             self.assertTrue(
-                egress.is_vetted_source("tg:-1001", scope="SEAL-1/bersaglio"))
+                egress.is_vetted_source("chat:-1001", scope="SEAL-1/bersaglio"))
 
     def test_a_source_of_ANOTHER_scope_does_not_vet_the_target(self):
         """IL CASO. La chat è dichiarata dove sta il chiamante, non nel topic che
         si sta agganciando: passare qui aprirebbe l'aggancio a una stanza in cui
         nessuno ha approvato niente."""
-        egress.scope_allow("ingress", "SEAL-1/altrove", "tg:-1001")
+        egress.scope_allow("ingress", "SEAL-1/altrove", "chat:-1001")
         with self._chiamante("SEAL-1/altrove"):
             self.assertFalse(
-                egress.is_vetted_source("tg:-1001", scope="SEAL-1/bersaglio"))
+                egress.is_vetted_source("chat:-1001", scope="SEAL-1/bersaglio"))
 
     def test_without_a_scope_the_behaviour_is_the_one_of_before(self):
         """Compatibilità: chi non passa lo scope continua a vagliare contro il
         canale corrente. È l'unico chiamante di produzione che esisteva."""
-        egress.scope_allow("ingress", "SEAL-1/altrove", "tg:-1001")
+        egress.scope_allow("ingress", "SEAL-1/altrove", "chat:-1001")
         with self._chiamante("SEAL-1/altrove"):
-            self.assertTrue(egress.is_vetted_source("tg:-1001"))
+            self.assertTrue(egress.is_vetted_source("chat:-1001"))
 
     def test_the_global_list_still_vets_any_scope(self):
         """L'unione globale + scope non cambia: una fonte globale vale ovunque."""
-        egress.allow("ingress", "tg:-1002")
+        egress.allow("ingress", "chat:-1002")
         with self._chiamante(None):
             self.assertTrue(
-                egress.is_vetted_source("tg:-1002", scope="SEAL-1/bersaglio"))
+                egress.is_vetted_source("chat:-1002", scope="SEAL-1/bersaglio"))
 
     def test_the_perimeter_is_asked_about_the_TARGET_room(self):
         """`is_perimeter_source` guarda «chi è nella stanza»: la stanza dev'essere
@@ -904,7 +824,7 @@ from .connectors import first_party_fixture as _first_party
 def setUpModule() -> None:
     # The first-party packs, installed as on every instance: since the switch
     # was retired (#526) the tables pinned here are theirs, not the gateway's.
-    _first_party.install()
+    _first_party.install(chat=True)
 
 
 def tearDownModule() -> None:

@@ -26,10 +26,10 @@ CAT = {
                "namespaces": ["gdrive"], "enumerable": True, "verbs": ["gdrive.update"],
                "write": ["gdrive.update"],
                "schemes": [{"scheme": "gdrive", "direction": "egress", "verbs": ["gdrive.update"]}]},
-    "telegram": {"id": "telegram", "label": "Telegram", "kind": "connector",
-                 "namespaces": ["telegram"], "enumerable": True, "verbs": ["telegram.send"],
-                 "write": ["telegram.send"],
-                 "schemes": [{"scheme": "tg", "direction": "egress", "verbs": ["telegram.send"]}]},
+    "whatsapp": {"id": "whatsapp", "label": "WhatsApp", "kind": "connector",
+                 "namespaces": ["whatsapp"], "enumerable": True, "verbs": ["whatsapp.send"],
+                 "write": ["whatsapp.send"],
+                 "schemes": [{"scheme": "wa", "direction": "egress", "verbs": ["whatsapp.send"]}]},
 }
 SCOPE = "SEAL-1/blog"
 
@@ -75,9 +75,9 @@ class RoomListTests(_Env):
                          [{"uri": "https://api.example.com/", "effect": "allow"}])
 
     def test_a_chat_is_allowed_both_ways(self):
-        egress.scope_allow("ingress", SCOPE, "tg:-100123")
-        self.assertEqual(self.mcp()["telegram"]["resources"],
-                         [{"uri": "tg:-100123", "effect": "allow"}])
+        egress.scope_allow("ingress", SCOPE, "wa:120363000000000000@g.us")
+        self.assertEqual(self.mcp()["whatsapp"]["resources"],
+                         [{"uri": "wa:120363000000000000@g.us", "effect": "allow"}])
 
     def test_removing_takes_its_allow_row_not_the_tool_nor_a_deny(self):
         egress.scope_allow("egress", SCOPE, "mailto:c@d.it")
@@ -97,7 +97,9 @@ class RoomListTests(_Env):
         self.assertEqual(self.mcp(), {})
 
     def test_a_tool_the_instance_lacks_is_left_alone(self):
-        egress.scope_allow("ingress", SCOPE, "wa:+390000000000")
+        sans = {k: v for k, v in CAT.items() if k != "whatsapp"}
+        with patch.object(RT, "mcp_catalogue", lambda: sans):
+            egress.scope_allow("ingress", SCOPE, "wa:+390000000000")
         self.assertNotIn("whatsapp", self.mcp())
 
 

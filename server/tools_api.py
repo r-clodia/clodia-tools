@@ -376,17 +376,6 @@ def connectors_snapshot() -> list[dict]:
         "connected": vault.has_credential("github_pat"),
         "accounts": [],
     })
-    # Telegram (tool telegram.*): connesso se il bot token è nel vault.
-    # "Connetti" inserisce il token di un bot dedicato (paste-key) → vault.
-    _tg_status = _telegram_status()
-    connectors.append({
-        "id": "telegram",
-        "label": "Telegram",
-        "provider": "telegram",
-        "connected": bool(_tg_status.get("configured")),
-        "bot_username": _tg_status.get("bot_username"),
-        "accounts": [],
-    })
     # Topic storage (Topic System v2): il backend attivo mostrato come
     # integrazione "built-in" (oggi local-fs; Drive/Dropbox in P4).
     try:
@@ -1130,31 +1119,6 @@ async def email_mailbox_remove(request: Request):
                          "global_revoked": pulizia["global"]})
 
 
-def _telegram_status() -> dict:
-    """The bot's non-sensitive status (configured, @username, chats, last
-    error), from comms-pack's gateway component (#522): the gateway keeps no
-    Telegram client. Without the component, only whether a token is stored."""
-    configured = vault.has_credential("telegram_bot_token")
-    try:
-        from .components import loader as _components
-        svc = _components.service("comms-pack", "telegram_status")
-        if svc is not None:
-            return dict(svc.handler({}) or {})
-    except Exception as e:  # noqa: BLE001 — a status, never a failure
-        return {"configured": configured, "last_error": str(e)[:200]}
-    return {"configured": configured,
-            "note": "Telegram is served by comms-pack's gateway component; "
-                    "it is not serving now"}
-
-
-async def telegram_status(request: Request):
-    """Stato non sensibile dell'integrazione Telegram (per la card di setup e
-    per Wainston via app_runtime). Mai il token."""
-    if not _authorized(request):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    return JSONResponse(_telegram_status())
-
-
 #: The fields a pairing status may carry back to the Tools card (#639), each
 #: with its length cap. Nothing else of the service's answer reaches the page.
 _PAIRING_FIELDS = {"state": 32, "code": 64, "qr": 4096, "me": 128, "error": 300}
@@ -1467,16 +1431,6 @@ def _test_connector(cid: str) -> dict:
                 return {"ok": True, "detail": f"autenticato come {r.json().get('login')}"}
             return {"ok": False, "detail": f"GitHub {r.status_code}: {r.json().get('message','')}"}
 
-        if cid == "telegram":
-            b = _c("telegram_bot_token")
-            tok = (b or {}).get("value") or (b or {}).get("token") or ""
-            if not tok:
-                return {"ok": False, "detail": "nessun bot token nel vault"}
-            r = _rq.get(f"https://api.telegram.org/bot{tok}/getMe", timeout=15)
-            j = r.json()
-            return ({"ok": True, "detail": f"bot @{j['result'].get('username')}"} if j.get("ok")
-                    else {"ok": False, "detail": j.get("description", "token non valido")})
-
         if cid in ("openai-images", "openai"):
             b = _c("openai_api_key")
             key = (b or {}).get("api_key") or (b or {}).get("value") or ""
@@ -1648,7 +1602,6 @@ routes = [
     Route("/tools/email/mailboxes", email_mailboxes, methods=["GET"]),
     Route("/tools/email/mailboxes", email_mailbox_add, methods=["POST"]),
     Route("/tools/email/mailboxes/{account}", email_mailbox_remove, methods=["DELETE"]),
-    Route("/tools/telegram/status", telegram_status, methods=["GET"]),
     Route("/tools/connectors/{id}/pairing", connector_pairing,
           methods=["GET", "POST"]),
     Route("/tools/backup/config", backup_configure, methods=["POST"]),

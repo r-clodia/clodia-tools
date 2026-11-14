@@ -6,8 +6,8 @@ Il livello sta nel path del topic e in ogni stato che lo indicizza con
 1. spostare il topic (`TopicService.set_tier`: cartella + meta + cronologia);
 2. RIPORTARE, identiche, le voci che il gateway tiene sotto la vecchia chiave:
    - le liste ingress/egress del topic (`scope_source_allow`/`scope_egress_allow`);
-   - i binding di canale di OGNI connettore (`channel_bindings`: Telegram e i
-     relay dei pack, #638);
+   - i binding di canale di OGNI connettore (`channel_bindings`: i relay dei
+     pack, #638);
    - lo stato di contaminazione (`taint`).
 
 Il punto 2 NON è una modifica dei muri — decisione di Davide (28 set 2026):
@@ -48,11 +48,9 @@ def _rekey_scope_lists(old: str, new: str) -> None:
 
 
 def _all_bindings() -> dict:
-    """`{connector: {chat: binding}}` of every connector, in the registry's
-    directory (the Telegram facade's `_base()`, as `connectors.actions`)."""
+    """`{connector: {chat: binding}}` of every connector."""
     from ..tools import channel_bindings as cb
-    from ..tools import telegram_bindings as tb
-    return cb.load(base=tb._base())
+    return cb.load()
 
 
 def _bound_connectors(tier: str, name: str) -> dict[str, list[str]]:
@@ -66,22 +64,16 @@ def _bound_connectors(tier: str, name: str) -> dict[str, list[str]]:
 
 
 def _rekey_bindings(tier: str, new: str, name: str) -> list[str]:
-    """Move EVERY connector's bindings of the topic (#638). Telegram's chats
-    are returned bare, as before; another connector's as `<connector>:<chat>`."""
+    """Move EVERY connector's bindings of the topic (#638), returned as
+    `<connector>:<chat>`."""
     from ..tools import channel_bindings as cb
-    from ..tools import telegram_bindings as tb
     spostati = []
     for conn, chats in _all_bindings().items():
         for cid, b in (chats or {}).items():
             if (b.get("tier"), b.get("topic")) != (tier, name):
                 continue
-            if conn == tb.CONNECTOR:
-                tb.set_binding(cid, b.get("instance") or "messaggero", new, name)
-                spostati.append(cid)
-            else:
-                cb.set_binding(conn, cid, b.get("instance") or "messaggero", new,
-                               name, base=tb._base())
-                spostati.append(f"{conn}:{cid}")
+            cb.set_binding(conn, cid, b.get("instance") or "messaggero", new, name)
+            spostati.append(f"{conn}:{cid}")
     return spostati
 
 
@@ -89,10 +81,6 @@ def _relay_caps_crossed(tier: str, new_tier: str, name: str) -> list[tuple[str, 
     """The pack channels bound to the topic whose SEAL cap `new_tier` exceeds:
     `[(connector, cap)]`. Same rule as binding (`actions.channel_cap`): a
     room may not climb above a pack relay's cap without the owner's ack.
-
-    Telegram is left out on purpose: its retier behaviour is unchanged
-    (its ack still does not survive an upward retier — `channel_cap_acked`
-    compares the tier — but the retier itself is not refused).
     """
     from ..connectors import actions as ca
     from ..connectors import resolved
@@ -100,8 +88,6 @@ def _relay_caps_crossed(tier: str, new_tier: str, name: str) -> list[tuple[str, 
     from .service import _tier_rank
     out = []
     for conn in _bound_connectors(tier, name):
-        if conn == "telegram":
-            continue
         try:
             connector = resolved.registry().by_id(conn)
         except Exception:  # noqa: BLE001 — unknown: the default, fail closed
@@ -133,7 +119,7 @@ def apply(svc, tier: str, name: str, new_tier: str, *, by: str, reason: str,
     unless `accept_seal_downgrade` — the owner's acknowledgement, recorded per
     connector at the new tier, exactly as when binding (#638)."""
     from .. import whitelist as wl
-    from ..tools import telegram_bindings as tb
+    from ..tools import channel_bindings as cb
     from .. import taint
     # #590: a topic cannot go below the level of the data it imports.
     from ..topic_data import DataError, check_retier
@@ -174,11 +160,8 @@ def apply(svc, tier: str, name: str, new_tier: str, *, by: str, reason: str,
             else:
                 wl.CONFIG[k] = v
         wl.save_config()
-        from ..tools import channel_bindings as cb
-        tb._save(bindings_prima.get(tb.CONNECTOR) or {})
         for conn in set(_all_bindings()) | set(bindings_prima):
-            if conn != tb.CONNECTOR:
-                cb.replace(conn, bindings_prima.get(conn) or {}, base=tb._base())
+            cb.replace(conn, bindings_prima.get(conn) or {})
         taint._save(taint_prima)
         svc.s.move(svc._dir(esito["to"], name), svc._dir(esito["from"], name))
         meta, ver = svc._read_meta(esito["from"], name)

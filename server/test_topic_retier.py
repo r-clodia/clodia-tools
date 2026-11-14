@@ -21,7 +21,7 @@ from starlette.testclient import TestClient
 
 from . import taint, topics_api
 from . import whitelist as w
-from .tools import telegram_bindings as tb
+from .tools import channel_bindings as cb
 from .topics import retier
 from .topics.local_fs import LocalFsStorage
 from .topics.service import TopicError, TopicService
@@ -36,14 +36,18 @@ class Base(unittest.TestCase):
             self.svc.new("SEAL-1", "acme", {"title": "Acme", "owner": "davide"})
         self.svc.put_file("SEAL-1", "acme", "offerta.txt", b"ciao")
         stato = Path(tempfile.mkdtemp(prefix="retier-state-"))
-        self.cfg = {"scope_source_allow": {"SEAL-1/acme": ["inbox:info@tomato.blue", "tg:-5411149155"],
-                                           "SEAL-1/altro": ["tg:-1"]},
-                    "scope_egress_allow": {"SEAL-1/acme": ["tg:-5411149155", "gdrive:folder/1xxBOdhf4Vz2lgHAsxIBOEfyY9ymJn_NT"]}}
+        self.cfg = {"scope_source_allow": {"SEAL-1/acme": ["inbox:info@tomato.blue", "chat:-5411149155"],
+                                           "SEAL-1/altro": ["chat:-1"]},
+                    "scope_egress_allow": {"SEAL-1/acme": ["chat:-5411149155", "gdrive:folder/1xxBOdhf4Vz2lgHAsxIBOEfyY9ymJn_NT"]}}
         self._p = [
             patch.object(w, "CONFIG", self.cfg),
             patch.object(w, "save_config", lambda: None),
             patch.object(w, "reload_config", lambda: None),
-            patch.object(tb, "_path", lambda: stato / "telegram-bindings.json"),
+            patch.dict("os.environ", {"CLODIA_DATA": str(stato)}),
+            # The room is bound to a chat of a pack connector; the SEAL cap a
+            # retier must respect is measured in `test_638_639_pack_relay`
+            # (`RetierTests`): here the walls and the bindings move.
+            patch.object(retier, "_relay_caps_crossed", lambda *a: []),
             patch.object(taint, "_path", lambda: stato / "taint.json"),
             patch.object(topics_api, "_svc", self.svc),
             patch.object(topics_api, "_authorize", come_agent_server),
@@ -51,7 +55,7 @@ class Base(unittest.TestCase):
         for p in self._p:
             p.start()
         self.addCleanup(lambda: [p.stop() for p in reversed(self._p)])
-        tb.set_binding("-5411149155", "messaggero", "SEAL-1", "acme")
+        cb.set_binding("chat", "-5411149155", "messaggero", "SEAL-1", "acme")
         taint.mark("chan:SEAL-1:acme:clodia", "verb", "web.fetch", "clodia")
 
 
@@ -73,13 +77,13 @@ class ApplyTests(Base):
     def test_the_walls_move_identical_and_nothing_else_changes(self):
         retier.apply(self.svc, "SEAL-1", "acme", "SEAL-3", by="davide", reason="x")
         self.assertEqual(self.cfg["scope_source_allow"]["SEAL-3/acme"],
-                         ["inbox:info@tomato.blue", "tg:-5411149155"])
+                         ["inbox:info@tomato.blue", "chat:-5411149155"])
         self.assertEqual(self.cfg["scope_egress_allow"]["SEAL-3/acme"],
-                         ["tg:-5411149155", "gdrive:folder/1xxBOdhf4Vz2lgHAsxIBOEfyY9ymJn_NT"])
+                         ["chat:-5411149155", "gdrive:folder/1xxBOdhf4Vz2lgHAsxIBOEfyY9ymJn_NT"])
         self.assertNotIn("SEAL-1/acme", self.cfg["scope_source_allow"])
-        self.assertEqual(self.cfg["scope_source_allow"]["SEAL-1/altro"], ["tg:-1"],
+        self.assertEqual(self.cfg["scope_source_allow"]["SEAL-1/altro"], ["chat:-1"],
                          "le liste degli altri topic non si toccano")
-        self.assertEqual(tb.get("-5411149155")["tier"], "SEAL-3")
+        self.assertEqual(cb.get("chat", "-5411149155")["tier"], "SEAL-3")
 
     def test_moving_a_topic_does_not_clean_its_contamination(self):
         retier.apply(self.svc, "SEAL-1", "acme", "SEAL-0", by="davide", reason="x")
@@ -95,7 +99,7 @@ class ApplyTests(Base):
         self.assertFalse(meta.get("tier_history"))
         self.assertFalse((self.root / "SEAL-2" / "acme").exists())
         self.assertIn("SEAL-1/acme", self.cfg["scope_source_allow"])
-        self.assertEqual(tb.get("-5411149155")["tier"], "SEAL-1")
+        self.assertEqual(cb.get("chat", "-5411149155")["tier"], "SEAL-1")
 
     def test_refusals(self):
         with self.assertRaises(TopicError):

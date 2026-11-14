@@ -388,8 +388,9 @@ def _strip_foreign_claims(installed: dict) -> tuple[dict, list[str]]:
     and `openai-images` (its transport received the API key). Stripped BEFORE
     the build, so the expected pack is never dropped as the "newcomer" of a
     clash with an intruder (review of #379). Since the switch is retired
-    (#526) this is the ONLY thing keeping a third-party pack off `email`,
-    `telegram`, `github`, `openai`, `gdrive`, … (`test_526_retired_switch`).
+    (#526) this is the ONLY thing keeping a third-party pack off `github`,
+    `openai`, `gdrive`, … (`test_526_retired_switch`); `email` is a builtin
+    namespace, `telegram` one released to nobody (#683).
     """
     try:
         claims = _builtin.expected_claims()
@@ -460,10 +461,10 @@ def _build_owners() -> dict[str, frozenset[str]]:
 #: `channel` since #638: `channel.relay_send` is mapped in the core manifest,
 #: and without it a relay delivery must be denied, not sent unchecked.
 FAILSAFE_EGRESS_NAMESPACES = frozenset({
-    "channel", "email", "gdrive", "github", "gsheets", "telegram", "web"})
+    "channel", "email", "gdrive", "github", "gsheets", "web"})
 FAILSAFE_SOURCE_NAMESPACES = frozenset({
     "datastore", "email", "gcalendar", "gdocs", "gdrive", "github", "gsheets",
-    "telegram", "topic", "web"})
+    "topic", "web"})
 
 
 def degraded() -> str:

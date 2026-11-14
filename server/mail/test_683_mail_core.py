@@ -1,8 +1,8 @@
 """#683: mail is the gateway's own code again.
 
 1. the vocabulary is the builtin `mail` manifest: `email` is a gateway
-   namespace, a pack's `mail` connector (comms-pack ≤ 2.8) is ignored while
-   its other connectors stay, google-pack's Gmail still extends it;
+   namespace, an old comms-pack (≤ 2.8: `mail` and `telegram`) is not held,
+   google-pack's Gmail still extends it;
 2. no gateway component may serve `email.*` or reach `mailbox_`;
 3. every service the gateway asks for (`mail_switch`) is the native code;
 4. an agent naming an `email.*` verb is refused, with the way mail works now.
@@ -38,14 +38,17 @@ class VocabularyTests(unittest.TestCase):
         self.assertNotIn("mail", builtin.RELEASED_TO)
         self.assertNotIn("mailbox_", builtin.CORE_CREDENTIALS_FOLLOW)
 
-    def test_a_pack_declaring_mail_keeps_its_other_connectors(self) -> None:
-        old_comms = {"name": "comms-pack",
-                     "connectors": [FP.telegram_connector(), FP.mail_connector()]}
-        reg = self._with({**FP.manifests(), "comms-pack": old_comms})
+    def test_an_old_comms_pack_has_both_its_connectors_refused(self) -> None:
+        """comms-pack ≤ 2.8 declares `mail` and `telegram`. `mail` is the
+        gateway's (#683 phase 1) and `telegram` is released to nobody since
+        Telegram's removal (#683 phase 2): neither is held, and the gateway's
+        own mail vocabulary stays the one that answers."""
+        reg = self._with({**FP.manifests(), "comms-pack": FP.comms_pack()})
         self.assertEqual(reg.by_id("mail").pack, "gateway-mail")
-        self.assertEqual(reg.by_id("telegram").pack, "comms-pack")
-        self.assertTrue(any("connector 'mail'" in r and "belongs to this gateway" in r
-                            for r in resolved.problems()), resolved.problems())
+        self.assertIsNone(reg.by_id("telegram"))
+        self.assertFalse(resolved.held_by_pack("telegram"))
+        self.assertTrue(any("comms-pack" in r for r in resolved.problems()),
+                        resolved.problems())
 
     def test_gmail_still_extends_the_vocabulary(self) -> None:
         reg = self._with(FP.manifests())

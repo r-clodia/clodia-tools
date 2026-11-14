@@ -16,10 +16,9 @@ same argument as the whitelist itself).
 
     agents:
       messaggero:
-        allowed_tools: [email.*, telegram.*]
+        allowed_tools: [email.*]
         egress_allow:
           email:    ["@tomato.blue", "d.carboni@gmail.com"]
-          telegram: ["76632169"]
 
 Three properties from §7 that this module implements literally:
 
@@ -777,8 +776,6 @@ def _legacy_to_uri(dtype: str, rule: str) -> str:
         return ""            # un `*` per-tipo non si promuove a `*` globale
     if dtype == "email":
         return f"mailto:{'*' + r if r.startswith('@') else r}".lower()
-    if dtype == "telegram":
-        return f"tg:{r}"
     if dtype == "github":
         return f"https://github.com/{r}".lower()
     if dtype == "http":
@@ -1138,10 +1135,11 @@ def check_grantable(direction: str, uri: str) -> str:
             f"'{scheme}:*' aprirebbe l'intero {sch.label or scheme}: indica la "
             f"risorsa, oppure un dominio (`{scheme}:*@esempio.it`).")
     # La FORMA si controlla nelle due direzioni, perché è una proprietà dello
-    # schema e non della direzione. In ingresso rifiuta il wildcard su `tg:`,
-    # che spegnerebbe il taint su tutto Telegram; in uscita rifiuta una voce che
-    # non potrebbe MAI combaciare — l'estrattore di `telegram.send` produce
-    # sempre `tg:<chat_id>`, quindi `tg:pippo` sarebbe approvata e inefficace, e
+    # schema e non della direzione. In ingresso rifiuta il wildcard su uno
+    # schema di chat, che spegnerebbe il taint su tutto il servizio; in uscita
+    # rifiuta una voce che non potrebbe MAI combaciare — l'estrattore di un
+    # verbo d'invio produce sempre `<schema>:<chat_id>` in una delle forme
+    # dichiarate, quindi una voce fuori forma sarebbe approvata e inefficace, e
     # il sintomo («l'ho messa in lista e chiede ancora») non nominerebbe la
     # causa. Stessa ragione per `topic:`, che vuole LIVELLO e NOME: un livello
     # intero non è una fonte di cui qualcuno risponda.

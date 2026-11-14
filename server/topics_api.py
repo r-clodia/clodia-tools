@@ -533,25 +533,6 @@ async def post_message(request: Request):
         return JSONResponse({"error": "not_found"}, status_code=404)
 
 
-async def set_channel(request: Request):
-    """POST /internal/topics/{tier}/{name}/channel {channel} → configura il
-    channel dei messaggi (telegram) del topic; {} o null → rimuove (webui)."""
-    _, err = _authorize(request)
-    if err:
-        return err
-    tier = request.path_params["tier"]; name = request.path_params["name"]
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "bad_json"}, status_code=400)
-    try:
-        meta = _service().set_channel(tier, name, body.get("channel"))
-        _invalidate_list_cache()
-        return JSONResponse({"ok": True, "channel": meta.get("channel")})
-    except TopicError as e:
-        return JSONResponse({"error": str(e)[:200]}, status_code=400)
-
-
 def _actor(request: Request, body: dict) -> tuple[str, bool, str | None]:
     """Who imports, as the gateway can know it (#590): the signed on-behalf
     human, or — on the agent-server's door, which has checked owner/admin —
@@ -1237,42 +1218,6 @@ async def topic_link(request: Request):
         return JSONResponse({"error": str(e)[:200]}, status_code=502)
 
 
-def _telegram_binding_for(tier: str, name: str) -> tuple[str | None, dict | None]:
-    """(chat_id, binding) legati a questo topic, o (None, None). Una chat →
-    un solo topic, ma questo cerca l'inverso: qual è LA chat di questo topic —
-    ce n'è al più una, per lo stesso vincolo."""
-    from .tools import telegram_bindings as tb
-    for cid, b in tb.load().items():
-        if (b.get("tier"), b.get("topic")) == (tier, name):
-            return cid, b
-    return None, None
-
-
-def _telegram_seal_state(tier: str, name: str) -> dict:
-    """Dove sta il cap SEAL del channel Telegram su QUESTO topic (#405).
-
-    Va nella risposta sempre, anche quando non morde: la UI deve sapere se
-    chiedere la presa d'atto senza riscrivere la regola: una policy duplicata nel
-    frontend è una policy che prima o poi dirà il contrario del backend, e a
-    quel punto quella che conta non è quella che l'owner ha letto.
-    """
-    from .topics.service import channel_ack, channel_cap_acked, channel_seal_cap
-    try:
-        meta = _service().open(tier, name).get("meta", {})
-    except TopicError:
-        meta = {}
-    cap = channel_seal_cap("telegram")
-    t = meta.get("tier", tier)
-    from .topics.service import _tier_rank
-    morde = cap is not None and _tier_rank(t) > cap
-    return {
-        "tier": t,
-        "cap": f"SEAL-{cap}" if cap is not None else None,
-        "requires_ack": bool(morde and not channel_cap_acked(meta, "telegram", t)),
-        "ack": channel_ack(meta, "telegram"),
-    }
-
-
 async def topic_tier(request: Request):
     """POST /internal/topics/{tier}/{name}/tier {tier, by, reason} — riclassifica
     il topic a un nuovo livello SEAL (clodia-platform#426).
@@ -1827,7 +1772,6 @@ routes = [
     Route("/internal/topics/{tier}/{name}/goal", set_goal, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/orchestrator", set_orchestrator, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/participants", participants, methods=["POST", "DELETE"]),
-    Route("/internal/topics/{tier}/{name}/channel", set_channel, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/drive-folder", drive_folder, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/data", topic_data_route, methods=["POST"]),
     Route("/internal/topics/{tier}/{name}/tools", topic_tools_route, methods=["GET", "POST"]),

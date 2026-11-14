@@ -26,13 +26,9 @@ class _Env:
                                          "denied_tools": list(denied)}},
                "egress_allow": [],
                "scope_egress_allow": {f"{ROOM[0]}/{ROOM[1]}": list(egress_scope)}}
-        spec = {v: NS(pack="comms-pack", component="comms-pack/comms", offload=False,
-                      tool=Tool(name=v, description="", inputSchema={"type": "object",
-                                "properties": {k: {} for k in (
-                                    "to", "subject", "body", "account", "topic_files",
-                                    "tier", "name", "chat_id", "text", "path", "thread_id")}}),
-                      handler=lambda a, _v=v: self.sent.append((_v, a)) or {"sent": True})
-                for v in ("telegram.send", "telegram.send_file")}
+        # No component verb is reached by these deliveries any more (Telegram's
+        # were the last, #683): mail is the gateway's own `email.send`.
+        spec: dict = {}
         tok = whitelist.set_current_agent("segretario")
         test.addCleanup(whitelist.reset_current_agent, tok)
         stack = contextlib.ExitStack()
@@ -108,15 +104,6 @@ class ChannelDeliverTests(unittest.TestCase):
         self.assertTrue(out.startswith(("DENIED", "ERROR")), out)
         self.assertEqual(env.sent, [])
 
-    def test_telegram_text_then_files(self):
-        env = _Env(self, egress_scope=("tg:-100123",))
-        out = env.call("channel.deliver", {"destination": "tg:-100123", "text": "ciao",
-                                           "attachments": ["files/a.png"], "thread_id": 7})
-        self.assertFalse(out.startswith(("DENIED", "ERROR")), out)
-        self.assertEqual([v for v, _ in env.sent], ["telegram.send", "telegram.send_file"])
-        self.assertEqual(env.sent[0][1], {"chat_id": "-100123", "text": "ciao", "thread_id": 7})
-        self.assertEqual(env.sent[1][1]["path"], "files/a.png")
-
     def test_two_room_mailboxes_need_an_account(self):
         env = _Env(self, egress_scope=("mailto:cliente@x.it", "outbox:info@tomato.blue",
                                        "outbox:studio@x.it"))
@@ -127,22 +114,6 @@ class ChannelDeliverTests(unittest.TestCase):
         self.assertTrue(out.startswith("ERROR"), out)
         self.assertIn("account", out)
 
-
-    def test_a_failed_file_after_the_text_names_the_partial_delivery(self):
-        env = _Env(self, egress_scope=("tg:-100123",))
-        real = M._component_verb
-
-        def _verb(n):
-            v = real(n)
-            if n == "telegram.send_file":
-                return NS(**{**vars(v), "handler": lambda a: {"error": "file troppo grande"}})
-            return v
-        with patch.object(M, "_component_verb", _verb):
-            out = env.call("channel.deliver", {"destination": "tg:-100123", "text": "ciao",
-                                               "attachments": ["files/a.png"]})
-        self.assertTrue(out.startswith("ERROR"), out)
-        self.assertIn("file troppo grande", out)
-        self.assertIn("già consegnato: telegram.send", out)
 
 class NativeMailDeliveryTests(unittest.TestCase):
     """#683: the delivery reaches the gateway's own `email.send`, whose send

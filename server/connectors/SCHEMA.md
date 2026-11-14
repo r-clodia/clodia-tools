@@ -29,7 +29,7 @@ A `connectors:` list at the top level of `pack.yaml`, alongside `agents:`,
 
 ```
 pack.yaml
-  name: comms-pack
+  name: chat-pack
   connectors:
     - id: …
 ```
@@ -38,11 +38,11 @@ pack.yaml
 
 | Kind | Declares | Example |
 |---|---|---|
-| **Vocabulary owner** | `schemes:`, and may declare `verbs:`, `taint:`, `topic_actions:` | `comms-pack` owns the mail vocabulary `mailto:`/`mailfrom:`/`inbox:`/`outbox:` |
+| **Vocabulary owner** | `schemes:`, and may declare `verbs:`, `taint:`, `topic_actions:` | the gateway's builtin `mail` owns the mail vocabulary `mailto:`/`mailfrom:`/`inbox:`/`outbox:` (comms-pack until #683) |
 | **Contributor** | `extends: <id>` plus `providers:` only | `google-pack` adds Gmail as a provider of that same vocabulary |
 
 The split is the whole of the multi-provider decision of 2026-10-08. Gmail lives
-in `google-pack` and IMAP in `comms-pack`, but `mailto:` has to mean one thing on
+in `google-pack` and IMAP in the gateway, but `mailto:` has to mean one thing on
 the instance. So the vocabulary has exactly one owner, and a contributor adds an
 *implementation*, never a *meaning*: an entry with `extends:` that also carries
 `schemes:`, `verbs:`, `taint:` or `topic_actions:` is refused. Otherwise the pack
@@ -74,7 +74,7 @@ extending nothing, is empty and refused.
 | `providers` | no | implementations, each with its credential |
 | `verbs` | no | verb → destination and read → source; a verb may appear more than once |
 | `danger_uris` | no | warnings for URIs of a shared scheme (`match` + `text`) |
-| `taint` | no | verb names or prefixes, inside the connector's namespace, whose answers DO taint the channel they land in — content nobody vouched for (`taint.taints`); e.g. comms-pack's `telegram.inbox`, google-pack's `gcalendar.list_events` |
+| `taint` | no | verb names or prefixes, inside the connector's namespace, whose answers DO taint the channel they land in — content nobody vouched for (`taint.taints`); e.g. chat-pack's `chat.inbox`, google-pack's `gcalendar.list_events` |
 | `unmapped` | no | verbs of the namespace that deliberately have NO egress/source mapping (#558); see below |
 | `topic_actions` | no | buttons the connector adds to a topic |
 | `listen` | no | kinds of source a room can listen to through this connector (#676); see below |
@@ -263,7 +263,7 @@ once.
 (optional, default `false`), and `adds:` with `ingress:` /
 `egress:` templates over the action's own fields. A template naming a field the
 action does not declare is an error, and so is a template that does not start
-with one of the connector's OWN schemes written out (`tg:{chat}`, never `{url}`
+with one of the connector's OWN schemes written out (`chat:{chat_id}`, never `{url}`
 or `https://{host}/`; an `extends` provider uses the vocabulary it joins). At
 run time every resolved URI is checked against its scheme's forms and against
 `egress.check_grantable` before anything is written. A pack's action may write
@@ -327,8 +327,8 @@ Two shapes, never both:
         egress: 'mailto:{sender}'       # written when the room replies
         reply: choice                   # none | choice (the owner ticks it) | implicit
       - kind: chat                      # an ACTION kind: the source is the chat
-        label: Chat Telegram            # a `binding: channel` topic action binds
-        action: telegram-link
+        label: Chat                     # a `binding: channel` topic action binds
+        action: chat-link
 ```
 
 A template kind's `ingress`/`egress` interpolate exactly the field and END with
@@ -392,7 +392,7 @@ and an extractor with no value is a verb with no declared destination.
 
 ```
 defaults:
-  - verb: telegram.send
+  - verb: chat.send
     arg: chat_id
     value: binding      # the chat bound to the calling topic
 ```
@@ -404,7 +404,7 @@ default is a convenience — «send it to this topic's chat» — and an explici
 value from the caller has to win, or you could no longer write to any chat other
 than the bound one.
 
-Per **verb**, not per namespace: `telegram.inbox` has no chat to fill, and
+Per **verb**, not per namespace: `chat.inbox` has no chat to fill, and
 filling it anyway would hand the backend an argument its schema does not
 declare.
 
@@ -422,7 +422,7 @@ wrong symptom for «this topic has no chat connected».
 
 ```
 files:
-  - verb: telegram.send_file
+  - verb: chat.send_file
     path_arg: path            # what the caller names
     bytes_arg: content_b64    # where the gateway puts the bytes
     name_arg: filename        # where it puts the basename
@@ -536,13 +536,13 @@ port (every loopback name is the same socket), and no two services of the
 instance — any pack, relay or not — may declare the same `http`/`tcp` health
 address; both packs are refused.
 
-**SEAL cap.** Binding a room to a relay is capped like Telegram (#405): above
+**SEAL cap.** Binding a room to a relay is capped (#405): above
 `seal_cap` — or SEAL-1 when the manifest names none, fail closed — the owner
 must acknowledge the downgrade (`accept_seal_downgrade`) with the room's tier
 shown, and the acknowledgement is dropped on disconnect. The cap is reported in
 the topic action's `seal` state and in the listing's `relay.seal_cap`.
 Acknowledgements are kept per connector (`channel_seal_ack: {<connector>:
-{…}}`; the older single slot is read as Telegram's), and disconnecting a
+{…}}`; the older single slot is read as the entry of its `channel`), and disconnecting a
 channel withdraws only its own. Re-classifying a room carries every
 connector's bindings to the new tier; climbing above a pack relay's cap is
 refused unless the owner acknowledges it again (`accept_seal_downgrade` on the
@@ -577,7 +577,7 @@ came from the gateway». The token changes at every restart; never log it.
 | `POST /download` | `{file_id}` | `{content_b64, size, mime}` — only with `attachments: true` |
 
 **Gateway side.** `POST /internal/channels/<connector>/{poll,send,download}`
-(same authorisation as `/internal/telegram/*`: the agent-server's privileged
+(the agent-server's privileged
 principal) forward to `<base>/<operation>` for a connector the live registry
 accepted with `relay:`, and for no other path. Unknown connector, no `relay:`,
 or `download` without `attachments` → 404; the service not running or not
@@ -600,11 +600,11 @@ a 400.
 seal_cap}` for such a connector — never `base` or the port. A topic action with `binding: channel`
 writes its binding under its own connector id, and `channel.deliver` reaches
 any scheme of a relay connector through the same `send` path, under the same
-egress decision as a Telegram delivery (`channel.relay_send`, mapped in the
+egress decision as any outbound verb (`channel.relay_send`, mapped in the
 core manifest; its profile question is asked of `channel.deliver`). A
 destination whose scheme belongs to any connector is never mailed: without a
 usable relay the delivery is refused. A relayed message is posted with `kind: channel` and
-`transport: <label>`; like `telegram`, it does not taint the room, because the
+`transport: <label>`; it does not taint the room, because the
 sender was vetted against the room's ingress before it was posted.
 
 ### `pairing` (clodia-platform#639)
@@ -867,7 +867,7 @@ host.service(pack, name) -> callable | None     # ANOTHER pack's service, grante
   component's config. There is no public route.
 - **Credentials**: a prefix must be declared, and must be usable *now*: inside
   the namespace of one of the component's connectors; or a core prefix
-  (`telegram_`, `github_`, …) released by the connectors of this very pack
+  (`github_`, `openai_`, …) released by the connectors of this very pack
   (`builtin.released_to`); or a gateway-custody entry listed in
   `builtin.CORE_CREDENTIALS_FOLLOW` (e.g. `google_`, `app_google_oauth`) whose
   connector is this pack's (`builtin.RELEASED_TO`). Checked again at every
@@ -890,11 +890,12 @@ host.service(pack, name) -> callable | None     # ANOTHER pack's service, grante
   the caller's value is dropped, never kept.
 - **Another pack's services** (#558, mail): `host.service(pack, name)` looks up
   a service of ANOTHER pack's serving component, only for the pairs
-  `builtin.COMPONENT_SERVICES` grants (code, closed by default; today
-  comms-pack → google-pack's `mail_accounts` and `mail_exec`). Anything else
-  is a `HostError`; a component not serving is None, and the caller fails
-  closed. It lets each pack keep to its own credentials: comms-pack never
-  reaches a Google refresh token, it asks google-pack to run the client.
+  `builtin.COMPONENT_SERVICES` grants (code, closed by default; empty since
+  #683, when comms-pack's mail — the one caller — moved into the gateway).
+  Anything else is a `HostError`; a component not serving is None, and the
+  caller fails closed. The gateway's own mail code asks google-pack's
+  `mail_accounts` and `mail_exec` itself, so it never reaches a Google
+  refresh token either.
 - **Perimeter**: read-only facts the gateway holds and the agent-server cannot
   write — the config's `gdrive_roots`, the egress/source lists in force for the
   call, `gcal:` approvals, a topic's `drive_folders`, whether the call comes
@@ -978,14 +979,15 @@ registry down with it.
 
 ### The first-party connectors (#522–#526)
 
-Telegram, Google, GitHub and image generation used to be builtin files
-here too. The migrations of the epic #527 moved each into a first-party pack —
-comms-pack (`telegram`), google-pack (`google`, `google-sheets`,
+Google, GitHub and image generation used to be builtin files here too. The
+migrations of the epic #527 moved each into a first-party pack — google-pack
+(`google`, `google-sheets`,
 `google-docs`, `google-calendar`, and Gmail's `mail-gmail`), it-pack
 (`github`, `openai-images`) — whose **gateway component** implements the
 verbs inside the reference monitor (see «Components»). Mail went to
-comms-pack too (#522–#558) and came back as a builtin in #683 (above). For a
-while an
+comms-pack too (#522–#558) and came back as a builtin in #683 (above);
+Telegram went to comms-pack and was removed from the platform in #683, and
+comms-pack is no longer a first-party pack. For a while an
 instance switch (`profile.yaml`, `connectors: {<id>: native|pack}`) chose per
 connector between the gateway's code and the pack's; the native code is gone
 and #526 retired the switch. A profile that still carries `connectors:` keeps
@@ -994,19 +996,21 @@ loading; a `native` value is ignored with one boot warning.
 What the gateway keeps about them is in `connectors/builtin.py`, as code:
 
 - **Who owns them.** `RELEASED_TO` names the ONE pack each connector belongs
-  to, and `RELEASED_NAMESPACES` its namespace (`telegram`, `github`,
-  `openai`, `gdrive`, `gsheets`, `gdocs`, `gcalendar`). Any other pack that
+  to, and `RELEASED_NAMESPACES` its namespace (`github`, `openai`, `gdrive`,
+  `gsheets`, `gdocs`, `gcalendar`). Any other pack that
   declares one of those connector ids or namespaces has that entry stripped
   before the registry is built (`resolved._strip_foreign_claims`), and the
   install preview reports it as `ignored`: a third-party pack can never answer
-  `telegram.send` or receive `github_pat`. `email` is a builtin namespace
-  (#683), refused to every pack by the build itself.
+  `github.push` or receive `github_pat`. `email` is a builtin namespace
+  (#683), refused to every pack by the build itself; `telegram` stays a
+  reserved namespace (its vault prefix `telegram_` is a core one) released to
+  nobody, so a comms-pack still installed cannot serve it.
 - **The credentials stay in the gateway's custody.** `mailbox_<acct>`,
   `google_`/`gworkspace_`/`gmail_` and `app_google_oauth` remain reserved vault
   prefixes with the same names and shapes; google-pack's component reaches
   its own through `host.credentials(...)` (`CORE_CREDENTIALS_FOLLOW`), and
   `mailbox_` is read by the gateway's mail code only (#683). The adopted
-  entries `telegram_bot_token`, `github_pat` and `openai_api_key`
+  entries `github_pat` and `openai_api_key`
   (`ADOPTED_VAULT_ENTRIES`) keep their legacy shapes; `github_pat` and
   `openai_api_key` are still written by their legacy handlers
   (`connectors_api._LEGACY_ADOPTED`). `google` stays a reserved NAMESPACE with
@@ -1032,27 +1036,30 @@ What the gateway keeps about them is in `connectors/builtin.py`, as code:
 
 ## Examples
 
-They describe the shape of the first-party packs (abridged): `telegram.` and
-`github.` are namespaces of packs, not of the gateway. The mail vocabulary is
+They describe the shape of packs (abridged): `chat.` (a fictional example)
+and `github.` are namespaces of packs, not of the gateway. The mail vocabulary is
 the gateway's own `builtin_manifests/mail.yaml` since #683.
 
-### comms-pack — Telegram (and, until #683, the mail vocabulary)
+### chat-pack — a messaging connector (example), and the mail vocabulary
+
+A fictional pack: a chat service reached through the pack's own transport
+(the shape a pack relay such as WhatsApp declares), and the `mail` vocabulary
+as the reference example of a vocabulary whose providers come from two packs.
+Telegram, which this example used to describe, was removed in #683.
 
 ```yaml
-name: comms-pack
+name: chat-pack
 connectors:
-  - id: telegram
+  - id: chat
     manifest_version: 1
-    namespace: telegram
-    label: Telegram
+    namespace: chat
+    label: Chat
     schemes:
-      - scheme: tg
+      - scheme: chat
         direction: both
-        label: Telegram chat
-        # Verbatim from `egress._DANGER["tg"]`, in the language the owner reads
-        # it at the gate: the example is the declaration, and a translated
-        # sentence here would be a different thing to consent to.
-        danger: "una chat su Telegram, cioè su un'infrastruttura non tua."
+        label: Chat
+        # In the language the owner reads it at the gate.
+        danger: "una chat su un servizio di messaggistica esterno, cioè su un'infrastruttura non tua."
         forms:
           - label: group
             pattern: '^-?\d+$'
@@ -1062,75 +1069,73 @@ connectors:
             example: '@dadabit'
     providers:
       - id: bot
-        label: Telegram bot
-        status_verb: telegram.status
+        label: Chat bot
+        status_verb: chat.status
         credential:
           kind: form
-          vault_entry: telegram_bot_token
+          vault_entry: chat_bot_token
           fields:
             - name: token
               label: Bot token
               secret: true
               placeholder: '123456:ABC-DEF…'
     verbs:
-      - verb: telegram.send
+      - verb: chat.send
         direction: egress
-        scheme: tg
+        scheme: chat
         arg: chat_id
-        dtype: telegram
-      - verb: telegram.send_file
+        dtype: chat
+      - verb: chat.send_file
         direction: egress
-        scheme: tg
+        scheme: chat
         arg: chat_id
-        dtype: telegram
+        dtype: chat
     # `chat_id` omesso = la chat legata al topic da cui si chiama. Lo risolve
     # il gateway, che è l'unico a tenere il registro dei binding; un esplicito
     # del chiamante vince, se no non si potrebbe più scrivere altrove.
     defaults:
-      - verb: telegram.send
+      - verb: chat.send
         arg: chat_id
         value: binding
-      - verb: telegram.send_file
+      - verb: chat.send_file
         arg: chat_id
         value: binding
-    # `telegram.send_file` manda un file che sta in un topic. Il path lo nomina
+    # `chat.send_file` manda un file che sta in un topic. Il path lo nomina
     # l'agente, i byte li mette il gateway: leggere un file di topic è lavoro
     # suo — ci stanno attaccati il compartimento e l'audit di ciò che esce.
     files:
-      - verb: telegram.send_file
+      - verb: chat.send_file
         path_arg: path
         bytes_arg: content_b64
         name_arg: filename
         tier_arg: tier
         topic_arg: name
         chat_arg: chat_id
-    # No `telegram.read`: today no Telegram read goes through
-    # `_RESOURCE_READ_VERBS`, so declaring one would add a check that does not
-    # exist — inside a migration (#522) whose whole point is parity. What the
-    # incoming side does have is the taint below.
+    # No `chat.read` source mapping: incoming chat mixes several authors in
+    # one answer, so there is no single source to vet. It taints instead.
     taint:
-      - telegram.inbox
-      - telegram.receive
-      - telegram.pull
+      - chat.inbox
+      - chat.receive
+      - chat.pull
     topic_actions:
-      - id: telegram-link
-        label: Link a Telegram chat
+      - id: chat-link
+        label: Link a chat
         binding: channel
         fields:
           - name: chat_id
             label: Chat id or @handle
         adds:
           ingress:
-            - 'tg:{chat_id}'
+            - 'chat:{chat_id}'
           egress:
-            - 'tg:{chat_id}'
+            - 'chat:{chat_id}'
     listen:
       - kind: chat
-        label: Chat Telegram
-        action: telegram-link
+        label: Chat
+        action: chat-link
     tools_card:
       setup_label: Connect a bot
-      status_verb: telegram.status
+      status_verb: chat.status
     # Who is calling, and from which room. The native verbs read both from the
     # process — the signed channel claim and the authenticated agent — and a
     # pack's MCP server has neither. Declared here, filled by the gateway, and

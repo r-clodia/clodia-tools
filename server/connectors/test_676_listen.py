@@ -16,27 +16,27 @@ from .test_manifest import _examples
 SENDER = {"kind": "sender", "label": "Mittente email",
           "field": {"name": "sender", "placeholder": "nome@dominio.it"},
           "ingress": "mailfrom:{sender}", "egress": "mailto:{sender}", "reply": "choice"}
-CHAT = {"kind": "chat", "label": "Chat Telegram", "action": "telegram-link"}
+CHAT = {"kind": "chat", "label": "Chat", "action": "chat-link"}
 
 
 def _conn(cid, listen):
-    entry = copy.deepcopy(next(c for c in _examples()["comms-pack"]["connectors"]
+    entry = copy.deepcopy(next(c for c in _examples()["chat-pack"]["connectors"]
                                if c["id"] == cid))
     entry["listen"] = listen
-    return M.parse_connector(entry, pack="comms-pack")
+    return M.parse_connector(entry, pack="chat-pack")
 
 
 class GrammarTests(unittest.TestCase):
     def test_a_pack_scheme_without_forms_is_accepted(self):
-        """comms-pack's `mailfrom`/`mailto` declare no forms; listening to a
+        """A pack's `mailfrom`/`mailto` may declare no forms; listening to a
         sender must not get the whole pack refused."""
-        entry = copy.deepcopy(next(c for c in _examples()["comms-pack"]["connectors"]
+        entry = copy.deepcopy(next(c for c in _examples()["chat-pack"]["connectors"]
                                    if c["id"] == "mail"))
         for sch in entry["schemes"]:
             if sch["scheme"] in ("mailfrom", "mailto"):
                 sch.pop("forms", None)
         entry["listen"] = [SENDER]
-        self.assertEqual(M.parse_connector(entry, pack="comms-pack").listen[0].kind, "sender")
+        self.assertEqual(M.parse_connector(entry, pack="chat-pack").listen[0].kind, "sender")
 
     def test_a_template_kind(self):
         (k,) = _conn("mail", [SENDER]).listen
@@ -44,8 +44,8 @@ class GrammarTests(unittest.TestCase):
                          ("sender", "mailfrom:{sender}", "mailto:{sender}", "choice", "sender"))
 
     def test_an_action_kind_replies_implicitly(self):
-        (k,) = _conn("telegram", [CHAT]).listen
-        self.assertEqual((k.action, k.reply), ("telegram-link", "implicit"))
+        (k,) = _conn("chat", [CHAT]).listen
+        self.assertEqual((k.action, k.reply), ("chat-link", "implicit"))
 
     def test_an_action_without_a_channel_binding_is_refused(self):
         with self.assertRaises(M.ManifestError):
@@ -78,7 +78,7 @@ class RoomListenTests(unittest.TestCase):
         from .. import room_listen as R
         self.R = R
         self.mail = _conn("mail", [SENDER])
-        self.tg = _conn("telegram", [CHAT])
+        self.tg = _conn("chat", [CHAT])
         self.lists = {"ingress": ["mailfrom:a@b.it", "mailfrom:*@c.it", "https:*"],
                       "egress": ["mailto:a@b.it"]}
         self.calls = []
@@ -90,7 +90,7 @@ class RoomListenTests(unittest.TestCase):
             patch("server.egress.scope_revoke",
                   lambda d, s, u: self.calls.append(("revoke", d, u)) or {"uri": u}),
             patch("server.connectors.actions._bound_chat",
-                  lambda cid, t, n: "-100123" if cid == "telegram" else None),
+                  lambda cid, t, n: "-100123" if cid == "chat" else None),
             patch.object(R, "_inbox", lambda t, n: None),
         ]
         for p in ps:
@@ -127,11 +127,11 @@ class RoomListenTests(unittest.TestCase):
 
     def test_an_action_kind_is_not_written_here(self):
         with self.assertRaises(self.R.ListenError):
-            self.R.add("SEAL-1", "acme", "telegram", "chat", "-1")
+            self.R.add("SEAL-1", "acme", "chat", "chat", "-1")
 
     def test_kinds_for_the_dialog(self):
         ks = {(k["connector"], k["kind"], k["reply"]) for k in self.R.kinds()}
-        self.assertEqual(ks, {("mail", "sender", "choice"), ("telegram", "chat", "implicit")})
+        self.assertEqual(ks, {("mail", "sender", "choice"), ("chat", "chat", "implicit")})
 
 
 class InboxTests(unittest.TestCase):
@@ -168,13 +168,13 @@ class SummaryOptionsTests(unittest.TestCase):
 
     def test_an_option_set_field_carries_its_name(self):
         from . import validate as V
-        entry = copy.deepcopy(next(c for c in _examples()["comms-pack"]["connectors"]
+        entry = copy.deepcopy(next(c for c in _examples()["chat-pack"]["connectors"]
                                    if c["id"] == "mail"))
         entry["topic_actions"][0]["fields"] = [{"name": "account", "options": "mailboxes"}]
-        row = V.summary(M.parse_connector(entry, pack="comms-pack"))
+        row = V.summary(M.parse_connector(entry, pack="chat-pack"))
         self.assertEqual(row["topic_actions"][0]["fields"][0].get("options"), "mailboxes")
 
     def test_a_free_field_carries_none(self):
         from . import validate as V
-        row = V.summary(_conn("telegram", [CHAT]))
+        row = V.summary(_conn("chat", [CHAT]))
         self.assertNotIn("options", row["topic_actions"][0]["fields"][0])

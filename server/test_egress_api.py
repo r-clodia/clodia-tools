@@ -146,32 +146,32 @@ class SourceQueryTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         return json.loads(r.body)
 
-    def test_a_granted_telegram_handle_is_vetted(self):
-        b = self._q("tg:@TheRealDadabit",
-                    {"source_allow": ["tg:@therealdadabit"], "agents": {}})
+    def test_a_granted_chat_handle_is_vetted(self):
+        b = self._q("chat:@TheRealDadabit",
+                    {"source_allow": ["chat:@therealdadabit"], "agents": {}})
         self.assertTrue(b["vetted"])
 
     def test_an_unlisted_handle_is_not(self):
-        b = self._q("tg:@qualcunaltro",
-                    {"source_allow": ["tg:@therealdadabit"], "agents": {}})
+        b = self._q("chat:@qualcunaltro",
+                    {"source_allow": ["chat:@therealdadabit"], "agents": {}})
         self.assertFalse(b["vetted"])
 
     def test_a_handle_vetted_in_one_room_is_not_vetted_in_another(self):
         """La lista per-scope vale LÌ: è la ragione per cui lo scope si passa
         esplicito invece di dedurlo (#364)."""
         cfg = {"agents": {},
-               "scope_source_allow": {"SEAL-1/acme": ["tg:@tizio"]}}
-        self.assertTrue(self._q("tg:@tizio", cfg, scope="SEAL-1/acme")["vetted"])
-        self.assertFalse(self._q("tg:@tizio", cfg, scope="SEAL-1/altro")["vetted"])
+               "scope_source_allow": {"SEAL-1/acme": ["chat:@tizio"]}}
+        self.assertTrue(self._q("chat:@tizio", cfg, scope="SEAL-1/acme")["vetted"])
+        self.assertFalse(self._q("chat:@tizio", cfg, scope="SEAL-1/altro")["vetted"])
 
     def test_without_a_scope_only_the_global_list_counts(self):
         """Uno scope omesso non deve valere «tutti gli scope»: la direzione
         sbagliata qui è quella permissiva, e non si vede."""
-        cfg = {"agents": {}, "scope_source_allow": {"SEAL-1/acme": ["tg:@tizio"]}}
-        self.assertFalse(self._q("tg:@tizio", cfg)["vetted"])
+        cfg = {"agents": {}, "scope_source_allow": {"SEAL-1/acme": ["chat:@tizio"]}}
+        self.assertFalse(self._q("chat:@tizio", cfg)["vetted"])
 
     def test_the_answer_does_not_carry_the_list(self):
-        b = self._q("tg:@estraneo", {"source_allow": ["tg:@segretissimo"], "agents": {}})
+        b = self._q("chat:@estraneo", {"source_allow": ["chat:@segretissimo"], "agents": {}})
         self.assertNotIn("segretissimo", str(b))
 
     def test_the_egress_query_is_unchanged(self):
@@ -354,7 +354,7 @@ from .connectors import first_party_fixture as _first_party
 def setUpModule() -> None:
     # The first-party packs, installed as on every instance: since the switch
     # was retired (#526) the tables pinned here are theirs, not the gateway's.
-    _first_party.install()
+    _first_party.install(chat=True)
 
 
 def tearDownModule() -> None:
