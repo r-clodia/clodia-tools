@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -94,6 +95,19 @@ class StructureTests(_Base):
         self.assertEqual(0, st["latest_version"])
         self.assertEqual("SEAL-2", st["tier_hint"])
 
+    def test_the_plugin_folder_itself_is_never_a_schema_or_migrations_dir(self):
+        for bad in (".", "./", "mcp/.."):
+            with self.subTest(bad=bad):
+                self.write_manifest([{"name": "contabilita", "schema": "mcp/schema.sql",
+                                      "migrations": bad}])
+                self.assertIsNone(datastores.structure("assetti-contabili/contabilita")
+                                  ["migrations"])
+
+    def test_structures_whose_env_names_collide_are_refused(self):
+        self.write_manifest([{"name": "a-b", "schema": "mcp/schema.sql"},
+                             {"name": "a_b", "schema": "mcp/schema.sql"}])
+        self.assertEqual(["assetti-contabili/a-b"], sorted(datastores.structures()))
+
     def test_schema_outside_the_plugin_is_not_a_schema(self):
         self.write_manifest([{"name": "contabilita", "schema": "../../etc/passwd"}])
         self.assertIsNone(datastores.structure("assetti-contabili/contabilita")["schema"])
@@ -110,6 +124,22 @@ class StructureTests(_Base):
 
 
 class CreateTests(_Base):
+    def test_imported_by_scopes_is_the_list(self):
+        out = self.create()
+        self.imp("tomato", out["id"])
+        [row] = di.structures_view()["structures"][0]["instances"]
+        self.assertEqual(["SEAL-2/tomato"], row["imported_by_scopes"])
+        self.assertEqual(1, row["imported_count"])
+
+    def test_registry_writes_take_a_file_lock(self):
+        import fcntl
+        self.create()
+        lock = self.state / "datastore-instances.lock"
+        self.assertTrue(lock.exists())
+        with open(lock, "a+") as fh:          # free once the write is done
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
     def test_create_builds_the_file_from_the_schema_and_catalogues_it(self):
         out = self.create(purpose="Libri di Tomato")
         self.assertEqual("assetti-contabili/contabilita:tomato", out["id"])
@@ -188,6 +218,18 @@ class CreateTests(_Base):
         archived = datastores.instances(include_archived=True)
         self.assertTrue(archived[0]["archived_at"])
         self.assertIsNotNone(cat.get("datastore", out["id"]))   # the catalogue keeps it
+        # reinstall: the name stays the archived instance's, with a clear message …
+        shutil.copytree(str(self.root / "plugins-archive" / "a"), str(self.plugin),
+                        ignore=shutil.ignore_patterns("datastores"))
+        with self.assertRaises(ValueError) as c:
+            self.create()
+        self.assertIn("archiviata", str(c.exception))
+        # … and putting its file back makes it usable again
+        shutil.move(str(self.root / "plugins-archive" / "a" / "datastores"),
+                    str(self.root / "datastores" / "assetti-contabili"))
+        self.assertEqual(out["id"], datastores.find_instance(out["id"])["pack"] + "/"
+                         + datastores.find_instance(out["id"])["name"])
+        self.assertIsNone(datastores.instances()[0]["archived_at"])
 
 
 class RouteTests(_Base):
@@ -284,8 +326,14 @@ class VerbTests(_Base):
                 M._dispatch_packs("packs.create_datastore", {
                     "structure": "assetti-contabili/contabilita", "name": "other",
                     "tier": "SEAL-2"})
-        listed = M._dispatch_packs("packs.datastore_structures", {})
-        self.assertEqual(1, len(listed["structures"][0]["instances"]))
+            listed = M._dispatch_packs("packs.datastore_structures", {})
+        [row] = listed["structures"][0]["instances"]
+        self.assertNotIn("created_by", row)                 # not for agents
+        self.create("alto", tier="SEAL-3")
+        with patch.object(M, "current_clearance", lambda: "SEAL-1"):
+            listed = M._dispatch_packs("packs.datastore_structures", {})
+        self.assertEqual(["assetti-contabili/contabilita:uncommon"],
+                         [i["id"] for i in listed["structures"][0]["instances"]])
 
 
 class LegacyMigrationTests(_Base):
@@ -349,6 +397,62 @@ class LegacyMigrationTests(_Base):
         cat._LAST_SYNC[0] = 0.0
         cat.sync()
         self.assertIsNone(cat.get("datastore", "assetti-contabili/contabilita"))
+
+    def test_authz_rules_follow_the_datastore(self):
+        from . import authz_shadow
+        gp = Path(authz_shadow._global_path())
+        gp.write_text(json.dumps({"tuples": [
+            {"id": "g1", "agent": "commercialista", "verb": "datastore.read",
+             "resource": "datastore:assetti-contabili/contabilita",
+             "rule": [{"effect": "allow", "match": "*"}]},
+            {"id": "g2", "agent": "*", "verb": "web.fetch", "resource": "*",
+             "rule": [{"effect": "ask", "match": "*"}]}]}))
+        meta, ver = self.svc._read_meta("SEAL-1", "bilancio")
+        meta["authz"] = [{"id": "r1", "agent": "*", "verb": "datastore.write",
+                          "resource": "datastore:assetti-contabili/contabilita",
+                          "rule": [{"effect": "deny", "match": "*"}]}]
+        self.svc._write_meta("SEAL-1", "bilancio", meta, base_version=ver)
+        self.write_manifest()
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            mig.main([])
+        dry = json.loads(buf.getvalue())["candidates"][0]["authz_rules"]
+        self.assertEqual(["global:g1", "SEAL-1/bilancio:r1"], dry)
+        self.assertIn("datastore:assetti-contabili/contabilita\"", gp.read_text())  # untouched
+        mig.apply(mig.candidates())
+        iid = "datastore:assetti-contabili/contabilita:tomato"
+        g = json.loads(gp.read_text())["tuples"]
+        self.assertEqual([iid, "*"], [t["resource"] for t in g])
+        self.assertEqual(iid, self.svc._read_meta("SEAL-1", "bilancio")[0]["authz"][0]["resource"])
+
+    def test_an_interrupted_run_is_resumed(self):
+        self.write_manifest()
+        rows = mig.candidates()
+        # crash right after the registry entry (step 1): nothing else done
+        with patch.object(mig, "_move", side_effect=OSError("disk")):
+            with self.assertRaises(OSError):
+                mig.apply(rows)
+        self.assertIn("assetti-contabili/contabilita:tomato", datastores.instance_registry())
+        self.assertTrue(self.legacy.is_file())
+        again = mig.candidates()
+        self.assertEqual(["resume"], [r["action"] for r in again])
+        mig.apply(again)
+        self.assertFalse(self.legacy.exists())
+        self.assertIsNone(cat.get("datastore", "assetti-contabili/contabilita"))
+        self.assertEqual([], [r for r in mig.candidates() if r["action"] != "skip"])
+
+    def test_a_file_already_in_place_is_adopted(self):
+        self.write_manifest()
+        dst = self.root / "datastores/assetti-contabili/contabilita/tomato.db"
+        dst.parent.mkdir(parents=True)
+        self.legacy.replace(dst)
+        rows = mig.candidates()
+        self.assertEqual(["adopt"], [r["action"] for r in rows])
+        mig.apply(rows)
+        self.assertIsNotNone(datastores.find_instance("assetti-contabili/contabilita:tomato"))
+        self.assertIsNotNone(cat.get("datastore", "assetti-contabili/contabilita:tomato"))
 
     def test_name_override(self):
         self.write_manifest()
@@ -446,6 +550,15 @@ class ResolveTests(_Base):
         self.svc.new("SEAL-2", "vuoto", {"owner": "davide", "participants": ["commercialista"]})
         with self.assertRaises(PermissionError):
             self._bind("SEAL-2/vuoto", {})
+
+    def test_a_bound_backend_over_http_is_refused(self):
+        b = {"name": "contabilita", "transport": "http", "url": "https://x.example/mcp"}
+        with patch.object(whitelist, "current_channel", lambda: "SEAL-2/tomato"), \
+                patch.object(whitelist, "agent_name", lambda: "commercialista"), \
+                patch.object(whitelist, "current_clearance", lambda: "SEAL-2"):
+            with self.assertRaises(PermissionError) as c:
+                proxy.bind_instances("contabilita", b, {})
+        self.assertIn("non è stdio", str(c.exception))
 
     def test_other_backends_are_untouched(self):
         b = {"name": "normattiva", "command": "x"}
@@ -585,6 +698,7 @@ class SchemaMigrationTests(_Base):
         conn.close()
         self.add(1, "CREATE TABLE extra (x);\nALTER TABLE fatture ADD COLUMN valuta TEXT;")
         rep = di.migrate()
+        self.assertIn("Update", rep["retry"])
         self.assertEqual(["assetti-contabili/contabilita:tomato"],
                          [r["id"] for r in rep["migrated"]])
         self.assertEqual(["assetti-contabili/contabilita:uncommon"],
@@ -596,6 +710,31 @@ class SchemaMigrationTests(_Base):
         self.assertNotIn("extra", tables)                    # rolled back as a whole
         versions = {i["name"]: i["schema_version"] for i in datastores.instances()}
         self.assertEqual({"tomato": 1, "uncommon": 0}, versions)
+
+    def test_a_stale_instance_is_refused_also_by_its_full_id(self):
+        from . import main as M
+        self.add(1, "ALTER TABLE fatture ADD COLUMN valuta TEXT;")
+        self.imp("tomato", "assetti-contabili/contabilita:tomato")
+        with patch.object(whitelist, "current_chat", lambda: "chan:SEAL-2:tomato:commercialista"), \
+                patch.object(whitelist, "current_channel", lambda: "SEAL-2/tomato"), \
+                patch.object(M, "agent_name", lambda: "commercialista"), \
+                patch.object(M, "is_on_behalf", lambda: False), \
+                patch.object(M, "current_clearance", lambda: "SEAL-2"):
+            with self.assertRaises(PermissionError) as c:
+                M._datastore_authorize("assetti-contabili/contabilita:tomato", write=False)
+            self.assertIn("Riprova migrazione", str(c.exception))
+            di.migrate(ids=["assetti-contabili/contabilita:tomato"])
+            M._datastore_authorize("assetti-contabili/contabilita:tomato", write=False)
+
+    def test_retry_one_instance(self):
+        self.add(1, "ALTER TABLE fatture ADD COLUMN valuta TEXT;")
+        rep = di.migrate(ids=["assetti-contabili/contabilita:uncommon"])
+        self.assertEqual(["assetti-contabili/contabilita:uncommon"],
+                         [r["id"] for r in rep["migrated"]])
+        versions = {i["name"]: i["schema_version"] for i in datastores.instances()}
+        self.assertEqual({"tomato": 0, "uncommon": 1}, versions)
+        with self.assertRaises(ValueError):
+            di.migrate(ids=["nonsense"])
 
     def test_an_instance_below_the_schema_is_not_served(self):
         self.add(1, "ALTER TABLE fatture ADD COLUMN valuta TEXT;")

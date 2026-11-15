@@ -34,7 +34,6 @@ import os
 import re
 import sqlite3
 import tempfile
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,7 +41,6 @@ from . import data_catalog as cat
 from . import datastores
 
 LOG = logging.getLogger("clodia-tools.datastore_instances")
-_LOCK = threading.Lock()
 
 #: The environment variable that carries an instance's file to a pack's MCP.
 ENV_PREFIX = "CLODIA_DATASTORE_"
@@ -158,9 +156,15 @@ def create(structure: str, name: str, *, tier: str, by: str, clearance: str | No
         raise PermissionError(
             f"'{iid}' è stata eliminata: il nome resta riservato (ripristino dalla "
             "pagina Databases, o scegli un altro nome)")
-    with _LOCK:
+    with datastores.registry_lock():
         reg = datastores.instance_registry()
         path = datastores.instance_file(st["pack"], st["name"], name)
+        if isinstance(reg.get(iid), dict) and reg[iid].get("archived_at"):
+            raise ValueError(
+                f"'{iid}' è stata archiviata con il pack il {reg[iid]['archived_at']}: il "
+                "nome resta suo. Per riusarla rimetti il file da plugins-archive/<pack>-<data>/"
+                f"datastores/{st['name']}/{name}.db in datastores/{st['pack']}/{st['name']}/ "
+                "(torna attiva da sola), oppure scegli un altro nome")
         if iid in reg or path.exists():
             raise ValueError(f"esiste già un'istanza '{iid}'")
         _build_file(path, st["schema"], st["latest_version"])
@@ -183,14 +187,19 @@ def create(structure: str, name: str, *, tier: str, by: str, clearance: str | No
 # ── List ─────────────────────────────────────────────────────────────────────
 
 def structures_view(*, scopes_of: dict[str, list[str]] | None = None,
-                    visible: set[str] | None = None) -> dict:
+                    visible: set[str] | None = None, clearance: str | None = None,
+                    for_agent: bool = False) -> dict:
     """`{structures: [{id, pack, name, purpose, pii, backup, tier_hint,
     schema_version, creatable, legacy, instances: [{id, name, tier, purpose,
-    pii, backup, schema_version, created_by, created_at, imported_by_scopes}]}]}`.
+    pii, backup, schema_version, created_by, created_at, imported_by_scopes,
+    imported_count}]}]}`.
 
-    `imported_by_scopes` is a COUNT here (the catalogue has the list).
-    `visible`: the instance ids the caller may see (None = all, admins and
-    agents); `scopes_of`: `{catalog key: [scope, …]}` (default: the topics)."""
+    `imported_by_scopes` is the LIST of scopes (`<tier>/<topic>`; the
+    agent-server adds `job:<id>`), as in the catalogue; `imported_count` its
+    length. `visible`: the instance ids the caller may see (None = all);
+    `scopes_of`: `{catalog key: [scope, …]}` (default: the topics).
+    `for_agent`: only the instances within `clearance`, without who created
+    them (`packs.datastore_structures`)."""
     if scopes_of is None:
         from . import topic_data
         try:
@@ -205,14 +214,20 @@ def structures_view(*, scopes_of: dict[str, list[str]] | None = None,
         if visible is not None and i["id"] not in visible:
             continue
         e = cat.get("datastore", i["id"])
-        by_struct.setdefault(i["structure"], []).append({
-            "id": i["id"], "name": i["name"],
-            "tier": cat.effective_tier(e) if e else i["tier"],
+        tier = cat.effective_tier(e) if e else i["tier"]
+        if for_agent and cat.rank_have(clearance) < cat.rank(tier):
+            continue
+        scopes = list(scopes_of.get(f"datastore:{i['id']}", []))
+        row = {
+            "id": i["id"], "name": i["name"], "tier": tier,
             "purpose": i["purpose"], "pii": i["pii"], "backup": i["backup"],
             "schema_version": i["schema_version"], "created_by": i["created_by"],
             "created_at": i["created_at"],
-            "imported_by_scopes": len(scopes_of.get(f"datastore:{i['id']}", [])),
-        })
+            "imported_by_scopes": scopes, "imported_count": len(scopes),
+        }
+        if for_agent:
+            row.pop("created_by")
+        by_struct.setdefault(i["structure"], []).append(row)
     rows = []
     for sid, st in sorted(datastores.structures().items()):
         if st["legacy"] and sid not in by_struct:
@@ -276,11 +291,30 @@ def resolve(sid: str, *, scope: str | None, agent: str, clearance: str | None,
         raise PermissionError(f"istanza '{chosen}' non disponibile (eliminata o archiviata)")
     if not Path(entry["abs_path"]).is_file():
         raise PermissionError(f"istanza '{chosen}': file assente")
-    if entry.get("schema_version", 0) < st["latest_version"]:
-        raise PermissionError(
-            f"istanza '{chosen}' allo schema {entry.get('schema_version', 0)}, la struttura "
-            f"è alla {st['latest_version']}: va migrata (aggiornamento del pack) prima dell'uso")
+    check_current(entry)
     return entry
+
+
+#: What to do about an instance left behind by a failed migration.
+RETRY_HINT = ("riprova con un nuovo Update del pack, oppure (admin) «Riprova migrazione» "
+              "sull'istanza nella pagina Databases; il backup è in CLODIA_DATA/migrations/")
+
+
+def check_current(entry: dict) -> None:
+    """PermissionError when the instance `entry` (a `declared()` entry) is
+    below its structure's latest schema: it is not served until migrated —
+    the pack's code expects the new schema. No-op for other datastores."""
+    sid = entry.get("structure")
+    if not sid:
+        return
+    st = datastores.structure(sid)
+    if st is None:
+        return
+    if int(entry.get("schema_version") or 0) < st["latest_version"]:
+        raise PermissionError(
+            f"istanza '{entry['pack']}/{entry['name']}' allo schema "
+            f"{entry.get('schema_version', 0)}, la struttura è alla {st['latest_version']}: "
+            f"va migrata prima dell'uso — {RETRY_HINT}")
 
 
 # ── Schema migrations on pack update (#687) ──────────────────────────────────
@@ -344,13 +378,20 @@ def _migrate_one(inst: dict, steps: list[tuple[int, Path]], latest: int) -> dict
     return {"from": current, "to": latest, "backup": str(backup)}
 
 
-def migrate(packs: list[str] | None = None, *, by: str = "platform") -> dict:
+def migrate(packs: list[str] | None = None, *, by: str = "platform",
+            ids: list[str] | None = None) -> dict:
     """Migrate every instance of the INSTALLED structures (of `packs`, or all)
     to its structure's latest version. Per instance: backup, pending
     migrations in one transaction, version bumped. A failure rolls back that
     instance only, and is in the report and the audit — never silent.
     Idempotent: an instance at the latest version is skipped."""
     want = {str(p) for p in packs} if packs else None
+    only = {str(i) for i in ids} if ids else None
+    if only:
+        unknown = sorted(i for i in only if not datastores.split_instance(i))
+        if unknown:
+            raise ValueError(f"id d'istanza non validi: {', '.join(unknown)}")
+        want = (want or set()) | {datastores.split_instance(i)[0] for i in only}
     structs = {sid: st for sid, st in datastores.structures().items()
                if not st["legacy"] and (want is None or st["pack"] in want)}
     report = {"migrated": [], "failed": [], "current": []}
@@ -366,6 +407,8 @@ def migrate(packs: list[str] | None = None, *, by: str = "platform") -> dict:
             if inst["structure"] != sid or not inst["installed"] \
                     or cat.tombstoned("datastore", inst["id"]):
                 continue
+            if only is not None and inst["id"] not in only:
+                continue
             if inst["schema_version"] >= latest:
                 report["current"].append({"id": inst["id"], "version": inst["schema_version"]})
                 continue
@@ -380,7 +423,7 @@ def migrate(packs: list[str] | None = None, *, by: str = "platform") -> dict:
                        version_from=inst["schema_version"], version_to=latest,
                        backup=row["backup"])
                 continue
-            with _LOCK:
+            with datastores.registry_lock():
                 reg = datastores.instance_registry()
                 if inst["id"] in reg:
                     reg[inst["id"]]["schema_version"] = done["to"]
@@ -390,4 +433,6 @@ def migrate(packs: list[str] | None = None, *, by: str = "platform") -> dict:
             report["migrated"].append(row)
             _audit("migrate", inst["id"], by, result="ok", version_from=done["from"],
                    version_to=done["to"], backup=done["backup"])
+    if report["failed"]:
+        report["retry"] = RETRY_HINT
     return report

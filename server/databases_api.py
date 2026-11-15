@@ -4,7 +4,8 @@
     POST /internal/databases  {action: create_datastore | create_collection
                                | create_instance | delete | restore, ...}  admins
     GET  /internal/databases/structures                            pack structures + instances
-    POST /internal/datastores/migrate  {packs?: [...]}             the agent-server, on pack update
+    POST /internal/datastores/migrate  {packs?: [...], ids?: [...]} the agent-server: pack update,
+                                                                   an admin's retry
     GET  /internal/databases/datastore/{pack}/{name}/tables        ?scope=
     GET  /internal/databases/datastore/{pack}/{name}/rows          ?table&limit&offset&q&scope
     POST /internal/databases/datastore/{pack}/{name}/rows          {op, table, rowid?, values?, scope?}
@@ -196,8 +197,11 @@ async def migrate_route(request: Request):
         if packs is not None and not (isinstance(packs, list)
                                       and all(isinstance(p, str) for p in packs)):
             raise ValueError("packs: lista di nomi")
+        ids = body.get("ids")
+        if ids is not None and not (isinstance(ids, list) and all(isinstance(i, str) for i in ids)):
+            raise ValueError("ids: lista di id d'istanza")
         by = str(body.get("by") or payload.get("agent") or "platform")[:120]
-        out = await asyncio.to_thread(datastore_instances.migrate, packs, by=by)
+        out = await asyncio.to_thread(datastore_instances.migrate, packs, by=by, ids=ids)
     except Exception as e:  # noqa: BLE001
         return _error(e)
     return JSONResponse(out)

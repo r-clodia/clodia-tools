@@ -2358,8 +2358,11 @@ def _dispatch_packs(name: str, a: dict):
     if sub == "check_command":
         return pack_runtime.check_command(a["command"])
     if sub == "datastore_structures":
+        # For an agent: only the instances its clearance covers, and not who
+        # created them (review of #485).
         from . import datastore_instances
-        return datastore_instances.structures_view()
+        return datastore_instances.structures_view(clearance=current_clearance(),
+                                                   for_agent=True)
     if sub == "create_datastore":
         return _packs_create_datastore(a)
     raise ValueError(f"unknown packs tool: {name}")
@@ -6221,11 +6224,17 @@ def _datastore_authorize(key: str, *, write: bool) -> dict:
         return datastore_instances.resolve(
             st["id"], scope=topic_data.scope_of_call(), agent=agent_name(),
             clearance=current_clearance(), write=write)
+    from . import datastore_instances
     if is_on_behalf():
-        return _datastore_authorize_human(entry, key, write=write)
+        _datastore_authorize_human(entry, key, write=write)
+        datastore_instances.check_current(entry)
+        return entry
     from . import topic_data
     topic_data.authorize("datastore", f"{pack}/{dsname}", write=write, agent=agent_name(),
                          clearance=current_clearance(), scope=topic_data.scope_of_call())
+    # An instance named by its full id is refused below its schema too, as
+    # through the structure id (review of #485).
+    datastore_instances.check_current(entry)
     return entry
 
 

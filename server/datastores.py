@@ -11,10 +11,13 @@ due consumatori.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
 import re
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -186,6 +189,37 @@ def instance_registry() -> dict:
         raise RuntimeError(f"registro delle istanze illeggibile ({type(e).__name__}): {p}") from e
 
 
+_REG_RLOCK = threading.RLock()
+_REG_DEPTH = threading.local()
+
+
+@contextmanager
+def registry_lock():
+    """Exclusive access to the instance registry, across threads AND
+    processes (the one-off migration script runs beside the gateway): an
+    in-process re-entrant lock plus `flock` on `datastore-instances.lock`,
+    taken once at the outermost level."""
+    with _REG_RLOCK:
+        depth = getattr(_REG_DEPTH, "n", 0)
+        if depth:
+            _REG_DEPTH.n = depth + 1
+            try:
+                yield
+            finally:
+                _REG_DEPTH.n = depth
+            return
+        p = _registry_path().with_suffix(".lock")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a+") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            _REG_DEPTH.n = 1
+            try:
+                yield
+            finally:
+                _REG_DEPTH.n = 0
+                fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def save_instance_registry(data: dict) -> None:
     p = _registry_path()
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -220,9 +254,11 @@ def _confined(root: Path, rel: str) -> Path | None:
         return None
     p = (root / rel).resolve()
     try:
-        p.relative_to(root.resolve())
+        inside = p.relative_to(root.resolve())
     except ValueError:
         return None
+    if not inside.parts:
+        return None             # the plugin's folder itself is not a schema or migrations dir
     return p
 
 
@@ -283,6 +319,14 @@ def structures() -> dict[str, dict]:
             sid = f"{pack}/{name}"
             if sid in out:
                 continue
+            env_key = re.sub(r"[^A-Z0-9]", "_", name.upper())
+            clash = next((o for o in out.values() if o["pack"] == pack
+                          and re.sub(r"[^A-Z0-9]", "_", o["name"].upper()) == env_key), None)
+            if clash is not None:
+                # `a-b` and `a_b` would hand the MCP the same CLODIA_DATASTORE_A_B.
+                LOG.error("datastores: %s: la struttura '%s' collide con '%s' "
+                          "(stessa variabile d'ambiente): ignorata", pack, name, clash["name"])
+                continue
             out[sid] = {
                 "id": sid, "pack": pack, "name": name,
                 "schema": str(schema) if schema and schema.is_file() else None,
@@ -323,7 +367,8 @@ def instances(*, include_archived: bool = False) -> list[dict]:
         LOG.error("datastores: %s", e)
         return []
     structs = structures()
-    out, changed = [], False
+    out = []
+    marks: dict[str, str | None] = {}
     for iid, meta in sorted(reg.items()):
         parts = split_instance(iid)
         if not parts or not isinstance(meta, dict):
@@ -334,7 +379,12 @@ def instances(*, include_archived: bool = False) -> list[dict]:
         p = _instance_abs(iid, meta)
         if st is None and not meta.get("archived_at") and not p.exists():
             meta["archived_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            changed = True
+            marks[iid] = meta["archived_at"]
+        elif st is not None and meta.get("archived_at") and p.is_file():
+            # Its pack is back and its file was put back in place (from
+            # `plugins-archive/…/datastores/`): the instance is usable again.
+            meta["archived_at"] = None
+            marks[iid] = None
         if meta.get("archived_at") and not include_archived:
             continue
 
@@ -355,10 +405,15 @@ def instances(*, include_archived: bool = False) -> list[dict]:
             "abs_path": str(p), "path": rel, "installed": st is not None,
             "archived_at": meta.get("archived_at"), "legacy_of": meta.get("legacy_of"),
         })
-    if changed:
+    if marks:
         try:
-            save_instance_registry(reg)
-        except OSError as e:
+            with registry_lock():
+                fresh = instance_registry()
+                for iid, mark in marks.items():
+                    if isinstance(fresh.get(iid), dict):
+                        fresh[iid]["archived_at"] = mark
+                save_instance_registry(fresh)
+        except (OSError, RuntimeError) as e:
             LOG.warning("datastores: archiviazione non registrata (%s)", type(e).__name__)
     return out
 
@@ -386,11 +441,12 @@ def find_instance(iid: str) -> dict | None:
 def drop_instance(iid: str) -> bool:
     """Forget an instance (after the #671 delete has exported and removed its
     file). The tombstone, not the registry, keeps the name from coming back."""
-    reg = instance_registry()
-    if reg.pop(iid, None) is None:
-        return False
-    save_instance_registry(reg)
-    return True
+    with registry_lock():
+        reg = instance_registry()
+        if reg.pop(iid, None) is None:
+            return False
+        save_instance_registry(reg)
+        return True
 
 
 def declared_collections() -> dict[str, dict]:

@@ -184,6 +184,13 @@ def bind_instances(backend: str, b: dict, arguments: dict) -> tuple[dict, dict]:
     structs = bound_structures(backend)
     if not structs:
         return b, arguments
+    if (b.get("transport") or "stdio") != "stdio":
+        # The instance travels in the process environment, which an http
+        # backend never sees: it would serve every scope from one database.
+        raise PermissionError(
+            f"il backend MCP '{backend}' lavora su istanze di datastore "
+            f"({', '.join(st['id'] for st in structs)}) ma non è stdio: l'istanza dello "
+            "scope non gli arriverebbe. Rifiutato: va montato come processo stdio")
     from . import datastore_instances, topic_data
     from .whitelist import agent_name, current_clearance
     args = dict(arguments or {})

@@ -11,6 +11,8 @@ instance — same bytes, moved to `CLODIA_DATA/datastores/<pack>/<structure>/
 - the catalogue entry `datastore:<pack>/<name>` → `datastore:<pack>/<name>:<instance>`
   (tier, admin-set level and importers kept);
 - every topic/DM import (`meta.data`);
+- every A·V·R·Q rule naming `datastore:<pack>/<name>` (global `authz.json`
+  and the rooms' `meta.authz`), listed in the dry run;
 - the job imports live in the agent-server: the mapping is written to
   `CLODIA_DATA/datastores/legacy-migration.json`, which clodia-logic's
   `python -m server.scheduler.migrate_job_data` applies.
@@ -94,8 +96,22 @@ def candidates(names: dict[str, str] | None = None) -> list[dict]:
                "target": str(datastores.instance_file(pack, name, inst)),
                "action": "migrate", "reason": ""}
         servers = (manifests.get(pack) or {}).get("mcp_servers") or {}
+        target = Path(row["target"])
         if old in migrated:
-            row.update(action="skip", reason="già migrato")
+            done_new = next((k for k, m in registry.items()
+                             if isinstance(m, dict) and m.get("legacy_of") == old), new)
+            row.update(to=done_new, target=str(datastores.instance_file(
+                *datastores.split_instance(done_new))))
+            unfinished = (path is not None and path.is_file()
+                          and not Path(row["target"]).exists()) \
+                or cat.get("datastore", old) is not None
+            if unfinished:
+                row.update(action="resume", reason="migrazione interrotta: la completo")
+            else:
+                row.update(action="skip", reason="già migrato")
+        elif new not in registry and target.is_file() and (path is None or not path.is_file()):
+            row.update(action="adopt",
+                       reason="il file è già al suo posto senza registrazione: lo adotto")
         elif not datastores.INSTANCE_RE.match(inst):
             row.update(action="skip", reason=f"nome d'istanza non valido: '{inst}'")
         elif cat.tombstoned("datastore", old):
@@ -176,12 +192,67 @@ def _rewrite_topics(old: str, new: str) -> list[str]:
     return done
 
 
+def _rewrite_rule(t: dict, old_res: str, new_res: str) -> bool:
+    hit = False
+    if t.get("resource") == old_res:
+        t["resource"] = new_res
+        hit = True
+    for c in t.get("rule") or []:
+        if isinstance(c, dict) and c.get("match") == old_res:
+            c["match"] = new_res
+            hit = True
+    return hit
+
+
+def authz_refs(old: str, new: str, *, write: bool = False) -> list[str]:
+    """The A·V·R·Q tuples that name `datastore:<old>` (resource or a clause's
+    match) — the global ones (`state/authz.json`) and every room's
+    (`meta.authz`) — rewritten to the instance when `write`. Returns where."""
+    from . import authz_shadow, topic_data
+    old_res, new_res = f"datastore:{old}", f"datastore:{new}"
+    found: list[str] = []
+    gp = Path(authz_shadow._global_path())
+    try:
+        raw = json.loads(gp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = None
+    tuples = raw.get("tuples") if isinstance(raw, dict) else raw
+    if isinstance(tuples, list):
+        hits = [t for t in tuples if isinstance(t, dict) and _rewrite_rule(t, old_res, new_res)]
+        found += [f"global:{t.get('id')}" for t in hits]
+        if hits and write:
+            tmp = gp.with_suffix(".tmp")
+            tmp.write_text(json.dumps(raw, indent=1, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(gp)
+    svc = topic_data._svc()
+    for row in svc.list(include_archived=True):
+        try:
+            meta, ver = svc._read_meta(row["tier"], row["name"])
+        except Exception:  # noqa: BLE001
+            continue
+        rules = meta.get("authz")
+        if not isinstance(rules, list):
+            continue
+        hits = [t for t in rules if isinstance(t, dict) and _rewrite_rule(t, old_res, new_res)]
+        found += [f"{row['tier']}/{row['name']}:{t.get('id')}" for t in hits]
+        if hits and write:
+            svc._write_meta(row["tier"], row["name"], meta, base_version=ver)
+    return found
+
+
 def apply(rows: list[dict], *, include_declared: bool = False) -> list[dict]:
-    """Migrate the rows marked `migrate` (and `needs-flag` with
-    `include_declared`). Each row gets `done` (bool) and what moved."""
+    """Migrate the rows marked `migrate`, `resume` or `adopt` (and
+    `needs-flag` with `include_declared`). Each row gets `done` (bool) and
+    what moved.
+
+    Crash-safe order: the registry entry FIRST (it records the intent, with
+    `legacy_of`), then the file, the catalogue, the imports, the rules. A run
+    interrupted anywhere is a `resume` on the next one; a file found already in
+    place without a registry entry is adopted."""
     mapping = {}
     for row in rows:
-        go = row["action"] == "migrate" or (include_declared and row["action"] == "needs-flag")
+        go = row["action"] in ("migrate", "resume", "adopt") \
+            or (include_declared and row["action"] == "needs-flag")
         if not go:
             row["done"] = False
             continue
@@ -189,21 +260,29 @@ def apply(rows: list[dict], *, include_declared: bool = False) -> list[dict]:
         pack, name = old.split("/", 1)
         inst = new.rsplit(datastores.INSTANCE_SEP, 1)[1]
         st = datastores.structure(old)
-        src, dst = Path(row["file"]), Path(row["target"])
-        _move(src, dst)
-        reg = datastores.instance_registry()
-        reg[new] = {"structure": old, "name": inst, "tier": row["tier"],
-                    "purpose": None, "pii": None, "backup": None,
-                    # The legacy file is taken to be at the schema its pack
-                    # ships now: a structure without migrations is at 0.
-                    "schema_version": max((st or {}).get("latest_version", 0), 0),
-                    "created_by": "migration", "created_at": _now(),
-                    "legacy_of": old, "legacy_path": str(src)}
-        datastores.save_instance_registry(reg)
-        moved = cat.rekey("datastore", old, new, migrated_from=old)
-        if moved is None:
+        src = Path(row["file"]) if row.get("file") else None
+        dst = Path(row["target"])
+        with datastores.registry_lock():                                  # 1. intent
+            reg = datastores.instance_registry()
+            if new not in reg:
+                reg[new] = {"structure": old, "name": inst, "tier": row["tier"],
+                            "purpose": None, "pii": None, "backup": None,
+                            # The legacy file is taken to be at the schema its
+                            # pack ships now: a structure without migrations is at 0.
+                            "schema_version": max((st or {}).get("latest_version", 0), 0),
+                            "created_by": "migration", "created_at": _now(),
+                            "legacy_of": old, "legacy_path": str(src) if src else None}
+                datastores.save_instance_registry(reg)
+            if src is not None and src.is_file() and not dst.exists():    # 2. same bytes
+                _move(src, dst)
+        if not dst.is_file():
+            row.update(done=False, error=f"file dell'istanza assente: {dst}")
+            continue
+        moved = cat.rekey("datastore", old, new, migrated_from=old)       # 3. catalogue
+        if moved is None and cat.get("datastore", new) is None:
             cat.register("datastore", new, tier=row["tier"], source=f"pack:{pack}")
-        row["topics"] = _rewrite_topics(old, new)
+        row["topics"] = _rewrite_topics(old, new)                         # 4. imports
+        row["authz_rules"] = authz_refs(old, new, write=True)             # 5. A·V·R·Q
         row["catalog"] = "rekeyed" if moved else "registered"
         row["done"] = True
         mapping[f"datastore:{old}"] = f"datastore:{new}"
@@ -242,6 +321,9 @@ def main(argv: list[str] | None = None) -> int:
             ap.error(f"--name: atteso PACK/DS=INSTANCE, non '{item}'")
         names[k.strip()] = v.strip()
     rows = candidates(names)
+    if not args.apply:
+        for row in rows:          # what the apply would rewrite in the rules, too
+            row["authz_rules"] = authz_refs(row["from"], row["to"], write=False)
     if args.apply:
         rows = apply(rows, include_declared=args.include_declared)
     print(json.dumps({"apply": bool(args.apply), "datadir": datastores.DATADIR,
