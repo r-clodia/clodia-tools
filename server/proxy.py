@@ -126,6 +126,137 @@ def _backends() -> dict[str, dict]:
     return out
 
 
+# ── Pack MCPs bound to a datastore instance (clodia-platform#686) ────────────
+#
+# The MCP of a pack that declares datastore STRUCTURES works on the instance
+# imported in the caller's scope, never on a file of its own: the gateway
+# resolves the instance per call from the signed claim's scope and hands its
+# file to the process in `CLODIA_DATASTORE_<STRUCTURE>`. One import → that
+# one; several → the call names it (`instance`, stripped before forwarding);
+# none → refused. A process never serves two instances: a stdio backend is
+# spawned per call (v1, see the module docstring), each with the environment
+# of its own instance.
+
+#: The argument a call uses to name the instance, never forwarded.
+INSTANCE_ARG = "instance"
+
+
+def bound_structures(backend: str) -> list[dict]:
+    """The datastore structures (declared with a `schema`, #684) of the
+    installed plugin whose manifest declares the MCP server `backend`. Empty
+    for any other backend: nothing changes for them."""
+    from . import datastores
+    from .connectors.resolved import norm_name
+    want = norm_name(backend)
+    plugins = set()
+    for pack, _root, meta in datastores._manifests():
+        servers = meta.get("mcp_servers")
+        if isinstance(servers, dict) and any(norm_name(str(n)) == want for n in servers):
+            plugins.add(pack)
+    if not plugins:
+        return []
+    return [st for st in datastores.structures().values()
+            if st["pack"] in plugins and not st["legacy"]]
+
+
+def _pick_requested(requested, st: dict) -> str | None:
+    """The instance the call names for structure `st`: a full id of THAT
+    structure, or a bare name (applies to every bound structure)."""
+    from . import datastores
+    items = requested if isinstance(requested, list) else [requested]
+    for r in items:
+        r = str(r or "").strip()
+        if not r:
+            continue
+        parts = datastores.split_instance(r)
+        if parts is None:
+            return r
+        if f"{parts[0]}/{parts[1]}" == st["id"]:
+            return r
+    return None
+
+
+def bind_instances(backend: str, b: dict, arguments: dict) -> tuple[dict, dict]:
+    """`(backend entry with the instances' env, arguments without
+    `instance`)` for a call in the current scope; `(b, arguments)` unchanged
+    for a backend bound to no structure. Raises PermissionError / ValueError
+    with the reason (no instance, several and none named, access refused)."""
+    structs = bound_structures(backend)
+    if not structs:
+        return b, arguments
+    if (b.get("transport") or "stdio") != "stdio":
+        # The instance travels in the process environment, which an http
+        # backend never sees: it would serve every scope from one database.
+        raise PermissionError(
+            f"il backend MCP '{backend}' lavora su istanze di datastore "
+            f"({', '.join(st['id'] for st in structs)}) ma non è stdio: l'istanza dello "
+            "scope non gli arriverebbe. Rifiutato: va montato come processo stdio")
+    from . import datastore_instances, topic_data
+    from .whitelist import agent_name, current_clearance
+    args = dict(arguments or {})
+    requested = args.pop(INSTANCE_ARG, None)
+    env = dict(b.get("env") or {})
+    scope = topic_data.scope_of_call()
+    for st in structs:
+        entry = datastore_instances.resolve(
+            st["id"], scope=scope, agent=agent_name(), clearance=current_clearance(),
+            instance=_pick_requested(requested, st) if requested else None, write=True)
+        env[datastore_instances.env_name(st["name"])] = entry["abs_path"]
+    return {**b, "env": env}, args
+
+
+@asynccontextmanager
+async def _listing_env(backend: str, b: dict):
+    """The backend entry for listing its tools (no call, no scope): a bound
+    backend gets throwaway databases built from its structures' schemas, so
+    that it starts — it refuses to without an instance — and touches no real
+    data. Removed afterwards."""
+    structs = bound_structures(backend)
+    if not structs:
+        yield b
+        return
+    import shutil
+    import tempfile
+    from pathlib import Path
+    from . import datastore_instances
+    d = tempfile.mkdtemp(prefix="clodia-mcp-probe-")
+    try:
+        env = dict(b.get("env") or {})
+        for st in structs:
+            p = Path(d) / f"{st['name']}.db"
+            try:
+                if st.get("schema"):
+                    datastore_instances._build_file(p, st["schema"], max(st["latest_version"], 0))
+                else:
+                    p.touch()
+            except Exception as e:  # noqa: BLE001 — an empty file still lets it start
+                LOG.warning("mcp %s: probe di %s senza schema (%s)", backend, st["id"],
+                            type(e).__name__)
+                p.touch()
+            env[datastore_instances.env_name(st["name"])] = str(p)
+        yield {**b, "env": env}
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _with_instance_arg(backend: str, schema: dict | None) -> dict | None:
+    """The tool's input schema with the optional `instance` argument of a
+    bound backend (#686): the agent learns it can name the instance when its
+    scope imports several."""
+    structs = bound_structures(backend)
+    if not structs:
+        return schema
+    s = dict(schema or {"type": "object"})
+    props = dict(s.get("properties") or {})
+    ids = ", ".join(f"'{st['id']}:<nome>'" for st in structs)
+    props.setdefault(INSTANCE_ARG, {
+        "type": "string",
+        "description": (f"istanza su cui lavorare ({ids}). Serve solo se questo scope ne "
+                        "importa più di una; con una sola si usa quella.")})
+    s["properties"] = props
+    return s
+
+
 def _vault_ref_names(val) -> set[str]:
     """The vault entries a backend's strings reference (`${VAULT:name[.field]}`)."""
     out: set[str] = set()
@@ -411,7 +542,7 @@ async def test_backend(name: str) -> dict:
         return {"ok": None, "detail": "backend non montato"}
     try:
         async def _probe():
-            async with _session(b) as s:
+            async with _listing_env(name, b) as lb, _session(lb) as s:
                 return await s.list_tools()
         res = await asyncio.wait_for(_probe(), timeout=TEST_TIMEOUT_S)
         tools = [{"name": f"{name}{NS_SEP}{t.name}",
@@ -437,13 +568,13 @@ async def list_proxied_tools() -> list[Tool]:
             continue
         if name not in _TOOL_CACHE:
             try:
-                async with _session(b) as s:
+                async with _listing_env(name, b) as lb, _session(lb) as s:
                     res = await s.list_tools()
                     _TOOL_CACHE[name] = [
                         Tool(
                             name=f"{name}{NS_SEP}{t.name}",
                             description=f"[{name}] {t.description or ''}".strip(),
-                            inputSchema=t.inputSchema,
+                            inputSchema=_with_instance_arg(name, t.inputSchema),
                         )
                         for t in res.tools
                     ]
@@ -525,6 +656,9 @@ async def call_proxied(name: str, arguments: dict) -> str:
     # other path that reaches a backend on an agent's behalf.
     if is_disabled(name):
         raise ToolDisabled(disabled_refusal(name))
+    # A pack MCP bound to a datastore structure works on the instance of the
+    # caller's scope (#686): resolved here, per call, or refused.
+    b, arguments = bind_instances(backend_name, b, arguments)
     try:
         async with _session(b) as s:
             res = await s.call_tool(tool_name, arguments)

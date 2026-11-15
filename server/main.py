@@ -318,7 +318,10 @@ _DATASTORE_TOOLS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "datastore": {"type": "string", "description": "'<pack>/<nome>', es. 'base-pack/contacts'"},
+                "datastore": {"type": "string", "description": (
+                    "'<pack>/<nome>', es. 'base-pack/contacts'; l'istanza di una struttura "
+                    "è '<pack>/<struttura>:<nome>', e '<pack>/<struttura>' vale l'unica "
+                    "istanza importata in questo scope")},
                 "query": {"type": "string", "description": "una SELECT (o PRAGMA table_info/table_list)"},
                 "params": {"type": "array", "description": "parametri posizionali legati con '?'"},
                 "max_bytes": {"type": "integer", "minimum": 1, "maximum": 262144,
@@ -339,7 +342,10 @@ _DATASTORE_TOOLS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "datastore": {"type": "string", "description": "'<pack>/<nome>', es. 'base-pack/contacts'"},
+                "datastore": {"type": "string", "description": (
+                    "'<pack>/<nome>', es. 'base-pack/contacts'; l'istanza di una struttura "
+                    "è '<pack>/<struttura>:<nome>', e '<pack>/<struttura>' vale l'unica "
+                    "istanza importata in questo scope")},
                 "statement": {"type": "string", "description": "una INSERT/UPDATE/DELETE"},
                 "params": {"type": "array", "description": "parametri posizionali legati con '?'"},
             },
@@ -1334,6 +1340,30 @@ _PACKS_TOOLS: list[Tool] = [
          inputSchema={"type": "object", "properties": {
              "packages": {"type": "array", "items": {"type": "string"}}},
              "required": ["packages"]}),
+    # Datastore structures of the packs and their instances (clodia-platform#684).
+    Tool(name="packs.datastore_structures",
+         description=("Elenca le STRUTTURE di datastore dichiarate dai pack installati "
+                      "(`<pack>/<struttura>`, schema e versione) con le loro ISTANZE "
+                      "(`<pack>/<struttura>:<nome>`, tier, quanti scope le importano). "
+                      "Sola lettura. Un pack definisce strutture, mai database: ogni "
+                      "istanza si crea esplicitamente con packs.create_datastore."),
+         inputSchema={"type": "object", "properties": {}}),
+    Tool(name="packs.create_datastore",
+         description=("Crea un'istanza VUOTA di una struttura di datastore di un pack "
+                      "installato: `structure` = '<pack>/<struttura>', `name` = nome "
+                      "dell'istanza (minuscole, cifre, '-'), `tier` obbligatorio (non "
+                      "sopra la tua clearance). L'istanza entra nel catalogo dei dati "
+                      "come '<pack>/<struttura>:<nome>' ma NON viene importata in nessuno "
+                      "scope: l'import lo fa l'owner. purpose/pii/backup ereditati dalla "
+                      "struttura se non indicati."),
+         inputSchema={"type": "object", "properties": {
+             "structure": {"type": "string", "description": "'<pack>/<struttura>', es. 'assetti-contabili/contabilita'"},
+             "name": {"type": "string", "description": "nome dell'istanza, es. 'uncommon'"},
+             "tier": {"type": "string", "description": "SEAL-0 … SEAL-4"},
+             "purpose": {"type": "string"},
+             "pii": {"type": "boolean"},
+             "backup": {"type": "boolean"}},
+             "required": ["structure", "name", "tier"]}),
     Tool(name="packs.check_command",
          description=("Verifica che un binario richiesto dal pack sia disponibile nel "
                       "PATH runtime (venv/bin + npm/bin + PATH di sistema). Usalo per "
@@ -2327,7 +2357,43 @@ def _dispatch_packs(name: str, a: dict):
         return pack_runtime.install_npm(a["packages"])
     if sub == "check_command":
         return pack_runtime.check_command(a["command"])
+    if sub == "datastore_structures":
+        # For an agent: only the instances its clearance covers, and not who
+        # created them (review of #485).
+        from . import datastore_instances
+        return datastore_instances.structures_view(clearance=current_clearance(),
+                                                   for_agent=True)
+    if sub == "create_datastore":
+        return _packs_create_datastore(a)
     raise ValueError(f"unknown packs tool: {name}")
+
+
+def _packs_create_datastore(a: dict) -> dict:
+    """`packs.create_datastore` (#685). No admin bypass: A·V·R·Q has already
+    decided whether this agent may call it (default ask); here the
+    structure must exist, the tier must be valid and within the caller's
+    clearance. Audited as a control-plane event."""
+    from . import datastore_instances
+    from .audit import control as _control
+    by = current_principal() if is_on_behalf() else agent_name()
+    by = by or "sconosciuto"
+    resource = f"{a.get('structure') or '?'}:{a.get('name') or '?'}"
+    try:
+        out = datastore_instances.create(
+            str(a.get("structure") or ""), str(a.get("name") or ""),
+            tier=str(a.get("tier") or ""), by=by, clearance=current_clearance(),
+            purpose=a.get("purpose"),
+            pii=None if a.get("pii") is None else bool(a.get("pii")),
+            backup=None if a.get("backup") is None else bool(a.get("backup")))
+    except Exception as e:
+        _control.safe(_control.emit, "databases", "create_instance", resource, by=by,
+                      tier=a.get("tier"), result="refused" if isinstance(
+                          e, (PermissionError, ValueError, LookupError)) else "failed",
+                      error=str(e)[:200])
+        raise
+    _control.safe(_control.emit, "databases", "create_instance", out["id"], by=by,
+                  tier=out["tier"], result="ok")
+    return out
 
 
 def _dispatch_providers(name: str, a: dict):
@@ -6144,12 +6210,31 @@ def _datastore_authorize(key: str, *, write: bool) -> dict:
     pack, dsname = datastores.parse_key(key)
     entry = datastores.find(pack, dsname)
     if entry is None:
-        raise ValueError(f"datastore sconosciuto: '{key}'")
+        st = datastores.structure(f"{pack}/{dsname}") \
+            if datastores.INSTANCE_SEP not in dsname else None
+        if st is None:
+            raise ValueError(f"datastore sconosciuto: '{key}'")
+        # A STRUCTURE id (#684, the `<DATASTORE:name>` token of a skill): the
+        # instance imported in the scope of the signed claim, decided by
+        # `datastore_instances.resolve` (which authorises it as below).
+        if is_on_behalf():
+            raise ValueError(f"'{key}' è una struttura: indica l'istanza "
+                             f"('{key}:<nome>')")
+        from . import datastore_instances, topic_data
+        return datastore_instances.resolve(
+            st["id"], scope=topic_data.scope_of_call(), agent=agent_name(),
+            clearance=current_clearance(), write=write)
+    from . import datastore_instances
     if is_on_behalf():
-        return _datastore_authorize_human(entry, key, write=write)
+        _datastore_authorize_human(entry, key, write=write)
+        datastore_instances.check_current(entry)
+        return entry
     from . import topic_data
     topic_data.authorize("datastore", f"{pack}/{dsname}", write=write, agent=agent_name(),
                          clearance=current_clearance(), scope=topic_data.scope_of_call())
+    # An instance named by its full id is refused below its schema too, as
+    # through the structure id (review of #485).
+    datastore_instances.check_current(entry)
     return entry
 
 

@@ -444,6 +444,52 @@ def visible(kind: str, *, agent: str, scope: str | None,
     return out
 
 
+def scope_imports(scope: str | None) -> list[dict]:
+    """What `scope` imports, `[{kind, name, grants}]` — a topic's or DM's
+    `meta.data`, a job's `data` (#684: which instances of a structure a call
+    may work on). Read only; any failure is no imports. Access to each one is
+    still `authorize`."""
+    if not scope:
+        return []
+    jid = job_id(scope)
+    if jid is not None:
+        try:
+            return job_imports(_job(jid))
+        except PermissionError:
+            return []
+    tier, _, name = scope.partition("/")
+    try:
+        meta = _svc()._read_meta(tier, name)[0]
+    except Exception:  # noqa: BLE001
+        return []
+    return imports(meta)
+
+
+def rename_import(tier: str, name: str, kind: str, old: str, new: str) -> bool:
+    """Rewrite an import of `old` into `new` in one topic, grants kept (the
+    one-off migration of a legacy pack datastore to an instance, #685).
+    True when the topic imported `old`."""
+    svc = _svc()
+    if _find(svc._read_meta(tier, name)[0], kind, old) is None:
+        return False
+
+    def mutate(meta, entries):
+        hit = False
+        for e in entries:
+            if e["kind"] == kind and e["name"] == old:
+                e["name"] = new
+                hit = True
+        seen, uniq = set(), []
+        for e in entries:
+            k = (e["kind"], e["name"])
+            if k not in seen:
+                seen.add(k)
+                uniq.append(e)
+        entries[:] = uniq
+        return hit
+    return _write(svc, tier, name, mutate)
+
+
 def importing_topics() -> dict[str, list[str]]:
     """`{catalog key: ["SEAL-2/name", ...]}` — which topics import what (the
     Databases page, #595). Archived topics included: their imports still exist."""

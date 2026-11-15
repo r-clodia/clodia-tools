@@ -22,9 +22,12 @@ Seeded at boot (`sync`) from what exists today, so the switch to topic access
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import threading
+from contextlib import contextmanager
+from pathlib import Path
 from datetime import datetime, timezone
 
 LOG = logging.getLogger("clodia-tools.data_catalog")
@@ -33,6 +36,22 @@ KINDS = ("datastore", "rag")
 ADMIN = "@admin"
 _LOCK = threading.Lock()
 _TIERS = ("SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4")
+
+
+@contextmanager
+def _locked():
+    """The catalogue's and tombstones' writes, serialised across threads and
+    processes (the one-off migration of #685 runs beside the gateway): the
+    in-process lock, then `flock` on `data-catalog.lock`."""
+    with _LOCK:
+        p = Path(_path()).with_name("data-catalog.lock")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a+") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _path():
@@ -142,7 +161,7 @@ def register(kind: str, name: str, *, tier: str, owner: str = "",
              importers: list[str] | None = None, source: str = "") -> dict:
     """Add a resource (idempotent: an existing entry is kept as it is)."""
     k = key(kind, name)
-    with _LOCK:
+    with _locked():
         data = _load()
         if k not in data:
             data[k] = {"kind": kind, "name": name, "tier": norm_tier(tier),
@@ -155,7 +174,7 @@ def register(kind: str, name: str, *, tier: str, owner: str = "",
 def update(kind: str, name: str, *, tier: str | None = None,
            importers: list[str] | None = None) -> dict:
     k = key(kind, name)
-    with _LOCK:
+    with _locked():
         data = _load()
         if k not in data:
             raise KeyError(f"risorsa non in catalogo: {k}")
@@ -177,12 +196,29 @@ def retire(kind: str, name: str) -> bool:
     """Drop the catalog entry (the data stays; topics importing it lose
     access at the next call, since `topic_data` requires the entry)."""
     k = key(kind, name)
-    with _LOCK:
+    with _locked():
         data = _load()
         if data.pop(k, None) is None:
             return False
         _save(data)
         return True
+
+
+def rekey(kind: str, old: str, new: str, **extra) -> dict | None:
+    """Move the entry `old` to `new`, everything else kept (tier, `tier_set`,
+    importers, owner, created_at), `extra` added — a legacy pack datastore
+    becoming an instance (#685). None when `old` is not listed; an existing
+    `new` is left as it is and `old` dropped."""
+    ko, kn = key(kind, old), key(kind, new)
+    with _locked():
+        data = _load()
+        entry = data.pop(ko, None)
+        if entry is None:
+            return None
+        if kn not in data:
+            data[kn] = {**entry, "name": new, **extra}
+        _save(data)
+        return dict(data[kn])
 
 
 def may_import(entry: dict, principal: str, *, is_admin: bool, clearance: str | None) -> str:
@@ -248,7 +284,7 @@ def refuse_tombstoned(kind: str, name: str) -> None:
 def tombstone(kind: str, name: str, *, by: str, export: str = "",
               tier: str | None = None) -> dict:
     k = key(kind, name)
-    with _LOCK:
+    with _locked():
         data = tombstones()
         data[k] = {"kind": kind, "name": name, "deleted_at": _now(), "by": by,
                    "export": export, "tier": norm_tier(tier) if tier else None}
@@ -263,7 +299,7 @@ def tombstone(kind: str, name: str, *, by: str, export: str = "",
 
 def set_tombstone_export(kind: str, name: str, export: str) -> None:
     k = key(kind, name)
-    with _LOCK:
+    with _locked():
         data = tombstones()
         if k in data:
             data[k]["export"] = export
@@ -276,7 +312,7 @@ def set_tombstone_export(kind: str, name: str, export: str) -> None:
 
 def clear_tombstone(kind: str, name: str) -> bool:
     k = key(kind, name)
-    with _LOCK:
+    with _locked():
         data = tombstones()
         if data.pop(k, None) is None:
             return False
