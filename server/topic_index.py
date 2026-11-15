@@ -310,8 +310,14 @@ def job_status(tier: str, name: str) -> dict:
             # Resumed on what the room says NOW, not on what the file said.
             _start_job(tier, name, ix["on"])
             job = _job_read(tier, name)
+    progress = None
+    if ix["on"] and ix["collection"]:
+        try:
+            progress = _load(ix["collection"]).get("progress")
+        except Exception:  # noqa: BLE001 — a status, never a failure
+            progress = None
     return {"on": ix["on"], "collection": ix["collection"], "since": ix["since"],
-            "job": job or {"state": "idle"}}
+            "job": job or {"state": "idle"}, "progress": progress}
 
 
 def set_enabled(tier: str, name: str, enabled: bool) -> dict:
@@ -847,7 +853,29 @@ def _apply_locked(svc, meta, ix, event, tier, name, kw) -> None:
                     _ingest_file(svc, rag, tier, name, coll, t, st, e)
 
 
-def _sync_drive(svc, meta, rag, tier, name, coll, t, st, left: list) -> tuple[int, int, bool]:
+def _record_progress(coll: str, st: dict, present: dict, drive_seen: dict,
+                     pending: bool) -> None:
+    """How far the room's index is (clodia-platform#689), as this pass saw it:
+    `expected` = the indexable room files found plus the Drive files listed,
+    `indexed` = those already processed at their current size/mtime (a file
+    too big or unreadable counts as processed: it is not retried until it
+    changes). `pending` = this pass left work for the next ones. The webui
+    shows it next to the toggle: the toggle's job ends at once, the indexing
+    itself takes as many passes as the files need."""
+    files_done = sum(1 for p, sig in present.items() if st["files"].get(p) == sig)
+    drive = st.get("drive") or {}
+    drive_done = sum(1 for d, sig in drive_seen.items() if drive.get(d) == sig)
+    st["progress"] = {
+        "expected": len(present) + len(drive_seen),
+        "indexed": files_done + drive_done,
+        "pending": bool(pending),
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    _save(coll, st)
+
+
+def _sync_drive(svc, meta, rag, tier, name, coll, t, st, left: list,
+                seen_out: dict | None = None) -> tuple[int, int, bool]:
     """Drive changes in, unlinked or deleted Drive files out. Returns
     (ingested, removed, pending). `left` is a one-item budget list."""
     drive = _drive_files(meta)
@@ -870,6 +898,8 @@ def _sync_drive(svc, meta, rag, tier, name, coll, t, st, left: list) -> tuple[in
             ingested += int(_ingest_drive(rag, tier, name, coll, t, st, row))
         except Exception:  # noqa: BLE001
             pending = True
+    if seen_out is not None:          # what this pass listed (#689)
+        seen_out.update(seen)
     if drive["complete"]:
         for doc in [d for d in st["drive"] if d not in seen]:
             try:
@@ -945,11 +975,14 @@ def _sync(tier: str, name: str) -> dict:
         done["removed"] += 1
     # Drive: changes there are picked up here (Drive does not tell us)
     budget = [left]
-    d_done, d_removed, d_pending = _sync_drive(svc, meta, rag, tier, name, coll, t, st, budget)
+    drive_seen: dict | None = {}
+    d_done, d_removed, d_pending = _sync_drive(svc, meta, rag, tier, name, coll, t, st,
+                                               budget, seen_out=drive_seen)
     left = budget[0]
     done["drive"] += d_done
     done["removed"] += d_removed
     pending = pending or d_pending
+    _record_progress(coll, st, present, drive_seen, pending)
     # messages a restart or an error kept off the live path
     have = st.get("msgs") or {}
     for m in _messages_since(svc, tier, name, ix["since"]):

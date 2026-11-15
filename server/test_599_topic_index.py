@@ -297,6 +297,35 @@ class ToggleTests(_Base):
         job = ti.job_status("SEAL-2", "vendite")["job"]
         self.assertEqual((job["state"], job["done"], job["total"]), ("done", 4, 4))
 
+    def test_progress_counts_indexed_over_expected_pass_by_pass(self):
+        """#689: the room says how far its index is. Three room files and one
+        Drive file, one document per pass: 1/4, 2/4, 3/4, then 4/4 and no
+        longer pending. Non-indexable files (`.png`) are not expected."""
+        self._link_drive()
+        files = [{"kind": "file", "path": f"files/{x}.md", "size": 5, "mtime_iso": "1"}
+                 for x in ("a", "b", "c")]
+        files.append({"kind": "file", "path": "files/x.png", "size": 5, "mtime_iso": "1"})
+        ps = self._room(files) + [
+            self._drive([{"id": "d1", "path": "Piano", "size": 9, "modifiedTime": "t"}]),
+            patch.object(ti, "MAX_FILES", 1)]
+        for p in ps:
+            p.start()
+        try:
+            seen = []
+            for _ in range(4):
+                ti.sync("SEAL-2", "vendite")
+                pr = ti.job_status("SEAL-2", "vendite")["progress"]
+                seen.append((pr["indexed"], pr["expected"], pr["pending"]))
+        finally:
+            for p in ps:
+                p.stop()
+        self.assertEqual(seen, [(1, 4, True), (2, 4, True), (3, 4, True), (4, 4, False)])
+        self.assertTrue(pr["at"])
+
+    def test_no_progress_while_off(self):
+        self.flip(False)
+        self.assertIsNone(ti.job_status("SEAL-2", "vendite")["progress"])
+
     def test_a_flip_is_refused_while_a_job_runs(self):
         import threading
         gate = threading.Event()
