@@ -72,7 +72,8 @@ _FAMILY = {"files": "local"}
 MAX_FILES = 15
 MAX_BYTES = 15 * 1024 * 1024
 MAX_CHARS = 400_000
-#: `channel` (#638) is a pack relay's message: the same standing as `telegram`.
+#: `channel` (#638) is a pack relay's message; `telegram` stays for the
+#: messages Telegram brought before its removal (#683).
 UNTRUSTED_KINDS = ("proxy", "telegram", "channel")
 
 _LOCKS: dict[str, threading.Lock] = {}

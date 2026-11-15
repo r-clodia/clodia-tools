@@ -53,7 +53,7 @@ _RESOURCE_KIND = {
     "gdrive": ("google", "account"), "gdocs": ("google", "account"),
     "gsheets": ("google", "account"), "gcalendar": ("google", "account"),
     "gslides": ("google", "account"),
-    "github": ("github", None), "telegram": ("telegram", None),
+    "github": ("github", None),
     "rag": ("rag", "collection"), "eu_corpus": ("rag", "collection"),
     "datastore": ("datastore", "datastore"),
     "web": ("web", None), "topic": ("topic", None), "artifact": ("topic", None),

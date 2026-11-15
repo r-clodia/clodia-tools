@@ -20,8 +20,8 @@ from . import manifest as M
 
 SCHEMA_MD = Path(__file__).with_name("SCHEMA.md")
 
-#: The examples describe the end state of the epic, where `telegram.`, `mail.`
-#: and `github.` belong to packs. Validating them against today's core
+#: The examples describe packs, where `chat.` (fictional), `mail.` and
+#: `github.` belong to packs. Validating them against today's core
 #: namespaces would measure the migration, not the grammar — so the reserved set
 #: is explicit here, and `CoreNamespaceTests` checks the real derivation apart.
 NO_RESERVED: tuple[str, ...] = ()
@@ -70,14 +70,14 @@ class DocumentedExamplesTests(unittest.TestCase):
         # The list of `tools_api.connectors_snapshot()` as of today, which is
         # what "one example per existing connector" means in the issue.
         self.assertTrue(
-            {"telegram", "mail", "google", "github", "openai-images"} <= ids, ids)
+            {"chat", "mail", "google", "github", "openai-images"} <= ids, ids)
 
     def test_mail_has_two_providers_from_two_packs(self):
         registry = M.build_registry(self.examples, reserved=NO_RESERVED)
         providers = registry.providers_of("mail")
         self.assertEqual({p.id for p in providers}, {"imap", "gmail"})
         # The point of the decision: one vocabulary, providers from two packs.
-        self.assertEqual({p.pack for p in providers}, {"comms-pack", "google-pack"})
+        self.assertEqual({p.pack for p in providers}, {"chat-pack", "google-pack"})
         owner = registry.by_id("mail")
         self.assertTrue(owner.owns_vocabulary)
         self.assertEqual(registry.by_id("mail-gmail").vocabulary, "mail")
@@ -88,15 +88,15 @@ class DocumentedExamplesTests(unittest.TestCase):
         self.assertNotIn("mailto", registry.scheme_names("source"))
         self.assertIn("mailfrom", registry.scheme_names("source"))
         self.assertNotIn("mailfrom", registry.scheme_names("egress"))
-        # `tg` is both since #363: a vetted chat is a source like a mailfrom.
-        self.assertIn("tg", registry.scheme_names("egress"))
-        self.assertIn("tg", registry.scheme_names("source"))
+        # A chat scheme is both (#363): a vetted chat is a source like a mailfrom.
+        self.assertIn("chat", registry.scheme_names("egress"))
+        self.assertIn("chat", registry.scheme_names("source"))
 
     def test_verb_map_reproduces_the_destination_of_a_real_call(self):
         registry = M.build_registry(self.examples, reserved=NO_RESERVED)
-        send = registry.verb_map("egress")["telegram.send"]
+        send = registry.verb_map("egress")["chat.send"]
         self.assertEqual(send.arg, "chat_id")
-        self.assertEqual(send.uri_for("-1001234567890"), "tg:-1001234567890")
+        self.assertEqual(send.uri_for("-1001234567890"), "chat:-1001234567890")
         upload = registry.verb_map("egress")["gdrive.upload"]
         self.assertEqual(upload.uri_for("1AbC"), "gdrive:folder/1AbC")
         # GitHub points at the platform `https` scheme and passes the URL through.
@@ -116,10 +116,9 @@ class DocumentedExamplesTests(unittest.TestCase):
 
     def test_topic_action_declares_what_it_would_add(self):
         registry = M.build_registry(self.examples, reserved=NO_RESERVED)
-        action = next(a for a in registry.topic_actions() if a.id == "telegram-link")
-        # `chat_id`: the field name comms-pack's real manifest uses.
-        self.assertEqual(action.adds_ingress, ("tg:{chat_id}",))
-        self.assertEqual(action.adds_egress, ("tg:{chat_id}",))
+        action = next(a for a in registry.topic_actions() if a.id == "chat-link")
+        self.assertEqual(action.adds_ingress, ("chat:{chat_id}",))
+        self.assertEqual(action.adds_egress, ("chat:{chat_id}",))
         self.assertEqual(action.binding, "channel")
 
     def test_a_credential_only_connector_is_legal(self):

@@ -290,8 +290,8 @@ class ListingTests(unittest.TestCase):
         row = next(c for c in r.json()["connectors"] if c["id"] == "sms")
         self.assertEqual(row["relay"]["label"], "SMS")
         self.assertTrue(row["pairing"])
-        tg = next(c for c in r.json()["connectors"] if c["id"] == "telegram")
-        self.assertNotIn("relay", tg)
+        gh = next(c for c in r.json()["connectors"] if c["id"] == "github")
+        self.assertNotIn("relay", gh)
 
 
 # --------------------------------------------------------------------------
@@ -379,7 +379,7 @@ class ChannelRouteTests(_RouteCase):
         self.assertEqual(self.svc.calls, [])
 
     def test_unknown_connector_and_connector_without_relay_are_404(self):
-        for cid in ("nope", "telegram", "core"):
+        for cid in ("nope", "github", "core"):
             with self.subTest(cid=cid):
                 self.assertEqual(self.post(f"/internal/channels/{cid}/poll",
                                            {}).status_code, 404)
@@ -408,7 +408,7 @@ class ChannelRouteTests(_RouteCase):
         r = self.post("/internal/channels/sms/send", {"chat_id": "+1", "text": "x"})
         self.assertEqual(r.status_code, 502)
 
-    def test_same_authorisation_as_the_telegram_routes(self):
+    def test_same_authorisation_as_the_other_internal_routes(self):
         self.auth = (None, JSONResponse({"error": "forbidden"}, status_code=403))
         for op in ("poll", "send", "download"):
             with self.subTest(op=op):
@@ -456,7 +456,6 @@ class _Room:
         import shutil
         import tempfile
         from pathlib import Path
-        from .tools import telegram_bindings as tb
         self.tmp = tempfile.mkdtemp()
         test.addCleanup(shutil.rmtree, self.tmp, True)
         self.tier = tier
@@ -481,8 +480,7 @@ class _Room:
         stack = contextlib.ExitStack()
         test.addCleanup(stack.close)
         for p in (_installed(doc),
-                  patch.object(tb, "_path",
-                               lambda: Path(self.tmp) / "telegram-bindings.json"),
+                  patch.dict("os.environ", {"CLODIA_DATA": str(Path(self.tmp))}),
                   patch.object(egress, "scope_allow",
                                lambda d, s, u: self.liste.setdefault((d, s), []).append(u)),
                   patch.object(egress, "scope_revoke",
@@ -503,11 +501,11 @@ class BindingTests(unittest.TestCase):
         room = _Room(self, "SEAL-1", _pack(BASE))
         out = room.apply(action="connect", chat="+39333000111")
         self.assertEqual(out["bound"], "+39333000111")
-        # Under `sms`, not `telegram`.
+        # Under `sms`, not another connector.
         self.assertEqual(cb.load("sms", base=room.tmp),
                          {"+39333000111": {"instance": "messaggero",
                                            "tier": "SEAL-1", "topic": "acme"}})
-        self.assertEqual(cb.load("telegram", base=room.tmp), {})
+        self.assertEqual(cb.load("chat", base=room.tmp), {})
         self.assertEqual(room.liste[("ingress", "SEAL-1/acme")], ["sms:+39333000111"])
         out = room.apply(action="disconnect")
         self.assertIsNone(out["bound"])
@@ -516,7 +514,7 @@ class BindingTests(unittest.TestCase):
 
 
 class SealCapTests(unittest.TestCase):
-    """B1: a pack relay is capped, fail closed, with Telegram's ack flow."""
+    """B1: a pack relay is capped, fail closed, with the owner's ack flow."""
 
     def test_default_cap_is_seal_1_and_needs_the_owners_ack_above(self):
         from .tools import channel_bindings as cb
@@ -555,12 +553,6 @@ class SealCapTests(unittest.TestCase):
                 with self.assertRaises(ManifestError):
                     _parse(**{"relay": {"service": "sms-relay", "base": BASE,
                                         "label": "SMS", "seal_cap": cap}})
-
-    def test_telegram_keeps_its_table(self):
-        from .connectors.actions import channel_cap
-        reg = resolved.registry()
-        self.assertEqual(channel_cap(reg.by_id("telegram")), 1)
-
 
 # --------------------------------------------------------------------------
 # E) channel.deliver over a relay
@@ -872,8 +864,7 @@ class RetierTests(unittest.TestCase):
         from .topics.local_fs import LocalFsStorage
         from .topics.service import TopicService
         from .tools import channel_bindings as cb
-        from .tools import telegram_bindings as tb
-        self.retier, self.cb, self.tb = retier, cb, tb
+        self.retier, self.cb = retier, cb
         root = tempfile.mkdtemp()
         self.state = tempfile.mkdtemp()
         for d in (root, self.state):
@@ -884,15 +875,16 @@ class RetierTests(unittest.TestCase):
                   patch.object(whitelist, "CONFIG", {}),
                   patch.object(whitelist, "save_config", lambda: None),
                   patch.object(whitelist, "reload_config", lambda: None),
-                  patch.object(tb, "_path",
-                               lambda: Path(self.state) / "telegram-bindings.json"),
+                  patch.dict("os.environ", {"CLODIA_DATA": str(Path(self.state))}),
                   patch.object(taint, "_path", lambda: Path(self.state) / "taint.json"),
                   patch("server.instance_profile.topic_default_participants",
                         return_value=[])):
             stack.enter_context(p)
         self.svc = TopicService(LocalFsStorage(root))
         self.svc.new("SEAL-1", "acme", {"title": "Acme", "owner": "davide"})
-        tb.set_binding("-100", "messaggero", "SEAL-1", "acme")
+        # A second connector's chat (not installed: the default cap, SEAL-1).
+        cb.set_binding("chat", "-100", "messaggero", "SEAL-1", "acme",
+                       base=self.state)
         cb.set_binding("sms", "+39333000111", "messaggero", "SEAL-1", "acme",
                        base=self.state)
 
@@ -900,10 +892,13 @@ class RetierTests(unittest.TestCase):
         doc = _pack(BASE)
         doc["connectors"][0]["relay"]["seal_cap"] = "SEAL-2"
         with _installed(doc):
+            # `chat` is above its (default) cap at SEAL-2: the owner's ack;
+            # `sms` is within its manifest cap.
             esito = self.retier.apply(self.svc, "SEAL-1", "acme", "SEAL-2",
-                                      by="davide", reason="x")
-        self.assertEqual(set(esito["bindings"]), {"-100", "sms:+39333000111"})
-        self.assertEqual(self.tb.get("-100")["tier"], "SEAL-2")
+                                      by="davide", reason="x",
+                                      accept_seal_downgrade=True)
+        self.assertEqual(set(esito["bindings"]), {"chat:-100", "sms:+39333000111"})
+        self.assertEqual(self.cb.get("chat", "-100", base=self.state)["tier"], "SEAL-2")
         self.assertEqual(self.cb.get("sms", "+39333000111", base=self.state)["tier"],
                          "SEAL-2")
 
@@ -929,7 +924,7 @@ class RetierTests(unittest.TestCase):
                 self.retier.apply(self.svc, "SEAL-1", "acme", "SEAL-2",
                                   by="davide", reason="x",
                                   accept_seal_downgrade=True)
-        self.assertEqual(self.tb.get("-100")["tier"], "SEAL-1")
+        self.assertEqual(self.cb.get("chat", "-100", base=self.state)["tier"], "SEAL-1")
         self.assertEqual(self.cb.get("sms", "+39333000111", base=self.state)["tier"],
                          "SEAL-1")
         self.assertNotIn("channel_seal_ack", self.svc.open("SEAL-1", "acme")["meta"])
@@ -954,32 +949,32 @@ class AckPerConnectorTests(unittest.TestCase):
     def test_two_acks_and_revoking_one(self):
         from .topics.service import channel_ack, channel_cap_acked
         svc = self._svc()
-        svc.accept_channel_cap("SEAL-2", "acme", "telegram", by="davide")
+        svc.accept_channel_cap("SEAL-2", "acme", "chat", by="davide", cap=1)
         svc.accept_channel_cap("SEAL-2", "acme", "sms", by="davide", cap=1)
         meta = svc.open("SEAL-2", "acme")["meta"]
-        self.assertTrue(channel_cap_acked(meta, "telegram"))
+        self.assertTrue(channel_cap_acked(meta, "chat"))
         self.assertTrue(channel_cap_acked(meta, "sms"))
         svc.revoke_channel_cap_ack("SEAL-2", "acme", "sms")
         meta = svc.open("SEAL-2", "acme")["meta"]
-        self.assertTrue(channel_cap_acked(meta, "telegram"))
+        self.assertTrue(channel_cap_acked(meta, "chat"))
         self.assertIsNone(channel_ack(meta, "sms"))
-        svc.revoke_channel_cap_ack("SEAL-2", "acme", "telegram")
+        svc.revoke_channel_cap_ack("SEAL-2", "acme", "chat")
         self.assertNotIn("channel_seal_ack", svc.open("SEAL-2", "acme")["meta"])
 
-    def test_the_legacy_single_slot_is_telegrams_and_migrates(self):
+    def test_the_legacy_single_slot_is_its_channels_and_migrates(self):
         from .topics.service import CHANNEL_SEAL_ACK, channel_ack, channel_cap_acked
         svc = self._svc()
         meta, ver = svc._read_meta("SEAL-2", "acme")
-        meta[CHANNEL_SEAL_ACK] = {"channel": "telegram", "tier": "SEAL-2",
+        meta[CHANNEL_SEAL_ACK] = {"channel": "chat", "tier": "SEAL-2",
                                   "cap": "SEAL-1", "by": "davide", "at": "t"}
         svc._write_meta("SEAL-2", "acme", meta, base_version=ver)
         meta = svc.open("SEAL-2", "acme")["meta"]
-        self.assertTrue(channel_cap_acked(meta, "telegram"))
+        self.assertTrue(channel_cap_acked(meta, "chat"))
         self.assertFalse(channel_cap_acked(meta, "sms"))
         svc.accept_channel_cap("SEAL-2", "acme", "sms", by="davide", cap=1)
         raw = svc.open("SEAL-2", "acme")["meta"][CHANNEL_SEAL_ACK]
-        self.assertEqual(set(raw), {"telegram", "sms"})
-        self.assertEqual(channel_ack({CHANNEL_SEAL_ACK: raw}, "telegram")["by"],
+        self.assertEqual(set(raw), {"chat", "sms"})
+        self.assertEqual(channel_ack({CHANNEL_SEAL_ACK: raw}, "chat")["by"],
                          "davide")
 
     def test_disconnecting_a_relay_revokes_only_its_ack(self):
@@ -1122,7 +1117,7 @@ class MessageKindTests(unittest.TestCase):
             self.assertEqual(r.status_code, 200)
             self.assertNotIn("transport", svc.post_message.call_args.kwargs)
 
-    def test_the_topic_index_treats_it_like_telegram(self):
+    def test_the_topic_index_treats_it_as_untrusted(self):
         from . import topic_index
         self.assertEqual(topic_index._message_provenance("SEAL-1", "acme", {"kind": "channel"}),
                          "untrusted")
@@ -1191,7 +1186,7 @@ class PairingTests(unittest.TestCase):
         self.assertEqual(self.svc.calls, [])
 
     def test_404_without_pairing_and_503_when_down(self):
-        for cid in ("telegram", "nope"):
+        for cid in ("github", "nope"):
             self.assertEqual(self.client.get(f"/tools/connectors/{cid}/pairing",
                                              headers=_H).status_code, 404)
         self.running = False

@@ -219,14 +219,14 @@ class ActionSchemeTests(unittest.TestCase):
         """`adds.egress: ['{url}']` with `url=https://evil.example/*`: the
         reviewer's PoC, on a registry that bypassed the load-time check."""
         reg = resolved.registry()
-        tg = reg.by_id("telegram")
+        tg = reg.by_id("chat")
         act = dataclasses.replace(tg.topic_actions[0], adds_egress=("{chat}",),
                                   adds_ingress=())
         fake = dataclasses.replace(reg, connectors=tuple(
-            dataclasses.replace(c, topic_actions=(act,)) if c.id == "telegram"
+            dataclasses.replace(c, topic_actions=(act,)) if c.id == "chat"
             else c for c in reg.connectors))
         with _Topic() as t, patch.object(resolved, "registry", lambda: fake):
-            r = _client().post(_url(t, "telegram", "telegram-link"),
+            r = _client().post(_url(t, "chat", "chat-link"),
                                json={"action": "connect",
                                      "chat": "https://evil.example/*"},
                                headers=_H)
@@ -237,7 +237,7 @@ class ActionSchemeTests(unittest.TestCase):
     def test_a_free_text_value_must_have_the_scheme_form(self):
         for chat in ("pippo", "-100123garbage", "*", "-1 tg:*"):
             with self.subTest(chat=chat), _Topic() as t:
-                r = _client().post(_url(t, "telegram", "telegram-link"),
+                r = _client().post(_url(t, "chat", "chat-link"),
                                    json={"action": "connect", "chat": chat},
                                    headers=_H)
                 self.assertEqual(r.status_code, 400, r.text)
@@ -253,19 +253,19 @@ class ActionSchemeTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# the Telegram button through the generic route (the `telegram-link` alias
-# was removed with #526: the webui calls the generic route only)
+# a chat button through the generic route (the `telegram-link` alias was
+# removed with #526, Telegram with #683: the example is `chat-pack`)
 # --------------------------------------------------------------------------
 
-class TelegramActionTests(unittest.TestCase):
+class ChannelActionTests(unittest.TestCase):
     def _tg(self, t, body):
-        return _client().post(_url(t, "telegram", "telegram-link"),
+        return _client().post(_url(t, "chat", "chat-link"),
                               json=body, headers=_H)
 
     def _missing(self, t):
         return patch.object(topics_api, "_service", lambda: _MissingSvc())
 
-    def test_telegram_connect_on_a_missing_topic_writes_nothing(self):
+    def test_a_chat_connect_on_a_missing_topic_writes_nothing(self):
         with _Topic() as t, self._missing(t):
             r = self._tg(t, {"action": "connect", "chat": "-100123"})
             self.assertIn(r.status_code, (400, 404), r.text)
@@ -316,7 +316,7 @@ from .connectors import first_party_fixture as _first_party
 def setUpModule() -> None:
     # The first-party packs, installed as on every instance: since the switch
     # was retired (#526) the tables pinned here are theirs, not the gateway's.
-    _first_party.install()
+    _first_party.install(chat=True)
 
 
 def tearDownModule() -> None:

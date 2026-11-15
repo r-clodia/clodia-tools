@@ -154,8 +154,8 @@ MIGRATING_NAMESPACES = frozenset(p.rstrip("_") for p in CORE_VAULT_PREFIXES)
 
 def reserved_namespaces() -> frozenset[str]:
     """`MIGRATING_NAMESPACES` minus the namespaces and vault prefixes of the
-    connectors first-party packs serve (`builtin.released()`: `telegram`,
-    `github`, `openai`, …).
+    connectors first-party packs serve (`builtin.released()`: `github`,
+    `openai`, …).
 
     Those are not free for everyone: `builtin.expected_claims()` hands each to
     its own pack only, and `resolved._strip_foreign_claims` drops any other
@@ -1172,10 +1172,9 @@ def core_namespaces() -> frozenset[str]:
     from ..main import (_GATEWAY_RETAINED_VERBS, _packaged_namespaces,
                         all_native_verb_names)
 
-    # The verbs the gateway keeps in a pack's namespace (Telegram's binding
-    # verbs, which write the gateway's own binding registry) do not make the
-    # namespace the gateway's again: otherwise keeping them would refuse the
-    # pack connector.
+    # The verbs the gateway keeps in a pack's namespace (none since #683;
+    # Telegram's binding verbs were the last) do not make the namespace the
+    # gateway's again: otherwise keeping them would refuse the pack connector.
     packaged = _packaged_namespaces()
     return frozenset(
         name.split(".", 1)[0] for name in all_native_verb_names()
@@ -1773,7 +1772,7 @@ _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 _SERVICE_PATH = re.compile(r"^/[A-Za-z0-9._~-]{1,32}(?:/[A-Za-z0-9._~-]{1,32}){0,3}$")
 #: Longest relay label: it is a name in a room, not a sentence.
 MAX_RELAY_LABEL = 32
-#: The SEAL cap of a pack relay that declares none (#638): SEAL-1, Telegram's.
+#: The SEAL cap of a pack relay that declares none (#638): SEAL-1.
 DEFAULT_RELAY_SEAL_CAP = 1
 
 

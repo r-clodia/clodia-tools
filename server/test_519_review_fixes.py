@@ -157,16 +157,18 @@ class VaultEntryTests(unittest.TestCase):
 
 
     def test_a_migrated_namespace_keeps_its_core_prefix_and_only_it(self):
-        """Since #522/#526 `telegram` is comms-pack's: its namespace may use
-        its own core prefix (and only comms-pack may hold that namespace,
-        `builtin.expected_claims`). Under the full reservation it may not."""
+        """Since #525/#526 `github` is it-pack's: its namespace may use its
+        own core prefix (and only it-pack may hold that namespace,
+        `builtin.expected_claims`). Under the full reservation it may not.
+        `telegram`, released to nobody since #683, keeps its prefix reserved."""
         from .connectors.manifest import MIGRATING_NAMESPACES, vault_entry_problem
         from .connectors import builtin
-        self.assertEqual(vault_entry_problem("telegram_bot_token", "telegram"), "")
-        self.assertEqual(builtin.expected_claims()["ns:telegram"], "comms-pack")
-        self.assertTrue(vault_entry_problem("telegram_bot_token", "telegram",
+        self.assertEqual(vault_entry_problem("github_pat", "github"), "")
+        self.assertEqual(builtin.expected_claims()["ns:github"], "it-pack")
+        self.assertTrue(vault_entry_problem("github_pat", "github",
                                             reserved=MIGRATING_NAMESPACES))
-        self.assertTrue(vault_entry_problem("telegram_bot_token", "sms"))
+        self.assertTrue(vault_entry_problem("github_pat", "sms"))
+        self.assertTrue(vault_entry_problem("telegram_bot_token", "telegram"))
         self.assertTrue(vault_entry_problem("mailbox_team", "mailbox"))
         self.assertTrue(vault_entry_problem("mcp_x_token", "mcp_x"))
 

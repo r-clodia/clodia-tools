@@ -674,8 +674,8 @@ class FailClosedTests(_Istanza):
         self.togli_pack(PACK)
         self.assertEqual(resolved.degraded(), "")
         self.assertIsNotNone(egress.spec_for("email.send"))
-        self.assertIsNotNone(egress.spec_for("telegram.send"))
-        for verbo in ("email.send", "telegram.send", "web.fetch", "topic.list"):
+        self.assertIsNotNone(egress.spec_for("github.push"))
+        for verbo in ("email.send", "github.push", "web.fetch", "topic.list"):
             main._check_pack_connector_held(verbo)          # no exception
 
     def test_a_profile_saying_native_does_not_lift_the_refusal(self):

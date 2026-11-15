@@ -566,7 +566,7 @@ def set_resource(tier: str, name: str, mid: str, uri: str, effect: str | None,
 
 #: The room's lists, by tool (#662): which MCP a list entry belongs to. In:
 #: Fonti (web), Mittenti and Caselle collegate (email), Gruppi e contatti
-#: (telegram, whatsapp). Out: Destinazioni (web), Destinatari (email), Gruppi e
+#: (whatsapp). Out: Destinazioni (web), Destinatari (email), Gruppi e
 #: contatti. Explicit, not derived from the catalogue: `mailto:` is reached by
 #: Google too, and `https:` out by GitHub — the list names the tool.
 LIST_TOOLS = {
@@ -574,7 +574,6 @@ LIST_TOOLS = {
     ("egress", "https"): "web", ("egress", "http"): "web",
     ("ingress", "mailfrom"): "email", ("ingress", "inbox"): "email",
     ("egress", "mailto"): "email", ("egress", "outbox"): "email",
-    ("ingress", "tg"): "telegram", ("egress", "tg"): "telegram",
     ("ingress", "wa"): "whatsapp", ("egress", "wa"): "whatsapp",
     # A Drive folder among the room's Destinazioni is a folder the room writes
     # to: the Google row allows it, or A·V·R·Q asks at every update while the
@@ -606,7 +605,7 @@ def on_room_list_added(direction: str, scope: str, uri: str) -> dict:
     if mid not in _mcp_entries(meta):
         enable_mcp(tier, name, mid)
         out["mcp_authorised"] = mid
-    row = direction == "egress" or mid in ("telegram", "whatsapp")
+    row = direction == "egress" or mid == "whatsapp"
     if row and str(uri).strip().lower() != "https:*":
         try:
             set_resource(tier, name, mid, uri, "allow")

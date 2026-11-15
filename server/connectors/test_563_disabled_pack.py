@@ -13,43 +13,43 @@ import json
 import unittest
 
 from . import resolved
-from .test_522_pack_switch import _comms_pack, _Istanza
+from .test_pack_context import PACK, _chat_pack, _Istanza
 
 
 class DisabledPackTests(_Istanza):
     def _write(self, **extra) -> None:
-        (self.dir / "packs" / "comms-pack" / "pack.yaml").write_text(
-            json.dumps({**_comms_pack(), **extra}), encoding="utf-8")
+        (self.dir / "packs" / PACK / "pack.yaml").write_text(
+            json.dumps({**_chat_pack(), **extra}), encoding="utf-8")
         resolved.invalidate()
 
     def test_a_disabled_pack_is_not_a_manifest(self) -> None:
-        self.assertIn("comms-pack", resolved.manifests())
+        self.assertIn(PACK, resolved.manifests())
         self._write(disabled=True)
-        self.assertNotIn("comms-pack", resolved.manifests())
+        self.assertNotIn(PACK, resolved.manifests())
         self._write(disabled=False)
-        self.assertIn("comms-pack", resolved.manifests())
+        self.assertIn(PACK, resolved.manifests())
 
     def test_its_connector_is_gone_on_pack(self) -> None:
         self.posizione("pack")
-        self.assertEqual(resolved.registry().by_id("telegram").pack, "comms-pack")
+        self.assertEqual(resolved.registry().by_id("chat").pack, PACK)
         self._write(disabled=True)
-        telegram = resolved.registry().by_id("telegram")
-        self.assertTrue(telegram is None or telegram.pack != "comms-pack",
+        chat = resolved.registry().by_id("chat")
+        self.assertTrue(chat is None or chat.pack != PACK,
                         "a disabled pack must not hold its connector")
 
     def test_only_a_true_boolean_disables(self) -> None:
         # A string is not a decision: "false" must not switch a pack off.
         for v in ("true", "false", 1, "yes"):
             self._write(disabled=v)
-            self.assertIn("comms-pack", resolved.manifests(), v)
+            self.assertIn(PACK, resolved.manifests(), v)
 
     def test_its_file_keeps_its_seniority(self) -> None:
-        before = resolved.seniority().get("comms-pack")
+        before = resolved.seniority().get(PACK)
         self._write(disabled=True)
-        self.assertIn("comms-pack",
+        self.assertIn(PACK,
                       [p.parent.name for p in resolved._manifest_files()])
         self._write(disabled=False)
-        self.assertEqual(resolved.seniority().get("comms-pack"), before)
+        self.assertEqual(resolved.seniority().get(PACK), before)
 
 
 class McpListNamesThePackTests(unittest.TestCase):

@@ -1,23 +1,18 @@
-"""clodia-platform#522 — i due pezzi che restano al gateway quando il connettore se ne va.
+"""clodia-platform#522 — what stays with the gateway when a connector's
+implementation lives in a pack.
 
-Spostata l'implementazione in un pack, due cose NON possono seguirla, e senza di
-esse l'interruttore non si può accendere su traffico vero:
+1. **reading a topic file.** A `send_file` verb sends a file that lives in a
+   topic: the caller names the path, and the compartment check (the caller must
+   be a member of THAT topic) and the audit of what crosses the boundary are
+   attached to the read. A pack backend reading the topics' filesystem itself
+   would skip both. So the manifest declares which arguments are the path and
+   the bytes, and the gateway hands over the bytes;
+2. **the bound chat.** A `defaults: value: binding` argument is resolved by the
+   gateway from its bindings registry, per connector.
 
-1. **leggere un file di topic.** `telegram.send_file` manda un file che sta in un
-   topic: il percorso lo sceglie il chiamante, e attaccati alla lettura ci sono
-   il compartimento (chi chiama dev'essere partecipante di QUEL topic) e l'audit
-   di ciò che attraversa il confine. Un backend di pack che leggesse da sé il
-   filesystem dei topic salterebbe entrambi. Quindi il manifest dichiara quali
-   argomenti sono il path e i byte, e il gateway consegna i byte;
-2. **la porta degli update.** Telegram ammette un solo consumer `getUpdates` per
-   bot: se il pack ne ha uno e il gateway pure, i due si rubano i messaggi.
-   Quindi le rotte interne del relay, in posizione `pack`, diventano un rinvio
-   al backend — e il join per link, che è control-plane e non si è spostato, va
-   intercettato lì, sull'unica porta da cui gli update entrano.
-
-I test sono scritti per fallire su ciò che si romperebbe in SILENZIO: un file
-letto senza il controllo di membership, un percorso che arriva al backend, un
-`/start <token>` che finisce nel topic come un messaggio qualunque.
+Born with Telegram (#522), measured on a generic `chat` connector since
+Telegram's removal (#683). The tests fail on what would break SILENTLY: a file
+read without the membership check, a path that reaches the backend.
 """
 from __future__ import annotations
 
@@ -26,23 +21,22 @@ import json
 import unittest
 from unittest.mock import patch
 
-from . import main, telegram_api
+from . import main
 from .connectors import manifest as M
 from .connectors import resolved
 
-#: Il connettore minimo che dichiara un file: quello vero (comms-pack) vive
-#: nell'altro repo, e questo test misura il MECCANISMO, non quel manifest.
+#: The minimal connector declaring a file: this test measures the MECHANISM.
 PACK = {
-    "name": "comms-pack",
+    "name": "chat-pack",
     "connectors": [{
-        "id": "telegram", "manifest_version": 1, "namespace": "telegram",
-        "schemes": [{"scheme": "tg", "direction": "both",
+        "id": "chat", "manifest_version": 1, "namespace": "chat",
+        "schemes": [{"scheme": "chat", "direction": "both",
                      "forms": [{"pattern": r"-?\d+", "example": "-100"}]}],
-        "verbs": [{"verb": "telegram.send_file", "direction": "egress",
-                   "scheme": "tg", "arg": "chat_id"}],
-        "defaults": [{"verb": "telegram.send", "arg": "chat_id",
+        "verbs": [{"verb": "chat.send_file", "direction": "egress",
+                   "scheme": "chat", "arg": "chat_id"}],
+        "defaults": [{"verb": "chat.send", "arg": "chat_id",
                       "value": "binding"}],
-        "files": [{"verb": "telegram.send_file", "path_arg": "path",
+        "files": [{"verb": "chat.send_file", "path_arg": "path",
                    "bytes_arg": "content_b64", "name_arg": "filename",
                    "tier_arg": "tier", "topic_arg": "name",
                    "chat_arg": "chat_id"}],
@@ -90,7 +84,7 @@ class IlGatewayConsegnaIlFileTests(unittest.TestCase):
         un pack che vedesse `local/x` saprebbe cosa chiedere la volta dopo."""
         args = {"path": "local/relazione.pdf", "caption": "ecco"}
         with _registry():
-            self.assertTrue(main._fill_declared_file("telegram.send_file", args))
+            self.assertTrue(main._fill_declared_file("chat.send_file", args))
         self.assertEqual(base64.b64decode(args["content_b64"]), b"ciao")
         self.assertEqual(args["filename"], "relazione.pdf")
         self.assertNotIn("path", args)
@@ -102,7 +96,7 @@ class IlGatewayConsegnaIlFileTests(unittest.TestCase):
         scelto dal chiamante aprirebbe i file di un topic di cui non è
         partecipante."""
         with _registry():
-            main._fill_declared_file("telegram.send_file", {"path": "local/x"})
+            main._fill_declared_file("chat.send_file", {"path": "local/x"})
         self.assertEqual(self.membership, [("SEAL-1", "software-house")])
         self.assertEqual(self.svc.letti, [("SEAL-1", "software-house", "local/x")])
 
@@ -111,13 +105,13 @@ class IlGatewayConsegnaIlFileTests(unittest.TestCase):
             raise PermissionError("non sei partecipante")
         with _registry(), patch.object(main, "_require_topic_member", nega):
             with self.assertRaises(PermissionError):
-                main._fill_declared_file("telegram.send_file",
+                main._fill_declared_file("chat.send_file",
                                          {"path": "local/x"})
         self.assertEqual(self.svc.letti, [])
 
     def test_il_topic_esplicito_vince(self) -> None:
         with _registry():
-            main._fill_declared_file("telegram.send_file", {
+            main._fill_declared_file("chat.send_file", {
                 "chat_id": "-100", "path": "local/x",
                 "tier": "SEAL-2", "name": "altro"})
         self.assertEqual(self.membership, [("SEAL-2", "altro")])
@@ -128,8 +122,8 @@ class IlGatewayConsegnaIlFileTests(unittest.TestCase):
         legame = {"tier": "SEAL-3", "topic": "riservato"}
         with _registry(), \
                 patch("server.tools.channel_bindings.get",
-                      lambda conn, chat, **k: legame if conn == "telegram" else None):
-            main._fill_declared_file("telegram.send_file",
+                      lambda conn, chat, **k: legame if conn == "chat" else None):
+            main._fill_declared_file("chat.send_file",
                                      {"chat_id": "-100", "path": "local/x"})
         self.assertEqual(self.membership, [("SEAL-3", "riservato")])
 
@@ -141,19 +135,19 @@ class IlGatewayConsegnaIlFileTests(unittest.TestCase):
         with _registry(), \
                 patch("server.tools.channel_bindings.get", lambda *a, **k: None):
             with self.assertRaises(ValueError):
-                main._fill_declared_file("telegram.send_file",
+                main._fill_declared_file("chat.send_file",
                                          {"chat_id": "-100", "path": "local/x"})
         self.assertEqual(self.svc.letti, [])
 
     def test_senza_percorso_e_un_errore_non_un_invio_vuoto(self) -> None:
         with _registry():
             with self.assertRaises(ValueError):
-                main._fill_declared_file("telegram.send_file", {})
+                main._fill_declared_file("chat.send_file", {})
 
     def test_un_verbo_che_non_lo_dichiara_resta_intatto(self) -> None:
         args = {"path": "local/x"}
         with _registry():
-            self.assertFalse(main._fill_declared_file("telegram.send", args))
+            self.assertFalse(main._fill_declared_file("chat.send", args))
         self.assertEqual(args, {"path": "local/x"})
 
     def test_la_dichiarazione_vale_solo_dentro_il_proprio_namespace(self) -> None:
@@ -174,7 +168,7 @@ class IlGatewayConsegnaIlFileTests(unittest.TestCase):
                             "scheme": "tg2", "arg": "chat_id"}],
                  "files": [{"verb": "tg2.send_file", "path_arg": "p",
                             "bytes_arg": "b"}]},
-                pack="gateway-telegram", builtin=True)
+                pack="gateway-chat", builtin=True)
 
     def test_i_byte_non_possono_sovrascrivere_il_percorso(self) -> None:
         doc = json.loads(json.dumps(PACK))
@@ -205,9 +199,9 @@ class LaChatLegataLaRisolveIlGatewayTests(unittest.TestCase):
 
     def test_un_argomento_omesso_prende_la_chat_del_canale(self) -> None:
         args = {"text": "ciao"}
-        with _registry(), self._registro({"telegram": {
+        with _registry(), self._registro({"chat": {
                 "-100999": {"tier": "SEAL-1", "topic": "software-house"}}}):
-            main._fill_declared_defaults("telegram.send", args)
+            main._fill_declared_defaults("chat.send", args)
         self.assertEqual(args["chat_id"], "-100999")
 
     def test_un_argomento_esplicito_vince(self) -> None:
@@ -215,16 +209,16 @@ class LaChatLegataLaRisolveIlGatewayTests(unittest.TestCase):
         sovrascrivesse, non si potrebbe più scrivere a una chat diversa da
         quella legata al topic."""
         args = {"text": "ciao", "chat_id": "-100111"}
-        with _registry(), self._registro({"telegram": {
+        with _registry(), self._registro({"chat": {
                 "-100999": {"tier": "SEAL-1", "topic": "software-house"}}}):
-            main._fill_declared_defaults("telegram.send", args)
+            main._fill_declared_defaults("chat.send", args)
         self.assertEqual(args["chat_id"], "-100111")
 
     def test_il_binding_di_un_altro_connettore_non_vale(self) -> None:
         with _registry(), self._registro({"whatsapp": {
                 "-100999": {"tier": "SEAL-1", "topic": "software-house"}}}):
             with self.assertRaises(ValueError):
-                main._fill_declared_defaults("telegram.send", {"text": "ciao"})
+                main._fill_declared_defaults("chat.send", {"text": "ciao"})
 
     def test_senza_chat_collegata_l_errore_nomina_la_causa(self) -> None:
         """Lasciare l'argomento vuoto farebbe calcolare al PDP una destinazione
@@ -232,16 +226,16 @@ class LaChatLegataLaRisolveIlGatewayTests(unittest.TestCase):
         semplicemente non ha una chat collegata."""
         with _registry(), self._registro({}):
             with self.assertRaises(ValueError) as e:
-                main._fill_declared_defaults("telegram.send", {"text": "ciao"})
+                main._fill_declared_defaults("chat.send", {"text": "ciao"})
         self.assertIn("collegala dal pulsante", str(e.exception))
 
     def test_un_verbo_senza_default_non_viene_toccato(self) -> None:
-        """Per VERBO, non per namespace: `telegram.inbox` non ha una chat da
+        """Per VERBO, non per namespace: `chat.inbox` non ha una chat da
         riempire e il suo schema non dichiara quell'argomento."""
         args = {}
-        with _registry(), self._registro({"telegram": {
+        with _registry(), self._registro({"chat": {
                 "-100999": {"tier": "SEAL-1", "topic": "software-house"}}}):
-            self.assertEqual(main._fill_declared_defaults("telegram.inbox", args), [])
+            self.assertEqual(main._fill_declared_defaults("chat.inbox", args), [])
         self.assertEqual(args, {})
 
     def test_un_manifest_del_gateway_non_puo_dichiararli(self) -> None:
@@ -254,7 +248,7 @@ class LaChatLegataLaRisolveIlGatewayTests(unittest.TestCase):
                             "scheme": "tg2", "arg": "chat_id"}],
                  "defaults": [{"verb": "tg2.send", "arg": "chat_id",
                                "value": "binding"}]},
-                pack="gateway-telegram", builtin=True)
+                pack="gateway-chat", builtin=True)
 
     def test_un_valore_inventato_e_rifiutato(self) -> None:
         doc = json.loads(json.dumps(PACK))
@@ -262,91 +256,6 @@ class LaChatLegataLaRisolveIlGatewayTests(unittest.TestCase):
         with self.assertRaises(M.ManifestError):
             M.build_registry({"comms-pack": doc}, reserved=frozenset())
 
-
-
-class _Req:
-    """La richiesta interna minima: `internal_auth` è patchato a parte."""
-
-    def __init__(self, body: dict):
-        self._body = body
-
-    async def json(self):
-        return self._body
-
-
-class LaPortaDegliUpdateEUnaSolaTests(unittest.IsolatedAsyncioTestCase):
-    """In posizione `pack` le rotte interne rinviano al backend."""
-
-    def setUp(self) -> None:
-        p = patch.object(telegram_api, "_authorize", lambda r: ("clodia", None))
-        p.start()
-        self.addCleanup(p.stop)
-        self.chiamate: list = []
-
-    def _pack(self, risposte: dict):
-        async def fake(verbo, args, **_kw):
-            self.chiamate.append((verbo, args))
-            return risposte.get(verbo, {})
-        return patch.object(telegram_api, "_pack", fake)
-
-    async def test_il_poll_passa_dal_backend_del_pack(self) -> None:
-        riga = {"chat_id": "-100", "text": "ciao", "chat_type": "supergroup"}
-        with self._pack({"updates": {"messages": [riga],
-                                        "bot_username": "clodiabot"}}):
-            r = await telegram_api.poll(_Req({"timeout": 5}))
-        self.assertEqual(self.chiamate, [("updates", {"timeout": 5})])
-        self.assertEqual(json.loads(r.body)["count"], 1)
-
-    async def test_un_join_per_link_non_finisce_nel_topic(self) -> None:
-        """`/start <token>` è un join che aspetta l'owner, non un messaggio da
-        riportare. Nel gateway l'intercettazione viveva nel ciclo degli update;
-        quel ciclo adesso è del pack, e il join non si è spostato con lui."""
-        riga = {"chat_id": "-100", "text": "/start abcdefghijklmnop",
-                "chat_type": "supergroup", "from_username": "dadabit"}
-        altro = {"chat_id": "-100", "text": "ciao", "chat_type": "supergroup"}
-        visti: list = []
-        with self._pack({"updates": {"messages": [riga, altro],
-                                        "bot_username": "clodiabot"}}), \
-                patch("server.tools.telegram_join.intercept",
-                      lambda msg, bot: visti.append((msg, bot)) or
-                      msg["text"].startswith("/start")):
-            r = await telegram_api.poll(_Req({}))
-        corpo = json.loads(r.body)
-        self.assertEqual(corpo["count"], 1)
-        self.assertEqual(corpo["messages"][0]["text"], "ciao")
-        # L'intercettazione riceve la chat con il suo TIPO: `claim` accetta solo
-        # gruppi, e senza il tipo un join in un gruppo verrebbe scartato.
-        self.assertEqual(visti[0][0]["chat"]["type"], "supergroup")
-        self.assertEqual(visti[0][1], "clodiabot")
-
-    async def test_il_send_interno_passa_dal_pack(self) -> None:
-        with self._pack({"send": {"ok": True, "message_id": 9}}):
-            r = await telegram_api.send(_Req({"chat_id": "-100", "text": "ciao"}))
-        self.assertEqual(self.chiamate[0][0], "send")
-        self.assertEqual(json.loads(r.body)["message_id"], 9)
-
-    async def test_il_download_passa_dal_pack(self) -> None:
-        with self._pack({"download": {"size": 3}}):
-            r = await telegram_api.download(_Req({"file_id": "F1"}))
-        self.assertEqual(self.chiamate[0], ("download", {"file_id": "F1"}))
-        self.assertEqual(json.loads(r.body)["size"], 3)
-
-    async def test_il_drenaggio_per_chat_non_esiste_piu(self) -> None:
-        """Solo il client nativo lo aveva, e nessuno lo chiamava (il relay usa
-        `poll`): con il nativo rimosso (#522) la rotta non c'è."""
-        self.assertFalse(hasattr(telegram_api, "updates"))
-        self.assertNotIn("/internal/telegram/updates",
-                         [r.path for r in telegram_api.routes])
-
-    async def test_senza_componente_nessun_altro_risponde(self) -> None:
-        """Né il client nativo né il backend MCP di comms-pack ≤ 2.0: se il
-        componente non serve, il relay riceve un errore, non un'altra strada."""
-        from server.components import loader
-        with patch.object(loader, "service", lambda *a: None), \
-                patch.object(loader, "verb", lambda *a: None):
-            with self.assertRaises(RuntimeError) as cm:
-                await telegram_api._pack("updates", {})
-        self.assertIn("comms-pack", str(cm.exception))
 
 
 async def _async(valore):

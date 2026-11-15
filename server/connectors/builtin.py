@@ -13,8 +13,8 @@ declared here in the same grammar:
 These files are code, not input: they live in the image and are the only
 manifests allowed to declare the intrinsic schemes or to span namespaces.
 
-The connectors the gateway used to implement — Telegram, Google, GitHub,
-image generation — are served by first-party packs (epic #527); the per-instance
+The connectors the gateway used to implement — Google, GitHub, image
+generation — are served by first-party packs (epic #527); the per-instance
 `native|pack` switch that moved them one at a time is retired (#526). What the
 gateway still knows about them is in the tables below (`RELEASED_TO`,
 `RELEASED_NAMESPACES`, `ADOPTED_VAULT_ENTRIES`): which pack owns each of them,
@@ -80,7 +80,6 @@ CONNECTOR_FAMILY: dict[str, str] = {
 #: name, whichever pack was imported first could claim the namespace, the
 #: official mount and its credential (review of clodia-tools#379).
 RELEASED_TO: dict[str, str] = {
-    "telegram": "comms-pack",
     "github": "it-pack",
     "openai-images": "it-pack",
     # #524: the four Google connectors, and Gmail's provider of the mail
@@ -97,7 +96,6 @@ RELEASED_TO: dict[str, str] = {
 #: manifests declared for them before the packs took over (#522–#525).
 #: `mail-gmail` has none of its own: it `extends:` the mail vocabulary.
 RELEASED_NAMESPACES: dict[str, str] = {
-    "telegram": "telegram",
     "github": "github",
     "openai-images": "openai",
     "google": "gdrive",
@@ -108,12 +106,11 @@ RELEASED_NAMESPACES: dict[str, str] = {
 
 
 #: The address schemes of the pack-served connectors (#526, review of #409):
-#: as much theirs as the namespace. A foreign pack declaring `mailto` or `tg`
+#: as much theirs as the namespace. A foreign pack declaring `gdrive`
 #: under a namespace of its own would otherwise, installed first, knock the
 #: first-party connector out in the scheme clash and set that scheme's
 #: canonicalisation and warnings.
 RELEASED_SCHEMES: dict[str, tuple[str, ...]] = {
-    "telegram": ("tg",),
     "google": ("gdrive", "gsheets", "gcal"),
 }
 
@@ -123,7 +120,6 @@ RELEASED_SCHEMES: dict[str, tuple[str, ...]] = {
 #: before its connector is held. Mail and Google have none: their credentials
 #: stay in the gateway's custody (`CORE_CREDENTIALS_FOLLOW`).
 ADOPTED_VAULT_ENTRIES: dict[str, str] = {
-    "telegram": "telegram_bot_token",
     "github": "github_pat",
     "openai-images": "openai_api_key",
 }
@@ -141,7 +137,6 @@ ADOPTED_VAULT_ENTRIES: dict[str, str] = {
 #: manifest says.
 FIRST_PARTY_SOURCES: dict[str, tuple[str, str]] = {
     "google-pack": ("r-clodia/clodia-logic", "catalogs/packs/google-pack/"),
-    "comms-pack": ("r-clodia/clodia-logic", "catalogs/packs/comms-pack/"),
     "it-pack": ("r-clodia/clodia-packs", "packs/it-pack/"),
 }
 
@@ -243,8 +238,8 @@ def released() -> tuple[frozenset[str], frozenset[str]]:
 
     A connector gives up its namespace and the core vault prefixes its
     adopted credential falls under: without this `check_namespace` would keep
-    `telegram` reserved for nobody and `vault_entry_problem` would refuse
-    `telegram_bot_token` to comms-pack. Who may then claim them is
+    `github` reserved for nobody and `vault_entry_problem` would refuse
+    `github_pat` to it-pack. Who may then claim them is
     `expected_claims` (`resolved._strip_foreign_claims`): their pack, nobody
     else.
     """

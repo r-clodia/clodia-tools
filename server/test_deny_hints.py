@@ -21,11 +21,12 @@ class DenyHintTests(unittest.TestCase):
     def test_the_file_verbs_point_at_the_by_reference_path(self):
         """I verbi tolti al postino hanno tutti un sostituto che non richiede di
         vedere i byte: è il motivo per cui toglierli non gli toglie il mestiere."""
-        for verb, needle in (("topic.put", "email.save_attachment"),
-                             ("topic.write_file", "email.save_attachment"),
-                             ("topic.read_file", "topic_files"),
-                             ("topic.read_document", "topic_files"),
-                             ("topic.fetch", "topic_files")):
+        # #683: mail attachments are the courier's, sending is channel.deliver.
+        for verb, needle in (("topic.put", "corriere"),
+                             ("topic.write_file", "corriere"),
+                             ("topic.read_file", "channel.deliver"),
+                             ("topic.read_document", "channel.deliver"),
+                             ("topic.fetch", "channel.deliver")):
             with self.subTest(verb=verb):
                 self.assertIn(needle, main._DENY_HINT[verb])
 
@@ -70,4 +71,4 @@ class ScratchPathErrorTests(unittest.TestCase):
         msg = str(cm.exception)
         self.assertIn("/tmp/f24.pdf", msg)
         self.assertIn(main._SPAWNS_ROOT, msg)
-        self.assertIn("email.save_attachment", msg)
+        self.assertIn("corriere", msg)

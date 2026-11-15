@@ -65,10 +65,10 @@ def telegram_connector() -> dict:
 
 
 def comms_pack() -> dict:
-    """comms-pack as the gateway holds it since #683: Telegram only. Its
-    `mail` connector (`mail_connector()`, kept for the tests of a pack that
-    still declares it) is ignored, because mail is the gateway's again."""
-    return {"name": "comms-pack", "connectors": [telegram_connector()]}
+    """comms-pack ≤ 2.8 as an instance may still have it installed: Telegram
+    and mail. Not first-party any more (#683): both connectors are refused."""
+    return {"name": "comms-pack",
+            "connectors": [telegram_connector(), mail_connector()]}
 
 
 # --------------------------------------------------------------------------
@@ -171,9 +171,49 @@ def it_pack() -> dict:
 
 
 def manifests() -> dict[str, dict]:
-    """`{pack: manifest}` of the three first-party packs."""
-    return {"comms-pack": comms_pack(), "google-pack": google_pack(),
-            "it-pack": it_pack()}
+    """`{pack: manifest}` of the first-party packs. comms-pack is gone
+    (#683): mail is the gateway's, Telegram was removed."""
+    return {"google-pack": google_pack(), "it-pack": it_pack()}
+
+
+# --------------------------------------------------------------------------
+# a generic chat pack (not first-party)
+# --------------------------------------------------------------------------
+
+def chat_connector() -> dict:
+    """A third-party messaging connector with a channel binding: the shape
+    Telegram had (#522–#683), renamed. The generic channel mechanisms —
+    `binding: channel` topic actions, the SEAL cap and the owner's ack, the
+    bindings registry, vetted chat sources, scheme forms — are measured on it
+    since Telegram was removed (#683)."""
+    return {
+        "id": "chat", "manifest_version": 1, "namespace": "chat", "label": "Chat",
+        "schemes": [{
+            "scheme": "chat", "direction": "both", "label": "Chat",
+            "danger": "una chat su un servizio di messaggistica esterno, cioè su "
+                      "un'infrastruttura non tua.",
+            "forms": [{"label": "gruppo", "pattern": r"^-?\d+$",
+                       "example": "-1001234567890"},
+                      {"label": "persona", "pattern": r"^@[A-Za-z0-9_]{5,32}$",
+                       "example": "@dadabit"}]}],
+        "verbs": [{"verb": "chat.send", "direction": "egress", "scheme": "chat",
+                   "arg": "chat_id", "dtype": "chat"},
+                  {"verb": "chat.send_file", "direction": "egress",
+                   "scheme": "chat", "arg": "chat_id", "dtype": "chat"}],
+        "topic_actions": [{
+            "id": "chat-link", "label": "Collega una chat", "binding": "channel",
+            "fields": [{"name": "chat", "label": "Chat id o @handle",
+                        "placeholder": "-1001234567890"}],
+            "adds": {"ingress": ["chat:{chat}"], "egress": ["chat:{chat}"]}}],
+        "providers": [{"id": "bot", "label": "Bot", "credential": {
+            "kind": "form", "vault_entry": "chat_bot_token",
+            "fields": [{"name": "token", "label": "Token", "secret": True}]}}],
+        "taint": ["chat.inbox", "chat.receive", "chat.pull"],
+    }
+
+
+def chat_pack() -> dict:
+    return {"name": "chat-pack", "connectors": [chat_connector()]}
 
 
 # --------------------------------------------------------------------------
@@ -183,9 +223,9 @@ def manifests() -> dict[str, dict]:
 _PATCHES: list = []
 
 
-def install(without: tuple[str, ...] = ()) -> None:
+def install(without: tuple[str, ...] = (), *, chat: bool = False) -> None:
     """Add the first-party packs (minus `without`) to the installed manifests
-    `resolved` reads.
+    `resolved` reads; with `chat`, also the generic `chat-pack`.
 
     They come FIRST (the oldest installs); a pack of the same name that the
     test writes or injects replaces them. Usable as `setUpModule`."""
@@ -193,7 +233,8 @@ def install(without: tuple[str, ...] = ()) -> None:
     own = resolved._installed_manifests
 
     def installed() -> dict[str, dict]:
-        out = {k: v for k, v in manifests().items() if k not in without}
+        base = {**manifests(), **({"chat-pack": chat_pack()} if chat else {})}
+        out = {k: v for k, v in base.items() if k not in without}
         for name, doc in own().items():
             out.pop(name, None)
             out[name] = doc

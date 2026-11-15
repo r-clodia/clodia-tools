@@ -74,7 +74,7 @@ class CapTests(unittest.IsolatedAsyncioTestCase):
         sc._SEMS.clear()
 
     def test_slow_families(self):
-        for v in ("email.read", "telegram.send", "gdrive.list", "web.fetch"):
+        for v in ("email.read", "gdocs.read", "gdrive.list", "web.fetch"):
             self.assertTrue(sc.is_slow(v), v)
         for v in ("topic.open", "memory.read", "github.list_prs"):
             self.assertFalse(sc.is_slow(v), v)
@@ -83,7 +83,7 @@ class CapTests(unittest.IsolatedAsyncioTestCase):
 class OffTheEventLoopTests(unittest.TestCase):
     """No network-bound native call runs directly in the async dispatcher."""
 
-    def test_dispatcher_offloads_email_telegram_google(self):
+    def test_dispatcher_offloads_email_and_google(self):
         src = pathlib.Path(__file__).with_name("main.py").read_text(encoding="utf-8")
         fn = next(n for n in ast.walk(ast.parse(src))
                   if isinstance(n, ast.AsyncFunctionDef)
@@ -97,7 +97,7 @@ class OffTheEventLoopTests(unittest.TestCase):
                     and f.value.id == "email" and f.attr != "safe_attachment_name"):
                 direct.append(f"email.{f.attr}@{n.lineno}")
             if isinstance(f, ast.Name) and f.id in (
-                    "_dispatch_telegram", "_dispatch_gdrive", "_dispatch_gcalendar",
+                    "_dispatch_gdrive", "_dispatch_gcalendar",
                     "_dispatch_gdocs", "_dispatch_gsheets"):
                 direct.append(f"{f.id}@{n.lineno}")
         self.assertEqual(direct, [], "network calls still on the event loop")

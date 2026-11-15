@@ -228,8 +228,7 @@ def state(connector: Connector, action: TopicAction, tier: str,
         out["seal"] = _seal_state(connector, tier, name)
         out["bound"] = _bound_chat(connector.id, tier, name)
         out["connected"] = out["bound"] is not None
-        out["suggestions"] = _suggestions(connector, action, tier, name,
-                                          out["bound"])
+        out["suggestions"] = []
     else:
         # The owner decides with the topic's tier in front of them, for EVERY
         # action (#519): what is being authorised and at which SEAL level.
@@ -273,20 +272,12 @@ def _seal_state(connector: Connector, tier: str, name: str) -> dict:
             "ack": channel_ack(meta, connector.id)}
 
 
-def channel_cap(connector: Connector) -> int | None:
-    """The SEAL cap of this connector's channel binding (#405, #638).
-
-    The gateway's own channel types (Telegram) keep their table. Any other
-    connector that binds a channel — a pack relay — is capped too, fail
-    closed: at its manifest's `relay.seal_cap`, or `DEFAULT_RELAY_SEAL_CAP`.
+def channel_cap(connector: Connector) -> int:
+    """The SEAL cap of this connector's channel binding (#405, #638): its
+    manifest's `relay.seal_cap`, or `DEFAULT_RELAY_SEAL_CAP` — fail closed.
     Above the cap the owner must acknowledge the downgrade, with the room's
-    tier in front of them, exactly as for Telegram.
-    """
-    from ..topics.service import channel_seal_cap
+    tier in front of them."""
     from .manifest import DEFAULT_RELAY_SEAL_CAP
-    cap = channel_seal_cap(connector.id)
-    if cap is not None:
-        return cap
     relay = getattr(connector, "relay", None)
     if relay is not None and relay.seal_cap is not None:
         return relay.seal_cap
@@ -294,43 +285,27 @@ def channel_cap(connector: Connector) -> int | None:
 
 
 def _bindings(connector_id: str):
-    """The channel bindings of ONE connector (clodia-platform#638).
-
-    `channel_bindings` is keyed by connector + chat (#521): a topic action with
-    `binding: channel` writes under its OWN connector id. Telegram keeps going
-    through its facade (`telegram_bindings`), byte for byte what it did before;
-    any other connector uses the same registry, in the same directory — the
-    facade's `_base()`, so whatever points Telegram's file elsewhere (the
-    tests) moves every connector's bindings with it.
-    """
+    """The channel bindings of ONE connector (clodia-platform#638): the
+    registry `channel_bindings`, keyed by connector + chat (#521). A topic
+    action with `binding: channel` writes under its OWN connector id."""
     from ..tools import channel_bindings as cb
-    from ..tools import telegram_bindings as tb
 
     class _View:
         @staticmethod
         def load() -> dict:
-            if connector_id == tb.CONNECTOR:
-                return tb.load()
-            return cb.load(connector_id, base=tb._base())
+            return cb.load(connector_id)
 
         @staticmethod
         def get(chat: str):
-            if connector_id == tb.CONNECTOR:
-                return tb.get(chat)
-            return cb.get(connector_id, chat, base=tb._base())
+            return cb.get(connector_id, chat)
 
         @staticmethod
         def set_binding(chat: str, instance: str, tier: str, topic: str):
-            if connector_id == tb.CONNECTOR:
-                return tb.set_binding(chat, instance, tier, topic)
-            return cb.set_binding(connector_id, chat, instance, tier, topic,
-                                  base=tb._base())
+            return cb.set_binding(connector_id, chat, instance, tier, topic)
 
         @staticmethod
         def remove(chat: str) -> bool:
-            if connector_id == tb.CONNECTOR:
-                return tb.remove(chat)
-            return cb.remove(connector_id, chat, base=tb._base())
+            return cb.remove(connector_id, chat)
 
     return _View
 
@@ -341,27 +316,6 @@ def _bound_chat(connector_id: str, tier: str, name: str) -> str | None:
         if (b.get("tier"), b.get("topic")) == (tier, name):
             return cid
     return None
-
-
-def _suggestions(connector: Connector, action: TopicAction, tier: str,
-                 name: str, bound: str | None) -> list[dict]:
-    """Chats the bot joined for this topic by link, ready for the owner (#549).
-
-    Each suggestion is a ready set of field values: approving one is the same
-    `connect` the owner would do by typing — with the id Telegram gave, not one
-    typed by hand. Nothing here authorises anything.
-    """
-    # SHORTCUT: like `_bound_chat`, the only joinable channel is Telegram's.
-    if connector.id != "telegram" or not action.fields:
-        return []
-    from ..tools import telegram_join as tj
-    campo = action.fields[0].name
-    return [{"label": p.get("title") or p["chat_id"],
-             "values": {campo: p["chat_id"]},
-             "requested_by": p.get("requested_by", ""),
-             "added_by": p.get("added_by", ""),
-             "at": p.get("at")}
-            for p in tj.proposals(tier, name) if p.get("chat_id") != bound]
 
 
 def _owned_schemes(connector: Connector) -> set[str]:
@@ -458,9 +412,6 @@ def apply(connector: Connector, action: TopicAction, tier: str, name: str, *,
         raise ActionError(str(e)[:200])
     if chat:
         _bindings(connector.id).set_binding(chat, "messaggero", tier, name)
-        if connector.id == "telegram":
-            from ..tools import telegram_join as tj
-            tj.drop(tier, name, chat)
     return state(connector, action, tier, name)
 
 
@@ -501,15 +452,14 @@ def _prepare_channel(connector: Connector, tier: str, name: str,
         # perché è ciò che la rende superabile. Qui il principal è l'umano
         # owner del topic — la rotta è owner-only — quindi è l'unico punto
         # della piattaforma in cui quel consenso può nascere.
-        # Telegram passes no cap and reads the table, exactly as before; a
-        # pack relay passes its own (`channel_cap`, #638), never none.
-        cap = None if connector.id == "telegram" else channel_cap(connector)
+        # A pack relay passes its own cap (`channel_cap`, #638), never none.
+        cap = channel_cap(connector)
         if body.get("accept_seal_downgrade"):
             svc.accept_channel_cap(tier, name, connector.id, by=principal or "",
-                                   **({"cap": cap} if cap is not None else {}))
+                                   cap=cap)
         meta = svc.open(tier, name).get("meta", {})
         _check_channel_cap({"type": connector.id}, meta.get("tier", tier), meta,
-                           **({"cap": cap} if cap is not None else {}))
+                           cap=cap)
     except TopicError as e:
         raise ActionError(str(e)[:400])
     return chat

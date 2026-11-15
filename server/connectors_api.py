@@ -235,13 +235,7 @@ async def connect(request: Request):
     problem = vault_entry_problem(cred.vault_entry, connector.namespace)
     owner_type = _cred_type(connector)
     esistente = vault.credential_type(cred.vault_entry)
-    # The entry the removed native handler wrote (`telegram_bot_token`, type
-    # `api_key`, #522) is the same credential: adopted, so the bot can be
-    # rotated or disconnected from here; the deposit rewrites its type.
-    _adottabile = (cid == "telegram" and esistente == "api_key"
-                   and cred.vault_entry == "telegram_bot_token")
-    if (not problem and esistente is not None and esistente != owner_type
-            and not _adottabile):
+    if (not problem and esistente is not None and esistente != owner_type):
         problem = (f"la voce di vault '{cred.vault_entry}' esiste già e non è "
                    f"di questo connettore")
     if problem:
@@ -296,8 +290,7 @@ _LEGACY_CONNECT = {"github": "github_connect",
 #: Connectors whose credential the GATEWAY keeps reading although the pack
 #: serves them (clodia-platform#525): `{connector id: the vault entry it
 #: reads}`. The generic route delegates to the legacy handler for them, so the
-#: entry keeps its shape and type (`mcp_secret`, `api_key`). Telegram is not
-#: here: its credential is the pack's own (#522).
+#: entry keeps its shape and type (`mcp_secret`, `api_key`).
 _LEGACY_ADOPTED = {"github": "github_pat", "openai-images": "openai_api_key"}
 
 

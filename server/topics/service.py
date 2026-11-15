@@ -41,16 +41,13 @@ SCHEMA_VERSION = 2
 #: `proxy` è un sistema terzo ammesso nella stanza: non è un'AI della colonia e
 #: non è una persona (clodia-platform#248).
 #:
-#: `telegram` non è un'ipotesi: lo scrive la relay di clodia-logic
-#: (`api/channel_relay.py`, un blocco di messaggi drenati da un gruppo). L'elenco
-#: nasce da un censimento dei chiamanti reali nei tre repo, non dai valori che
-#: sembrano plausibili: un insieme chiuso indovinato a memoria avrebbe rotto la
-#: relay al primo messaggio.
+#: `telegram` is what the relay wrote for a Telegram group until Telegram's
+#: removal (#683): kept so that the rooms' history stays readable.
 #:
-#: `channel` (clodia-platform#638) is `telegram` for any transport a pack
-#: declares with `relay:`: the same relay writes it, after vetting the sender
-#: against the room's ingress, so it is treated like `telegram` — not tainting
-#: at arrival. Which transport carried it is the message's `transport` label.
+#: `channel` (clodia-platform#638) is a message of any transport a pack
+#: declares with `relay:`: the relay writes it after vetting the sender
+#: against the room's ingress — not tainting at arrival. Which transport
+#: carried it is the message's `transport` label.
 MESSAGE_KINDS = ("human", "ai", "system", "telegram", "proxy", "channel")
 #: Longest `transport` label of a `channel` message (`manifest.MAX_RELAY_LABEL`).
 MAX_TRANSPORT_LABEL = 32
@@ -82,41 +79,13 @@ def _tier_rank(t: str | None) -> int:
         return -1
 
 
-# Cap SEAL per tipo di channel dei MESSAGGI (anello più debole della catena):
-# Telegram = SEAL-1 (FZ-LLC Dubai, server non-UE, gruppi non-E2E). Un topic con
-# quel channel non può superare il cap. webui = nessun cap (default).
-_CHANNEL_SEAL_CAP = {"telegram": 1}
-# type/chat_id/bot_ref = legacy; listens/participants/messenger = modello
-# telegram-proxy (18 lug): `listens` = chat_id ascoltate dall'istanza messaggero
-# partecipe del topic (binding 1:N); `participants` = mappa telegram_uid→diritti
-# (command|dialogue) per il giudizio degli agenti; `messenger` = nome dell'istanza.
-_CHANNEL_FIELDS = ("type", "chat_id", "bot_ref", "listens", "participants", "messenger")
-
-
-def _clean_channel(ch: dict) -> dict:
-    """Tiene solo i campi ammessi del channel; normalizza gli id a stringa."""
-    out = {k: ch.get(k) for k in _CHANNEL_FIELDS if ch.get(k) is not None}
-    if "chat_id" in out:
-        out["chat_id"] = str(out["chat_id"])
-    if "listens" in out:
-        # lista di chat_id, stringhe, deduplicata, ordine stabile.
-        out["listens"] = list(dict.fromkeys(str(c) for c in (out["listens"] or [])))
-    if "participants" in out:
-        # mappa uid(str) → "command"|"dialogue"; scarta valori non ammessi.
-        out["participants"] = {
-            str(uid): rights for uid, rights in (out["participants"] or {}).items()
-            if rights in ("command", "dialogue")}
-    out.setdefault("bot_ref", "telegram_bot_token")
-    return out
-
-
 # Chiave del meta che registra la presa d'atto dell'owner sul cap del channel
 # (clodia-platform#405). Nasce SOLO da `accept_channel_cap`, cioè dalla rotta
 # interna autenticata come owner: è un permesso, e un permesso scrivibile da chi
 # ne è soggetto non è un permesso. Per questo `new()` lo toglie dal meta in
 # ingresso — `topic.new` accetta un meta arbitrario da un agente.
 #:
-#: Keyed by channel/connector id since #638 (`{"telegram": {…}, "sms": {…}}`):
+#: Keyed by channel/connector id since #638 (`{"whatsapp": {…}, "sms": {…}}`):
 #: a room bound to two transports holds one acknowledgement per transport, and
 #: disconnecting one revokes only its own. The single-slot shape written before
 #: (`{"channel": "telegram", "tier", "cap", "by", "at"}`) is still read, as the
@@ -130,8 +99,8 @@ def channel_acks(meta: dict | None) -> dict[str, dict]:
     if not isinstance(raw, dict) or not raw:
         return {}
     if isinstance(raw.get("channel"), str):
-        # The legacy single slot: it was only ever Telegram's.
-        return {raw.get("channel") or "telegram": dict(raw)}
+        # The legacy single slot (before #638).
+        return {raw["channel"]: dict(raw)} if raw.get("channel") else {}
     return {str(k): dict(v) for k, v in raw.items() if isinstance(v, dict)}
 
 
@@ -139,11 +108,6 @@ def channel_ack(meta: dict | None, ctype: str) -> dict | None:
     """The acknowledgement of ONE channel, in the shape the UI reads
     (`{channel, tier, cap, by, at}`), or None."""
     return channel_acks(meta).get(ctype)
-
-
-def channel_seal_cap(ctype: str | None) -> int | None:
-    """Rango SEAL massimo ammesso per quel tipo di channel, o None se ignoto."""
-    return _CHANNEL_SEAL_CAP.get(ctype)
 
 
 def channel_cap_acked(meta: dict | None, ctype: str, tier: str | None = None) -> bool:
@@ -162,8 +126,8 @@ def channel_cap_acked(meta: dict | None, ctype: str, tier: str | None = None) ->
     return _normalize_tier(ack.get("tier")) == effettivo
 
 
-def _check_channel_cap(channel: dict, tier: str, meta: dict | None = None,
-                       cap: int | None = None) -> None:
+def _check_channel_cap(channel: dict, tier: str, meta: dict | None = None, *,
+                       cap: int) -> None:
     """Verifica che il tier del topic rispetti il cap SEAL del channel.
 
     Il cap resta la regola: sopra il suo rango il channel non si aggancia. Ciò
@@ -173,12 +137,8 @@ def _check_channel_cap(channel: dict, tier: str, meta: dict | None = None,
     identico a prima.
     """
     ctype = (channel or {}).get("type")
-    # `cap` is given for a pack relay (#638), whose cap comes from its manifest
-    # or the default; the gateway's own channel types read the table, as before.
-    if cap is None:
-        cap = _CHANNEL_SEAL_CAP.get(ctype)
-    if cap is None:
-        raise TopicError(f"channel type non supportato: {ctype}")
+    # The cap is the connector's (`connectors.actions.channel_cap`, #638): its
+    # manifest's `relay.seal_cap`, or the default.
     if _tier_rank(tier) > cap and not channel_cap_acked(meta, ctype, tier):
         raise TopicError(
             f"channel '{ctype}' cappa il tier a SEAL-{cap}: topic {tier} non ammesso "
@@ -1364,15 +1324,10 @@ class TopicService:
         want_drive = meta.get("storage") == "google-drive" or sc.get("type") == "drive"
         meta["storage"] = self.s.capability().name
         meta.pop("storage_config", None)
-        # Channel dei MESSAGGI (default: webui, implicito). Se dichiarato (es.
-        # telegram) → cap del tier all'anello più debole (SEAL-cap del channel).
-        ch = meta.get("channel")
-        if ch:
-            # Nessun `meta` alla verifica: alla nascita la presa d'atto non può
-            # esistere (è appena stata tolta qui sopra), e passarlo lascerebbe
-            # credere il contrario a chi legge.
-            _check_channel_cap(ch, tier)
-            meta["channel"] = _clean_channel(ch)
+        # The legacy message channel of a topic (`meta.channel`, Telegram's) is
+        # gone with Telegram (#683): a chat is bound by a connector's topic
+        # action (`channel_bindings`), never declared in the meta.
+        meta.pop("channel", None)
         meta.setdefault("tags", [])
         meta.setdefault("people", [])
         from .. import instance_profile as _iprof0
@@ -1427,18 +1382,6 @@ class TopicService:
                     "local): %s", tier, name, e)
         return meta
 
-    def set_channel(self, tier: str, name: str, channel: dict | None) -> dict:
-        """Configura/rimuove il channel dei messaggi di un topic esistente.
-        `channel=None` o `{}` → rimuove (torna a webui). Applica il cap SEAL."""
-        meta, ver = self._read_meta(tier, name)
-        if not channel:
-            meta.pop("channel", None)
-        else:
-            _check_channel_cap(channel, meta.get("tier", tier), meta)
-            meta["channel"] = _clean_channel(channel)
-        self._write_meta(tier, name, meta, base_version=ver)
-        return meta
-
     def accept_channel_cap(self, tier: str, name: str, ctype: str,
                            by: str = "", cap: int | None = None) -> dict:
         """Registra la presa d'atto dell'owner sul cap SEAL di un channel (#405).
@@ -1453,9 +1396,7 @@ class TopicService:
         verrebbe letto come un precedente.
         """
         meta, ver = self._read_meta(tier, name)
-        if cap is None:      # a pack relay passes its own (#638)
-            cap = _CHANNEL_SEAL_CAP.get(ctype)
-        if cap is None:
+        if cap is None:      # the connector's own (#638)
             raise TopicError(f"channel type non supportato: {ctype}")
         t = _normalize_tier(meta.get("tier", tier))
         if _tier_rank(t) <= cap:
@@ -1477,7 +1418,7 @@ class TopicService:
         invece di ereditare un sì dato a un'altra occasione.
 
         `ctype` (#638): only THAT channel's acknowledgement — disconnecting an
-        SMS relay must not withdraw the owner's consent for the Telegram group
+        SMS relay must not withdraw the owner's consent for the WhatsApp group
         of the same room. None removes every one, as before."""
         meta, ver = self._read_meta(tier, name)
         if CHANNEL_SEAL_ACK not in meta:
@@ -1490,53 +1431,6 @@ class TopicService:
             meta[CHANNEL_SEAL_ACK] = acks
         else:
             return meta
-        self._write_meta(tier, name, meta, base_version=ver)
-        return meta
-
-    def _chat_owner_topic(self, chat_id: str, exclude: tuple | None = None):
-        """(tier, name) del topic che già ascolta `chat_id`, o None. Garantisce
-        l'invariante UNA chat → UN solo topic (evita il drain distruttivo condiviso:
-        chi draga per primo consuma il messaggio, gli altri lo perdono)."""
-        cid = str(chat_id)
-        for row in self.list(None, include_archived=True):
-            ch = row.get("channel") or {}
-            if cid in (ch.get("listens") or []):
-                key = (row.get("tier"), row.get("name"))
-                if key != exclude:
-                    return key
-        return None
-
-    def channel_listen(self, tier: str, name: str, chat_id: str,
-                       listen: bool = True, messenger: str | None = None) -> dict:
-        """Aggiunge/rimuove una chat_id dall'insieme `listens` del channel
-        Telegram del topic (modello telegram-proxy). Crea il channel telegram se
-        assente (applicando la SEAL-cap). `listen=False` → unlisten. `messenger` =
-        istanza messaggero che ha stabilito il binding. Ritorna il meta aggiornato.
-        Invariante: una chat può essere ascoltata da UN solo topic."""
-        cid = str(chat_id)
-        if listen:
-            owner = self._chat_owner_topic(cid, exclude=(tier, name))
-            if owner is not None:
-                raise TopicError(
-                    f"chat {cid} già in ascolto sul topic {owner[0]}/{owner[1]}: "
-                    f"fai prima telegram.unlisten lì (una chat → un solo topic)")
-        meta, ver = self._read_meta(tier, name)
-        ch = dict(meta.get("channel") or {})
-        if not ch:
-            ch = {"type": "telegram"}
-        if ch.get("type") != "telegram":
-            raise TopicError(f"channel del topic {tier}/{name} non è telegram")
-        _check_channel_cap(ch, meta.get("tier", tier), meta)
-        cur = list(ch.get("listens") or [])
-        if listen:
-            if cid not in cur:
-                cur.append(cid)
-            if messenger:
-                ch["messenger"] = messenger
-        else:
-            cur = [c for c in cur if c != cid]
-        ch["listens"] = cur
-        meta["channel"] = _clean_channel(ch)
         self._write_meta(tier, name, meta, base_version=ver)
         return meta
 
@@ -2860,9 +2754,7 @@ class TopicService:
     # Menzioni consultabili (client MCP di una persona)
     #
     # MCP è domanda-risposta: non esiste un push verso il client di Giovanni.
-    # Chi vuole essere svegliato ha Telegram; chi lavora da Claude Code CHIEDE.
-    # I due canali non competono — uno spinge, l'altro si consulta — ed è la
-    # ragione per cui questo non prova a essere una notifica.
+    # Chi lavora da Claude Code CHIEDE: questo non prova a essere una notifica.
     #
     # Il segnaposto è per (topic, persona) e tiene il timestamp dell'ultimo
     # messaggio visto. Non un elenco di id visti: quello cresce senza fine e

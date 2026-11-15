@@ -100,7 +100,7 @@ class ContextGateTests(unittest.TestCase):
 
     def test_every_egress_type_is_covered_not_just_email(self):
         taint.mark(self.CHAT, "verb", "web.fetch")
-        for verb in ("email.send", "telegram.send", "web.post",
+        for verb in ("email.send", "web.post",
                      "gdrive.upload", "gsheets.write_range",
                      "github.create_pull_request"):
             with self.subTest(verb=verb):

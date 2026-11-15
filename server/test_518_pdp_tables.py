@@ -25,7 +25,7 @@ class SchemeListsTests(unittest.TestCase):
     def test_egress_schemes(self):
         self.assertEqual(
             set(egress.summary()["egress_schemes"]),
-            {"mailto", "tg", "http", "https", "gdrive", "gsheets", "outbox",
+            {"mailto", "http", "https", "gdrive", "gsheets", "outbox",
              "gcal"})
 
     def test_source_schemes(self):
@@ -35,7 +35,7 @@ class SchemeListsTests(unittest.TestCase):
         # never declare one trusted — a source declarable in half, i.e. never.
         self.assertEqual(
             set(egress.summary()["source_schemes"]),
-            {"mailfrom", "tg", "http", "https", "gdrive", "gsheets", "mcp",
+            {"mailfrom", "http", "https", "gdrive", "gsheets", "mcp",
              "inbox", "topic", "datastore"})
 
 
@@ -50,9 +50,6 @@ class SpecTests(unittest.TestCase):
         # No `to` in the arguments: the recipient comes from the message being
         # replied to. No destination readable ⇒ UNKNOWN ⇒ denied.
         ("email.reply", {"message_id": "42"}, "email", []),
-        ("telegram.send", {"chat_id": -100123}, "telegram", ["tg:-100123"]),
-        ("telegram.send_file", {"chat_id": "@dadabit"}, "telegram",
-         ["tg:@dadabit"]),
         ("web.post", {"url": "https://Example.IT:443/a/b?q=1"}, "http",
          ["https://example.it/"]),
         ("web.post", {"url": "notaurl"}, "http", []),
@@ -116,7 +113,7 @@ class CanonicalTests(unittest.TestCase):
         ("https://docs.google.com/document/d/D1/edit", "gdrive:doc/D1"),
         ("https://drive.google.com/file/d/F1/view", "gdrive:file/F1"),
         ("https://Example.IT/Path", "https://example.it/Path"),
-        ("TG:-100", "tg:-100"),
+        ("GSHEETS:S1", "gsheets:S1"),
         ("*", "*"),
     ]
 
@@ -147,7 +144,6 @@ class MatchTests(unittest.TestCase):
     def test_prefix_refused(self):
         for rule, dest in [
             ("mailto:a@b.it", "mailto:a@b.it.evil"),
-            ("tg:-100", "tg:-1001"),
             ("gsheets:S", "gsheets:S2"),
             ("mcp:normattiva.", "mcp:normattiva-mirror.search"),
             # #636: a path rule covers its subtree, not a sibling.
@@ -161,7 +157,7 @@ class MatchTests(unittest.TestCase):
     def test_wildcard_inside_one_scheme(self):
         self.assertTrue(egress._matches("mailto:x@tomato.blue",
                                         "mailto:*@tomato.blue"))
-        self.assertFalse(egress._matches("tg:x@tomato.blue",
+        self.assertFalse(egress._matches("gsheets:x@tomato.blue",
                                          "mailto:*@tomato.blue"))
 
 
@@ -169,7 +165,6 @@ class DangerTests(unittest.TestCase):
     def test_each_scheme_has_its_note(self):
         for uri, needle in [
             ("mailto:a@b.it", "indirizzo email"),
-            ("tg:-100", "Telegram"),
             ("gsheets:S", "foglio Google"),
             ("gcal:a@b.it", "calendario Google"),
             ("https://github.com/a/b", "repository su github.com"),
@@ -188,8 +183,6 @@ class GrantableTests(unittest.TestCase):
     OK = [
         ("egress", "mailto:a@b.it"),
         ("egress", "mailto:*@tomato.blue"),
-        ("egress", "tg:-1001234567890"),
-        ("egress", "tg:@dadabit"),
         ("egress", "https://github.com/r-clodia/"),
         ("egress", "gdrive:folder/ABC"),
         ("egress", "gsheets:S1"),
@@ -199,7 +192,6 @@ class GrantableTests(unittest.TestCase):
         ("ingress", "inbox:studio@x.it"),
         ("ingress", "mcp:normattiva."),
         ("ingress", "topic:SEAL-1/acme"),
-        ("ingress", "tg:-100123"),
         # See `test_source_schemes`: grantable from #518 on, deliberately.
         ("ingress", "datastore:osint"),
     ]
@@ -220,8 +212,6 @@ class GrantableTests(unittest.TestCase):
         ("egress", "*"),
         ("egress", "gcal:*"),
         # shapes that could never match anything
-        ("egress", "tg:pippo"),
-        ("ingress", "tg:*"),
         ("ingress", "topic:SEAL-1/"),
         ("ingress", "topic:*"),
         # unknown scheme
@@ -244,7 +234,6 @@ class GrantableTests(unittest.TestCase):
 class TaintTests(unittest.TestCase):
     TAINTS = [
         "email.read", "email.list", "email.search", "email.get_attachment",
-        "telegram.inbox", "telegram.receive", "telegram.pull",
         "topic.read_file", "topic.read_document", "topic.fetch",
         "gdrive.download", "gdocs.read", "gsheets.read", "gsheets.list_tabs",
         "gcalendar.list_events", "datastore.read",
@@ -253,7 +242,7 @@ class TaintTests(unittest.TestCase):
         "github.search_code", "github.issue_read", "github.pull_request_read",
     ]
     CLEAN = [
-        "email.send", "telegram.send", "gdrive.upload", "gsheets.write_range",
+        "email.send", "gdrive.upload", "gsheets.write_range",
         "topic.post_message", "topic.put", "github.push",
     ]
 

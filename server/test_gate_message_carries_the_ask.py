@@ -98,25 +98,6 @@ class TheMessageSaysWhatWasAskedTests(unittest.TestCase):
         self.assertIn("grant **crosstopic**", t)
         self.assertNotIn("di usare `crosstopic`", t)
 
-    def test_a_channel_gate_also_notifies_the_principal_outside_the_room(self):
-        notified = []
-        svc = _Svc()
-        with patch.object(M, "_topics", lambda: svc), \
-             patch.object(M, "current_chat", lambda: "chan:SEAL-2:acme:messaggero"), \
-             patch.object(M, "current_principal", lambda: "davide"), \
-             patch.object(G, "active", lambda *a, **k: False), \
-             patch.object(G, "request", lambda *a, **k: {"id": "messaggero|-|github.issue_write"}), \
-             patch.object(G, "request_pending", lambda *a, **k: True), \
-             patch.object(G, "resolve_request", lambda *a, **k: None), \
-             patch.object(M, "_gate_notify_principal",
-                          lambda agent, key, principal: notified.append((agent, key, principal)) or True), \
-             patch.dict("os.environ", {"GATE_WAIT_LOOPS": "0"}):
-            with self.assertRaises(PermissionError):
-                asyncio.run(M._require_gate_consent(
-                    "messaggero", "github.issue_write", consume=True))
-        self.assertEqual(notified, [("messaggero", "github.issue_write", "davide")])
-        self.assertTrue(svc.posted, "la card nel canale resta presente")
-
     def test_a_channel_gate_times_out_with_a_gate_message_before_the_caller(self):
         with patch.object(M, "_topics", lambda: _Svc()), \
              patch.object(M, "current_chat", lambda: "chan:SEAL-2:acme:messaggero"), \
@@ -125,7 +106,6 @@ class TheMessageSaysWhatWasAskedTests(unittest.TestCase):
              patch.object(G, "request", lambda *a, **k: {"id": "messaggero|-|github.issue_write"}), \
              patch.object(G, "request_pending", lambda *a, **k: True), \
              patch.object(G, "resolve_request", lambda *a, **k: None), \
-             patch.object(M, "_gate_notify_principal", lambda *a, **k: True), \
              patch.dict("os.environ", {"GATE_WAIT_LOOPS": "0"}):
             with self.assertRaises(PermissionError) as ctx:
                 asyncio.run(M._require_gate_consent(

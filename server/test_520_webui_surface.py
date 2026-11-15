@@ -27,7 +27,7 @@ from starlette.testclient import TestClient
 
 from . import connectors_api, internal_auth, pki_verify, tools_api, topics_api, vault
 from . import egress as eg
-from .tools import telegram_bindings as tb
+from .tools import channel_bindings as cb
 from .connectors import actions as ca
 from .connectors import first_party_fixture as _first_party
 from .connectors import manifest as cm
@@ -72,14 +72,16 @@ class _Session:
 
 
 class _NoPacks(unittest.TestCase):
-    """Registry dei connettori builtin e dei tre pack first-party (#526), come
-    su ogni istanza: gli altri pack installati sull'istanza reale non devono
+    """Registry dei connettori builtin, dei pack first-party (#526) e del
+    `chat-pack` di esempio (Telegram è stato tolto, #683): gli altri pack installati sull'istanza reale non devono
     entrare nelle asserzioni di un test."""
 
     def setUp(self):
         resolved.invalidate()
         self.addCleanup(resolved.invalidate)
-        p = patch.object(resolved, "manifests", _first_party.manifests)
+        p = patch.object(resolved, "manifests",
+                         lambda: {**_first_party.manifests(),
+                                  "chat-pack": _first_party.chat_pack()})
         p.start()
         self.addCleanup(p.stop)
         self.c = TestClient(Starlette(routes=connectors_api.routes))
@@ -185,8 +187,8 @@ class AdminOnlyTravelsTests(_NoPacks):
                       "il connettore mail non dichiara più la sua azione")
         self.assertTrue(azioni[("mail", "mailbox-link")]["admin_only"])
         # L'opposto, se no il campo potrebbe essere `true` per tutti e il test
-        # verde a vuoto: collegare una chat Telegram resta dell'owner.
-        self.assertFalse(azioni[("telegram", "telegram-link")]["admin_only"])
+        # verde a vuoto: collegare una chat resta dell'owner.
+        self.assertFalse(azioni[("chat", "chat-link")]["admin_only"])
 
     def test_the_state_of_an_action_carries_it(self):
         """È il campo che l'agent-server legge prima di inoltrare una POST: se
@@ -196,9 +198,9 @@ class AdminOnlyTravelsTests(_NoPacks):
         svc.open.return_value = {"meta": {"tier": "SEAL-1"}}
         with patch.object(topics_api, "_service", lambda: svc), \
                 patch.object(eg, "scope_uris", lambda d, s, cfg=None: []), \
-                patch.object(tb, "load", dict):
+                patch.object(cb, "load", lambda *a, **k: {}):
             for cid, aid, atteso in (("mail", "mailbox-link", True),
-                                     ("telegram", "telegram-link", False)):
+                                     ("chat", "chat-link", False)):
                 with self.subTest(connettore=cid):
                     connector, action = ca.find(cid, aid)
                     stato = ca.state(connector, action, "SEAL-1", "stanza")
@@ -207,7 +209,7 @@ class AdminOnlyTravelsTests(_NoPacks):
     def test_an_action_is_not_admin_only_by_default(self):
         azione = cm._parse_topic_action(
             {"id": "x", "label": "X", "fields": [{"name": "v", "label": "V"}],
-             "adds": {"egress": ["tg:{v}"]}}, "c.topic_actions[0]")
+             "adds": {"egress": ["chat:{v}"]}}, "c.topic_actions[0]")
         self.assertFalse(azione.admin_only)
 
     def test_a_typo_in_admin_only_is_refused(self):
@@ -215,7 +217,7 @@ class AdminOnlyTravelsTests(_NoPacks):
             cm._parse_topic_action(
                 {"id": "x", "label": "X", "admin_only": "si",
                  "fields": [{"name": "v", "label": "V"}],
-                 "adds": {"egress": ["tg:{v}"]}}, "c.topic_actions[0]")
+                 "adds": {"egress": ["chat:{v}"]}}, "c.topic_actions[0]")
 
 
 class ToolsCardCopyTests(_NoPacks):
@@ -234,9 +236,9 @@ class ToolsCardCopyTests(_NoPacks):
             rows = self.c.get("/tools/connectors", headers=_H).json()["connectors"]
         return {r["id"]: r for r in rows}
 
-    def test_the_five_base_cards_describe_themselves(self):
+    def test_the_base_cards_describe_themselves(self):
         cards = self._cards()
-        for cid in ("google", "mail", "telegram", "github", "openai-images"):
+        for cid in ("google", "mail", "github", "openai-images"):
             with self.subTest(connettore=cid):
                 self.assertIn(cid, cards, "connettore sparito dal registry")
                 card = cards[cid]["tools_card"]
@@ -267,7 +269,6 @@ class CredentialFormTests(_NoPacks):
             rows = self.c.get("/tools/connectors", headers=_H).json()["connectors"]
         per_id = {r["id"]: r for r in rows}
         atteso = {"github": ("github_pat", "value"),
-                  "telegram": ("telegram_bot_token", "token"),
                   "openai-images": ("openai_api_key", "api_key")}
         for cid, (entry, campo) in atteso.items():
             with self.subTest(connettore=cid):
@@ -283,16 +284,15 @@ class CredentialFormTests(_NoPacks):
         """Il nome del campo dichiarato è quello che l'handler nativo legge.
 
         Attorno al deposito ognuno fa qualcosa che il deposito generico non fa:
-        GitHub monta il backend MCP, Telegram valida il token con `getMe` e
-        salva l'@username, OpenAI passa per il gating del profilo. Se la rotta
+        GitHub monta il backend MCP, OpenAI passa per il gating del profilo. Se la rotta
         generica scrivesse da sé, quelle cose sparirebbero e il sintomo
         arriverebbe altrove — un bot connesso senza @username, un MCP non
         montato.
         """
         import inspect
         from . import tools_api
-        # Telegram's handler went with the native client (#522): its
-        # credential is comms-pack's connector's, deposited generically.
+        # Telegram's handler went with the native client (#522), Telegram
+        # itself with #683.
         self.assertNotIn("telegram", connectors_api._LEGACY_CONNECT)
         for cid, atteso in (("github", "github_connect"),
                             ("openai-images", "openai_connect")):
@@ -300,8 +300,7 @@ class CredentialFormTests(_NoPacks):
                 nome = connectors_api._LEGACY_CONNECT[cid]
                 self.assertEqual(nome, atteso)
                 sorgente = inspect.getsource(getattr(tools_api, nome))
-                campo = {"github": "pat", "telegram": "token",
-                         "openai-images": "api_key"}[cid]
+                campo = {"github": "pat", "openai-images": "api_key"}[cid]
                 self.assertIn(f'body.get("{campo}")', sorgente)
 
 

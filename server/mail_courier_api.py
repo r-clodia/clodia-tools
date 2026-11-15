@@ -5,7 +5,7 @@ topics whose room has a mailbox in its `inbox:` list: it posts the ENVELOPE
 (sender, subject, date, attachment names) and stores the attachments in the
 topic's files. It never receives a message body.
 
-Same door as `/internal/telegram/*`: `internal_auth` restricted to a privileged
+Same door as the relay routes (`/internal/channels/*`): `internal_auth` restricted to a privileged
 principal (the agent-server), not a per-agent MCP grant. Each call runs inside
 the ROOM's claims, so the gateway's mail code (`server/mail/`, #683) applies
 that room's rules: the mailbox must be in the room's `inbox:` list, and only

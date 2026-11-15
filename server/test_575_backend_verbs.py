@@ -127,11 +127,6 @@ class RefusalIsTheCallPathsTests(unittest.TestCase):
         with patch.object(main, "_component_verb", lambda n: object()):
             self.assertIn("never reached", main.proxied_verb_refusal("x.y"))
 
-    def test_a_gateway_retained_verb_shadows_the_backend(self):
-        name = next(iter(main._GATEWAY_RETAINED_VERBS))
-        with patch.object(main, "_component_verb", lambda n: None):
-            self.assertIn("never reached", main.proxied_verb_refusal(name))
-
     def test_a_backend_named_after_a_native_namespace_is_not_reached(self):
         with patch.object(main, "_component_verb", lambda n: None):
             why = main.proxied_verb_refusal("jobs.something_else")

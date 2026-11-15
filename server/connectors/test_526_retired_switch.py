@@ -2,12 +2,14 @@
 to the pack connectors.
 
 1. **Nothing native is left.** The gateway's builtin manifests are the two
-   schema-only ones; no native tool lives in a first-party pack's namespace
-   except the binding verbs the gateway retains.
+   schema-only ones (and mail, the gateway's again since #683); no native
+   tool lives in a first-party pack's namespace.
 2. **The namespaces stay owned.** With the switch gone, what keeps a
-   third-party pack off `email`, `telegram`, `github`, `openai`, `gdrive` (and
-   the other Google namespaces) is `builtin.expected_claims`: such a claim is
-   stripped at runtime and reported as `ignored` by the install preview.
+   third-party pack off `github`, `openai`, `gdrive` (and the other Google
+   namespaces) is `builtin.expected_claims`: such a claim is stripped at
+   runtime and reported as `ignored` by the install preview. `email` is a
+   builtin namespace (#683); `telegram`, removed with Telegram (#683), is
+   reserved for nobody.
 3. **`integrations.connectors` is one decision** (`instance_profile
    .connector_allowed`), with the legacy profile names (`mailboxes`) and the
    Google family, never filtering the schema-only builtins — applied to the
@@ -34,7 +36,7 @@ from . import resolved
 from . import validate as cv
 
 #: A third-party pack trying each first-party namespace in turn.
-CLAIMS = {"email": "email.send", "telegram": "telegram.send",
+CLAIMS = {"email": "email.send",
           "github": "github.push", "openai": "openai.generate",
           "gdrive": "gdrive.upload", "gsheets": "gsheets.write_range",
           "gdocs": "gdocs.read", "gcalendar": "gcalendar.create_event"}
@@ -72,7 +74,7 @@ class NothingNativeIsLeftTests(unittest.TestCase):
         for cid, pack in B.RELEASED_TO.items():
             self.assertIn(pack, B.FIRST_PARTY_PACKS, cid)
         # The namespaces are the ones the former builtins declared.
-        for stem in ("telegram", "google", "github", "openai"):
+        for stem in ("google", "github", "openai"):
             for e in FP.former(stem)["connectors"]:
                 self.assertEqual(B.RELEASED_NAMESPACES[e["id"]], e["namespace"])
 
@@ -112,6 +114,17 @@ class ThirdPartyCannotClaimTests(unittest.TestCase):
                     self.assertIsNone(reg.by_id(f"acme-{ns}"))
             self.assertEqual(resolved.registry().by_id("mail").pack, "gateway-mail")
 
+    def test_a_pack_claiming_telegram_is_refused(self):
+        """#683: Telegram was removed and its namespace released to nobody: a
+        pack declaring `telegram` (comms-pack ≤ 2.8) is not held, so no
+        component of it can serve `telegram.*` either."""
+        evil = {"name": "evil-pack", "connectors": [_intruder("telegram", "telegram.send")]}
+        with patch.object(resolved, "manifests", lambda: {"evil-pack": evil}):
+            resolved.invalidate()
+            self.assertIsNone(resolved.registry().by_id("acme-telegram"))
+            self.assertFalse(resolved.held_by_pack("telegram"))
+            self.assertIn("telegram", M.core_namespaces())
+
     def test_even_when_the_owner_is_not_installed(self):
         """No comms-pack/it-pack/google-pack: the namespace stays free for
         nobody — a newcomer cannot take it while its owner is absent."""
@@ -136,7 +149,7 @@ class ThirdPartyCannotClaimTests(unittest.TestCase):
         """Review of #409: `mailto`/`tg`/`gdrive` are as much the owner's as its
         namespace. Installed first, an intruder declaring them would knock the
         first-party connector out in the scheme clash."""
-        for sch in ("mailto", "inbox", "tg", "gdrive", "gcal"):
+        for sch in ("mailto", "inbox", "gdrive", "gcal"):
             with self.subTest(scheme=sch):
                 entry = {"id": "acme-x", "manifest_version": 1, "namespace": "acmex",
                          "label": "Acme",
@@ -270,9 +283,6 @@ class TopicActionTests(unittest.TestCase):
             c = _client()
             r = c.get(_url(t, "mail", "mailbox-link"), headers=_H)
             self.assertEqual(r.status_code, 200, r.text)
-            r = c.post(_url(t, "telegram", "telegram-link"),
-                       json={"action": "connect", "chat": "-100"}, headers=_H)
-            self.assertEqual(r.status_code, 403, r.text)
             r = c.get(_url(t, "google", "drive-folder"), headers=_H)
             self.assertEqual(r.status_code, 403, r.text)
             self.assertEqual((t.liste, t.bindings), ({}, {}))

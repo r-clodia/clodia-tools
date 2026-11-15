@@ -354,32 +354,6 @@ class FailClosedTests(_Istanza):
         self.assertFalse(resolved.held_by_pack("email"))
         self.assertTrue(_call("email.send", {"to": "x@y.it"}).startswith("DENIED:"))
 
-class TelegramBindingVerbsFailClosedTests(unittest.TestCase):
-    """The retained Telegram binding verbs follow the same rule now: in `pack`
-    position they need the pack's telegram connector held."""
-
-    def test_listen_is_denied_without_the_packs_connector(self):
-        from .test_522_pack_switch import _comms_pack as comms
-        from .test_522_pack_switch import _Istanza as Telegram
-
-        class _T(Telegram):
-            def runTest(self):  # noqa: N802
-                pass
-        t = _T()
-        t.setUp()
-        try:
-            t.posizione("pack")
-            broken = comms()
-            broken["connectors"][0]["context"] = [{"arg": "agent", "value": "bogus"}]
-            (t.dir / "packs" / "comms-pack" / "pack.yaml").write_text(
-                json.dumps(broken), encoding="utf-8")
-            resolved.invalidate()
-            self.assertTrue(_call("telegram.listen", {"chat_id": "1"})
-                            .startswith("DENIED:"))
-        finally:
-            t.doCleanups()
-
-
 # --------------------------------------------------------------------------
 # 5. the transport backend is the gateway's
 # --------------------------------------------------------------------------

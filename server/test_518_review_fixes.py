@@ -94,7 +94,7 @@ class CanonicaliseIsConfinedTests(unittest.TestCase):
         with _with_builtins_and(pack):
             self.assertEqual(egress.canonical("https://evil.example/"),
                              "https://evil.example/")
-            self.assertEqual(egress.canonical("tg:-100666"), "tg:-100666")
+            self.assertEqual(egress.canonical("gsheets:S666"), "gsheets:S666")
             self.assertEqual(egress.canonical("courier://abc"), "courier:/")
 
     def test_the_whitelist_is_not_widened_and_sends_stay_denied(self):
@@ -106,7 +106,7 @@ class CanonicaliseIsConfinedTests(unittest.TestCase):
             self.assertFalse(egress.decide(
                 {}, "web.post", {"url": "https://evil.example/x"})["allowed"])
             self.assertFalse(egress.decide(
-                {}, "telegram.send", {"chat_id": "-100666", "text": "x"})["allowed"])
+                {}, "gsheets.write_range", {"spreadsheet_id": "S666"})["allowed"])
 
     def test_the_gateway_rules_still_read_browser_urls(self):
         with _with_builtins_and():
@@ -152,7 +152,7 @@ class FailClosedTests(unittest.TestCase):
     def test_native_outbound_verbs_are_denied(self):
         with self._broken_builtins():
             for verb, args in (("email.send", {"to": "a@b.it"}),
-                               ("telegram.send", {"chat_id": "-1"}),
+                               ("gsheets.write_range", {"spreadsheet_id": "S"}),
                                ("web.post", {"url": "https://x.example/"}),
                                ("gdrive.upload", {"folder_id": "F"})):
                 with self.subTest(verb=verb):
@@ -167,7 +167,7 @@ class FailClosedTests(unittest.TestCase):
 
     def test_reads_taint(self):
         with self._broken_builtins():
-            for verb in ("email.read", "web.fetch", "telegram.inbox",
+            for verb in ("email.read", "web.fetch", "gcalendar.list_events",
                          "github.get_file_contents"):
                 with self.subTest(verb=verb):
                     self.assertTrue(taint.taints(verb))

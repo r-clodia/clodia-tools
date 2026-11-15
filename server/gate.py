@@ -339,7 +339,6 @@ def needs_consent(verb: str, *, globally_gated: bool, agent_gated: bool,
 EDITABLE_ARGS: dict[str, tuple[str, ...]] = {
     "email.send": ("to", "cc", "subject", "body"),
     "email.reply": ("body", "cc"),
-    "telegram.send": ("text",),
     "web.post": ("body",),
     "gdrive.upload": ("name",),
     "github.pull_request": ("title", "body"),
