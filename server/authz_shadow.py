@@ -62,6 +62,8 @@ _RESOURCE_KIND = {
 _READ_WORDS = frozenset({"list", "read", "get", "search", "show", "open", "status",
                          "fetch", "download", "collections", "files", "messages",
                          "history", "info", "query", "find", "lookup"})
+#: Read-only verbs whose first word is not one of `_READ_WORDS`.
+_READ_VERBS = frozenset({"packs.datastore_structures"})
 
 
 def mode_raw() -> str:
@@ -104,6 +106,8 @@ def facts(verb: str, arguments: dict) -> dict:
     if writes:
         kind = A.WRITE
     elif reads:
+        kind = A.READ
+    elif verb in _READ_VERBS:
         kind = A.READ
     else:
         # The verb's first word, not a prefix: `telegram.listen` is not a list.

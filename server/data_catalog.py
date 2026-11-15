@@ -185,6 +185,23 @@ def retire(kind: str, name: str) -> bool:
         return True
 
 
+def rekey(kind: str, old: str, new: str, **extra) -> dict | None:
+    """Move the entry `old` to `new`, everything else kept (tier, `tier_set`,
+    importers, owner, created_at), `extra` added — a legacy pack datastore
+    becoming an instance (#685). None when `old` is not listed; an existing
+    `new` is left as it is and `old` dropped."""
+    ko, kn = key(kind, old), key(kind, new)
+    with _LOCK:
+        data = _load()
+        entry = data.pop(ko, None)
+        if entry is None:
+            return None
+        if kn not in data:
+            data[kn] = {**entry, "name": new, **extra}
+        _save(data)
+        return dict(data[kn])
+
+
 def may_import(entry: dict, principal: str, *, is_admin: bool, clearance: str | None) -> str:
     """"" when `principal` may import `entry` into a topic, else the reason."""
     allowed = set(entry.get("importers") or [ADMIN])

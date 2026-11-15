@@ -2,7 +2,9 @@
 
     GET  /internal/databases                                       catalogue
     POST /internal/databases  {action: create_datastore | create_collection
-                               | delete | restore, ...}           admins
+                               | create_instance | delete | restore, ...}  admins
+    GET  /internal/databases/structures                            pack structures + instances
+    POST /internal/datastores/migrate  {packs?: [...]}             the agent-server, on pack update
     GET  /internal/databases/datastore/{pack}/{name}/tables        ?scope=
     GET  /internal/databases/datastore/{pack}/{name}/rows          ?table&limit&offset&q&scope
     POST /internal/databases/datastore/{pack}/{name}/rows          {op, table, rowid?, values?, scope?}
@@ -27,7 +29,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import databases, datastores, human_mcp, internal_auth
+from . import databases, datastore_instances, datastores, human_mcp, internal_auth
 
 LOG = logging.getLogger("clodia-tools.databases_api")
 
@@ -111,7 +113,16 @@ async def catalogue_route(request: Request):
         if not admin:
             raise PermissionError("creare ed eliminare datastore e collection è "
                                   "riservato agli admin")
-        if action == "create_datastore":
+        if action == "create_instance":
+            # An instance of a pack's datastore structure (#685).
+            def _opt_bool(k):
+                return None if body.get(k) is None else bool(body.get(k))
+            out = await asyncio.to_thread(
+                datastore_instances.create, str(body.get("structure") or ""), name,
+                tier=str(body.get("tier") or ""), by=who, clearance=clearance,
+                purpose=body.get("purpose"), pii=_opt_bool("pii"),
+                backup=_opt_bool("backup"))
+        elif action == "create_datastore":
             out = await asyncio.to_thread(
                 databases.create_datastore, name, purpose=str(body.get("purpose") or ""),
                 tier=str(body.get("tier") or ""), pii=bool(body.get("pii")), by=who,
@@ -133,15 +144,62 @@ async def catalogue_route(request: Request):
             out = await asyncio.to_thread(databases.restore, str(body.get("kind") or ""),
                                           name, by=who, clearance=clearance)
         else:
-            raise ValueError("azione: create_datastore | create_collection | delete | restore")
+            raise ValueError("azione: create_datastore | create_collection | create_instance "
+                             "| delete | restore")
     except Exception as e:  # noqa: BLE001
         # Refused and failed container actions are recorded too (#671 review).
         _audit(action, name or "*", who, resource_kind=body.get("kind"), tier=body.get("tier"),
                result="refused" if isinstance(e, (PermissionError, ValueError, LookupError))
                else "failed", error=str(e)[:200])
         return _error(e)
-    _audit(action, name or "*", who, resource_kind=body.get("kind"), tier=body.get("tier"),
-           result="ok", export=out.get("export_dir"))
+    _audit(action, out.get("id") or name or "*", who, resource_kind=body.get("kind"),
+           tier=body.get("tier"), result="ok", export=out.get("export_dir"))
+    return JSONResponse(out)
+
+
+async def structures_route(request: Request):
+    """The datastore structures of the installed packs with their instances
+    (#685, the shape of `packs.datastore_structures`), plus who is asking:
+    `caller_clearance` and `is_admin`, for the tiers the create dialog may
+    offer. An admin sees every instance; anybody else only those imported
+    into scopes they are in."""
+    me, err = _person(request)
+    if err:
+        return err
+    who, admin, clearance = me
+    try:
+        visible = None
+        if not admin:
+            cat_out = await asyncio.to_thread(databases.catalogue, who=who, is_admin=False,
+                                              clearance=clearance)
+            visible = {e["name"] for e in cat_out.get("entries") or []
+                       if e.get("kind") == "datastore"}
+        out = await asyncio.to_thread(datastore_instances.structures_view, visible=visible)
+    except Exception as e:  # noqa: BLE001
+        return _error(e)
+    out["caller_clearance"] = clearance
+    out["is_admin"] = admin
+    return JSONResponse(out)
+
+
+async def migrate_route(request: Request):
+    """Schema migrations of every instance of the given packs' structures
+    (#687), asked by the agent-server after a pack install or update — the
+    update was authorised there (`packs.import_url`). Not a person's door:
+    the service token only."""
+    payload, err = internal_auth.authorize(request, log=LOG)
+    if err:
+        return err
+    try:
+        body = await _json(request)
+        packs = body.get("packs")
+        if packs is not None and not (isinstance(packs, list)
+                                      and all(isinstance(p, str) for p in packs)):
+            raise ValueError("packs: lista di nomi")
+        by = str(body.get("by") or payload.get("agent") or "platform")[:120]
+        out = await asyncio.to_thread(datastore_instances.migrate, packs, by=by)
+    except Exception as e:  # noqa: BLE001
+        return _error(e)
     return JSONResponse(out)
 
 
@@ -309,6 +367,8 @@ async def remove_route(request: Request):
 
 routes = [
     Route("/internal/databases", catalogue_route, methods=["GET", "POST"]),
+    Route("/internal/databases/structures", structures_route, methods=["GET"]),
+    Route("/internal/datastores/migrate", migrate_route, methods=["POST"]),
     Route("/internal/databases/datastore/{pack}/{name}/tables", tables_route, methods=["GET"]),
     Route("/internal/databases/datastore/{pack}/{name}/rows", rows_route, methods=["GET", "POST"]),
     Route("/internal/databases/datastore/{pack}/{name}/schema", schema_route, methods=["POST"]),

@@ -102,8 +102,19 @@ def _declared_dbs() -> list[str]:
     è coperto senza toccare l'env."""
     from . import datastores as _ds
 
-    return [str(Path("plugins") / ds["pack"] / ds["path"])
-            for ds in _ds.declared() if ds["backup"]]
+    # Relative to the datadir, from the resolved file: a pack's legacy file
+    # lives under `plugins/<pack>/`, an instance of a structure (#684) and a
+    # platform datastore (#671) under `datastores/`.
+    root = Path(_ds.DATADIR).resolve()
+    out = []
+    for ds in _ds.declared():
+        if not ds["backup"]:
+            continue
+        try:
+            out.append(str(Path(ds["abs_path"]).resolve().relative_to(root)))
+        except ValueError:
+            continue        # outside the datadir: not this backup's to snapshot
+    return out
 
 
 def _cfg() -> dict | None:

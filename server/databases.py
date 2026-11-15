@@ -188,6 +188,10 @@ def catalogue(*, who: str, is_admin: bool, clearance: str | None) -> dict:
             if ds:
                 row["size"], row["updated_at"], row["status"] = _datastore_stats(ds)
                 row["purpose"], row["pii"] = ds.get("purpose", ""), bool(ds.get("pii"))
+                if ds.get("structure"):
+                    # An instance of a pack structure (#684): `<structure> · <name>`.
+                    row["structure"], row["instance"] = ds["structure"], ds["instance"]
+                    row["schema_version"] = ds.get("schema_version", 0)
             else:
                 row.update(size=None, updated_at=None, status="missing")
         else:
@@ -295,7 +299,7 @@ def _export_datastore(ds: dict | None, name: str, d: Path) -> dict:
     if not ds or not Path(ds["abs_path"]).is_file():
         return {"file": None, "note": "file assente: nessun dato da esportare"}
     from urllib.parse import quote
-    dst_path = d / f"{name.split('/', 1)[1]}.db"
+    dst_path = d / f"{name.split('/', 1)[1].replace(datastores.INSTANCE_SEP, '__')}.db"
     src = sqlite3.connect(f"file:{quote(ds['abs_path'])}?mode=ro", uri=True, timeout=10)
     dst = sqlite3.connect(str(dst_path))
     try:
@@ -423,6 +427,10 @@ def delete(kind: str, name: str, *, by: str, clearance: str | None,
             reg = datastores.platform_registry()
             if reg.pop(dsname, None) is not None:
                 datastores.save_platform_registry(reg)
+        elif datastores.split_instance(name):
+            # An instance of a pack structure (#685): out of the registry; the
+            # tombstone keeps its name from being created again.
+            datastores.drop_instance(name)
     elif col is not None:
         from .tools import eu_corpus
         eu_corpus.drop_collection(name)
