@@ -958,6 +958,22 @@ def check(agent: str, agent_cfg: dict, verb: str, arguments: dict,
         # scritto nella docstring del modulo, qui viene applicato.
         m = "on"
     v = decide(agent_cfg, verb, arguments)
+    if v.get("checked") and not v.get("allowed") and v.get("refused"):
+        # Per seed (#693): a destination a gate remembered for THIS agent only
+        # (an A·V·R·Q allow tuple written by the gate) is accepted for it, and
+        # for no other agent. The lists stay for every agent.
+        from .gate_remember import seed_accepts
+        ok = seed_accepts(agent, verb, [d for d in v["refused"] if d != UNKNOWN],
+                          _scope_of_call())
+        if ok:
+            rest = [d for d in v["refused"] if d not in ok]
+            v["seed_rules"] = sorted(ok)
+            if rest:
+                v["refused"] = rest
+            else:
+                v.pop("refused", None)
+                v["allowed"] = True
+                v["reason"] = f"destinazione ammessa per {agent} da una regola del gate"
     # Il modo DICHIARATO resta leggibile accanto a quello applicato: nel log,
     # «configurato on» e «gate degradato perché non presidiato» sono due
     # situazioni diverse e vanno distinte da chi legge.
