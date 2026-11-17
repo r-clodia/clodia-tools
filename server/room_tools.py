@@ -380,6 +380,41 @@ def resources(meta: dict) -> dict[str, list[dict]]:
     return {mid: v["resources"] for mid, v in _mcp_entries(meta).items()}
 
 
+#: The gateway's builtin mail connector (`builtin_manifests/mail.yaml`, #683)
+#: and the room key its authorisation has been written under since #620: the
+#: MCP id `_groups()` derives from the connector's namespace (`email`).
+MAIL_CONNECTOR = "mail"
+EMAIL_MCP = "email"
+
+
+def email_mcp_ids() -> frozenset[str]:
+    """The keys of `meta.tools.mcp` that authorise Email in a room: the MCP id
+    owning the builtin `mail` connector, and `email` whatever the registry
+    says (the key every room linked before #683 carries). Never raises."""
+    ids = {EMAIL_MCP}
+    try:
+        for mid, g in _groups().items():
+            if MAIL_CONNECTOR in g["connectors"]:
+                ids.add(mid)
+    except Exception:  # noqa: BLE001 — no registry: the stored key still counts
+        pass
+    return frozenset(ids)
+
+
+def email_authorised(meta: dict) -> bool:
+    """Did the room authorise Email (clodia-platform#696)?
+
+    Read from what the room STORES, not from the verbs it compiles to: since
+    #683 agents have no `email.*` verbs, the Email MCP is not in
+    `mcp_catalogue()`, and `toolbox()` can never contain `email.*` from it —
+    the question «may mail enter this room» is the room's authorisation of the
+    mail capability, which is `meta.tools.mcp.<email id>`. A legacy per-verb
+    entry (`enabled: ["email.*"]`, before #620) still counts, as it did."""
+    if any(mid in email_mcp_ids() for mid in _mcp_entries(meta)):
+        return True
+    return any(e.partition(".")[0] == EMAIL_MCP for e in _legacy(meta)["enabled"])
+
+
 # ---------------------------------------------------------------- the room's toolbox
 
 def _shape(entry) -> str | None:
