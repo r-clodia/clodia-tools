@@ -43,6 +43,14 @@ UPLOAD_MAX_BYTES = 20 * 1024 * 1024
 UPLOAD_EXT = (".pdf", ".docx", ".pptx", ".md", ".txt")
 #: An agent's `rag.ingest` of a topic file also takes spreadsheets, as before.
 AGENT_INGEST_EXT = UPLOAD_EXT + (".xlsx", ".xlsm")
+#: A `.zip` upload is unpacked in memory and every supported member is indexed
+#: as its own document (#698). Members take the formats of an agent's ingest.
+ARCHIVE_EXT = (".zip",)
+ARCHIVE_MEMBER_EXT = AGENT_INGEST_EXT
+#: Files (directories excluded) one archive may hold; beyond, it is refused.
+ARCHIVE_MAX_MEMBERS = 500
+#: Archives inside the archive are listed, never expanded.
+_NESTED_ARCHIVE_EXT = (".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".jar")
 TOPIC_PREFIX = "topic-"
 
 
@@ -206,7 +214,7 @@ def catalogue(*, who: str, is_admin: bool, clearance: str | None) -> dict:
                            status="missing" if rag_ok else "unknown")
         rows.append(row)
     out = {"entries": rows, "rag_available": rag_ok, "upload_max_bytes": _upload_max(),
-           "upload_formats": list(UPLOAD_EXT), "is_admin": is_admin}
+           "upload_formats": list(UPLOAD_EXT + ARCHIVE_EXT), "is_admin": is_admin}
     if is_admin:
         out["tombstones"] = sorted(cat.tombstones().values(),
                                    key=lambda t: t.get("deleted_at") or "", reverse=True)
@@ -477,6 +485,9 @@ def upload(collection: str, filename: str, data: bytes, *, doc_name: str = "",
         raise PermissionError(
             f"clearance di '{who}' ({clearance or 'nessuna'}) inferiore al tier della "
             f"collection '{collection}' ({need}): il caricamento è rifiutato")
+    if filename.lower().endswith(ARCHIVE_EXT):
+        return _upload_archive(collection, filename, data, prefix=doc_name,
+                               version=str(version or "1"), who=who)
     text = extract_text(filename, data)
     if not text.strip():
         raise ValueError(f"nessun testo estraibile da '{filename}'")
@@ -486,3 +497,100 @@ def upload(collection: str, filename: str, data: bytes, *, doc_name: str = "",
     return {"ok": True, "collection": collection, "document": name,
             "version": str(version or "1"), "chunks": (res or {}).get("chunks"),
             "bytes": len(data), "characters": len(text)}
+
+
+def _archive_skip_reason(path: str, info) -> str | None:
+    """Why a member of an uploaded archive is not indexed, or None."""
+    parts = [p for p in path.split("/") if p]
+    if info.is_dir() or path.endswith("/"):
+        return "directory"
+    if not parts:
+        return "empty name"
+    if any(p == "__MACOSX" for p in parts):
+        return "macOS metadata (__MACOSX)"
+    if ".." in parts:
+        return "unsafe path"
+    if any(p.startswith(".") for p in parts):
+        return "hidden file"
+    low = parts[-1].lower()
+    if low.endswith(_NESTED_ARCHIVE_EXT):
+        return "nested archive (not expanded)"
+    if not low.endswith(ARCHIVE_MEMBER_EXT):
+        return "unsupported format"
+    if info.flag_bits & 0x1:
+        return "encrypted"
+    if info.file_size > _upload_max():
+        return f"too large: {info.file_size} bytes (max {_upload_max()})"
+    return None
+
+
+def _archive_doc_name(path: str, used: set[str], prefix: str = "") -> str:
+    """The member's path without extension; on a collision the extension is
+    kept, then an index is appended."""
+    stem = path.rsplit(".", 1)[0] if "." in path.rsplit("/", 1)[-1] else path
+    if prefix:
+        stem, path = f"{prefix}/{stem}", f"{prefix}/{path}"
+    for cand in (stem, path):
+        if cand.lower() not in used:
+            used.add(cand.lower())
+            return cand
+    n = 2
+    while f"{path} ({n})".lower() in used:
+        n += 1
+    used.add(f"{path} ({n})".lower())
+    return f"{path} ({n})"
+
+
+def _upload_archive(collection: str, filename: str, data: bytes, *, prefix: str,
+                    version: str, who: str) -> dict:
+    """Index every supported member of a `.zip` as its own document (#698).
+    The archive is read in memory only; the zip-bomb limits and the member cap
+    are checked on its directory before anything is indexed, so an unsafe or
+    unreadable archive indexes nothing. A member's failure never stops the
+    others: each one gets `indexed | skipped | error` and a reason."""
+    import io
+    import zipfile
+    from . import main
+    from .tools import eu_corpus
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+        infos = z.infolist()
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, ValueError) as e:
+        raise ValueError(f"'{filename}' is not a valid ZIP archive: {e}") from e
+    main._zip_guard(filename, data)
+    files = [i for i in infos if not i.is_dir()]
+    if len(files) > ARCHIVE_MAX_MEMBERS:
+        raise ValueError(f"'{filename}' refused: {len(files)} files in the archive "
+                         f"(max {ARCHIVE_MAX_MEMBERS})")
+    prefix = str(prefix or "").strip().strip("/")
+    members, used = [], set()
+    counts = {"indexed": 0, "skipped": 0, "error": 0}
+    for info in infos:
+        path = info.filename.replace("\\", "/").lstrip("/")
+        reason = _archive_skip_reason(path, info)
+        if reason == "directory":
+            continue
+        row = {"path": path, "document": None, "chunks": None}
+        if reason:
+            row.update(status="skipped", reason=reason)
+        else:
+            try:
+                blob = z.read(info)
+                text = extract_text(path.rsplit("/", 1)[-1], blob, ARCHIVE_MEMBER_EXT)
+                if not text.strip():
+                    row.update(status="skipped", reason="no extractable text")
+                else:
+                    name = _archive_doc_name(path, used, prefix)
+                    res = eu_corpus.ingest_text(
+                        collection, name, text, version=version,
+                        source=f"upload:{who}:{filename}!{path}", provenance="untrusted")
+                    row.update(status="indexed", document=name,
+                               chunks=(res or {}).get("chunks"))
+            except Exception as e:  # noqa: BLE001 — one member never aborts the rest
+                LOG.warning("archive %s member %s: %s", filename, path, e)
+                row.update(status="error", reason=str(e)[:200])
+        counts[row["status"]] += 1
+        members.append(row)
+    return {"ok": True, "archive": True, "collection": collection, "filename": filename,
+            "version": version, "members": members, "indexed": counts["indexed"],
+            "skipped": counts["skipped"], "errors": counts["error"], "bytes": len(data)}

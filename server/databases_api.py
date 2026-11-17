@@ -13,6 +13,7 @@
     GET  /internal/databases/collection/{name}/documents           ?scope=
     GET  /internal/databases/collection/{name}/chunks              ?doc&version&limit&offset&scope
     POST /internal/databases/collection/{name}/upload              ?filename&doc_name&version&scope, raw body
+                                                                   (a .zip: every supported member indexed, #698)
     POST /internal/databases/collection/{name}/remove              {doc_name, version?, scope?}
 
 Only a PERSON's on-behalf session passes (the agent-server mints it with the
@@ -343,8 +344,17 @@ async def upload_route(request: Request):
         _audit("upload", name, who, result="refused", error=str(e)[:200],
                filename=qp.get("filename"))
         return _error(e)
-    _audit("upload", name, who, result="ok", filename=qp.get("filename"),
-           document=out.get("document"), bytes=out.get("bytes"), chunks=out.get("chunks"))
+    if out.get("archive"):
+        # One record per archive, the per-member results in its detail (#698).
+        _audit("upload", name, who, result="ok", filename=qp.get("filename"), archive=True,
+               bytes=out.get("bytes"), indexed=out.get("indexed"),
+               skipped=out.get("skipped"), errors=out.get("errors"),
+               members=[{k: m.get(k) for k in ("path", "status", "document", "chunks",
+                                               "reason") if m.get(k) is not None}
+                        for m in out.get("members") or []])
+    else:
+        _audit("upload", name, who, result="ok", filename=qp.get("filename"),
+               document=out.get("document"), bytes=out.get("bytes"), chunks=out.get("chunks"))
     return JSONResponse(out)
 
 
