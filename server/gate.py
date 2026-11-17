@@ -708,8 +708,16 @@ def list_requests() -> list:
              "reason": v.get("reason", ""), "age_s": int(now - float(v.get("at", 0))),
              # What the approver may correct before approving (#448), and the
              # hash of the arguments shown, which binds a correction to them.
-             "editable": v.get("editable"), "args_hash": v.get("args_hash")}
+             "editable": v.get("editable"), "args_hash": v.get("args_hash"),
+             # Which cells of the approval matrix this gate has (#693): an
+             # empty reason applies; the approver's title is judged elsewhere.
+             "remember": _remember_cells(v["verb"])}
             for k, v in live.items()]
+
+
+def _remember_cells(verb: str) -> dict:
+    from .gate_remember import cells
+    return cells(verb)
 
 
 def resolve_request(agent: str, instance: str, verb: str, *,
