@@ -13,6 +13,7 @@ deliberato (nuovo deploy), non runtime.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -99,7 +100,9 @@ async def logic_run(request: Request):
             {"error": f"verbo '{verb}' non ammesso nei job logici (allowlist)"},
             status_code=403)
     try:
-        result = fn(args if isinstance(args, dict) else {})
+        # Off the event loop (clodia-platform#691): `settings.backup_run` ran
+        # restic for 47 s on it, and the whole gateway waited (16 Nov).
+        result = await asyncio.to_thread(fn, args if isinstance(args, dict) else {})
         if isinstance(result, dict) and result.get("ok") is False:
             # Un verbo che torna `ok: false` ha FALLITO, e lo step con lui.
             # Senza questa riga il job registrava `last_status: ok` su un

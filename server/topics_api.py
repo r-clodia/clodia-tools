@@ -263,7 +263,8 @@ async def archive_topic(request: Request):
     if err:
         return err
     try:
-        meta = _service().archive(request.path_params["tier"], request.path_params["name"])
+        meta = await asyncio.to_thread(_service().archive, request.path_params["tier"],
+                                       request.path_params["name"])
         _invalidate_list_cache()
         return JSONResponse({"archived": True, "meta": meta})
     except TopicError as e:
@@ -320,9 +321,9 @@ async def set_status(request: Request):
     except Exception:  # noqa: BLE001
         body = {}
     try:
-        res = _service().set_status(request.path_params["tier"],
-                                    request.path_params["name"],
-                                    (body or {}).get("status", ""))
+        res = await asyncio.to_thread(_service().set_status, request.path_params["tier"],
+                                      request.path_params["name"],
+                                      (body or {}).get("status", ""))
         _invalidate_list_cache()
         return JSONResponse(res)
     except TopicError as e:
@@ -465,7 +466,8 @@ async def create_topic(request: Request):
         # un campo del body che nessuno legge è indistinguibile da uno letto,
         # per chi chiama. Se arrivano da un client vecchio vengono ignorati
         # come qualsiasi altra chiave sconosciuta del body.
-        meta = _service().new(tier, name, dict(body.get("meta") or {}))
+        meta = await asyncio.to_thread(_service().new, tier, name,
+                                       dict(body.get("meta") or {}))
         _invalidate_list_cache()
         return JSONResponse({"created": True, "meta": meta})
     except TopicError as e:
@@ -1245,18 +1247,20 @@ async def topic_tier(request: Request):
     from .topics import retier
     svc = _service()
     try:
-        esito = retier.apply(svc, tier, name, nuovo, by=chi, reason=motivo,
-                             accept_seal_downgrade=body.get("accept_seal_downgrade") is True)
+        esito = await asyncio.to_thread(
+            lambda: retier.apply(svc, tier, name, nuovo, by=chi, reason=motivo,
+                                 accept_seal_downgrade=body.get("accept_seal_downgrade") is True))
     except TopicError as e:
         return JSONResponse({"error": str(e)[:300]}, status_code=400)
     # Traccia leggibile nella stanza: chi, da dove a dove, perché. Il registro
     # durevole è la cronologia del meta (`tier_history`), in attesa dell'audit
     # trail di piattaforma (clodia-platform#425).
     try:
-        svc.post_message(esito["to"], name, "platform",
-                         f"🔒 **Livello riclassificato da {esito['from']} a {esito['to']}** "
-                         f"da {chi}, che se ne assume la responsabilità.\n\n"
-                         f"Motivazione: {motivo[:600]}", kind="ai")
+        await asyncio.to_thread(
+            svc.post_message, esito["to"], name, "platform",
+            f"🔒 **Livello riclassificato da {esito['from']} a {esito['to']}** "
+            f"da {chi}, che se ne assume la responsabilità.\n\n"
+            f"Motivazione: {motivo[:600]}", kind="ai")
     except Exception as e:  # noqa: BLE001 — la riclassificazione è avvenuta
         LOG.warning("messaggio di riclassificazione non postato: %s", e)
     return JSONResponse(esito)
@@ -1428,14 +1432,19 @@ async def participants(request: Request):
         return JSONResponse({"error": "agent_required"}, status_code=400)
     svc = _service()
     try:
+        # Off the event loop (clodia-platform#691): `add_participant` asks the
+        # agent-server for the entry note and announces the message, and the
+        # agent-server calls this gateway back while answering. On the loop
+        # that was a circular wait, resolved only by timeouts (17 s, 17 Nov).
         if request.method == "DELETE":
-            return JSONResponse(svc.remove_participant(tier, name, agent))
+            return JSONResponse(await asyncio.to_thread(
+                svc.remove_participant, tier, name, agent))
         # `role` opzionale: assente = `contributor`, che è ciò che «invitato» ha
         # significato finora. Serve anche a CAMBIARE il ruolo di chi è già dentro,
         # senza doverlo togliere e rimettere — un'operazione che nel frattempo lo
         # farebbe uscire dal canale.
-        return JSONResponse(svc.add_participant(tier, name, agent,
-                                                role=body.get("role")))
+        return JSONResponse(await asyncio.to_thread(
+            lambda: svc.add_participant(tier, name, agent, role=body.get("role"))))
     except TopicError as e:
         # Un ruolo non valido è una richiesta malformata, non un topic assente:
         # rispondere 404 manderebbe a cercare il topic sbagliato.

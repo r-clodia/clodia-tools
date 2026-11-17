@@ -3279,7 +3279,8 @@ async def _require_gate_consent(
                                    gate_key.replace("<!--", "‹!--").replace("-->", "--›")
                                    .replace("`", "'"))))
                 # kind=ai (non system): i system sono filtrati dal render del webui.
-                _topics().post_message(
+                await asyncio.to_thread(
+                    _topics().post_message,
                     _tier, _name, author="gate",
                     text=(f"🛡️ **{agent}** chiede {_cosa}{_perche}\n"
                           f"<!-- gate={req.get('id')} -->"), kind="ai")
@@ -6405,7 +6406,7 @@ async def _dispatch_image(a: dict):
         size=a.get("size") or "1024x1024",
         quality=a.get("quality") or "auto",
         background=a.get("background") or "auto")
-    svc.put_file(tier, name, filename, png)
+    await asyncio.to_thread(svc.put_file, tier, name, filename, png)
     return {"ok": True, "path": f"files/{filename}", "bytes": len(png)}
 
 
