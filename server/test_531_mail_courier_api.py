@@ -51,24 +51,26 @@ class EmailAuthorisedTests(unittest.TestCase):
     """A·V·R·Q (owner, 27 Oct 2026): mail enters a room only where the room
     authorised the Email MCP."""
 
-    def _rooms(self, mode, enabled):
-        from . import authz_runtime, main, room_tools
+    def _rooms(self, mode, tools):
+        from . import main
         cfg = {"authz_mode": mode, "scope_source_allow": {
             "SEAL-2/preventivi": ["inbox:info@tomato.blue", "mailfrom:a@b.it"]}}
-        svc = type("S", (), {"_read_meta": lambda self, t, n: ({"tools": {}}, 1)})()
+        svc = type("S", (), {"_read_meta": lambda self, t, n: ({"tools": tools}, 1)})()
         with patch.object(whitelist, "CONFIG", cfg), \
                 patch("server.tools.mail_switch.system_mailboxes", return_value=BOXES), \
                 patch.object(C, "_topic_exists", lambda t, n: True), \
-                patch.object(main, "_topics", lambda: svc), \
-                patch.object(room_tools, "toolbox", lambda m: {"enabled": enabled}):
+                patch.object(main, "_topics", lambda: svc):
             return C.rooms()
 
     def test_no_email_no_mail_under_enforce(self):
-        self.assertEqual(self._rooms("enforce", ["github.*"]), [])
-        self.assertEqual(len(self._rooms("enforce", ["email.*"])), 1)
+        # The room's stored authorisation decides, not its toolbox: since #683
+        # the toolbox never holds `email.*` (clodia-platform#696).
+        self.assertEqual(self._rooms("enforce", {"mcp": {"github": {"resources": []}}}), [])
+        self.assertEqual(len(self._rooms("enforce", {"mcp": {"email": {"resources": []}}})), 1)
+        self.assertEqual(len(self._rooms("enforce", {"enabled": ["email.*"]})), 1)
 
     def test_without_enforce_as_before(self):
-        self.assertEqual(len(self._rooms("shadow", [])), 1)
+        self.assertEqual(len(self._rooms("shadow", {})), 1)
 
 
 class InRoomTests(unittest.TestCase):

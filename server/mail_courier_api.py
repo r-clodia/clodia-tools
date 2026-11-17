@@ -204,8 +204,12 @@ def rooms(indexed: bool = False) -> list[dict]:
 
 def _email_authorised(tier: str, name: str) -> bool:
     """May mail enter this room? Without enforce: as before (yes). Under
-    enforce: only if the room gives `email.*` (the Email MCP, or a legacy
-    per-verb entry). An unreadable room gets nothing."""
+    enforce: only if the room authorised Email (`meta.tools.mcp.email`, or a
+    legacy per-verb `email.*` entry). An unreadable room gets nothing.
+
+    Not «does the toolbox give `email.*`»: since #683 no agent has `email.*`
+    verbs, the toolbox never contains them, and that test dropped every
+    linked-mailbox row (clodia-platform#696)."""
     from . import authz_runtime
     if not authz_runtime.enforcing():
         return True
@@ -214,7 +218,7 @@ def _email_authorised(tier: str, name: str) -> bool:
         meta = main._topics()._read_meta(tier, name)[0]
     except Exception:  # noqa: BLE001
         return False
-    return any(e.partition(".")[0] == "email" for e in room_tools.toolbox(meta)["enabled"])
+    return room_tools.email_authorised(meta)
 
 
 def _colony_rooms(existing: list[dict], indexed_ok: bool = False) -> list[dict]:
