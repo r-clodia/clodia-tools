@@ -189,9 +189,13 @@ def _unescape_leaked_json_string(text: str) -> str:
     return decoded
 
 
-#: The seeds that can orchestrate a room (#667), as in the agent-server's
-#: `coordinator.DECLARED`. The first is the default and is never stored.
+#: The FALLBACK order of the room's orchestrator (#667), as in the
+#: agent-server's `coordinator.DECLARED`: who leads a room that chose nobody.
+#: Not an allowlist since #695 — any AI participant may be chosen.
 ORCHESTRATOR_SEEDS = ("segretario", "clodia", "ophelia")
+
+#: A participant name as the gateway stores it.
+_ORCH_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 
 
 def _tldr(summary_text: str) -> str:
@@ -3538,18 +3542,20 @@ class TopicService:
         return {"goal": g, "previous": precedente}
 
     def set_orchestrator(self, tier: str, name: str, who: str | None, by: str = "") -> dict:
-        """The room's ORCHESTRATOR (clodia-platform#667): one of the seeds that
-        can lead a room, already a participant; None = the default (the
-        secretary). An owner's act: the agent-server checks it and passes the
-        principal in `by`; no agent verb reaches this — an orchestrator that
-        could appoint itself would not be chosen."""
+        """The room's ORCHESTRATOR (clodia-platform#667): a participant of the
+        room — any AI agent since #695, no longer one of three seeds; None =
+        the default (`ORCHESTRATOR_SEEDS` order). An owner's act: the
+        agent-server checks the owner, that the agent is an AI (not a person
+        or a proxy: the gateway does not hold the agents' types) and that it
+        can serve at the room's tier, then passes the principal in `by`; no
+        agent verb reaches this — an orchestrator that could appoint itself
+        would not be chosen."""
         meta, ver = self._read_meta(tier, name)
         prima = str(meta.get("orchestrator") or "") or None
         w = str(who or "").strip().lower() or None
         if w is not None:
-            if w not in ORCHESTRATOR_SEEDS:
-                raise TopicError(f"'{w}' non può orchestrare una stanza: "
-                                 f"ammessi {', '.join(ORCHESTRATOR_SEEDS)}")
+            if not _ORCH_NAME.match(w):
+                raise TopicError(f"'{w}' non è un nome di agente valido")
             raw = meta.get("participants")
             parti = set(raw.keys()) if isinstance(raw, dict) else set(raw or [])
             if w not in parti:
