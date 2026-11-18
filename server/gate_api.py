@@ -68,7 +68,8 @@ async def grant(request: Request):
     try:
         res = gate.grant(agent, instance, verb, token, decided_by=principal,
                          decided_by_role=_role(request), modified=body.get("modified"),
-                         args_hash=body.get("args_hash"))
+                         args_hash=body.get("args_hash"),
+                         who=(str(body.get("who") or "").strip() or None))
     except PermissionError as e:
         LOG.warning("gate grant rifiutato %s@%s:%s — %s", agent, instance, verb, e)
         return JSONResponse({"error": "bad_capability", "detail": str(e)}, status_code=400)
@@ -187,8 +188,38 @@ async def remember(request: Request):
                          "scope": scope or None, "direction": direction, **res})
 
 
+async def remember_rule(request: Request):
+    """POST /internal/gate/remember {verb, agent, scope?} — one cell of the
+    approval matrix (clodia-platform#693): `agent` is the seed or `*`, `scope`
+    the room (`tier/name`) or absent for the whole instance. A destination
+    gate for every agent goes to the lists, as `/allow`; an A·V·R·Q ask
+    becomes an allow tuple on the verb and the gate's exact targets, at the
+    level that asked (`gate_remember`). Who may answer — the room's owner for a
+    room, an admin for the instance — is decided by clodia-logic before calling
+    here, where the human is known."""
+    principal, err = _authorize(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    from .gate_remember import RememberError, remember as _remember
+    import asyncio as _aio
+    try:
+        out = await _aio.to_thread(
+            _remember, str(body.get("verb") or "").strip(),
+            agent=str(body.get("agent") or "").strip(),
+            scope=str(body.get("scope") or "").strip(),
+            by=str(body.get("by") or principal or ""))
+    except RememberError as e:
+        return JSONResponse({"remembered": False, "error": str(e)[:300]}, status_code=400)
+    return JSONResponse(out)
+
+
 routes = [
     Route("/internal/gate/allow", remember, methods=["POST"]),
+    Route("/internal/gate/remember", remember_rule, methods=["POST"]),
     Route("/internal/gate/grant", grant, methods=["POST"]),
     Route("/internal/gate/deny", deny, methods=["POST"]),
     Route("/internal/gate/pending", pending, methods=["GET"]),

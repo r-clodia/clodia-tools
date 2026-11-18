@@ -486,7 +486,7 @@ def _revoke_jti(jti: str) -> None:
 def grant(agent: str, instance: str, verb: str, token: str, *,
           decided_by: str = "", decided_by_role: str | None = None,
           chat: Optional[str] = None, modified: dict | None = None,
-          args_hash: str | None = None) -> dict:
+          args_hash: str | None = None, who: str | None = None) -> dict:
     """Registra un consenso per (agent, instance, verb) da una capability ccap1
     firmata dalla CA. Verifica firma + agente + `cap`=gate:<verb>. Memorizza jti+exp
     autoritativi dal payload firmato.
@@ -524,6 +524,9 @@ def grant(agent: str, instance: str, verb: str, token: str, *,
     d[_key(agent, instance, verb)] = {
         "exp": float(payload.get("exp", 0)), "jti": str(payload.get("jti") or ""),
         "by": str(payload.get("by") or ""), "token": token, "at": now,
+        # The row of the approval matrix (#693): `spawn`/`seed` must not be
+        # turned into a list entry for every agent after the call.
+        **({"who": who} if who in ("spawn", "seed", "all") else {}),
         **({"modified": modified, "args_hash": bound} if modified else {})}
     _save(_store_path(), d)
     by = str(payload.get("by") or "")
@@ -708,8 +711,26 @@ def list_requests() -> list:
              "reason": v.get("reason", ""), "age_s": int(now - float(v.get("at", 0))),
              # What the approver may correct before approving (#448), and the
              # hash of the arguments shown, which binds a correction to them.
-             "editable": v.get("editable"), "args_hash": v.get("args_hash")}
+             "editable": v.get("editable"), "args_hash": v.get("args_hash"),
+             # Which cells of the approval matrix this gate has (#693): an
+             # empty reason applies; the approver's title is judged elsewhere.
+             "remember": _remember_cells(v["verb"], v["agent"], v.get("chat"))}
             for k, v in live.items()]
+
+
+def _remember_cells(verb: str, agent: str = "", chat: str | None = None) -> dict:
+    """The cells of the approval matrix (#693) for this request: its seed and
+    the room of its signed chat claim, so a rule that would be shadowed by an
+    explicit ask is offered disabled. Never fails the listing."""
+    from .gate_remember import cells
+    scope = ""
+    parts = str(chat or "").split(":")
+    if len(parts) >= 3 and parts[0] == "chan":
+        scope = f"{parts[1]}/{parts[2]}"
+    try:
+        return cells(verb, agent, scope)
+    except Exception:  # noqa: BLE001
+        return cells(verb)
 
 
 def resolve_request(agent: str, instance: str, verb: str, *,

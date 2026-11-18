@@ -879,6 +879,80 @@ async def authz_route(request: Request):
     return JSONResponse(out)
 
 
+async def room_rules_route(request: Request):
+    """GET    /internal/topics/{tier}/{name}/rules → {rules: [...]}
+    DELETE /internal/topics/{tier}/{name}/rules {id} → {removed}
+    The room's explicit A·V·R·Q rules (`meta.authz`), those a gate wrote
+    included (clodia-platform#693). The agent-server checks the person (owner
+    or admin) before calling; removing invalidates the rule cache."""
+    from . import gate_remember as _gr
+    _, err = _authorize(request)
+    if err:
+        return err
+    scope = f"{request.path_params['tier']}/{request.path_params['name']}"
+    if request.method == "GET":
+        try:
+            return JSONResponse({"rules": await asyncio.to_thread(_gr.list_room, scope)})
+        except TopicError:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    rid = str((body or {}).get("id") or "").strip()
+    if not rid:
+        return JSONResponse({"error": "id richiesto"}, status_code=400)
+    try:
+        removed = await asyncio.to_thread(_gr.remove_room, scope, rid,
+                                          str((body or {}).get("by") or ""))
+    except TopicError:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    from .audit import control as _control
+    if removed:
+        _control.safe(_control.emit, "authz", "remove_rule", scope, rule=rid,
+                      by=(body or {}).get("by"))
+    return JSONResponse({"removed": removed})
+
+
+async def global_rules_route(request: Request):
+    """GET    /internal/authz/rules → {rules: [...]}
+    DELETE /internal/authz/rules {id} → {removed}
+    The global rules of `authz.json` (#693). An admin, or the agent-server
+    for the webui (which checks the admin)."""
+    from .pki_mint import ROLE_AGENT_SERVER
+    from .human import _ADMIN_ROLES
+    from . import gate_remember as _gr
+    _, err = _authorize(request)
+    if err:
+        return err
+    p = getattr(request.state, "auth_payload", None) or {}
+    if not ((p.get("on_behalf") and (p.get("human_role") or "") in _ADMIN_ROLES)
+            or p.get("role") == ROLE_AGENT_SERVER):
+        return JSONResponse({"error": "riservato agli admin"}, status_code=403)
+    if request.method == "GET":
+        try:
+            return JSONResponse({"rules": await asyncio.to_thread(_gr.list_global)})
+        except _gr.RememberError as e:
+            return JSONResponse({"error": str(e)[:300]}, status_code=500)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    rid = str((body or {}).get("id") or "").strip()
+    if not rid:
+        return JSONResponse({"error": "id richiesto"}, status_code=400)
+    try:
+        removed = await asyncio.to_thread(_gr.remove_global, rid,
+                                          str((body or {}).get("by") or ""))
+    except _gr.RememberError as e:
+        return JSONResponse({"error": str(e)[:300]}, status_code=500)
+    from .audit import control as _control
+    if removed:
+        _control.safe(_control.emit, "authz", "remove_rule", "global", rule=rid,
+                      by=(body or {}).get("by"))
+    return JSONResponse({"removed": removed})
+
+
 async def dm_tools_route(request: Request):
     """GET  /internal/dm-tools → {enabled, enablable}
     POST /internal/dm-tools {action: enable|disable, verb} (#605, decisione 5
@@ -1790,6 +1864,9 @@ routes = [
     Route("/internal/authz/shadow", authz_shadow_route, methods=["GET"]),
     Route("/internal/authz/available", authz_available_route, methods=["GET"]),
     Route("/internal/authz", authz_route, methods=["GET", "POST"]),
+    Route("/internal/authz/rules", global_rules_route, methods=["GET", "DELETE"]),
+    Route("/internal/topics/{tier}/{name}/rules", room_rules_route,
+          methods=["GET", "DELETE"]),
     Route("/internal/data-catalog", data_catalog_route, methods=["GET", "POST"]),
     Route("/internal/topic-index", topic_index_route, methods=["GET"]),
     Route("/internal/topic-index/{tier}/{name}", topic_index_route, methods=["GET", "POST"]),

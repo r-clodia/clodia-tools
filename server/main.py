@@ -5284,7 +5284,7 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # resta ammessa. Il gate è sulla DESTINAZIONE, non sul verbo:
                 # «scrivi a mario@x.it» è la domanda che l'umano sa valutare,
                 # «puoi mandare mail» no.
-                await _require_gate_consent(
+                _egate = await _require_gate_consent(
                     _ag, _ev["gate_key"], consume=True,
                     reason=_ev.get("gate_reason", ""),
                     # Nessuna delega prefirmata su una destinazione nuova: è
@@ -5297,7 +5297,10 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
                 # una whitelist scritta dagli agenti. Al ritorno all'enforcement
                 # ci si troverebbe tutto già consentito — cioè il contrario dello
                 # scopo di questa modalità.
-                if not _obs2.skipping():
+                # «Solo questo spawn» / «questo seed» (#693) are not a list entry
+                # for every agent: only an approval that did not say who (an
+                # older agent-server) or said «tutti» keeps today's remembering.
+                if not _obs2.skipping() and (_egate or {}).get("who") not in ("spawn", "seed"):
                     _egress.remember(_ag or "", _ev["type"], _ev.get("remember") or [])
             # GATE DI CONTESTO (#104 §6): destinazione già ammessa, ma il canale
             # è contaminato. È il rischio che la whitelist non copre — l'uscita
