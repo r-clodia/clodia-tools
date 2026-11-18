@@ -1,4 +1,5 @@
-"""#667 — the room chooses its orchestrator among its participants."""
+"""#667/#695 — the room chooses its orchestrator among its participants, any
+AI agent (the type check is the agent-server's)."""
 from __future__ import annotations
 
 import shutil
@@ -32,9 +33,15 @@ class RoomOrchestratorTests(unittest.TestCase):
         self.assertEqual(r["previous"], "clodia")
         self.assertNotIn("orchestrator", self.meta())
 
-    def test_a_seed_that_cannot_orchestrate_is_refused(self):
+    def test_any_participant_agent_can_be_chosen(self):
+        """#695: not only the three seeds of the fallback order."""
+        r = self.svc.set_orchestrator("SEAL-1", "acme", "worker", by="davide")
+        self.assertEqual((r["orchestrator"], r["changed"]), ("worker", True))
+        self.assertEqual(self.meta().get("orchestrator"), "worker")
+
+    def test_a_malformed_name_is_refused(self):
         with self.assertRaises(TopicError):
-            self.svc.set_orchestrator("SEAL-1", "acme", "worker")
+            self.svc.set_orchestrator("SEAL-1", "acme", "../x")
 
     def test_a_seed_not_in_the_room_is_refused(self):
         with self.assertRaises(TopicError):
