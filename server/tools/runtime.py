@@ -122,13 +122,75 @@ def restart_agent(agent: str) -> dict:
     return _post("/clodia/runtime/restart-agent", {"agent": agent})
 
 
+#: What `runtime.inspect_topic` may return, field by field (clodia-platform#704).
+#: The verb is a steward's view of a room it does not take part in, and the
+#: charter of the steward is «never the contents»: names, people, tier, state,
+#: counts and timestamps — never a message, a file's bytes, a summary or a row.
+#: A WHITELIST and not a filter on `messages`: an agent-server that adds a field
+#: tomorrow does not turn it into something sysadmin reads by default, and an
+#: older agent-server that still returns the latest messages (before #704) is
+#: stripped here, so the deploy order cannot reopen the leak.
+_INSPECT_META = ("title", "status", "type", "owner", "contact_agent",
+                 "participants", "agents", "orchestrator", "created_at")
+_INSPECT_COUNTS = ("messages", "messages_window", "human", "agent", "system",
+                   "files")
+_INSPECT_ACTIVITY = ("last_message_at", "last_human_at", "last_agent_at",
+                     "last_message_author", "last_message_kind")
+
+
+def _names(v) -> list[str]:
+    return [str(x) for x in v if isinstance(x, (str, int))] if isinstance(v, list) else []
+
+
+def _inspect_metadata(raw: dict) -> dict:
+    """The metadata-only shape of an inspect-topic answer (see `_INSPECT_META`)."""
+    raw = raw if isinstance(raw, dict) else {}
+    meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
+    out_meta = {}
+    for k in _INSPECT_META:
+        if k not in meta:
+            continue
+        v = meta[k]
+        out_meta[k] = _names(v) if k in ("participants", "agents") else (
+            v if isinstance(v, (str, int, float, bool)) or v is None else str(v))
+    counts = raw.get("counts") if isinstance(raw.get("counts"), dict) else {}
+    out_counts = {k: counts[k] for k in _INSPECT_COUNTS
+                  if isinstance(counts.get(k), int) and not isinstance(counts.get(k), bool)}
+    act = raw.get("last_activity") if isinstance(raw.get("last_activity"), dict) else {}
+    out_act = {k: (str(act[k]) if act[k] is not None else None)
+               for k in _INSPECT_ACTIVITY if k in act}
+    toolbox = raw.get("toolbox") if isinstance(raw.get("toolbox"), dict) else {}
+    out_toolbox = {"enabled": _names(toolbox.get("enabled")),
+                   "mcp": _names(toolbox.get("mcp"))}
+    imports = []
+    for e in raw.get("imports") if isinstance(raw.get("imports"), list) else []:
+        if isinstance(e, dict) and e.get("kind") and e.get("name"):
+            g = e.get("grants") if isinstance(e.get("grants"), dict) else {}
+            imports.append({"kind": str(e["kind"]), "name": str(e["name"]),
+                            "grants": {str(a): str(m) for a, m in g.items()
+                                       if m in ("read", "write")}})
+    out = {"ok": bool(raw.get("ok", True)), "tier": raw.get("tier"), "name": raw.get("name"),
+           "meta": out_meta, "counts": out_counts, "last_activity": out_act,
+           "toolbox": out_toolbox, "imports": imports,
+           "contents": "never returned (clodia-platform#704)"}
+    if raw.get("error"):
+        out["error"] = str(raw["error"])[:200]
+    return out
+
+
 def inspect_topic(tier: str, name: str, by: str) -> dict:
-    """Proxy: introspezione di UN topic per uno steward (sysadmin) chiamato dal
-    widget. Metadati + agenti + ultimi messaggi, MA solo entro la clearance del
-    chiamante: topic sopra la sua SEAL → 403 (invisibile). L'asse participant è
-    bypassato (lo steward non è partecipante), quello clearance NO."""
-    return _post("/clodia/runtime/inspect-topic",
-                 {"tier": tier, "name": name, "by": by})
+    """Proxy: introspection of ONE topic for a steward (sysadmin) called from
+    the widget. **Metadata only** (clodia-platform#704): participants, tier,
+    status, counts, last-activity timestamps, toolbox and data imports — never
+    a message, a file, a summary or a row.
+
+    Within the CALLER's clearance: a topic above its SEAL → 403 (invisible).
+    The participant axis is bypassed (the steward is not a participant), the
+    clearance axis is not. `auth=True`: the agent-server checks that the
+    signed caller is `by`, so a spawn cannot borrow another agent's clearance
+    by naming it (clodia-logic ≥ 6.362.0)."""
+    return _inspect_metadata(_post("/clodia/runtime/inspect-topic",
+                                   {"tier": tier, "name": name, "by": by}, auth=True))
 
 
 def channel_trigger(tier: str, name: str, text: str, by: str) -> dict:

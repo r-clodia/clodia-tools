@@ -1201,15 +1201,26 @@ _RUNTIME_TOOLS: list[Tool] = [
              "required": ["mcp", "uri", "effect"]}),
     Tool(name="runtime.inspect_topic",
          description=("OPS/STEWARD: ispeziona UN topic specifico (di norma quello da cui "
-                      "l'utente ti sta chiamando nel widget). Ritorna metadati (titolo, "
-                      "stato, owner), gli AGENTI del topic e gli ULTIMI messaggi. NB: "
-                      "vincolato alla tua clearance — se la tua SEAL effettiva è < tier "
-                      "del topic ricevi 403 (il topic è invisibile). Usalo per capire il "
-                      "contesto in cui stai assistendo l'utente (chi c'è, cosa si sono detti)."),
+                      "l'utente ti sta chiamando nel widget). SOLO METADATI: titolo, stato, "
+                      "owner, partecipanti e agenti, conteggi (messaggi, file), timestamp "
+                      "dell'ultima attività, strumenti abilitati (toolbox) e dati importati. "
+                      "MAI il contenuto: niente testo dei messaggi, file, summary o righe "
+                      "(clodia-platform#704). Vincolato alla tua clearance — se la tua SEAL "
+                      "effettiva è < tier del topic ricevi 403 (il topic è invisibile)."),
          inputSchema={"type": "object", "properties": {
              "tier": {"type": "string", "description": "tier del topic (es. SEAL-1)"},
              "name": {"type": "string", "description": "nome del topic"}},
              "required": ["tier", "name"]}),
+    Tool(name="runtime.health",
+         description=("OPS/DIAGNOSI, sola lettura: lo stato della piattaforma come lo controlla "
+                      "lo smoke test post-deploy — versioni dei servizi (gateway, agent-server), "
+                      "salute dell'agent-server, ogni backend MCP montato con list_tools "
+                      "OK/FAIL, righe del corriere mail con e senza tag, e le ultime righe "
+                      "CRITICAL/ERROR del log del gateway (redatte). Nessun segreto, nessun "
+                      "contenuto."),
+         inputSchema={"type": "object", "properties": {
+             "backends": {"type": "boolean",
+                          "description": "prova i backend MCP (default true; ~secondi)"}}}),
 ]
 
 # jobs.* — gestione dei job schedulati. La CREAZIONE non è diretta: si PROPONE
@@ -5374,6 +5385,11 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_egress_admin(name, arguments)
         elif name in _ROOM_TOOL_VERBS:
             result = await _room_tools_verb(name, arguments, _ag or "")
+        elif name == "runtime.health":
+            # Async: it probes the MCP backends concurrently (#703).
+            from .tools import health as _health
+            result = await _health.health(
+                backends=arguments.get("backends", True) is not False)
         elif name.startswith("runtime."):
             # proxy httpx SINCRONO all'agent-server → offload su thread (no blocco loop)
             result = await asyncio.to_thread(_dispatch_runtime, name, arguments, _ag)

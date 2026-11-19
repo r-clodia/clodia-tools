@@ -97,6 +97,43 @@ def _redact_topics(line: str, clearance: str | None) -> str:
     return _TOPIC_RE.sub(_sub, line)
 
 
+#: Log lines that carry what someone WROTE — a prompt, a reply, a quoted
+#: sentence — and the part of each that is the text (clodia-platform#704).
+#: `logs.tail` is a diagnostic verb of sysadmin, whose charter is «never the
+#: contents»: the agent-server stops writing these (clodia-logic ≥ 6.362.0),
+#: and this is the defence in depth for the lines already on disk, for an
+#: older agent-server, and for the next emitter that forgets.
+#:
+#: - `turno START <chat>: <first 80 chars of the prompt>` (session.py);
+#: - `… convocato da una menzione che sembra narrativa ('<sentence>') …`
+#:   (channels.py, the reply's sentence around an @mention).
+#:
+#: SHORTCUT: textual, like `_TOPIC_RE`: it knows the shapes the emitters use.
+#:           `clodia-logic:server/test_704_no_content_in_logs.py` fails when a
+#:           new log call passes message text, which is where this list would
+#:           otherwise fall behind.
+_CONTENT_RES = (
+    (re.compile(r"(turno START \S+?):\s.*$"), r"\1: [message text withheld]"),
+    (re.compile(r"(sembra narrativa \()['\"].*?['\"](\): turno avviato)"),
+     r"\1[withheld]\2"),
+)
+
+
+def redact_content(line: str) -> str:
+    """The line without the text a person or an agent wrote (see `_CONTENT_RES`)."""
+    for rx, rep in _CONTENT_RES:
+        line = rx.sub(rep, line)
+    return line
+
+
+def redact_line(line: str, clearance: str | None) -> str:
+    """Everything `tail` hides in one line: secrets, message text, and the
+    names of topics above the reader's clearance. Shared with
+    `runtime.health`, which shows the gateway's recent errors."""
+    line = _SECRET_RE.sub(lambda m: m.group(1) + "=•••", line)
+    return _redact_topics(redact_content(line), clearance)
+
+
 def _log_file(source: str = "agent-server") -> Path:
     """Il file della sorgente. Sconosciuta → errore, mai un ripiego silenzioso:
     rispondere con l'agent-server a chi ha chiesto il gateway è dargli la
@@ -153,8 +190,9 @@ def attach_gateway_file_log(level: int = logging.INFO) -> Path | None:
 def tail(lines: int = 100, level: str = "", source: str = "agent-server") -> dict:
     """Ultime `lines` righe del log (max 500), opzionalmente filtrate per
     `level` (INFO/WARNING/ERROR). `source`: `agent-server` (default) o
-    `gateway`. Segreti redatti, e con loro i nomi dei topic sopra la clearance
-    di chi legge (`_redact_topics`)."""
+    `gateway`. Segreti redatti, e con loro il testo dei messaggi
+    (`redact_content`, #704) e i nomi dei topic sopra la clearance di chi
+    legge (`_redact_topics`)."""
     tool_allowed("logs.tail")
     f = _log_file(source)
     n = max(1, min(int(lines or 100), _MAX_LINES))
@@ -166,6 +204,5 @@ def tail(lines: int = 100, level: str = "", source: str = "agent-server") -> dic
     if lv:
         rows = [r for r in rows if f" {lv} " in r]
     cl = current_clearance()
-    out = [_redact_topics(_SECRET_RE.sub(lambda m: m.group(1) + "=•••", r), cl)
-           for r in rows[-n:]]
+    out = [redact_line(r, cl) for r in rows[-n:]]
     return {"file": str(f), "source": source, "count": len(out), "lines": out}

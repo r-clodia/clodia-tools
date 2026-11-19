@@ -706,10 +706,10 @@ class ConnectTests(_ItIstanza, _Config):
         # Nothing mounted; the native connector's leftover is gone.
         self.assertEqual([b["name"] for b in whitelist.CONFIG["mcp_backends"]],
                          [IMG_BACKEND])
-        concessi = whitelist.CONFIG["agents"]["clodia"]["allowed_tools"]
-        for verbo in GIT_VERBS + ("github.list_issues",):
-            self.assertIn(verbo, concessi)
-        self.assertNotIn("github.*", concessi)
+        # Connecting grants no verb (clodia-platform#703): `allowed_tools` is
+        # read by nothing under A·V·R·Q, and the role plan decides who uses
+        # the backend's verbs.
+        self.assertEqual(whitelist.CONFIG["agents"]["clodia"]["allowed_tools"], [])
 
     def test_the_packs_mount_is_never_touched(self):
         whitelist.CONFIG["mcp_backends"][:] = [_backend("github"), _backend(IMG_BACKEND)]
