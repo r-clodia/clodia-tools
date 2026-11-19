@@ -32,8 +32,13 @@ _TIMEOUT = httpx.Timeout(connect=4.0, read=15.0, write=10.0, pool=4.0)
 
 
 def _get(path: str):
+    # The agent-server answers only a signed caller (clodia-platform#705): the
+    # caller's token when there is one, and the paired-gateway secret.
+    from .runtime import _paired_headers
+    tok = whitelist.current_token()
+    headers = {**_paired_headers(), **({"Authorization": f"Bearer {tok}"} if tok else {})}
     with httpx.Client(timeout=_TIMEOUT) as c:
-        r = c.get(f"{AGENT_SERVER_URL}{path}")
+        r = c.get(f"{AGENT_SERVER_URL}{path}", headers=headers)
         r.raise_for_status()
         return r.json()
 
