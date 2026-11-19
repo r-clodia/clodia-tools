@@ -52,19 +52,36 @@ def validate(pack: str, connectors: Any) -> dict:
     own = _builtin.manifests()
     installed = {k: v for k, v in _resolved.manifests().items() if k not in own}
     candidate = {"name": name, "connectors": block}
+    others_refused: list[str] = []
     try:
-        # The candidate goes in LAST under its own name, so it replaces the
-        # installed manifest of that pack instead of sitting next to it:
-        # reinstalling a pack is not two packs colliding with each other.
-        reg = build_registry({**own, **installed, name: candidate},
-                             builtin=tuple(own))
-        # A first-party connector's id or namespace claimed by another pack:
-        # the registry strips it at runtime, so the preview does too, and
-        # says so (#526).
-        stripped, foreign = _resolved._strip_foreign_claims({name: candidate})
-        if foreign:
-            reg = build_registry({**own, **installed, name: stripped[name]},
-                                 builtin=tuple(own))
+        # A refusal that blames only OTHER installed packs is theirs, not the
+        # candidate's (clodia-platform#699): the runtime registry drops them
+        # and keeps the rest (`_build_isolated`), so the preview does the same
+        # and says so — a stale pack must not block every other update.
+        while True:
+            try:
+                # The candidate goes in LAST under its own name, so it replaces
+                # the installed manifest of that pack instead of sitting next
+                # to it: reinstalling a pack is not two packs colliding.
+                reg = build_registry({**own, **installed, name: candidate},
+                                     builtin=tuple(own))
+                # A first-party connector's id or namespace claimed by another
+                # pack: the registry strips it at runtime, so the preview does
+                # too, and says so (#526).
+                stripped, foreign = _resolved._strip_foreign_claims({name: candidate})
+                if foreign:
+                    reg = build_registry({**own, **installed, name: stripped[name]},
+                                         builtin=tuple(own))
+                break
+            except ManifestError as e:
+                culprits = [p for p in getattr(e, "packs", ()) or ()
+                            if p in installed and p != name]
+                if not culprits or name in (getattr(e, "packs", ()) or ()):
+                    raise
+                for p in culprits:
+                    installed.pop(p, None)
+                    others_refused.append(f"pack '{p}' installato ma rifiutato "
+                                          f"(non riguarda '{name}'): {e}")
     except ManifestError as e:
         # One message, the author's: `build_registry` is all-or-nothing and the
         # first refusal is the one to fix. Reporting a half-parsed registry
@@ -86,6 +103,9 @@ def validate(pack: str, connectors: Any) -> dict:
         # Well formed but inactive here and now, with the reason. The install
         # goes ahead: this is a statement about the instance, not the pack.
         "ignored": ignored,
+        # Other installed packs this instance refuses anyway (#699): a warning
+        # for the owner, not a reason to refuse this pack.
+        "others_refused": others_refused,
         "connectors": [summary(c) for c in mine],
     }
 
