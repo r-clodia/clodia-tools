@@ -244,17 +244,48 @@ def _room_view(scope: Optional[str]) -> dict:
     return view
 
 
+#: Ids of the ROLE tuples (`authz_roles`, clodia-platform#703).
+ROLE_PREFIX = "role-"
+
+
+def role_principal_ok() -> bool:
+    """Do ROLE tuples hold for this call? Only when the turn's SIGNED
+    principal — the person writing to the agent, `principal` claim of the
+    spawn's token — is a human admin, and someone is in front of the turn.
+
+    The helpdesk widget is admin-only (owner, 19 Nov 2026), and that is
+    enforced HERE, not by the webui: a non-admin's DM with sysadmin, a room
+    turn started by a member, an anonymous session or an unattended job get
+    no role tools. Fail closed: any doubt is no."""
+    try:
+        from . import human, whitelist as _wl
+        if _wl.is_unattended():
+            return False
+        p = _wl.current_principal()
+        return bool(p) and human.is_human(p) and human.is_admin(p)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _global_for_call(g: list[A.Tuple]) -> list[A.Tuple]:
+    if role_principal_ok():
+        return g
+    return [t for t in g if not str(t.id).startswith(ROLE_PREFIX)]
+
+
 def tuples_for(agent: str, scope: Optional[str]) -> tuple[list[A.Tuple], Optional[list[A.Tuple]]]:
     """The tuples in force for THIS agent here. A room gives nothing to whoever
     does not take part in it and nothing from its panels once archived —
     review of #435, B2. Outside a room: the global level only — plus, in an
-    agentic job's turn, the job's imported data (#670)."""
+    agentic job's turn, the job's imported data (#670). Role tuples only
+    when an admin is the turn's principal (`role_principal_ok`, #703)."""
     v = _room_view(scope)
+    g = _global_for_call(v["global"])
     if not scope:
-        return v["global"] + _job_data_tuples(agent), None
+        return g + _job_data_tuples(agent), None
     if agent not in v["members"] or v["archived"]:
-        return v["global"], []
-    return v["global"], v["explicit"] + v["derived"]
+        return g, []
+    return g, v["explicit"] + v["derived"]
 
 
 def tuples_in_force(scope: Optional[str]) -> tuple[list[A.Tuple], Optional[list[A.Tuple]]]:

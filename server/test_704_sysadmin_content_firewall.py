@@ -200,3 +200,114 @@ class RolePlanHasNoContentVerbTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SecretRedactionTests(unittest.TestCase):
+    """#703 review: the shapes credentials take in a log line."""
+
+    CASES = (
+        "Authorization: Bearer eyJhbGciOi.abc-def",
+        '{"access_token": "ya29.A0Afake", "refresh_token":"1//0fake"}',
+        "client_secret=shh-fake-value next",
+        "oauth: id_token=abc123fake",
+        "x-api-key: 12345fake",
+        'password = "hunter2fake"',
+        "ghp_ABCDEFGH12345678 and github_pat_11AAAAAA_bbbbbbbbcc",
+        "sk-ant-abcdefgh12345 sk-proj-abcdefgh12345 ckt1.eyJfake.sigfake",
+    )
+    LEAKS = ("eyJhbGciOi", "ya29", "1//0fake", "shh-fake", "abc123fake", "12345fake",
+             "hunter2fake", "ghp_ABCDEFGH", "github_pat_11", "sk-ant-abc",
+             "sk-proj-abc", "ckt1.eyJ")
+
+    def test_no_credential_survives(self):
+        for line in self.CASES:
+            out = logs.redact_secrets(line)
+            for leak in self.LEAKS:
+                self.assertNotIn(leak, out, f"{line!r} → {out!r}")
+
+    def test_egress_destinations_lose_query_and_mailbox(self):
+        out = logs.redact_secrets(
+            "egress web.fetch → https://api.example.com/v1/items?key=abc&user=42 "
+            "email.send → mailto:anna.rossi@foo.bar cc bob@example.org")
+        self.assertIn("https://api.example.com/v1/items?•••", out)
+        self.assertNotIn("user=42", out)
+        self.assertIn("mailto:•••", out)
+        self.assertNotIn("anna.rossi", out)
+        self.assertIn("•••@example.org", out)
+
+    def test_ordinary_words_are_left_alone(self):
+        line = ("compartimento spawn · clodia tocca SEAL-1/blog (topic.read_file) "
+                "da chan:SEAL-1:blog:clodia: monkey=banana keyboard: 3")
+        self.assertEqual(logs.redact_secrets(line), line)
+
+
+class HealthCacheTests(unittest.TestCase):
+    def setUp(self):
+        health.reset_cache()
+        self.addCleanup(health.reset_cache)
+
+    def test_concurrent_calls_share_one_run_and_later_ones_hit_the_cache(self):
+        runs = []
+
+        async def slow_run(*, backends=True):
+            runs.append(1)
+            await asyncio.sleep(0.05)
+            return {"ok": True}
+
+        async def go():
+            with patch.object(health, "_run", slow_run):
+                first = await asyncio.gather(*(health.health() for _ in range(5)))
+                again = await health.health()
+            return first, again
+        first, again = asyncio.run(go())
+        self.assertEqual(len(runs), 1)
+        self.assertTrue(all(r == {"ok": True} for r in first))
+        self.assertIn("cached_age_s", again)
+
+    def test_the_cache_expires(self):
+        runs = []
+
+        async def run(*, backends=True):
+            runs.append(1)
+            return {"ok": True}
+        with patch.object(health, "_run", run), patch.object(health, "CACHE_TTL_S", 0.0):
+            asyncio.run(health.health())
+            asyncio.run(health.health())
+        self.assertEqual(len(runs), 2)
+
+
+class DmGovernsRoomsTests(unittest.TestCase):
+    """#701 widget: from an admin's DM, runtime.room_* names the room."""
+
+    def setUp(self):
+        from . import main
+        from .topics.local_fs import LocalFsStorage
+        from .topics.service import TopicService
+        self.main = main
+        self.svc = TopicService(LocalFsStorage(tempfile.mkdtemp(prefix="dm704-")))
+        p = patch.object(main, "_topics", lambda: self.svc)
+        p.start(); self.addCleanup(p.stop)
+        self.svc.new("SEAL-0", "dm-davide--sysadmin", {"owner": "davide", "kind": "dm",
+                                                       "participants": ["davide", "sysadmin"]})
+        self.svc.new("SEAL-1", "blog", {"owner": "davide"})
+
+    def _target(self, scope, args, admin):
+        from . import authz_runtime
+        with patch("server.egress._scope_of_call", lambda: scope), \
+                patch.object(authz_runtime, "role_principal_ok", lambda: admin):
+            return self.main._room_target(args)
+
+    def test_an_admin_dm_acts_on_the_named_room_as_from_outside(self):
+        out = self._target("SEAL-0/dm-davide--sysadmin",
+                           {"tier": "SEAL-1", "name": "blog"}, admin=True)
+        self.assertEqual(out, ("SEAL-1", "blog", False))   # False → admin card
+
+    def test_a_non_admin_dm_stays_pinned(self):
+        with self.assertRaises(PermissionError):
+            self._target("SEAL-0/dm-davide--sysadmin",
+                         {"tier": "SEAL-1", "name": "blog"}, admin=False)
+
+    def test_a_room_stays_pinned_even_for_an_admin(self):
+        with self.assertRaises(PermissionError):
+            self._target("SEAL-1/blog", {"tier": "SEAL-0", "name": "dm-davide--sysadmin"},
+                         admin=True)

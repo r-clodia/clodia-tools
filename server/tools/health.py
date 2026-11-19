@@ -118,7 +118,60 @@ def _gateway() -> dict:
     return {"ok": True, "version": __version__}
 
 
+#: Seconds an answer is reused (#703 review): probing every backend costs
+#: seconds and processes, and a widget, a retry or two agents asking at once
+#: must not multiply it. Short enough that «I fixed it, check again» works
+#: within a minute.
+CACHE_TTL_S = 45.0
+_cache: dict = {}
+_inflight: dict = {}
+
+
+def _cache_key(backends: bool) -> tuple:
+    # The answer depends on the reader's clearance (topic names in the error
+    # lines are redacted above it), so readers of different clearance never
+    # share one.
+    try:
+        from ..whitelist import current_clearance
+        cl = current_clearance()
+    except Exception:  # noqa: BLE001
+        cl = None
+    return (bool(backends), cl)
+
+
+def reset_cache() -> None:
+    _cache.clear()
+    _inflight.clear()
+
+
 async def health(*, backends: bool = True) -> dict:
+    """The smoke checks, cached `CACHE_TTL_S` seconds; concurrent calls for
+    the same answer share ONE run instead of each probing every backend."""
+    import time
+    key = _cache_key(backends)
+    hit = _cache.get(key)
+    now = time.monotonic()
+    if hit and now - hit[0] < CACHE_TTL_S:
+        return {**hit[1], "cached_age_s": round(now - hit[0], 1)}
+    fut = _inflight.get(key)
+    if fut is not None:
+        return await asyncio.shield(fut)
+    fut = asyncio.get_running_loop().create_future()
+    _inflight[key] = fut
+    try:
+        out = await _run(backends=backends)
+        _cache[key] = (time.monotonic(), out)
+        fut.set_result(out)
+        return out
+    except BaseException as e:
+        fut.set_exception(e)
+        fut.exception()        # retrieved: no «never retrieved» warning
+        raise
+    finally:
+        _inflight.pop(key, None)
+
+
+async def _run(*, backends: bool = True) -> dict:
     """The smoke checks. Each part answers on its own: one failing does not
     hide the others, and an exception becomes that part's `ok: false`."""
     agent_server, courier, errors = await asyncio.gather(

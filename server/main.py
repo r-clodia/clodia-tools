@@ -2221,6 +2221,14 @@ def _room_target(arguments: dict) -> tuple[str, str, bool]:
                                 str(arguments.get("name") or "").strip()) if x)
     if scope:
         if want and want != scope:
+            if _dm_governs_rooms(scope):
+                # The helpdesk widget (#701): an admin's DM with an agent acts
+                # on the room the admin names — configuration only, behind an
+                # ADMIN's card (`authz-global:`), as from outside any room.
+                tier, _, nm = want.partition("/")
+                if not (tier and nm):
+                    raise ValueError("servono tier e name della stanza")
+                return tier, nm, False
             raise PermissionError(f"da {scope} agisci solo su questa stanza, non su {want}")
         tier, _, nm = scope.partition("/")
         return tier, nm, True
@@ -2228,6 +2236,22 @@ def _room_target(arguments: dict) -> tuple[str, str, bool]:
     if not (tier and nm):
         raise ValueError("fuori da una stanza servono tier e name")
     return tier, nm, False
+
+
+def _dm_governs_rooms(scope: str) -> bool:
+    """Is the call made from a DM whose turn an ADMIN is driving? Then
+    `runtime.room_*` may name another room (#701 widget, #703 review). The
+    DM is recognised by its meta (`kind: dm`), the admin by the signed
+    principal (`authz_runtime.role_principal_ok`), never by an argument."""
+    from . import authz_runtime as _azr
+    if not _azr.role_principal_ok():
+        return False
+    tier, _, nm = scope.partition("/")
+    try:
+        meta = _topics()._read_meta(tier, nm)[0]
+    except Exception:  # noqa: BLE001
+        return False
+    return str(meta.get("kind") or "").strip().lower() == "dm"
 
 
 async def _room_tools_verb(name: str, arguments: dict, agent: str) -> dict:

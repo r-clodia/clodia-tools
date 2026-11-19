@@ -20,6 +20,8 @@ from .topics.service import TopicService
 
 GITHUB_LISTED = ["get_me", "list_issues", "issue_read", "issue_write",
                  "get_pull_request", "get_workflow_run", "run_workflow",
+                 "mark_all_notifications_read", "list_notifications",
+                 "list_secret_scanning_alerts", "get_secret_scanning_alert",
                  "create_pull_request", "delete_repository", "merge_pull_request"]
 
 
@@ -73,6 +75,7 @@ class PlanTests(_Env):
                      "github.issue_read", "runtime.agents", "github.get_pull_request",
                      "github.get_workflow_run"):
             self.assertEqual(eff(read), "allow", read)
+        self.assertFalse(ROLES.is_read("github.mark_all_notifications_read"))
         for write in ("github.issue_write", "github.create_pull_request", "github.run_workflow",
                       "packs.setup_done", "rag.create_collection"):
             self.assertEqual(eff(write), "ask", write)
@@ -86,7 +89,10 @@ class PlanTests(_Env):
         for never in ("github.delete_repository", "github.merge_pull_request",
                       "github.clone", "github.push", "github.pull_request",
                       "rag.search", "rag.list", "rag.ingest", "datastore.read",
-                      "topic.read_file", "jobs.report_status", "github.*"):
+                      "topic.read_file", "jobs.report_status", "github.*",
+                      "github.mark_all_notifications_read", "github.list_notifications",
+                      "github.list_secret_scanning_alerts",
+                      "github.get_secret_scanning_alert", "runtime.chats"):
             self.assertNotIn(never, v)
 
     def test_an_unknown_role_is_refused(self):
@@ -109,7 +115,7 @@ class MergeTests(_Env):
         meta["authz"] = [{**existing, "id": "t-1", "verb": "notify.send"}]
         self.svc._write_meta("SEAL-1", "blog", meta, base_version=ver)
         p = self.plan()
-        out = ROLES.merge(p, by="davide")
+        out = ROLES.merge(p, by="davide", github_tools=GITHUB_LISTED)
         self.assertTrue(out["ok"])
         self.assertEqual(out["added"], len(p["global"]))
         ids = [t.id for t in S.global_tuples()[0]]
@@ -118,7 +124,7 @@ class MergeTests(_Env):
         # The rooms' rules are untouched (apply would have replaced them).
         self.assertEqual(self.svc._read_meta("SEAL-1", "blog")[0]["authz"][0]["id"], "t-1")
         # Idempotent: merging again adds nothing.
-        again = ROLES.merge(p, by="davide")
+        again = ROLES.merge(p, by="davide", github_tools=GITHUB_LISTED)
         self.assertEqual(again["added"], 0)
         MIG.rollback(out["backup"], by="davide")
         self.assertEqual([t.id for t in S.global_tuples()[0]], ["g-0001"])
@@ -127,7 +133,7 @@ class MergeTests(_Env):
         mine = {"id": "gate-x", "agent": "sysadmin", "verb": "github.issue_write",
                 "resource": "*", "rule": [{"effect": "deny", "match": "*"}]}
         S._global_path().write_text(json.dumps({"tuples": [mine]}))
-        out = ROLES.merge(self.plan(), by="davide")
+        out = ROLES.merge(self.plan(), by="davide", github_tools=GITHUB_LISTED)
         self.assertIn("role-sysadmin-github.issue_write", out["skipped"])
         rows = [t for t in S.global_tuples()[0] if t.verb == "github.issue_write"]
         self.assertEqual([t.id for t in rows], ["gate-x"])
@@ -140,18 +146,72 @@ class MergeTests(_Env):
                                         "resource": "*",
                                         "rule": [{"effect": "allow", "match": "*"}]}]
         with self.assertRaises(A.AuthzError):
-            ROLES.merge(bad, by="davide")
+            ROLES.merge(bad, by="davide", github_tools=GITHUB_LISTED)
         self.assertEqual(S.global_tuples()[0], [])
         with self.assertRaises(A.AuthzError):
-            ROLES.merge({"global": [{"id": "g-1", "agent": "*", "verb": "*",
+            ROLES.merge({"role": "sysadmin",
+                         "global": [{"id": "g-1", "agent": "*", "verb": "*",
                                      "resource": "*",
                                      "rule": [{"effect": "allow", "match": "*"}]}]},
-                        by="davide")
+                        by="davide", github_tools=GITHUB_LISTED)
         with self.assertRaises(A.AuthzError):
-            ROLES.merge({**p, "topics": {"SEAL-1/blog": p["global"]}}, by="davide")
+            ROLES.merge({**p, "topics": {"SEAL-1/blog": p["global"]}}, by="davide",
+                        github_tools=GITHUB_LISTED)
+
+    def test_merge_accepts_only_what_role_plan_regenerates(self):
+        p = self.plan()
+        row = next(t for t in p["global"] if t["verb"] == "github.issue_write")
+
+        def refused(mutate):
+            bad = json.loads(json.dumps(p))
+            r = next(t for t in bad["global"] if t["id"] == row["id"])
+            mutate(bad, r)
+            with self.assertRaises(A.AuthzError):
+                ROLES.merge(bad, by="davide", github_tools=GITHUB_LISTED)
+        refused(lambda b, r: r.update(rule=[{"effect": "allow", "match": "*"}]))  # wider
+        refused(lambda b, r: r.update(agent="clodia"))
+        refused(lambda b, r: r.update(verb="github.delete_repository"))
+        refused(lambda b, r: r.update(where="outside"))
+        refused(lambda b, r: r.update(resource="github:default"))
+        refused(lambda b, r: r.update(rule=[{"effect": "allow", "match": "https://github.com/x"},
+                                            {"effect": "ask", "match": "*"}]))
+        refused(lambda b, r: b["global"].append({**r, "id": "role-sysadmin-github.fork_repository",
+                                                 "verb": "github.fork_repository"}))
+        refused(lambda b, r: b.update(role="clodia"))
+        self.assertEqual(S.global_tuples()[0], [])
+        # Trimmed and TIGHTENED is fine: the owner may narrow.
+        ok = json.loads(json.dumps(p))
+        ok["global"] = [dict(t, rule=[{"effect": "deny", "match": "*"}])
+                        for t in ok["global"] if t["verb"].startswith("github.")]
+        out = ROLES.merge(ok, by="davide", github_tools=GITHUB_LISTED)
+        self.assertEqual(out["added"], len(ok["global"]))
+
+    def test_role_tuples_hold_only_for_an_admin_principal(self):
+        ROLES.merge(self.plan(), by="davide", github_tools=GITHUB_LISTED)
+        with patch.object(whitelist, "current_principal", lambda: None):
+            self.assertFalse(R.available("sysadmin", "runtime.health", None))
+        with patch.object(whitelist, "current_principal", lambda: "mario"), \
+                patch("server.human.is_human", lambda n: True), \
+                patch("server.human.is_admin", lambda n: n == "davide"):
+            self.assertFalse(R.available("sysadmin", "runtime.health", None),
+                             "a non-admin's DM gets no role tools")
+        with patch.object(whitelist, "current_principal", lambda: "davide"), \
+                patch("server.human.is_human", lambda n: True), \
+                patch("server.human.is_admin", lambda n: n == "davide"), \
+                patch.object(whitelist, "is_unattended", lambda: True):
+            self.assertFalse(R.available("sysadmin", "runtime.health", None),
+                             "an unattended job gets none")
+        with patch.object(whitelist, "current_principal", lambda: "sysadmin"), \
+                patch("server.human.is_human", lambda n: False), \
+                patch("server.human.is_admin", lambda n: False):
+            self.assertFalse(R.available("sysadmin", "runtime.health", None))
 
     def test_after_merge_sysadmin_has_the_tools_everywhere_and_no_one_else(self):
-        ROLES.merge(self.plan(), by="davide")
+        ROLES.merge(self.plan(), by="davide", github_tools=GITHUB_LISTED)
+        for p in (patch.object(whitelist, "current_principal", lambda: "davide"),
+                  patch("server.human.is_human", lambda n: True),
+                  patch("server.human.is_admin", lambda n: n == "davide")):
+            p.start(); self.addCleanup(p.stop)
         self.assertTrue(R.available("sysadmin", "runtime.health", None))
         self.assertTrue(R.available("sysadmin", "runtime.health", "SEAL-1/blog"))
         self.assertTrue(R.available("sysadmin", "github.list_issues", "SEAL-1/blog"))

@@ -825,6 +825,19 @@ async def authz_available_route(request: Request):
                          "available": await asyncio.to_thread(_answer)})
 
 
+async def _github_names() -> list[str] | None:
+    """The `github` backend's verb names, listed live (#703); None when it is
+    not mounted or does not answer — the role plan then uses the known names."""
+    try:
+        from . import proxy as _proxy
+        gh = await _proxy.test_backend("github")
+        if gh.get("ok"):
+            return [t["name"] for t in gh.get("tools") or [] if t.get("name")]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 async def authz_route(request: Request):
     """GET  /internal/authz → {mode, tuples, problems}
     POST /internal/authz {action: plan, days?} | {action: apply, plan} |
@@ -878,14 +891,7 @@ async def authz_route(request: Request):
             from . import authz_roles as _roles
             # The `github` backend's verbs BY NAME, from the backend itself:
             # a wildcard would grant what it adds tomorrow (#703).
-            names = None
-            try:
-                from . import proxy as _proxy
-                gh = await _proxy.test_backend("github")
-                if gh.get("ok"):
-                    names = [t["name"] for t in gh.get("tools") or [] if t.get("name")]
-            except Exception:  # noqa: BLE001 — not mounted: the known names
-                names = None
+            names = await _github_names()
             out = await asyncio.to_thread(
                 _roles.role_plan, str(body.get("agent") or "sysadmin"), github_tools=names)
             if body.get("format") == "markdown":
@@ -895,7 +901,10 @@ async def authz_route(request: Request):
             plan = body.get("plan")
             if not isinstance(plan, dict):
                 return JSONResponse({"error": "serve il piano approvato (`plan`)"}, status_code=400)
-            out = await asyncio.to_thread(_roles.merge, plan, by=actor)
+            # Checked against what role_plan generates NOW, with the same
+            # live GitHub list the plan was built from.
+            out = await asyncio.to_thread(_roles.merge, plan, by=actor,
+                                          github_tools=await _github_names())
         else:
             return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
     except (ValueError, FileNotFoundError) as e:

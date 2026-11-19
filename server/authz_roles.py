@@ -41,6 +41,7 @@ from typing import Iterable, Optional
 
 from . import authz as A
 
+#: Same prefix `authz_runtime.ROLE_PREFIX` filters on (admin principal only).
 ID_PREFIX = "role-"
 ORIGIN = "role-plan"
 
@@ -88,9 +89,17 @@ SELF_CONSENT = frozenset({"runtime.room_authorize_mcp", "runtime.room_resource",
 #: `main._GITHUB_NATIVE_NAMES`): not role tools of the helpdesk.
 GITHUB_GIT_VERBS = frozenset({"github.clone", "github.pull", "github.push",
                               "github.pull_request", "github.mirror"})
-#: Words of the backend's verbs that cannot be undone (decision-record 35).
-GITHUB_IRREVERSIBLE = ("delete", "force_push", "merge", "create_repository",
-                       "transfer", "archive")
+#: Words of the backend's verbs that cannot be undone (decision-record 35),
+#: or that are not the helpdesk's: secret-scanning alerts carry the secret
+#: itself, and notifications are the PAT owner's personal inbox.
+GITHUB_EXCLUDED = ("delete", "force_push", "merge", "create_repository",
+                   "transfer", "archive", "secret", "notification")
+#: Verbs left out of every role although their namespace is in it.
+ROLE_EXCLUDED = frozenset({
+    # `/clodia/chats` no longer exists on the agent-server: a verb that can
+    # only fail is not a tool.
+    "runtime.chats",
+})
 #: The backend's verbs known when it cannot be listed (the former
 #: `_GH_CONCESSI` minus the git verbs): the plan says it fell back to them.
 GITHUB_KNOWN = (
@@ -105,7 +114,9 @@ GITHUB_KNOWN = (
 #: a write anyway.
 _WRITE_WORDS = frozenset({"write", "create", "update", "add", "comment", "push",
                           "set", "remove", "fork", "assign", "edit", "close",
-                          "reopen", "submit", "rerun", "cancel", "dismiss", "lock"})
+                          "reopen", "submit", "rerun", "cancel", "dismiss", "lock",
+                          "mark", "star", "unstar", "subscribe", "unsubscribe",
+                          "manage", "delete", "approve", "resolve"})
 _READ_WORDS = frozenset({"list", "read", "get", "search", "show", "open", "status",
                          "fetch", "download", "info", "query", "find", "lookup",
                          "view", "diff", "logs"})
@@ -170,7 +181,7 @@ def github_verbs(listed: Optional[Iterable[str]]) -> tuple[list[str], str]:
         off = set()
     keep = sorted({n for n in names
                    if n not in GITHUB_GIT_VERBS and n not in off
-                   and not any(w in n.split(".", 1)[1].lower() for w in GITHUB_IRREVERSIBLE)})
+                   and not any(w in n.split(".", 1)[1].lower() for w in GITHUB_EXCLUDED)})
     return keep, source
 
 
@@ -194,7 +205,7 @@ def role_plan(agent: str = "sysadmin", *, catalogue: Optional[Iterable[str]] = N
     cat = set(catalogue) if catalogue is not None else _native_catalogue()
     verbs = sorted(v for v in cat
                    if (v.split(".", 1)[0] in nss or v in CONTAINER_VERBS)
-                   and not content_bearing(v))
+                   and not content_bearing(v) and v not in ROLE_EXCLUDED)
     gh, gh_source = github_verbs(github_tools)
     rows, skipped = [], []
     for v in verbs + gh:
@@ -237,22 +248,73 @@ def markdown(p: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def merge(p: dict, *, by: str) -> dict:
-    """Add an approved role plan's global tuples to `authz.json`. ADDITIVE:
-    nothing already there is changed or removed; a tuple whose id is present,
-    or that names the same agent, verb and resource as one already there, is
-    skipped (the owner's earlier decision wins). Validated all-or-nothing; the
-    state is saved first, so `authz_migration.rollback` undoes it."""
+def _expected(p: dict, github_tools: Optional[Iterable[str]],
+              catalogue: Optional[Iterable[str]]) -> dict:
+    role = str((p or {}).get("role") or "").strip()
+    if role not in ROLES:
+        raise A.AuthzError(f"piano senza un ruolo noto (`role`): {role!r}")
+    try:
+        fresh = role_plan(role, catalogue=catalogue, github_tools=github_tools)
+    except RoleError as e:
+        raise A.AuthzError(str(e)) from None
+    return {t["id"]: t for t in fresh["global"]}
+
+
+def _check_row(r: dict, want: Optional[dict]) -> str:
+    """"" when `r` is a row `role_plan` would generate — same id, agent,
+    verb, resource and `where`, one clause on `*` with the same or a STRICTER
+    effect — otherwise why it is refused."""
+    if want is None:
+        return f"{r.get('id')!r}: non è una riga che il piano di ruolo genera oggi"
+    for k in ("agent", "verb", "resource"):
+        if r.get(k) != want[k]:
+            return f"{r['id']}: {k} {r.get(k)!r} ≠ {want[k]!r}"
+    if str(r.get("where") or A.EVERYWHERE) != want["where"]:
+        return f"{r['id']}: where {r.get('where')!r} ≠ {want['where']!r}"
+    rule = r.get("rule")
+    if not (isinstance(rule, list) and len(rule) == 1 and isinstance(rule[0], dict)
+            and rule[0].get("match") == A.ANY
+            and set(rule[0]) <= {"effect", "match"}):
+        return f"{r['id']}: la regola dev'essere una sola clausola su `*`"
+    eff, top = rule[0].get("effect"), want["rule"][0]["effect"]
+    if eff not in A.RANK or A.RANK[eff] > A.RANK[top]:
+        return f"{r['id']}: effetto {eff!r} più largo di {top!r}"
+    return ""
+
+
+def merge(p: dict, *, by: str, github_tools: Optional[Iterable[str]] = None,
+          catalogue: Optional[Iterable[str]] = None) -> dict:
+    """Add an approved role plan's global tuples to `authz.json`.
+
+    ONLY rows that `role_plan(p["role"])` regenerates now are accepted: same
+    id, agent, verb, resource and `where`, and the same effect or a stricter
+    one (`ask` or `deny` for an `allow`, `deny` for an `ask`). The owner may
+    trim the plan or tighten a row; anything else — a verb the role does not
+    hold, a wider effect, a target-specific clause — refuses the whole merge.
+    `github_tools`: the backend's names, listed live by the route, so a
+    GitHub row is checked against what the backend serves.
+
+    ADDITIVE: nothing already there is changed or removed; a tuple whose id
+    is present, or that names the same agent, verb and resource as one already
+    there, is skipped (the owner's earlier decision wins).
+
+    ROLLBACK: the state is snapshotted first (the global file AND every room's
+    `meta.authz`), and `authz_migration.rollback(backup)` restores THAT
+    snapshot whole — it also undoes any rule changed after the merge (a gate
+    remembered, a room rule removed). To take back only the role tuples, remove
+    them by id (`DELETE /internal/authz/rules`, ids `role-<agent>-<verb>`)."""
     if (p or {}).get("topics"):
         raise A.AuthzError("un piano di ruolo è solo globale: nessuna regola di stanza")
     rows = [r for r in (p or {}).get("global") or [] if isinstance(r, dict)]
     if not rows:
         raise A.AuthzError("piano vuoto: nulla da aggiungere")
+    expected = _expected(p, github_tools, catalogue)
     for r in rows:
-        if not str(r.get("id") or "").startswith(ID_PREFIX):
-            raise A.AuthzError(f"{r.get('id')!r}: non è una tupla di un piano di ruolo")
         if content_bearing(str(r.get("verb") or "")):
             raise A.AuthzError(f"{r.get('verb')!r} porta contenuti: non è uno strumento di ruolo")
+        why = _check_row(r, expected.get(str(r.get("id") or "")))
+        if why:
+            raise A.AuthzError("piano rifiutato, nulla scritto: " + why)
     _ok, bad = A.parse_tuples(rows, level=A.GLOBAL)
     if bad:
         raise A.AuthzError("piano non valido, nulla scritto: " + "; ".join(bad[:5]))
@@ -265,6 +327,7 @@ def merge(p: dict, *, by: str) -> dict:
         backup = MIG._backup(MIG._snapshot())
         stamp = {"by": by, "at": time.time()}
         keep = ("id", "agent", "verb", "resource", "where", "rule", "origin", "why")
+        rows = [{**r, "where": r.get("where") or A.EVERYWHERE} for r in rows]
         with GR._GLOBAL_LOCK:
             doc = GR._read_global()
             have_ids = {t.get("id") for t in doc["tuples"] if isinstance(t, dict)}

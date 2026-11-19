@@ -39,8 +39,39 @@ _BACKUPS = 3
 #: livello cercando " WARNING " nella riga. Un formato diverso passerebbe i
 #: test del file e renderebbe muto il filtro.
 _FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-_SECRET_RE = re.compile(
-    r"(?i)\b(token|secret|key|password|authorization|bearer|api[_-]?key)\b\s*[=:]\s*\S+")
+#: Secrets, in the shapes they take in a log line (#703 review). Order
+#: matters: the self-identifying tokens and `Bearer …` first, then any
+#: `key = value` / `"key": "value"` whose KEY names a credential — the old
+#: `\b(token|secret|…)\b` missed `access_token=`, `client_secret=` and every
+#: quoted JSON key, because `_` is a word character.
+_PREFIX_RE = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}"
+    r"|sk-(?:ant-|proj-)?[A-Za-z0-9_-]{8,}|ckt1\.[A-Za-z0-9._~+/=-]+"
+    r"|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{16})")
+_BEARER_RE = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+")
+_KV_SECRET_RE = re.compile(
+    r"""(?ix)
+    (?P<k>(?P<q>["']?)[\w.-]*(?:token|secret|password|passwd|pwd|api[_-]?key|apikey
+         |authorization|credential|private[_-]?key|session[_-]?id|cookie|signature
+         |(?<![a-z])key)(?P=q))
+    (?P<sep>\s*[=:]\s*)
+    (?P<v>"[^"]*"|'[^']*'|[^\s,;&}\]]+)""")
+#: Egress lines name destinations: a URL's query string carries tokens and
+#: identifiers, a `mailto:` a person (#703 review). The scheme and host stay —
+#: they are what a diagnosis needs.
+_QUERY_RE = re.compile(r"(\bhttps?://[^\s?#\"']+)\?[^\s\"'#]*")
+_MAILTO_RE = re.compile(r"(?i)\bmailto:[^\s,;\"'>)\]]+")
+_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)\b")
+
+
+def redact_secrets(line: str) -> str:
+    """The line without credentials, query strings and mail addresses."""
+    line = _PREFIX_RE.sub("•••", line)
+    line = _BEARER_RE.sub(lambda m: m.group(1) + " •••", line)
+    line = _KV_SECRET_RE.sub(lambda m: m.group("k") + m.group("sep") + "•••", line)
+    line = _QUERY_RE.sub(lambda m: m.group(1) + "?•••", line)
+    line = _MAILTO_RE.sub("mailto:•••", line)
+    return _EMAIL_RE.sub(lambda m: "•••@" + m.group(1), line)
 #: Il NOME di un topic nelle righe del reference monitor, nelle due sole forme
 #: in cui vi compare: `SEAL-2/dossier` (il bersaglio) e `chan:SEAL-2:dossier:…`
 #: (la stanza da cui parte la chiamata). In entrambe il tier sta ATTACCATO al
@@ -130,7 +161,7 @@ def redact_line(line: str, clearance: str | None) -> str:
     """Everything `tail` hides in one line: secrets, message text, and the
     names of topics above the reader's clearance. Shared with
     `runtime.health`, which shows the gateway's recent errors."""
-    line = _SECRET_RE.sub(lambda m: m.group(1) + "=•••", line)
+    line = redact_secrets(line)
     return _redact_topics(redact_content(line), clearance)
 
 
