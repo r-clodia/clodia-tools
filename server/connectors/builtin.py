@@ -138,6 +138,8 @@ ADOPTED_VAULT_ENTRIES: dict[str, str] = {
 FIRST_PARTY_SOURCES: dict[str, tuple[str, str]] = {
     "google-pack": ("r-clodia/clodia-logic", "catalogs/packs/google-pack/"),
     "it-pack": ("r-clodia/clodia-packs", "packs/it-pack/"),
+    # Jev decision verbs `jev.*` (clodia-platform#694).
+    "business-pack": ("r-clodia/clodia-packs", "packs/business-pack/"),
 }
 
 #: The packs this gateway knows as first-party: the keys of
