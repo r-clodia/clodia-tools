@@ -1258,7 +1258,7 @@ async def github_connect(request: Request):
     The backend is it-pack's own mount (clodia-platform#525), so this handler
     deposits the PAT only —
     same entry, same `{"value": pat}` shape, which the pack's mount reads as
-    `${VAULT:github_pat.value}` — and keeps the grant to clodia. It mounts
+    `${VAULT:github_pat.value}` — and grants no verb to anyone. It mounts
     nothing, and it never touches the pack's stamped mount: what it removes is
     the native connector's leftover unstamped `github` entry, which would
     otherwise keep the pack's connector refused for a namespace clash."""
@@ -1291,29 +1291,12 @@ async def github_connect(request: Request):
         return JSONResponse({"connected": False})
     vault.deposit("github_pat", {"value": pat}, cred_type="mcp_secret", grant_agents=[])
     whitelist.CONFIG["mcp_backends"] = backends
-    # I verbi che il collegamento concede a clodia, per NOME. Prima qui c'era
-    # `github.*`, e una wildcard sul namespace di un backend esterno concede
-    # anche ciò che quel backend aggiungerà domani: misurato il 17 ago 2026,
-    # `delete_repository`, `force_push` e `delete_branch` risultavano concessi a
-    # chi aveva la wildcard. Ciò che è irreversibile non si gata, non si concede
-    # (decision-record 35) — e una lista esplicita fa nascere negato ogni verbo
-    # nuovo, che è la direzione giusta in cui sbagliare.
-    _GH_CONCESSI = [
-        "github.clone", "github.pull", "github.push", "github.pull_request",
-        "github.add_issue_comment", "github.get_commit", "github.get_file_contents",
-        "github.get_pull_request", "github.issue_read", "github.issue_write",
-        "github.list_branches", "github.list_commits", "github.list_issues",
-        "github.list_pull_requests", "github.list_releases", "github.list_tags",
-        "github.search_code", "github.search_commits", "github.search_issues",
-    ]
-    agents = whitelist.CONFIG.setdefault("agents", {})
-    ct = agents.setdefault("clodia", {}).setdefault("allowed_tools", [])
-    # Toglie una wildcard lasciata da un collegamento precedente: senza questo,
-    # chi si era collegato prima del fix se la porterebbe dietro per sempre.
-    ct[:] = [v for v in ct if v != "github.*"]
-    for v in _GH_CONCESSI:
-        if v not in ct:
-            ct.append(v)
+    # Connecting grants nothing (clodia-platform#703). Before 2.181.0 this
+    # appended a named list of `github.*` verbs to clodia's `allowed_tools`,
+    # a field nothing reads since A·V·R·Q became the only authority on which
+    # verbs an agent has (#656): the append was dead, and it read as a grant.
+    # Who may use the backend's verbs is decided by tuples — the role plan of
+    # `authz_roles` for sysadmin, the room's Strumenti panel elsewhere.
     whitelist.save_config(); whitelist.reload_config(); proxy.clear_cache()
     LOG.info("github_connect: PAT depositato (backend: quello del pack, len=%d)",
              len(pat))

@@ -1201,15 +1201,26 @@ _RUNTIME_TOOLS: list[Tool] = [
              "required": ["mcp", "uri", "effect"]}),
     Tool(name="runtime.inspect_topic",
          description=("OPS/STEWARD: ispeziona UN topic specifico (di norma quello da cui "
-                      "l'utente ti sta chiamando nel widget). Ritorna metadati (titolo, "
-                      "stato, owner), gli AGENTI del topic e gli ULTIMI messaggi. NB: "
-                      "vincolato alla tua clearance — se la tua SEAL effettiva è < tier "
-                      "del topic ricevi 403 (il topic è invisibile). Usalo per capire il "
-                      "contesto in cui stai assistendo l'utente (chi c'è, cosa si sono detti)."),
+                      "l'utente ti sta chiamando nel widget). SOLO METADATI: titolo, stato, "
+                      "owner, partecipanti e agenti, conteggi (messaggi, file), timestamp "
+                      "dell'ultima attività, strumenti abilitati (toolbox) e dati importati. "
+                      "MAI il contenuto: niente testo dei messaggi, file, summary o righe "
+                      "(clodia-platform#704). Vincolato alla tua clearance — se la tua SEAL "
+                      "effettiva è < tier del topic ricevi 403 (il topic è invisibile)."),
          inputSchema={"type": "object", "properties": {
              "tier": {"type": "string", "description": "tier del topic (es. SEAL-1)"},
              "name": {"type": "string", "description": "nome del topic"}},
              "required": ["tier", "name"]}),
+    Tool(name="runtime.health",
+         description=("OPS/DIAGNOSI, sola lettura: lo stato della piattaforma come lo controlla "
+                      "lo smoke test post-deploy — versioni dei servizi (gateway, agent-server), "
+                      "salute dell'agent-server, ogni backend MCP montato con list_tools "
+                      "OK/FAIL, righe del corriere mail con e senza tag, e le ultime righe "
+                      "CRITICAL/ERROR del log del gateway (redatte). Nessun segreto, nessun "
+                      "contenuto."),
+         inputSchema={"type": "object", "properties": {
+             "backends": {"type": "boolean",
+                          "description": "prova i backend MCP (default true; ~secondi)"}}}),
 ]
 
 # jobs.* — gestione dei job schedulati. La CREAZIONE non è diretta: si PROPONE
@@ -2210,6 +2221,14 @@ def _room_target(arguments: dict) -> tuple[str, str, bool]:
                                 str(arguments.get("name") or "").strip()) if x)
     if scope:
         if want and want != scope:
+            if _dm_governs_rooms(scope):
+                # The helpdesk widget (#701): an admin's DM with an agent acts
+                # on the room the admin names — configuration only, behind an
+                # ADMIN's card (`authz-global:`), as from outside any room.
+                tier, _, nm = want.partition("/")
+                if not (tier and nm):
+                    raise ValueError("servono tier e name della stanza")
+                return tier, nm, False
             raise PermissionError(f"da {scope} agisci solo su questa stanza, non su {want}")
         tier, _, nm = scope.partition("/")
         return tier, nm, True
@@ -2217,6 +2236,22 @@ def _room_target(arguments: dict) -> tuple[str, str, bool]:
     if not (tier and nm):
         raise ValueError("fuori da una stanza servono tier e name")
     return tier, nm, False
+
+
+def _dm_governs_rooms(scope: str) -> bool:
+    """Is the call made from a DM whose turn an ADMIN is driving? Then
+    `runtime.room_*` may name another room (#701 widget, #703 review). The
+    DM is recognised by its meta (`kind: dm`), the admin by the signed
+    principal (`authz_runtime.role_principal_ok`), never by an argument."""
+    from . import authz_runtime as _azr
+    if not _azr.role_principal_ok():
+        return False
+    tier, _, nm = scope.partition("/")
+    try:
+        meta = _topics()._read_meta(tier, nm)[0]
+    except Exception:  # noqa: BLE001
+        return False
+    return str(meta.get("kind") or "").strip().lower() == "dm"
 
 
 async def _room_tools_verb(name: str, arguments: dict, agent: str) -> dict:
@@ -5374,6 +5409,11 @@ async def _call_tool_unaudited(name: str, arguments: dict) -> list[TextContent]:
             result = _dispatch_egress_admin(name, arguments)
         elif name in _ROOM_TOOL_VERBS:
             result = await _room_tools_verb(name, arguments, _ag or "")
+        elif name == "runtime.health":
+            # Async: it probes the MCP backends concurrently (#703).
+            from .tools import health as _health
+            result = await _health.health(
+                backends=arguments.get("backends", True) is not False)
         elif name.startswith("runtime."):
             # proxy httpx SINCRONO all'agent-server → offload su thread (no blocco loop)
             result = await asyncio.to_thread(_dispatch_runtime, name, arguments, _ag)

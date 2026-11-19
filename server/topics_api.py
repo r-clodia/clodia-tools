@@ -825,11 +825,30 @@ async def authz_available_route(request: Request):
                          "available": await asyncio.to_thread(_answer)})
 
 
+async def _github_names() -> list[str] | None:
+    """The `github` backend's verb names, listed live (#703); None when it is
+    not mounted or does not answer — the role plan then uses the known names."""
+    try:
+        from . import proxy as _proxy
+        gh = await _proxy.test_backend("github")
+        if gh.get("ok"):
+            return [t["name"] for t in gh.get("tools") or [] if t.get("name")]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 async def authz_route(request: Request):
     """GET  /internal/authz → {mode, tuples, problems}
     POST /internal/authz {action: plan, days?} | {action: apply, plan} |
          {action: rollback, backup} | {action: set_mode, mode}   (#617)
-    An admin, or the agent-server for the webui; every change audited."""
+         {action: role_plan, agent?, format?} | {action: merge, plan}   (#703)
+    An admin, or the agent-server for the webui; every change audited.
+
+    `role_plan` proposes the global tuples of an agent's ROLE tools (today
+    sysadmin's: GitHub, diagnostics, governance) and writes nothing; `merge`
+    ADDS an approved role plan to the global tuples without touching the
+    others — `apply` would replace them all (`authz_roles`)."""
     from .pki_mint import ROLE_AGENT_SERVER
     from .human import _ADMIN_ROLES
     from . import authz_migration as _mig, authz_runtime as _azr, authz_shadow as _azs
@@ -868,12 +887,30 @@ async def authz_route(request: Request):
             out = await asyncio.to_thread(_mig.rollback, str(body.get("backup") or ""), by=actor)
         elif action == "set_mode":
             out = await asyncio.to_thread(_mig.set_mode, str(body.get("mode") or ""))
+        elif action == "role_plan":
+            from . import authz_roles as _roles
+            # The `github` backend's verbs BY NAME, from the backend itself:
+            # a wildcard would grant what it adds tomorrow (#703).
+            names = await _github_names()
+            out = await asyncio.to_thread(
+                _roles.role_plan, str(body.get("agent") or "sysadmin"), github_tools=names)
+            if body.get("format") == "markdown":
+                out = {**out, "markdown": _roles.markdown(out)}
+        elif action == "merge":
+            from . import authz_roles as _roles
+            plan = body.get("plan")
+            if not isinstance(plan, dict):
+                return JSONResponse({"error": "serve il piano approvato (`plan`)"}, status_code=400)
+            # Checked against what role_plan generates NOW, with the same
+            # live GitHub list the plan was built from.
+            out = await asyncio.to_thread(_roles.merge, plan, by=actor,
+                                          github_tools=await _github_names())
         else:
             return JSONResponse({"error": f"azione sconosciuta: {action}"}, status_code=400)
     except (ValueError, FileNotFoundError) as e:
         return JSONResponse({"error": str(e)[:300]}, status_code=400)
     from .audit import control as _control
-    if action != "plan":
+    if action not in ("plan", "role_plan"):
         _control.safe(_control.emit, "authz", str(action), "global",
                       by=actor, mode=body.get("mode"), backup=body.get("backup"))
     return JSONResponse(out)
