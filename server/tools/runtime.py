@@ -27,9 +27,21 @@ AGENT_SERVER_URL = os.environ.get("AGENT_SERVER_URL", "http://agent-server:7842"
 _TIMEOUT = httpx.Timeout(connect=4.0, read=15.0, write=10.0, pool=4.0)
 
 
+def _paired_headers() -> dict[str, str]:
+    """The secret shared with the paired agent-server, on EVERY call.
+
+    Since clodia-platform#705 the agent-server answers only a signed caller: a
+    session token, or this secret. These proxies call it for a verb the gateway
+    has already authorised (and fill any `by` from the signed identity, never
+    from the agent's arguments), so the gateway is the caller. The secret never
+    reaches a spawn's environment (clodia-logic `child_env`, #471)."""
+    condiviso = (os.environ.get("CLODIA_ORCHESTRATOR_SECRET") or "").strip()
+    return {"X-Orchestrator-Secret": condiviso} if condiviso else {}
+
+
 def _get(path: str):
     with httpx.Client(timeout=_TIMEOUT) as c:
-        r = c.get(f"{AGENT_SERVER_URL}{path}")
+        r = c.get(f"{AGENT_SERVER_URL}{path}", headers=_paired_headers())
         # Il motivo del backend invece di metodo + URL (clodia-platform#297).
         # `policy_deny=False`: queste rotte sono metadati anonimi e non
         # autorizzano per verbo, quindi un 403 qui non è una decisione di policy
@@ -55,7 +67,7 @@ def _post(path: str, payload: dict, *, auth: bool = False,
     # auth=True: inoltra il session token ckt1 del chiamante corrente, così
     # agent-server verifica l'identità firmata (via _principal_from_request) e
     # non deve fidarsi di un campo auto-dichiarato nel body.
-    headers = {}
+    headers = _paired_headers()
     if auth:
         token = whitelist.current_token()
         if token:
@@ -72,10 +84,10 @@ def _post(path: str, payload: dict, *, auth: bool = False,
     # conto di un chiamante identificato — l'annuncio di un messaggio parte
     # dallo store, non da un principal — e l'unica cosa da provare è che questo
     # processo sia il gateway accoppiato all'agent-server.
-    if secret:
-        condiviso = (os.environ.get("CLODIA_ORCHESTRATOR_SECRET") or "").strip()
-        if condiviso:
-            headers["X-Orchestrator-Secret"] = condiviso
+    #
+    # Since #705 the secret goes on every call (`_paired_headers` above); the
+    # flag stays for the call sites that state it.
+    del secret
     with httpx.Client(timeout=timeout or _TIMEOUT) as c:
         r = c.post(f"{AGENT_SERVER_URL}{path}", json=payload, headers=headers)
         # Qui il corpo vale più che nella #297: queste rotte MUTANO e il loro
