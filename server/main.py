@@ -1216,8 +1216,9 @@ _RUNTIME_TOOLS: list[Tool] = [
                       "lo smoke test post-deploy — versioni dei servizi (gateway, agent-server), "
                       "salute dell'agent-server, ogni backend MCP montato con list_tools "
                       "OK/FAIL, righe del corriere mail con e senza tag, e le ultime righe "
-                      "CRITICAL/ERROR del log del gateway (redatte). Nessun segreto, nessun "
-                      "contenuto."),
+                      "CRITICAL/ERROR del log del gateway (redatte). Per un admin anche "
+                      "l'ultimo stallo dell'event loop con gli stack dei thread (#710). "
+                      "Nessun segreto, nessun contenuto."),
          inputSchema={"type": "object", "properties": {
              "backends": {"type": "boolean",
                           "description": "prova i backend MCP (default true; ~secondi)"}}}),
