@@ -590,7 +590,8 @@ async def topic_data_route(request: Request):
                             status_code=409)
     from .audit import control as _control
     _control.safe(_control.emit, "topic_data", str(action), f"{tier}/{name}",
-                  kind=kind, resource=resource, agent=body.get("agent"), mode=body.get("mode"),
+                  resource_kind=kind, data_resource=resource, agent=body.get("agent"),
+                  mode=body.get("mode"),
                   by=_actor(request, body)[0])
     _invalidate_list_cache()
     return JSONResponse(out)
@@ -1127,7 +1128,7 @@ async def data_catalog_route(request: Request):
         return JSONResponse(out)        # a question, not a change: no control event
     from .audit import control as _control
     _control.safe(_control.emit, "data_catalog", str(action), str(body.get("resource") or "*"),
-                  kind=body.get("kind"), tier=body.get("tier"))
+                  resource_kind=body.get("kind"), tier=body.get("tier"))
     return JSONResponse(out)
 
 
