@@ -441,6 +441,22 @@ def connectors_snapshot() -> list[dict]:
                 else:
                     detail = "non connesso: serve «Connetti» dalla card"
                 row["issues"] = [{"error": detail}]
+        # Un backend che ha risposto 401/403 non è connesso, qualunque cosa
+        # dica la sua configurazione (clodia-platform#533). Se il server annuncia
+        # OAuth e il backend non è ancora configurato così, la card riceve lo
+        # stesso metodo di un backend OAuth non autorizzato: «Connetti» porta al
+        # consenso, e `oauth/start` registra `auth` prima di avviarlo.
+        rifiuto = proxy.auth_failure(str(b.get("name") or ""))
+        if rifiuto:
+            row["connected"] = False
+            row["operational"] = False
+            row["issues"] = [{"error": rifiuto["detail"]}]
+            if rifiuto.get("oauth") and mcp_oauth.adoptable(b):
+                row["oauth_detected"] = True
+                row["auth"] = "oauth"
+                row["authorized"] = False
+                row["auth_methods"] = [{"type": "oauth"}]
+                row["auth_active"] = None
         gap = gaps_by_server.get(_slugify(str(b.get("name") or "")))
         if gap:
             row["operational"] = False
@@ -620,8 +636,41 @@ def _core_entry_released(entry: dict, pack: str = "",
             and str(entry.get("url") or "") == GITHUB_MCP_URL)
 
 
+def detect_oauth_sync(config) -> dict[str, dict]:
+    """Sonda i server http del config che potrebbero volere OAuth (#533).
+
+    Solo quelli che `register_mcp_core` lascerebbe senza alcuna auth: niente
+    `auth`, niente `headers`. Per ognuno, `mcp_oauth.detect` con un
+    `initialize` anonimo. Sincrona: la chiamano la rotta (in un thread) e
+    `mcp.add` (già in un thread). Un errore di rete non ferma il mount.
+    """
+    cfg = config
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except Exception:
+            return {}
+    servers = (cfg or {}).get("mcpServers") if isinstance(cfg, dict) else None
+    if not isinstance(servers, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for name, spec in servers.items():
+        if not isinstance(spec, dict) or not spec.get("url") or spec.get("auth") is not None \
+                or spec.get("headers"):
+            continue
+        url = str(spec["url"])
+        if not url.startswith(("http://", "https://")):
+            continue
+        try:
+            out[_slugify(name)] = asyncio.run(mcp_oauth.detect(url))
+        except Exception as e:  # noqa: BLE001 — il rilevamento è un aiuto, non un requisito
+            LOG.info("mcp: rilevamento OAuth di '%s' non riuscito: %s", name, type(e).__name__)
+    return out
+
+
 def register_mcp_core(config, secrets: dict | None = None,
-                      pack: str | None = None) -> dict:
+                      pack: str | None = None,
+                      detected: dict[str, dict] | None = None) -> dict:
     """Core riutilizzabile della registrazione MCP (UI Add-MCP e tool mcp.add).
     I placeholder ${NAME} nel config vengono sostituiti con
     ${VAULT:mcp_<server>_<NAME>} e i segreti depositati nel vault (mai nel
@@ -645,6 +694,7 @@ def register_mcp_core(config, secrets: dict | None = None,
     # montato ora non è concesso a nessuno: lo ha chi lo dichiara nel proprio
     # seed, e clodia, se le serve, lo prende in prestito con `copybrain`.
     registered = []
+    oauth_detected: list[str] = []
     deposits: list[tuple[str, str]] = []
     forget_after: list[str] = []
     renames: list[tuple[str, str]] = []   # (old name, slug), #633
@@ -689,6 +739,13 @@ def register_mcp_core(config, secrets: dict | None = None,
                 if implicit is not None:
                     backend = mcp_credentials.strip_injected(backend, implicit)
                     backend["auth"] = {"methods": [implicit]}
+                elif (detected or {}).get(slug, {}).get("oauth") and mcp_oauth.adoptable(backend):
+                    # Il server ha risposto 401 annunciando OAuth (#533): il
+                    # backend nasce OAuth, con «Connetti» sulla card. `spec` non
+                    # cambia, quindi nemmeno `config_sha256`.
+                    backend["auth"] = mcp_credentials.normalize({"type": "oauth"},
+                                                               transport=transport)
+                    oauth_detected.append(slug)
         except ValueError as e:
             raise McpRegisterError(f"server '{name}': {e}")
         # Provenienza (review di #354): il backend montato DAL MOUNT DI UN PACK
@@ -823,7 +880,44 @@ def register_mcp_core(config, secrets: dict | None = None,
     whitelist.save_config()
     whitelist.reload_config()
     proxy.clear_cache()
-    return {"registered": registered}
+    for slug in registered:
+        # Un backend appena (ri)montato non ha ancora un esito suo, salvo il
+        # rifiuto che il rilevamento ha appena visto (#533).
+        proxy.clear_auth_failure(slug)
+        info = (detected or {}).get(slug) or {}
+        if info.get("status") in (401, 403) and slug not in oauth_detected:
+            proxy.record_auth_failure(slug, info)
+    out: dict = {"registered": registered}
+    if oauth_detected:
+        out["oauth_detected"] = oauth_detected
+    return out
+
+
+def adopt_detected_oauth(name: str) -> bool:
+    """Dà `auth: {type: oauth}` a un backend montato che lo annuncia (#533).
+
+    Solo se `mcp_oauth.adoptable` (niente auth, niente headers): il server ha
+    detto nel suo 401 di volere OAuth, e senza questo la card non avrebbe un
+    «Connetti». Ritorna True se ha cambiato il config.
+    """
+    backends = list(whitelist.CONFIG.get("mcp_backends") or [])
+    for i, b in enumerate(backends):
+        if b.get("name") != name:
+            continue
+        if not mcp_oauth.adoptable(b):
+            return False
+        backends[i] = {**b, "auth": mcp_credentials.normalize(
+            {"type": "oauth"}, transport="http")}
+        whitelist.CONFIG["mcp_backends"] = backends
+        whitelist.save_config()
+        whitelist.reload_config()
+        proxy.clear_cache()
+        # Il 401 è spiegato dalla configurazione nuova: la card dice ora
+        # «Da autorizzare», non più il rifiuto.
+        proxy.clear_auth_failure(name)
+        LOG.info("mcp: backend '%s' annuncia OAuth nel suo 401: auth oauth impostata", name)
+        return True
+    return False
 
 
 def unregister_mcp_core(name: str) -> dict:
@@ -894,9 +988,11 @@ async def register_mcp(request: Request):
                     {"error": f"'{_slugify(n)}' is declared by pack '{claimant}': "
                               f"mount it as that pack's (\"pack\": \"{claimant}\")"},
                     status_code=409)
+    # Il rilevamento OAuth (#533) è rete: fuori dall'event loop.
+    detected = await asyncio.to_thread(detect_oauth_sync, body.get("config"))
     try:
         out = register_mcp_core(body.get("config"), body.get("secrets") or {},
-                                pack=pack)
+                                pack=pack, detected=detected)
     except McpRegisterError as e:
         return JSONResponse({"error": str(e)}, status_code=e.status)
     if pack:
@@ -924,20 +1020,56 @@ def _mcp_backend(name: str) -> dict | None:
 
 
 async def mcp_oauth_start(request: Request):
-    """POST /tools/mcp/{name}/oauth/start → `{state, auth_url, redirect_uri}`.
+    """POST /tools/mcp/{name}/oauth/start {origin?, return_to?}
+    → `{state, auth_url, redirect_uri, mode, return_to}`.
 
     Chi può montare un server MCP può autorizzarlo: stesso `_authorized` di
     `/tools/mcp`, cioè territorio admin. Il risultato non contiene segreti —
     la URL di consenso è pubblica per costruzione, il PKCE verifier resta nel
     provider.
+
+    `origin` (clodia-platform#534): l'origin della webui da cui parte il
+    consenso; il browser ci torna (`/tools/oauth/callback`). Deve essere
+    dell'istanza (`mcp_oauth.callback_redirect`) e, se il browser manda
+    l'header `Origin`, coincidere con quello. Senza `origin`, il ritorno da
+    incollare di prima. `return_to`: la pagina a cui tornare, solo un path
+    della webui (`mcp_oauth.safe_return_path`).
+
+    Un backend montato senza `auth` il cui server annuncia OAuth nel 401
+    (#533) riceve qui `auth: {type: oauth}`, prima del consenso.
     """
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    b = _mcp_backend(request.path_params["name"])
+    name = request.path_params["name"]
+    b = _mcp_backend(name)
     if b is None:
         return JSONResponse({"error": "backend non montato"}, status_code=404)
     try:
-        return JSONResponse(await mcp_oauth.begin(b))
+        body = await request.json() if (await request.body()) else {}
+    except Exception:
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    origin = body.get("origin")
+    if origin is not None:
+        if not isinstance(origin, str):
+            return JSONResponse({"error": "origin deve essere una stringa"}, status_code=400)
+        try:
+            mcp_oauth.callback_redirect(origin)
+            header = request.headers.get("origin")
+            if header and header != "null" and \
+                    mcp_oauth._origin_of(header)[0] != mcp_oauth._origin_of(origin)[0]:
+                raise ValueError("origin diversa da quella della pagina che la chiede")
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+    if mcp_oauth.auth_spec(b) is None and mcp_oauth.adoptable(b):
+        info = await mcp_oauth.detect(str(b.get("url") or ""))
+        if info.get("oauth") and adopt_detected_oauth(name):
+            b = _mcp_backend(name) or b
+    try:
+        return JSONResponse(await mcp_oauth.begin(
+            b, origin=origin, return_to=body.get("return_to"),
+            principal=_admin_principal(request)))
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:  # noqa: BLE001 — un backend di terzi rotto è un 502, non un 500 nostro
@@ -958,15 +1090,22 @@ async def mcp_oauth_complete(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad_json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    name = request.path_params["name"]
     try:
+        # Legato al backend della rotta e a chi ha avviato il consenso (#534):
+        # un `state` vale per un consenso, di un server, di una sessione.
         res = await mcp_oauth.finish(str(body.get("state") or ""),
-                                     str(body.get("code") or ""))
+                                     str(body.get("code") or ""),
+                                     slug=name, principal=_admin_principal(request))
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:  # noqa: BLE001
         LOG.warning("mcp oauth complete fallito: %s", type(e).__name__)
         return JSONResponse({"error": f"{type(e).__name__}: {str(e)[:200]}"}, status_code=502)
     proxy.clear_cache()  # ora il backend espone tool: la lista cache-ata è vecchia
+    proxy.clear_auth_failure(name)
     return JSONResponse(res)
 
 
@@ -993,6 +1132,7 @@ async def mcp_connect(request: Request):
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     proxy.clear_cache()
+    proxy.clear_auth_failure(b.get("name"))
     return JSONResponse(res)
 
 
@@ -1449,6 +1589,12 @@ async def test_connector(request: Request):
     if r["ok"] is None and cid in {b.get("name") for b in (whitelist.CONFIG.get("mcp_backends") or [])}:
         # non è uno dei provider nativi sopra: prova come backend MCP montato
         r = await proxy.test_backend(cid)
+        if r.get("oauth_detected"):
+            # Il server ha annunciato OAuth nel suo 401 (#533): il backend senza
+            # auth la riceve ora, e la card offre «Connetti».
+            b = _mcp_backend(cid)
+            if b is not None and await asyncio.to_thread(adopt_detected_oauth, cid):
+                r["auth_set"] = "oauth"
         tools = r.pop("tools", None)
         if r.get("ok") and tools is not None:
             # Off the event loop: the checks read manifests and mounts.

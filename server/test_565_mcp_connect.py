@@ -238,7 +238,7 @@ class ReviewFixTests(_Base):
     async def test_oauth_finish_refused_after_a_credential_connect(self):
         b = self.mount({"url": URL, "auth": DECL})
         flow = type("F", (), {"slug": "invoicetronic", "code": None, "task": None,
-                              "exp": float("inf")})()
+                              "exp": float("inf"), "used": False, "principal": ""})()
         mcp_oauth._flows["st"] = flow
         self.addCleanup(mcp_oauth._flows.pop, "st", None)
         await mcp_credentials.connect(b, {"APIKEY": KEY})

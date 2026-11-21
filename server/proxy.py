@@ -21,6 +21,8 @@ import logging
 import re
 from contextlib import asynccontextmanager
 
+import httpx
+
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client, StdioServerParameters
 try:  # mcp <2
@@ -413,6 +415,7 @@ def _bounded_http_factory(limit: int, tripped: "asyncio.Event"):
 
 @asynccontextmanager
 async def session(b: dict, *, oauth_handlers: tuple | None = None,
+                  oauth_redirect: str | None = None,
                   max_bytes: int | None = None, tripped=None):
     """Apre una ClientSession verso il backend (stdio o http). I secret
     ${VAULT:cred} in env/headers/url/args sono risolti dal vault qui, al volo.
@@ -455,7 +458,7 @@ async def session(b: dict, *, oauth_handlers: tuple | None = None,
                 await s.initialize()
                 yield s
     elif transport == "http":
-        auth = mcp_oauth.provider_for(b, handlers=oauth_handlers)
+        auth = mcp_oauth.provider_for(b, handlers=oauth_handlers, redirect=oauth_redirect)
         extra: dict = {}
         if max_bytes is not None and tripped is not None:
             # Bounded on the wire (#641 review): see `_bounded_http_factory`.
@@ -492,6 +495,84 @@ def riautorizzazione(e: BaseException) -> mcp_oauth.ReauthorizationRequired | No
             return found
     cause = e.__cause__ or e.__context__
     return riautorizzazione(cause) if cause is not None else None
+
+
+def rifiuto_http(e: BaseException) -> "httpx.HTTPStatusError | None":
+    """Un 401/403 del backend dentro un guasto, anche annidato (clodia-platform#533).
+
+    Stesso srotolamento di `riautorizzazione`: un backend senza `auth` che
+    risponde 401 risale come `HTTPStatusError` dentro il gruppo di eccezioni di
+    anyio, e il «Test» mostrava «unhandled errors in a TaskGroup (1
+    sub-exception)» — il proprietario ha rimontato il server due volte perché
+    niente sullo schermo diceva cosa non andava.
+    """
+    if isinstance(e, httpx.HTTPStatusError) and e.response is not None \
+            and e.response.status_code in (401, 403):
+        return e
+    for sub in getattr(e, "exceptions", ()) or ():
+        found = rifiuto_http(sub)
+        if found is not None:
+            return found
+    cause = e.__cause__ or e.__context__
+    return rifiuto_http(cause) if cause is not None else None
+
+
+# ── Backend che rifiutano: «montato» non è «connesso» (clodia-platform#533) ──
+#
+# Un backend http senza `auth` era `connected: true` per costruzione, anche
+# quando ogni chiamata prendeva 401. Qui si ricorda, per backend, l'ultimo
+# rifiuto di autenticazione visto (Test, chiamata di tool, elenco dei tool) e
+# lo si dimentica al primo successo, o quando il backend cambia (rimount,
+# «Connetti», consenso concluso). La card e `runtime.mcp_servers` lo leggono:
+# stessa regola di #451 per le dipendenze pip mancanti. In memoria: dopo un
+# restart il primo Test o la prima chiamata lo ritrovano.
+#
+# Mai un valore di header o un token: solo lo status, se il server annuncia
+# OAuth, e un messaggio scritto qui.
+
+_AUTH_FAILURES: dict[str, dict] = {}
+
+
+def auth_failure(name: str) -> dict | None:
+    return _AUTH_FAILURES.get(str(name or ""))
+
+
+def record_auth_failure(name: str, info: dict) -> None:
+    _AUTH_FAILURES[str(name)] = {
+        "status": info.get("status"),
+        "oauth": bool(info.get("oauth")),
+        "detail": str(info.get("detail") or "")[:300],
+    }
+
+
+def clear_auth_failure(name: str) -> None:
+    _AUTH_FAILURES.pop(str(name or ""), None)
+
+
+async def spiega_rifiuto(name: str, b: dict, err: "httpx.HTTPStatusError") -> dict:
+    """Il rifiuto di un backend, letto: OAuth annunciato o credenziale sbagliata.
+
+    Usa gli header della risposta VERA (nessuna nuova richiesta al server MCP),
+    più i metadati pubblici che quegli header indicano. Lo ricorda per la card.
+    """
+    status = err.response.status_code
+    try:
+        info = await mcp_oauth.detect(str(b.get("url") or ""), status=status,
+                                      headers=err.response.headers)
+    except Exception as e:  # noqa: BLE001 — la diagnosi non deve diventare un altro guasto
+        LOG.warning("mcp: diagnosi del %s di '%s' fallita: %s", status, name, type(e).__name__)
+        info = {"status": status, "oauth": False,
+                "detail": f"{status} — il server rifiuta l'autenticazione"}
+    if info.get("oauth") and mcp_oauth.auth_spec(b):
+        # Già configurato OAuth e comunque rifiutato: il consenso va rifatto.
+        info["detail"] = (f"{status} — il token OAuth è stato rifiutato: "
+                          "serve un nuovo consenso («Riautorizza»)")
+    elif info.get("oauth") and b.get("headers"):
+        info["detail"] = (
+            f"{status} — il server annuncia OAuth (RFC 9728) e rifiuta l'header statico: "
+            "rimonta il server con \"auth\": {\"type\": \"oauth\"} e senza quell'header")
+    record_auth_failure(name, info)
+    return info
 
 
 class ToolDisabled(PermissionError):
@@ -548,11 +629,22 @@ async def test_backend(name: str) -> dict:
         tools = [{"name": f"{name}{NS_SEP}{t.name}",
                   "description": str(t.description or "")[:TEST_DESCRIPTION_MAX]}
                  for t in res.tools]
+        clear_auth_failure(name)
         return {"ok": True, "detail": f"{len(res.tools)} tool esposti", "tools": tools}
     except TimeoutError:
         return {"ok": False, "detail": f"nessuna risposta entro {TEST_TIMEOUT_S}s"}
     except Exception as e:  # noqa: BLE001 — qualunque guasto del backend è un esito, non un crash della API
-        return {"ok": False, "detail": str(riautorizzazione(e) or e)[:200]}
+        reauth = riautorizzazione(e)
+        if reauth is not None:
+            return {"ok": False, "detail": str(reauth)[:200], "needs_consent": True}
+        rifiuto = rifiuto_http(e)
+        if rifiuto is not None:
+            info = await spiega_rifiuto(name, b, rifiuto)
+            out = {"ok": False, "detail": info["detail"][:300], "status": info.get("status")}
+            if info.get("oauth"):
+                out["oauth_detected"] = True
+            return out
+        return {"ok": False, "detail": str(e)[:200]}
 
 
 async def list_proxied_tools() -> list[Tool]:
@@ -578,8 +670,14 @@ async def list_proxied_tools() -> list[Tool]:
                         )
                         for t in res.tools
                     ]
-            except Exception:
+            except Exception as e:
                 _TOOL_CACHE[name] = []  # backend down: cache vuota (riprovabile a restart)
+                rifiuto = rifiuto_http(e)
+                if rifiuto is not None:
+                    try:
+                        await spiega_rifiuto(name, b, rifiuto)
+                    except Exception:  # noqa: BLE001 — la lista non cade per una diagnosi
+                        pass
         # Disabled tools (#633) are withheld here, not in the cache: the
         # toggle takes effect at once, with no backend round trip.
         off = {f"{name}{NS_SEP}{t}" for t in _wl.disabled_backend_tools(name)}
@@ -665,15 +763,23 @@ async def call_proxied(name: str, arguments: dict) -> str:
     try:
         async with _session(b) as s:
             res = await s.call_tool(tool_name, arguments)
+            clear_auth_failure(backend_name)
             return _cappa(_response_text(res.content), name)
     except Exception as e:
         # Un backend OAuth non ancora autorizzato non è un guasto misterioso:
         # è una cosa che una persona deve fare nella card. Dillo con quelle
         # parole, invece di lasciare risalire il gruppo di eccezioni di anyio.
         reauth = riautorizzazione(e)
-        if reauth is None:
+        if reauth is not None:
+            raise reauth from None
+        # Nemmeno un 401/403 di un backend senza `auth` (#533): la card smette
+        # di dirlo connesso, e chi chiama legge perché.
+        rifiuto = rifiuto_http(e)
+        if rifiuto is None:
             raise
-        raise reauth from None
+        info = await spiega_rifiuto(backend_name, b, rifiuto)
+        raise mcp_oauth.ReauthorizationRequired(
+            f"server MCP '{backend_name}': {info['detail']}") from None
 
 
 #: Margin over the caller's own timeout for opening the session: a stdio

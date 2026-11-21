@@ -2460,8 +2460,11 @@ def _dispatch_mcp(name: str, a: dict):
         return runtime.mcp_servers()
     if sub == "add":
         try:
+            # Già in un thread (`asyncio.to_thread`): il rilevamento OAuth
+            # (#533) può fare rete qui.
             return tools_api.register_mcp_core(a["config"], a.get("secrets") or {},
-                                               pack=a.get("pack") or None)
+                                               pack=a.get("pack") or None,
+                                               detected=tools_api.detect_oauth_sync(a["config"]))
         except tools_api.McpRegisterError as e:
             raise PermissionError(str(e)) if getattr(e, "status", 400) == 403 else ValueError(str(e))
     if sub == "remove":
