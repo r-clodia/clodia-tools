@@ -1,10 +1,11 @@
 """eu_corpus — retrieval sul corpus normativo UE (RAG documentale).
 
-Proxy leggero verso il micro-servizio `eu-rag-search` (host minipc), che tiene
+Proxy leggero verso il micro-servizio `rag-search` (container dello stack, #603), che tiene
 il modello di embedding residente e interroga pgvector. Il gateway resta
 leggero (niente torch). Ritorna passaggi citabili (documento+versione+pagina).
 
-URL del servizio da env `EU_RAG_SEARCH_URL` (default host LAN del minipc).
+URL del servizio da env `EU_RAG_SEARCH_URL` (default: il container `rag-search`
+sulla rete interna, mai un host fuori dallo stack).
 """
 import json
 import os
@@ -13,7 +14,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-_BASE = os.environ.get("EU_RAG_SEARCH_URL", "http://192.168.1.45:7900").rstrip("/")
+_BASE = os.environ.get("EU_RAG_SEARCH_URL", "http://rag-search:7900").rstrip("/")
 _TIMEOUT = float(os.environ.get("EU_RAG_SEARCH_TIMEOUT", "15"))
 DEFAULT_COLLECTION = "eu-normativa"
 # L'ingest può essere lento (estrazione+embedding di un PDF grande).
