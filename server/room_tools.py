@@ -260,6 +260,9 @@ def mcp_catalogue() -> dict[str, dict]:
     once discovery has listed it: `enumerable` says so); `schemes` are the
     resource kinds the MCP's verbs reach, from the connector manifests, each
     with its direction and verbs — the rows of the resource panel.
+
+    `agent_verbs` is False for a room CAPABILITY that gives agents nothing:
+    Email (clodia-platform#697), see `_capability_entries()`.
     """
     cat = {ns: set(v) for ns, v in _catalogue().items() if ns not in _NOT_ENABLABLE}
     try:
@@ -291,7 +294,7 @@ def mcp_catalogue() -> dict[str, dict]:
             "id": mid, "label": (g or {}).get("label") or ns,
             "kind": (g or {}).get("kind") or ("native" if verbs else "mcp"),
             "namespaces": [], "verbs": [], "write": [], "schemes": [],
-            "enumerable": True})
+            "enumerable": True, "agent_verbs": True})
         e["namespaces"].append(ns)
         vv = set(verbs) or _backend_verbs(ns)
         if not vv or _norm(ns) in transports:
@@ -300,8 +303,12 @@ def mcp_catalogue() -> dict[str, dict]:
             # level takes it all instead of cutting by a partial list.
             e["enumerable"] = False
         e["verbs"] = sorted(set(e["verbs"]) | vv)
+    for mid, e in _capability_entries(groups).items():
+        out.setdefault(mid, e)
     reg = _registry()
     for mid, e in out.items():
+        if not e["agent_verbs"]:
+            continue            # no verbs, so no resource rows either
         e["write"] = sorted(v for v in e["verbs"] if _is_write(v))
         schemes: dict[tuple, set] = {}
         for c in (getattr(reg, "connectors", None) or ()):
@@ -314,6 +321,29 @@ def mcp_catalogue() -> dict[str, dict]:
                     schemes.setdefault((m.scheme, m.direction), set()).add(v)
         e["schemes"] = [{"scheme": sc, "direction": d, "verbs": sorted(v)}
                         for (sc, d), v in sorted(schemes.items())]
+    return out
+
+
+def _capability_entries(groups: dict[str, dict]) -> dict[str, dict]:
+    """The room capabilities listed among the MCPs with NO agent verb
+    (clodia-platform#697): today only Email, the builtin `mail` connector.
+
+    Since #683 agents have no `email.*` verbs, so the connector's namespace is
+    not in `_catalogue()` and the loop of `mcp_catalogue()` never meets it.
+    The room still decides whether mail enters it: `meta.tools.mcp.email` is
+    what `email_authorised()` reads to keep the courier's linked-mailbox rows.
+    Listing it here gives that decision back its card, `enable_mcp`, the
+    `mailbox-link` action (`mcp_for_namespace`) and the lists' authorisation
+    (`on_room_list_added`). `verbs`, `write` and `schemes` stay empty and
+    `_compile_mcp()` skips it: the toolbox gives no `email.*`, and no resource
+    row can be written on it, so no A·V·R·Q tuple comes from it."""
+    out: dict[str, dict] = {}
+    for mid, g in groups.items():
+        if MAIL_CONNECTOR not in g["connectors"]:
+            continue
+        out[mid] = {"id": mid, "label": g.get("label") or mid, "kind": "connector",
+                    "namespaces": sorted(g["namespaces"]), "verbs": [], "write": [],
+                    "schemes": [], "enumerable": True, "agent_verbs": False}
     return out
 
 
@@ -371,7 +401,9 @@ def _compile_mcp(meta: dict) -> set[str]:
     if not mcp:
         return set()
     cat = mcp_catalogue()
+    # A capability with no agent verb (Email, #697) compiles to nothing.
     return {f"{ns}.{WILDCARD}" for mid in mcp
+            if (cat.get(mid) or {}).get("agent_verbs", True)
             for ns in (cat.get(mid) or {}).get("namespaces") or ()}
 
 
@@ -405,8 +437,8 @@ def email_authorised(meta: dict) -> bool:
     """Did the room authorise Email (clodia-platform#696)?
 
     Read from what the room STORES, not from the verbs it compiles to: since
-    #683 agents have no `email.*` verbs, the Email MCP is not in
-    `mcp_catalogue()`, and `toolbox()` can never contain `email.*` from it —
+    #683 agents have no `email.*` verbs: the Email MCP is in `mcp_catalogue()`
+    only as a capability (#697), and `toolbox()` never contains `email.*` from it —
     the question «may mail enter this room» is the room's authorisation of the
     mail capability, which is `meta.tools.mcp.<email id>`. A legacy per-verb
     entry (`enabled: ["email.*"]`, before #620) still counts, as it did."""
