@@ -248,6 +248,8 @@ def build_app() -> Starlette:
     from .components_api import internal_routes as components_internal
     # Thread/task stack dump (#710): admins and the service role only.
     from .stackdump_api import routes as stackdump_routes
+    # Tool-call telemetry (#550): admins and the service role only.
+    from .tool_calls_api import routes as tool_calls_routes
     from .audit.trace import TraceparentMiddleware
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
@@ -256,7 +258,8 @@ def build_app() -> Starlette:
                 *tool_routes, *mint_routes, *gate_routes, *logic_routes,
                 *egress_routes, *proxy_auth_routes, *rag_routes, *databases_routes,
                 *audit_routes, *egress_proxy_routes, *connectors_routes,
-                *components_internal, *stackdump_routes, *component_routes],
+                *components_internal, *stackdump_routes, *tool_calls_routes,
+                *component_routes],
         # Chi è in volo, su tutte le rotte (clodia-platform#316). Attorno a tutto
         # e non alle due rotte della issue: nell'incidente del 7 set le rotte
         # «innocenti» erano quelle in timeout, e un contatore puntato sui
