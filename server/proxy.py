@@ -181,9 +181,20 @@ def bind_instances(backend: str, b: dict, arguments: dict) -> tuple[dict, dict]:
     `instance`)` for a call in the current scope; `(b, arguments)` unchanged
     for a backend bound to no structure. Raises PermissionError / ValueError
     with the reason (no instance, several and none named, access refused)."""
+    b, arguments, _instances = _bind_instances(backend, b, arguments)
+    return b, arguments
+
+
+def _bind_instances(backend: str, b: dict, arguments: dict
+                    ) -> tuple[dict, dict, tuple[tuple[str, str], ...]]:
+    """`bind_instances` plus the `(instance id, file)` pairs it bound: the
+    sandboxed process is given access to those files and no others (#577).
+    Carried beside the entry, never inside it: an `env` or a key of a mount
+    entry is configuration a pack writes, and must not be able to name a file
+    the gateway then opens up."""
     structs = bound_structures(backend)
     if not structs:
-        return b, arguments
+        return b, arguments, ()
     if (b.get("transport") or "stdio") != "stdio":
         # The instance travels in the process environment, which an http
         # backend never sees: it would serve every scope from one database.
@@ -197,12 +208,14 @@ def bind_instances(backend: str, b: dict, arguments: dict) -> tuple[dict, dict]:
     requested = args.pop(INSTANCE_ARG, None)
     env = dict(b.get("env") or {})
     scope = topic_data.scope_of_call()
+    bound: list[tuple[str, str]] = []
     for st in structs:
         entry = datastore_instances.resolve(
             st["id"], scope=scope, agent=agent_name(), clearance=current_clearance(),
             instance=_pick_requested(requested, st) if requested else None, write=True)
         env[datastore_instances.env_name(st["name"])] = entry["abs_path"]
-    return {**b, "env": env}, args
+        bound.append((f"{entry['pack']}/{entry['name']}", entry["abs_path"]))
+    return {**b, "env": env}, args, tuple(bound)
 
 
 @asynccontextmanager
@@ -216,10 +229,13 @@ async def _listing_env(backend: str, b: dict):
         yield b
         return
     import shutil
-    import tempfile
     from pathlib import Path
-    from . import datastore_instances
-    d = tempfile.mkdtemp(prefix="clodia-mcp-probe-")
+    from . import datastore_instances, mcp_sandbox
+    # Sandboxed (#577), the process reaches only its own home: the throwaway
+    # databases are built there and handed over to its uid.
+    ident = await asyncio.to_thread(mcp_sandbox.identity, b) \
+        if (b.get("transport") or "stdio") == "stdio" else None
+    d = mcp_sandbox.scratch(ident)
     try:
         env = dict(b.get("env") or {})
         for st in structs:
@@ -233,6 +249,7 @@ async def _listing_env(backend: str, b: dict):
                 LOG.warning("mcp %s: probe di %s senza schema (%s)", backend, st["id"],
                             type(e).__name__)
                 p.touch()
+            mcp_sandbox.hand_over(ident, p)
             env[datastore_instances.env_name(st["name"])] = str(p)
         yield {**b, "env": env}
     finally:
@@ -413,7 +430,8 @@ def _bounded_http_factory(limit: int, tripped: "asyncio.Event"):
 
 @asynccontextmanager
 async def session(b: dict, *, oauth_handlers: tuple | None = None,
-                  max_bytes: int | None = None, tripped=None):
+                  max_bytes: int | None = None, tripped=None,
+                  instances: tuple[tuple[str, str], ...] = ()):
     """Apre una ClientSession verso il backend (stdio o http). I secret
     ${VAULT:cred} in env/headers/url/args sono risolti dal vault qui, al volo.
 
@@ -422,6 +440,11 @@ async def session(b: dict, *, oauth_handlers: tuple | None = None,
     automatico (clodia-platform#532). `oauth_handlers` lo passa SOLO il consenso
     guidato dalla card — in una chiamata di tool resta None, e un backend non
     ancora autorizzato fallisce invece di aprire un consenso che nessuno può dare.
+
+    A stdio backend runs under the MCP sandbox (#577, `mcp_sandbox`): its own
+    uid, no access to the vault or the gateway's process. `instances` are the
+    datastore instances `_bind_instances` resolved for this call — the only
+    instance files the process is given access to.
     """
     # La credenziale inserita al «Connetti» (#565) entra qui come `${VAULT:…}`,
     # e la risolve la riga dopo come ogni altro segreto del backend.
@@ -444,12 +467,22 @@ async def session(b: dict, *, oauth_handlers: tuple | None = None,
         # (clodia-platform#451). Da #540 la base è costruita da zero
         # (`mcp_backend_env`): nessun segreto del gateway arriva al processo di
         # un pack. L'`env` del backend resta l'ultima parola.
-        params = StdioServerParameters(
-            command=b["command"],
-            args=b.get("args", []),
-            # From zero, not the gateway's own environment (#540).
-            env={**pack_runtime.mcp_backend_env(), **(b.get("env") or {})},
-        )
+        command, args = b["command"], list(b.get("args", []))
+        # From zero, not the gateway's own environment (#540).
+        env = {**pack_runtime.mcp_backend_env(), **(b.get("env") or {})}
+        cwd = None
+        # Not root any more (#577): the drop happens in a stub that `exec`s
+        # the server, so the gateway's own uid never runs pack code.
+        from . import mcp_sandbox
+
+        def _sandboxed():
+            ident = mcp_sandbox.identity(b)
+            return None if ident is None else mcp_sandbox.prepare(ident, tuple(instances))
+        ident = await asyncio.to_thread(_sandboxed)
+        if ident is not None:
+            command, args, env = mcp_sandbox.wrap(ident, command, args, env)
+            cwd = str(ident.home)
+        params = StdioServerParameters(command=command, args=args, env=env, cwd=cwd)
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as s:
                 await s.initialize()
@@ -661,9 +694,11 @@ async def call_proxied(name: str, arguments: dict) -> str:
         raise ToolDisabled(disabled_refusal(name))
     # A pack MCP bound to a datastore structure works on the instance of the
     # caller's scope (#686): resolved here, per call, or refused.
-    b, arguments = bind_instances(backend_name, b, arguments)
+    b, arguments, instances = _bind_instances(backend_name, b, arguments)
     try:
-        async with _session(b) as s:
+        # The kwarg only when there is something to grant: a backend bound to
+        # no structure opens its session exactly as before.
+        async with (_session(b, instances=instances) if instances else _session(b)) as s:
             res = await s.call_tool(tool_name, arguments)
             return _cappa(_response_text(res.content), name)
     except Exception as e:
