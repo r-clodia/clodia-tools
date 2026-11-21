@@ -93,8 +93,51 @@ def resource_of(verb: str, arguments: dict) -> Optional[str]:
     return f"{kind}:{ident or 'default'}"
 
 
+def _name_word(verb: str) -> str:
+    """The first word of the verb's tool name, after a leading word equal to
+    its namespace (#634): servers often prefix every tool with their own name
+    (`clickup.clickup_get_task` → `get`), in `_`, `-` or `.` spelling."""
+    ns, _, rest = verb.partition(".")
+    rest = rest.replace("-", "_").replace(".", "_").lower()
+    from .connectors.resolved import norm_name
+    prefix = norm_name(ns)
+    if prefix and rest.startswith(prefix + "_") and len(rest) > len(prefix) + 1:
+        rest = rest[len(prefix) + 1:]
+    return rest.split("_", 1)[0]
+
+
+#: Where a call's read/write classification came from (`facts()["basis"]`):
+#: a connector manifest, the platform's own list, the backend's MCP
+#: annotations (#634), or the verb's name. Only a `name` write is a guess —
+#: `authz_runtime.check` treats it as such in a room (#650).
+BASIS_MAPPING, BASIS_PLATFORM, BASIS_HINT, BASIS_NAME = "mapping", "platform", "hint", "name"
+
+
+def _unmapped(verb: str) -> tuple[str, str]:
+    try:
+        from . import tool_hints as _h
+        hk = _h.hint_kind(verb)
+    except Exception:  # noqa: BLE001 — no hints: the name decides
+        LOG.warning("authz: tool hints not readable for '%s'", verb)
+        hk = None
+    if hk is not None:
+        return (A.READ, BASIS_HINT) if hk == A.READ else (A.WRITE, BASIS_HINT)
+    # The verb's first word, not a prefix: `telegram.listen` is not a list.
+    return (A.READ if _name_word(verb) in _READ_WORDS else A.WRITE), BASIS_NAME
+
+
+def unmapped_kind(verb: str) -> str:
+    """READ or WRITE for a verb no connector manifest maps (#634): the
+    backend's own `readOnlyHint`/`destructiveHint` first (`tool_hints`, where
+    the platform's stricter catalogue wins), then the name heuristic, and in
+    doubt a write."""
+    return _unmapped(verb)[0]
+
+
 def facts(verb: str, arguments: dict) -> dict:
-    """`{resource, kind, targets}` for one call, from the connector manifests."""
+    """`{resource, kind, targets, mapped, basis}` for one call: the connector
+    manifests first, then the platform's read list, then the backend's MCP
+    annotations, then the verb's name (`basis` says which decided)."""
     from .connectors import resolved as _c
     out, writes, reads = [], False, False
     for m in _c.egress_mappings(verb):
@@ -104,17 +147,16 @@ def facts(verb: str, arguments: dict) -> dict:
         reads = True
         out += _c.destinations(m, arguments)
     if writes:
-        kind = A.WRITE
+        kind, basis = A.WRITE, BASIS_MAPPING
     elif reads:
-        kind = A.READ
+        kind, basis = A.READ, BASIS_MAPPING
     elif verb in _READ_VERBS:
-        kind = A.READ
+        kind, basis = A.READ, BASIS_PLATFORM
     else:
-        # The verb's first word, not a prefix: `telegram.listen` is not a list.
-        word = verb.split(".", 1)[-1].replace("-", "_").split("_", 1)[0].lower()
-        kind = A.READ if word in _READ_WORDS else A.WRITE
+        kind, basis = _unmapped(verb)
     return {"resource": resource_of(verb, arguments), "kind": kind,
-            "targets": list(dict.fromkeys(out)), "mapped": writes or reads}
+            "targets": list(dict.fromkeys(out)), "mapped": writes or reads,
+            "basis": basis}
 
 
 # ── the tuples in force ─────────────────────────────────────────────────────
