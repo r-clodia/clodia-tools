@@ -21,14 +21,39 @@ _INGEST_TIMEOUT = float(os.environ.get("EU_RAG_INGEST_TIMEOUT", "300"))
 _TOKEN_FILE = os.environ.get("EU_RAG_INGEST_TOKEN_FILE", "/datadir/eu-rag-ingest-token")
 
 
-def _ingest_token() -> str:
+def _token_and_source() -> "tuple[str, str | None]":
     tok = os.environ.get("EU_RAG_INGEST_TOKEN")
-    if not tok and os.path.isfile(_TOKEN_FILE):
-        with open(_TOKEN_FILE) as f:
-            tok = f.read().strip()
+    if tok:
+        return tok, "env"
+    if os.path.isfile(_TOKEN_FILE):
+        try:
+            with open(_TOKEN_FILE) as f:
+                tok = f.read().strip()
+        except OSError:
+            tok = ""
+        if tok:
+            return tok, "file"
+    return "", None
+
+
+def _ingest_token() -> str:
+    tok, _ = _token_and_source()
     if not tok:
-        raise RuntimeError("token di ingest non disponibile (EU_RAG_INGEST_TOKEN[_FILE])")
+        # What to do, not only what is missing (clodia-platform#499). The file
+        # is read on every call: putting it in place needs no restart.
+        raise RuntimeError(
+            "token di ingest non disponibile: imposta EU_RAG_INGEST_TOKEN "
+            f"(e riavvia il gateway) oppure scrivi il token nel file {_TOKEN_FILE} "
+            "(EU_RAG_INGEST_TOKEN_FILE), letto a ogni chiamata")
     return tok
+
+
+def ingest_token_status() -> dict:
+    """Whether the ingest token is provisioned, and from where — NEVER its
+    value (clodia-platform#499). Read by `runtime.health`."""
+    tok, source = _token_and_source()
+    return {"present": bool(tok), "source": source,
+            "env": "EU_RAG_INGEST_TOKEN", "file": _TOKEN_FILE}
 
 
 def _read_headers() -> dict:

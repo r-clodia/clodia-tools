@@ -12,7 +12,10 @@ answer that does not need a shell on the host:
 - the mail courier: how many rows it reads, with and without a tag (the
   message box rows vs the linked mailboxes) — counts only, no address;
 - the gateway log's recent CRITICAL/ERROR lines, redacted like `logs.tail`
-  (secrets, message text, topic names above the reader's clearance).
+  (secrets, message text, topic names above the reader's clearance);
+- the RAG ingest token: present or missing, and from where (environment or
+  file) — never its value (clodia-platform#499). It does not decide `ok`: an
+  instance without the EU RAG has no token by design.
 
 Contents never: no message, no file, no row, no address. Secrets never: a
 backend failure is reported by its class and a redacted, capped detail.
@@ -193,6 +196,16 @@ async def health(*, backends: bool = True) -> dict:
         _inflight.pop(key, None)
 
 
+def _rag_ingest() -> dict:
+    try:
+        from .eu_corpus import ingest_token_status
+        st = ingest_token_status()
+    except Exception as e:  # noqa: BLE001 - one part failing hides nothing else
+        return {"token": "unknown", "error": type(e).__name__}
+    return {"token": "present" if st["present"] else "missing",
+            "source": st["source"], "env": st["env"], "file": st["file"]}
+
+
 async def _run(*, backends: bool = True) -> dict:
     """The smoke checks. Each part answers on its own: one failing does not
     hide the others, and an exception becomes that part's `ok: false`."""
@@ -201,7 +214,8 @@ async def _run(*, backends: bool = True) -> dict:
         asyncio.to_thread(_gateway_errors))
     mcp = await _backends() if backends else None
     out = {"gateway": _gateway(), "agent_server": agent_server,
-           "courier": courier, "gateway_errors": errors}
+           "courier": courier, "gateway_errors": errors,
+           "rag_ingest": _rag_ingest()}
     if mcp is not None:
         out["mcp_backends"] = {"count": len(mcp),
                                "failing": [b["name"] for b in mcp if not b["ok"]],
