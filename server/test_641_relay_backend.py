@@ -594,7 +594,9 @@ class RoomToolsTransportTests(_Case):
                 patch.object(resolved, "transport_backends",
                              lambda: frozenset({"sms_transport"})):
             self.assertEqual(room_tools.enablable(), {})
-            self.assertEqual(room_tools.mcp_catalogue(), {})
+            # Only the capabilities with no agent verb (Email, #697) remain.
+            self.assertEqual({m for m, e in room_tools.mcp_catalogue().items()
+                              if e["agent_verbs"]}, set())
 
 
 if __name__ == "__main__":
