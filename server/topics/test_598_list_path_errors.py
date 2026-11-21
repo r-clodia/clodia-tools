@@ -21,6 +21,11 @@ class ListPathErrorsTests(unittest.TestCase):
     def test_empty_existing_folder_is_an_empty_list(self):
         self.assertEqual([], self.svc.list_files("SEAL-1", "acme", "local/vuota"))
 
+    def test_unmaterialized_local_mount_is_an_empty_list(self):
+        self.svc.new("SEAL-1", "nuovo", {"title": "Nuovo", "owner": "davide"})
+        self.assertEqual([], self.svc.list_files("SEAL-1", "nuovo", "local"))
+        self.assertEqual([], self.svc.list_files("SEAL-1", "nuovo", "files"))
+
     def test_missing_folder_is_a_clear_error(self):
         with self.assertRaisesRegex(TopicError, "cartella non esistente: local/manca"):
             self.svc.list_files("SEAL-1", "acme", "local/manca")

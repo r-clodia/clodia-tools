@@ -2866,8 +2866,14 @@ class TopicService:
 
         if is_files:
             target = f"{base}/{sub}".strip("/")
-            _require_directory(store, target, rel)
-            entries = list(store.list(target))
+            # Il mount locale esiste logicamente appena nasce il topic, ma il
+            # backend filesystem materializza `files/` al primo documento.
+            # Quella radice virtuale è una cartella vuota, non un path mancante.
+            if not sub and mount == self.MOUNT_LOCAL and store.stat(target) is None:
+                entries = []
+            else:
+                _require_directory(store, target, rel)
+                entries = list(store.list(target))
             for e in entries:
                 if e.name.startswith("."):
                     continue
