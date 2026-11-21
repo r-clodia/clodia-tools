@@ -1154,6 +1154,11 @@ async def topic_index_route(request: Request):
             except (TopicError, VersionConflict) as e:
                 return JSONResponse({"error": str(e)[:300]}, status_code=404)
         return JSONResponse({"topics": await asyncio.to_thread(topic_index.topics)})
+    # Every action needs at least the internal rule: checked before the body,
+    # so an unauthenticated caller learns nothing about the route (#584).
+    _who, err = _authorize(request)
+    if err:
+        return err
     try:
         body = await request.json()
     except Exception:
@@ -1863,7 +1868,17 @@ async def clear_taint(request):
     l'owner del canale. Il gateway non conosce i ruoli umani di uno scope, quindi
     non può decidere qui — e fingere di deciderlo sarebbe un controllo che non
     controlla niente.
+
+    The DOOR is still checked here (clodia-platform#584): until then this
+    handler had no authorisation at all, and any process reaching the gateway
+    — a spawn's shell included — could wipe the trifecta's first bit of any
+    room. The caller is the agent-server with its service role
+    (`topics_client.clear_taint`), or an on-behalf session of the owner/an
+    admin: `_authorize_topic_owner`, the rule of the other wall actions.
     """
+    _who, err = _authorize_topic_owner(request)
+    if err:
+        return err
     tier = request.path_params["tier"]
     name = request.path_params["name"]
     try:

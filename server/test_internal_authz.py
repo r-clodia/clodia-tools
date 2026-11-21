@@ -15,9 +15,11 @@ che si lasciava riscrivere da chi vincola (clodia-platform#261).
 
 Il quarto test è la direzione d'errore opposta, e non è decorativo: i chiamanti
 reali (`git_client`, `provider_store`, `topics_client`, `telegram_client`,
-`gateway_admin`, … in clodia-logic) coniano un token nudo sul principal, senza
+`gateway_admin`, … in clodia-logic) coniano un token sul principal, senza
 `scoped_tools` né `on_behalf`. Una guardia che stringesse anche loro spegnerebbe
-il runner in produzione.
+il runner in produzione. Since clodia-platform#584 that token carries the signed
+service role, and the bare one — which a spawn of `clodia` also holds — is
+refused (`AnAgentsRuntimeTokenIsNotTheAgentServerTests`).
 """
 from __future__ import annotations
 
@@ -48,8 +50,18 @@ _REVOCATO = {"agent": "clodia", "execution_id": "mcp_scomparso",
 _UMANO = {"agent": "clodia", "principal": "davide", "on_behalf": True,
           "human_role": "admin"}
 
-#: Il runner di clodia-logic: `pki.mint_session_token(_PRINCIPAL, ttl)`, e basta.
-_RUNNER = {"agent": "clodia"}
+#: Il runner di clodia-logic: `pki.mint_session_token(_PRINCIPAL, ttl,
+#: role=ROLE_AGENT_SERVER)` — the signed service role (clodia-platform#584).
+_RUNNER = {"agent": "clodia", "role": "agent-server"}
+
+#: A spawn of `clodia`: the runtime token in its environment
+#: (`CLODIA_TOOLS_TOKEN`, the MCP header). Same `agent` as the runner, no role —
+#: it is the carrier name the routes used to trust (clodia-platform#584).
+_SPAWN = {"agent": "clodia", "execution_id": "clodia-77", "principal": "davide",
+          "clearance": "SEAL-2", "chat": "chan:SEAL-1:acme:clodia"}
+
+#: The same runner token as before #584: the carrier name and nothing else.
+_BARE = {"agent": "clodia"}
 
 
 def _sessione(payload: dict):
@@ -124,11 +136,27 @@ class TheInfrastructureRoutesAreNotAHumanFlowTests(unittest.TestCase):
                 self.assertEqual(r.status_code, 403, f"{r.request.url}: {r.text}")
 
 
+class AnAgentsRuntimeTokenIsNotTheAgentServerTests(unittest.TestCase):
+    """clodia-platform#584: a spawn of `clodia` carries `agent: clodia` and has a
+    shell that reaches the gateway. The routes whose only caller is the
+    agent-server require the signed service role, not the carrier name."""
+
+    def test_the_three_sensitive_routes_refuse_a_spawn_token(self):
+        with _sessione(_SPAWN), _Rotte() as c:
+            for r in _tre_chiamate(c):
+                self.assertEqual(r.status_code, 403, f"{r.request.url}: {r.text}")
+
+    def test_a_bare_principal_token_without_the_role_is_refused(self):
+        with _sessione(_BARE), _Rotte() as c:
+            for r in _tre_chiamate(c):
+                self.assertEqual(r.status_code, 403, f"{r.request.url}: {r.text}")
+
+
 class TheRunnerStillGetsInTests(unittest.TestCase):
     """L'eccesso di zelo è il difetto successivo: qui si verifica che la guardia
     non abbia spento i chiamanti reali."""
 
-    def test_the_bare_principal_token_passes_the_guard(self):
+    def test_the_service_token_passes_the_guard(self):
         with _sessione(_RUNNER), _Rotte() as c:
             vault_r, prov_r, agents_r = _tre_chiamate(c)
             # 404: autorizzati, la credenziale semplicemente non c'è.
@@ -167,6 +195,14 @@ class ThePiiRouterIsNotAServiceIdentityTests(unittest.TestCase):
         chi, err = self._chi(_REVOCATO)
         self.assertIsNone(chi)
         self.assertEqual(err.status_code, 401)
+
+    def test_a_spawn_token_cannot_declare_a_principal(self):
+        # clodia-platform#584: `agent: clodia` is in `_TRUSTED_SERVICES`, and a
+        # spawn's token carries it — without the role it read anyone's PII.
+        for payload in (_SPAWN, _BARE):
+            chi, err = self._chi(payload)
+            self.assertIsNone(chi)
+            self.assertEqual(err.status_code, 403)
 
     def test_the_agent_server_service_token_still_declares(self):
         chi, err = self._chi(_RUNNER)

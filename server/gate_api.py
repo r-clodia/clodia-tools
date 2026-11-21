@@ -4,8 +4,8 @@ Il consenso a un verbo *gated* è un artefatto crittografico: una capability
 `ccap1` firmata dalla CA (`cap = gate:<verb>`), coniata dal flusso di
 approvazione umano di clodia-logic (che verifica la RBAC dell'approvatore sul
 verbo). Qui il gateway: elenca le richieste pending, registra il consenso
-verificando la firma CA (`gate.grant`), nega/risolve. Auth ckt1 come gli altri
-/internal; la RBAC-per-verbo dell'approvatore è applicata a monte (clodia-logic)
+verificando la firma CA (`gate.grant`), nega/risolve. Auth ckt1 con il ruolo
+di servizio `agent-server` (clodia-platform#584); la RBAC-per-verbo dell'approvatore è applicata a monte (clodia-logic)
 e la firma CA è la prova non falsificabile.
 """
 import logging
@@ -34,6 +34,19 @@ def _authorize(request: Request):
     err = internal_auth.refuse_if_revoked(payload, log=LOG)
     if err:
         return None, err
+    # The caller is the agent-server (`clodia-logic/server/api/gate.py`), which
+    # has checked the deciding human (owner/admin, RBAC on the verb) and says
+    # who it is with the signed service role (clodia-platform#584). A claim
+    # `principal` alone is not a human's decision: every agent's runtime token
+    # carries the principal of the person it talks to, so any spawn could make
+    # a destination permanent (`/allow`), write itself an allow tuple
+    # (`/remember`) or deny another agent's request.
+    from .pki_mint import ROLE_AGENT_SERVER
+    if payload.get("role") != ROLE_AGENT_SERVER:
+        LOG.warning("gate_api: token senza ruolo di servizio rifiutato "
+                    "(agent=%s, execution=%s)", payload.get("agent"),
+                    payload.get("execution_id") or "-")
+        return None, JSONResponse({"error": "forbidden"}, status_code=403)
     principal = str(payload.get("principal") or "")
     if not principal:
         return None, JSONResponse({"error": "forbidden"}, status_code=403)
