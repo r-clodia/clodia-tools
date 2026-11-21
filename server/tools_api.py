@@ -670,11 +670,24 @@ def detect_oauth_sync(config) -> dict[str, dict]:
 
 def register_mcp_core(config, secrets: dict | None = None,
                       pack: str | None = None,
-                      detected: dict[str, dict] | None = None) -> dict:
+                      detected: dict[str, dict] | None = None,
+                      name: str | None = None) -> dict:
     """Core riutilizzabile della registrazione MCP (UI Add-MCP e tool mcp.add).
     I placeholder ${NAME} nel config vengono sostituiti con
     ${VAULT:mcp_<server>_<NAME>} e i segreti depositati nel vault (mai nel
-    config.yaml). Solleva McpRegisterError su input non valido."""
+    config.yaml). Solleva McpRegisterError su input non valido.
+
+    Without `pack`, `config` may also be a bare URL (`name` names it) or an
+    `mcp-remote` wrapper: both become an `http` backend (#632). A pack's own
+    config is mounted as written: its hash is what the agent-server compares
+    before mounting it back (#563)."""
+    notes: list[str] = []
+    if pack is None:
+        from . import mcp_input
+        try:
+            config, notes = mcp_input.normalize(config, name)
+        except mcp_input.McpInputError as e:
+            raise McpRegisterError(str(e))
     cfg = config
     if isinstance(cfg, str):
         try:
@@ -890,6 +903,8 @@ def register_mcp_core(config, secrets: dict | None = None,
     out: dict = {"registered": registered}
     if oauth_detected:
         out["oauth_detected"] = oauth_detected
+    if notes:
+        out["notes"] = notes     # what was translated, for the dialog (#632)
     return out
 
 
@@ -961,7 +976,16 @@ async def register_mcp(request: Request):
         return JSONResponse({"error": "bad_json"}, status_code=400)
     pack = body.get("pack") if isinstance(body, dict) else None
     cfg = body.get("config") if isinstance(body, dict) else None
-    if isinstance(cfg, str):
+    name = body.get("name") if isinstance(body, dict) else None
+    if pack is None:
+        # A URL or an mcp-remote wrapper (#632): the names checked below are
+        # those of the servers that will actually be mounted.
+        from . import mcp_input
+        try:
+            cfg, _ = mcp_input.normalize(cfg, name if isinstance(name, str) else None)
+        except mcp_input.McpInputError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+    elif isinstance(cfg, str):
         try:
             cfg = json.loads(cfg)
         except Exception:
@@ -989,10 +1013,14 @@ async def register_mcp(request: Request):
                               f"mount it as that pack's (\"pack\": \"{claimant}\")"},
                     status_code=409)
     # Il rilevamento OAuth (#533) è rete: fuori dall'event loop.
-    detected = await asyncio.to_thread(detect_oauth_sync, body.get("config"))
+    # On the NORMALIZED config (#632): a server added by URL or through
+    # mcp-remote is an http entry here, and is probed like any other.
+    detected = await asyncio.to_thread(detect_oauth_sync,
+                                       cfg if pack is None else body.get("config"))
     try:
         out = register_mcp_core(body.get("config"), body.get("secrets") or {},
-                                pack=pack, detected=detected)
+                                pack=pack, detected=detected,
+                                name=name if isinstance(name, str) else None)
     except McpRegisterError as e:
         return JSONResponse({"error": str(e)}, status_code=e.status)
     if pack:
