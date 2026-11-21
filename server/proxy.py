@@ -583,7 +583,10 @@ async def list_proxied_tools() -> list[Tool]:
         # Disabled tools (#633) are withheld here, not in the cache: the
         # toggle takes effect at once, with no backend round trip.
         off = {f"{name}{NS_SEP}{t}" for t in _wl.disabled_backend_tools(name)}
-        tools.extend(t for t in _TOOL_CACHE[name] if t.name not in off)
+        # A backend shadowed by a serving gateway component (#713) keeps its
+        # other tools; the ones the component serves are withheld here.
+        tools.extend(t for t in _TOOL_CACHE[name]
+                     if t.name not in off and not _is_transport(t.name))
     return tools
 
 

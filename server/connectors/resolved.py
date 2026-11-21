@@ -1073,13 +1073,41 @@ def transport_for(connector_id: str,
     return backend, provider.transport.tool
 
 
-#: (signature, declared transport backends) — see `transport_backends`.
-_TRANSPORTS: tuple[tuple, frozenset[str]] | None = None
+#: (signature, (provider transports, shadowed backends)) — see
+#: `transport_backends`.
+_TRANSPORTS: tuple[tuple, tuple[frozenset[str], frozenset[str]]] | None = None
 
 
 def transport_backends() -> frozenset[str]:
-    """The (normalised) MCP backends packs declare as provider transports, or
-    as the `backend` of a `relay:`/`pairing:` (#641).
+    """Every backend a pack withholds in some way: the provider transports,
+    withheld whole, and the backends shadowed by a serving gateway component,
+    withheld only for the verbs the component serves (#713). Callers that
+    must tell them apart use `provider_transports()` / `shadowed_backends()`;
+    `is_transport_backend()` answers per verb."""
+    transports, shadowed = _transport_sets()
+    return transports | shadowed
+
+
+def provider_transports() -> frozenset[str]:
+    """The backends withheld WHOLE: provider transports, relay/pairing
+    backends (#641), retired transports (#558)."""
+    return _transport_sets()[0]
+
+
+def shadowed_backends() -> frozenset[str]:
+    """A pack's own stamped backend named like a connector its gateway
+    component SERVES (#522/#558, e.g. it-pack's `github`). Only the tools the
+    component itself registers are withheld (they would be listed twice and
+    reach the backend instead of the component); the backend's other tools are
+    ordinary tools (#713: the 46 tools of the official GitHub MCP backend —
+    issues, PRs, code search — were hidden whole)."""
+    return _transport_sets()[1]
+
+
+def _transport_sets() -> tuple[frozenset[str], frozenset[str]]:
+    """`(provider transports, shadowed backends)`, normalised. Transports: the
+    MCP backends packs declare as provider transports, or as the `backend` of
+    a `relay:`/`pairing:` (#641). Shadowed: see `shadowed_backends`.
 
     Gateway-internal sockets: their tools are never listed to an agent and an
     agent's call to one is refused (`main._check_not_transport`). A transport
@@ -1104,6 +1132,7 @@ def transport_backends() -> frozenset[str]:
         return _TRANSPORTS[1]
     owners = backend_owners()
     out: set[str] = set()
+    shadow: set[str] = set()
     for pack, meta in manifests().items():
         entries = meta.get("connectors") if isinstance(meta, Mapping) else None
         for entry in entries if isinstance(entries, list) else []:
@@ -1145,13 +1174,13 @@ def transport_backends() -> frozenset[str]:
                 nomi.add(str(entry["namespace"]))
         for n in nomi:
             if _norm(n) in (owners.get(pack) or ()):
-                out.add(_norm(n))
+                shadow.add(_norm(n))
     from . import builtin as _builtin
     for pack, names in _builtin.RETIRED_TRANSPORTS.items():
         for n in names:
             if _norm(n) in (owners.get(pack) or ()):
                 out.add(_norm(n))
-    result = frozenset(out)
+    result = (frozenset(out), frozenset(shadow - out))
     _TRANSPORTS = (sig, result)
     return result
 
@@ -1281,10 +1310,23 @@ def owned_backend(pack: str, backend: str) -> bool:
 
 
 def is_transport_backend(name: str) -> bool:
-    """True when `name` (a backend, or a `backend.tool` verb) is a transport."""
-    backend = (name or "").split(".", 1)[0]
+    """True when `name` (a backend, or a `backend.tool` verb) is withheld.
+
+    A provider transport is withheld whole. A backend shadowed by a serving
+    component (#713) is withheld only for the verbs the component itself
+    registers: asked about the bare backend name it answers False (the
+    backend is listed), asked about `backend.tool` it answers True only when
+    the component serves that very verb."""
+    backend, _, tool = (name or "").partition(".")
     try:
-        return _norm(backend) in transport_backends()
+        transports, shadowed = _transport_sets()
+        b = _norm(backend)
+        if b in transports:
+            return True
+        if b in shadowed and tool:
+            from ..components import loader as _components
+            return _components.verb(f"{backend}.{tool}") is not None
+        return False
     except Exception:  # noqa: BLE001 — in doubt the socket stays closed
         LOG.warning("connectors: transport backends not readable; '%s' "
                     "withheld", name)
