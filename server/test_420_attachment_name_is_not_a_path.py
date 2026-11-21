@@ -76,7 +76,7 @@ class TheSymptomItselfTests(unittest.TestCase):
     elenca. Test di caratterizzazione — se un giorno la lettura smettesse di
     fare `.strip()`, questo diventa rosso e la guardia sopra può cadere."""
 
-    def test_a_directory_whose_name_ends_with_a_space_lists_empty(self):
+    def test_a_directory_whose_name_ends_with_a_space_is_not_silently_empty(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         svc = TopicService(LocalFsStorage(tmp.name))
@@ -85,7 +85,8 @@ class TheSymptomItselfTests(unittest.TestCase):
         # Scrittura per la via bassa, scavalcando la guardia: è com'era prima.
         store, base = svc._local_mount("SEAL-1", "ch")
         store.write(f"{base}/cartella /dentro.md", b"ci sono")
-        self.assertEqual(svc.list_files("SEAL-1", "ch", "local/cartella "), [])
+        with self.assertRaisesRegex(TopicError, "non esistente"):
+            svc.list_files("SEAL-1", "ch", "local/cartella ")
         self.assertIn("cartella ",
                       [f["name"] for f in svc.list_files("SEAL-1", "ch", "local")])
 
