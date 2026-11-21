@@ -21,11 +21,16 @@ con i privilegi lasciati cadere. Esito:
 La condizione si corregge nello storage (clodia-logic#525: segreti e vault su
 volume nominato, non su bind virtiofs), non qui: qui si rende impossibile che
 passi inosservata.
+
+The probe covers only the gateway's own directories. `check_datadir_mount`
+looks at the rest of the datadir from the mount table and logs an ERROR when it
+sits on virtiofs / 9p / FUSE (clodia-platform#554): it never blocks the start.
 """
 from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets as _secrets
 import subprocess
 import sys
@@ -219,6 +224,92 @@ def selfcheck(*, runner=None) -> str:
     return ""
 
 
+#: Where the kernel lists this process's mounts. A module constant so tests
+#: can point it at a fixture; absent outside Linux, where the check is moot.
+MOUNTINFO = "/proc/self/mountinfo"
+
+#: Filesystems that do NOT enforce POSIX permission bits for the container: a
+#: host folder shared into the VM of a macOS/Windows runtime. virtiofs and 9p
+#: (Colima, Lima, Docker Desktop), any FUSE (`fuse.grpcfuse`, `fuse.sshfs`),
+#: OrbStack's `fakeowner`. A named Docker volume shows the VM's own filesystem
+#: (ext4, btrfs, xfs, overlay) and is not matched.
+PERMISSIONLESS_FSTYPES = ("virtiofs", "9p", "fakeowner")
+
+
+def _unescape_mount_field(field: str) -> str:
+    """mountinfo octal-escapes space, tab, newline and backslash (`\\040`)."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def mount_fstype(mountpoint: Path, *, mountinfo: str | None = None) -> str:
+    """The fstype of the mount AT `mountpoint` (exact match), "" if `mountpoint`
+    is not itself a mount point or mountinfo is unreadable. The LAST matching
+    line wins: a later mount on the same point covers the earlier ones."""
+    target = str(mountpoint)
+    try:
+        text = Path(mountinfo or MOUNTINFO).read_text(encoding="utf-8",
+                                                      errors="replace")
+    except OSError:
+        return ""
+    found = ""
+    for line in text.splitlines():
+        # `id parent maj:min root mountpoint opts [optional...] - fstype src super`
+        left, sep, right = line.partition(" - ")
+        if not sep:
+            continue
+        fields = left.split()
+        if len(fields) < 5 or _unescape_mount_field(fields[4]) != target:
+            continue
+        tail = right.split()
+        if tail:
+            found = tail[0]
+    return found
+
+
+def permissionless(fstype: str) -> bool:
+    return fstype in PERMISSIONLESS_FSTYPES or fstype == "fuse" \
+        or fstype.startswith("fuse.")
+
+
+def datadir_mount_problem(*, mountinfo: str | None = None) -> str:
+    """"" unless the shared datadir is mounted from a filesystem that ignores
+    permission bits — then the reason, naming clodia-platform#554.
+
+    The probe above covers only the gateway's own directories (vault, state,
+    legacy secrets). The REST of the datadir — transcripts, spawns, audit,
+    topics, data, pack services' state — is what every spawn uid could read on
+    a virtiofs bind (terra, until 19 Nov 2026). Asked of the mount table rather
+    than with a sentinel: the answer is a property of the filesystem, and the
+    datadir root is shared with the agent-server, where a probe file would be
+    one more thing to clean up."""
+    from . import state_paths
+    datadir = state_paths.shared_dir().resolve()
+    fstype = mount_fstype(datadir, mountinfo=mountinfo)
+    if not fstype or not permissionless(fstype):
+        return ""
+    return (f"{datadir} is mounted from a {fstype} filesystem, which does not "
+            f"enforce permission bits: every spawn uid can read transcripts, "
+            f"audit, topics and pack-service state there "
+            f"(clodia-platform#554). Move the datadir to a named Docker volume: "
+            f"scripts/migrate-datadir-to-volume.sh in clodia-platform")
+
+
+def check_datadir_mount(*, mountinfo: str | None = None) -> str:
+    """Log an ERROR when the datadir sits on a permissionless filesystem. Never
+    blocks the start: on such a host the gateway's own secrets are already
+    guarded by the probe (or by named volumes), and refusing to start over the
+    rest would push operators to switch the whole check off."""
+    try:
+        problem = datadir_mount_problem(mountinfo=mountinfo)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must not crash boot
+        LOG.warning("datadir mount check skipped (%s: %s)",
+                    type(exc).__name__, str(exc)[:200])
+        return ""
+    if problem:
+        LOG.error("DATADIR NOT ISOLATED: %s", problem)
+    return problem
+
+
 def check_at_boot(*, runner=None) -> None:
     """Il self-check all'avvio del gateway. In `enforce` solleva `SystemExit`.
 
@@ -226,6 +317,9 @@ def check_at_boot(*, runner=None) -> None:
     stdout è fuori portata di chi deve diagnosticarlo da dentro la colonia
     (#382), ed è esattamente la riga che qui spiega perché il gateway non parte.
     """
+    # Independent of the mode: it only logs, and `off` is exactly the setup in
+    # which nobody would otherwise notice (#554).
+    check_datadir_mount()
     scelta = mode()
     if scelta == "off":
         LOG.warning("self-check di isolamento DISATTIVATO "
