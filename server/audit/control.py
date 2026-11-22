@@ -75,8 +75,12 @@ def config(before: dict, after: dict) -> None:
                result={"changes": changes})
 
 
-def emit(kind: str, action: str, resource: str, **details) -> None:
-    """A specific control-plane event, e.g. `emit("vault", "grant", "google_x", agent=…)`."""
+def emit(kind: str, action: str, resource: str, /, **details) -> None:
+    """A specific control-plane event, e.g. `emit("vault", "grant", "google_x", agent=…)`.
+
+    The three names are positional-only (#673): a detail called `kind`,
+    `action` or `resource` used to collide with them, the call raised
+    `TypeError`, and `safe` logged the event as «not recorded»."""
     from .. import audit
     audit.emit(f"control.{kind}", action=action, resource=resource,
                result={k: v for k, v in details.items() if v is not None} or None)
