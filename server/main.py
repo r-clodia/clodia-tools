@@ -2846,6 +2846,15 @@ def _verb_implemented(name: str) -> bool:
         return True
 
 
+def _verb_known(name: str) -> bool:
+    """`_verb_implemented` for the telemetry (#550): never raises, and a verb
+    the gateway does not serve is not a name worth keeping."""
+    try:
+        return _verb_implemented(name)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _bound_chat(namespace: str) -> str:
     """La chat legata al canale da cui si chiama, per questo connettore.
 
@@ -3206,6 +3215,20 @@ async def _native_consent(arguments: dict, agent: str) -> dict:
 
 
 async def _require_gate_consent(
+    agent: str, gate_key: str, *, consume: bool, reason: str = "",
+    allow_delegation: bool = True, arguments: dict | None = None,
+) -> dict | None:
+    """`_require_gate_consent_waiting` with the tool call's deadline paused
+    (#550): a person deciding a consent is not a backend hanging, and the gate
+    has its own expiry."""
+    from . import tool_calls as _tc
+    with _tc.paused():
+        return await _require_gate_consent_waiting(
+            agent, gate_key, consume=consume, reason=reason,
+            allow_delegation=allow_delegation, arguments=arguments)
+
+
+async def _require_gate_consent_waiting(
     agent: str, gate_key: str, *, consume: bool, reason: str = "",
     allow_delegation: bool = True, arguments: dict | None = None,
 ) -> dict | None:
@@ -4777,6 +4800,7 @@ async def _call_tool_recorded(name: str, arguments: dict) -> list[TextContent]:
     tok_e = _AUDIT_EGRESS.set(egress_seen)
     tok_r = _AUDIT_READS.set({})
     _az_pre = _authz_shadow_start(name, arguments)
+    t_run, _tc_call, timed_out = None, None, False
     try:
         # Per-agent cap on slow calls (#553): one agent's burst waits for its
         # own slots instead of taking the whole offload pool.
@@ -4785,10 +4809,31 @@ async def _call_tool_recorded(name: str, arguments: dict) -> list[TextContent]:
             _who = agent_name()
         except PermissionError:
             _who = None
+        # Per-call deadline (#550): a call that never answers is cancelled and
+        # answered with an error, instead of consuming the agent's whole turn.
+        # Inside the slow-call slot: queueing for a slot has its own limit.
+        from . import tool_calls as _tc
         try:
             async with _slow.slot(name, _who):
-                out = await _call_tool_unaudited(name, arguments)
+                t_run = _time.monotonic()
+                try:
+                    async with _tc.deadline(name) as _tc_call:
+                        out = await _call_tool_unaudited(name, arguments)
+                except _tc.ToolCallTimeout as e:
+                    timed_out = True
+                    LOG.warning("tool call timed out: %s after %gs (agent %s)",
+                                name, _tc_call.budget, _who or "-")
+                    _tlm.record(name, _who or "", "error", channel=current_chat(),
+                                unattended=is_unattended(), detail="timeout")
+                    out = [TextContent(type="text", text=f"ERROR: ToolCallTimeout: {e}")]
+                except BaseException:
+                    # Cancelled from outside (the client went away): counted,
+                    # then left to propagate as before.
+                    _tc.record(name, "cancelled", _time.monotonic() - t_run,
+                               known=_verb_known(name))
+                    raise
         except _slow.TooManySlowCalls as e:
+            t_run = _time.monotonic()      # counted as an error, no latency to speak of
             out = [TextContent(type="text", text=f"ERROR: TooManySlowCalls: {e}")]
     finally:
         _AUDIT_READS.reset(tok_r)
@@ -4796,6 +4841,12 @@ async def _call_tool_recorded(name: str, arguments: dict) -> list[TextContent]:
         _AUDIT_CROSSING.reset(tok_c)
         _AUDIT_PARENT.reset(tok)
     status, err = _outcome_of(out)
+    if t_run is not None:
+        # Telemetry per verb/backend (#550): names and timings, never content.
+        # The time a human spent deciding a consent is not latency.
+        _tc.record(name, status, _time.monotonic() - t_run
+                   - (_tc_call.paused_s if _tc_call else 0.0),
+                   known=_verb_known(name), timed_out=timed_out)
     # A·V·R·Q in shadow (#615): record the pre-call decision next to the
     # outcome, in the background — it changes nothing and costs the call
     # nothing (`_az_pre` was started before the dispatch, above).

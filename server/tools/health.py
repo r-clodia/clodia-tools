@@ -170,6 +170,33 @@ def reset_cache() -> None:
 
 
 async def health(*, backends: bool = True) -> dict:
+    """The smoke checks, plus the tool-call telemetry for an admin reader
+    (#550) — live, never from the cache."""
+    out = await _health_cached(backends=backends)
+    block = _tool_calls_block()
+    return {**out, "tool_calls": block} if block is not None else out
+
+
+#: Verbs listed in the `tool_calls` block (the busiest); the full table is
+#: `GET /internal/diagnostics/tool-calls`.
+TOOL_CALLS_TOP = 25
+
+
+def _tool_calls_block() -> dict | None:
+    """Per verb/backend counts, errors, timeouts and latency (#550), when the
+    person behind this call is a human admin (`role_principal_ok`, the rule
+    of the role tools). Names and numbers only. Fail closed."""
+    try:
+        from ..authz_runtime import role_principal_ok
+        if not role_principal_ok():
+            return None
+        from .. import tool_calls
+        return tool_calls.snapshot(top=TOOL_CALLS_TOP)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _health_cached(*, backends: bool = True) -> dict:
     """The smoke checks, cached `CACHE_TTL_S` seconds; concurrent calls for
     the same answer share ONE run instead of each probing every backend."""
     import time
