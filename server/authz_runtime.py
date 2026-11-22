@@ -324,7 +324,7 @@ def check(agent: str, verb: str, arguments: dict, scope: Optional[str],
         f["targets"] = list(targets)
     kind = f["kind"]
     if (scope and not f["mapped"] and targets is None and not f["targets"]
-            and kind == A.WRITE):
+            and kind == A.WRITE and f.get("basis", S.BASIS_NAME) == S.BASIS_NAME):
         # A verb no manifest describes, acting on nothing the gateway can name
         # (#650). Its «write» comes only from the name heuristic — Normattiva's
         # `risolvi`, `articolo` are not English — and in a room it asked on
@@ -334,6 +334,11 @@ def check(agent: str, verb: str, arguments: dict, scope: Optional[str],
         # rule (a global deny, an ask or deny the owner wrote). A verb with a
         # mapping keeps its destinations judged: enabling mail never decides
         # who a mail may reach (review of #435, S1).
+        #
+        # Only a GUESSED write (`basis: name`) is read this way (#634): a
+        # write the backend declared itself (`readOnlyHint: false`,
+        # `destructiveHint: true`) is no guess, and keeps the write default —
+        # `clickup_create_task` asks where `clickup_get_task` runs.
         kind = A.READ
     return A.decide(g, t, agent=agent, verb=verb, resource=f["resource"],
                     targets=f["targets"], kind=kind, tainted=tainted)

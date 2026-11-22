@@ -132,8 +132,10 @@ def _tokens(verb: str) -> set[str]:
 
 def is_read(verb: str) -> bool:
     """Read-only? The explicit list first; then the connector manifests
-    (`authz_shadow.facts`); then the verb's words — a verb with any writing
-    word is a write, so an unclear name errs towards the card."""
+    (`authz_shadow.facts`); then the backend's MCP annotations (#634,
+    `tool_hints`, where the platform's stricter catalogue wins); then the
+    verb's words — a verb with any writing word is a write, so an unclear
+    name errs towards the card."""
     if verb in READS:
         return True
     try:
@@ -143,6 +145,13 @@ def is_read(verb: str) -> bool:
             return f["kind"] == A.READ
     except Exception:  # noqa: BLE001
         pass
+    try:
+        from . import tool_hints
+        hk = tool_hints.hint_kind(verb)
+    except Exception:  # noqa: BLE001 — no hints: the words decide
+        hk = None
+    if hk is not None:
+        return hk == tool_hints.READ
     t = _tokens(verb)
     return bool(t & _READ_WORDS) and not (t & _WRITE_WORDS)
 
@@ -179,9 +188,13 @@ def github_verbs(listed: Optional[Iterable[str]]) -> tuple[list[str], str]:
         off = {f"github.{t}" for t in whitelist.disabled_backend_tools("github")}
     except Exception:  # noqa: BLE001
         off = set()
+    from . import tool_hints
+    # `destructiveHint: true` from the backend is irreversible too (#634); a
+    # `false` never brings back a verb the excluded words leave out.
     keep = sorted({n for n in names
                    if n not in GITHUB_GIT_VERBS and n not in off
-                   and not any(w in n.split(".", 1)[1].lower() for w in GITHUB_EXCLUDED)})
+                   and not any(w in n.split(".", 1)[1].lower() for w in GITHUB_EXCLUDED)
+                   and not tool_hints.irreversible(n)})
     return keep, source
 
 

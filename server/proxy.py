@@ -61,8 +61,12 @@ _TOOL_CACHE: dict[str, list[Tool]] = {}
 
 
 def clear_cache() -> None:
-    """Svuota la cache dei tool proxied (dopo register/unregister di un backend)."""
+    """Svuota la cache dei tool proxied (dopo register/unregister di un backend).
+    Con la cache vanno le annotazioni MCP dei tool (#634): un backend rimontato
+    o riconfigurato le ridichiara alla prossima lista."""
     _TOOL_CACHE.clear()
+    from . import tool_hints
+    tool_hints.clear()
 
 
 def _resolve_secrets(val):
@@ -626,8 +630,13 @@ async def test_backend(name: str) -> dict:
             async with _listing_env(name, b) as lb, _session(lb) as s:
                 return await s.list_tools()
         res = await asyncio.wait_for(_probe(), timeout=TEST_TIMEOUT_S)
+        # A live listing refreshes the read/write hints (#634), and the Test
+        # list shows the classification the PDP uses (`read`).
+        from . import authz_shadow, tool_hints
+        tool_hints.record(name, res.tools)
         tools = [{"name": f"{name}{NS_SEP}{t.name}",
-                  "description": str(t.description or "")[:TEST_DESCRIPTION_MAX]}
+                  "description": str(t.description or "")[:TEST_DESCRIPTION_MAX],
+                  "read": _is_read_verb(authz_shadow, f"{name}{NS_SEP}{t.name}")}
                  for t in res.tools]
         clear_auth_failure(name)
         return {"ok": True, "detail": f"{len(res.tools)} tool esposti", "tools": tools}
@@ -647,10 +656,18 @@ async def test_backend(name: str) -> dict:
         return {"ok": False, "detail": str(e)[:200]}
 
 
+def _is_read_verb(authz_shadow, verb: str) -> bool:
+    try:
+        return authz_shadow.facts(verb, {})["kind"] == "read"
+    except Exception:  # noqa: BLE001 — in doubt a verb writes
+        return False
+
+
 async def list_proxied_tools() -> list[Tool]:
     """Tutti i tool dei backend, namespaced. Cache per backend; un backend
     irraggiungibile viene saltato senza far cadere l'intera lista. Senza i
     tool disattivati in Tools (#633)."""
+    from . import tool_hints
     from . import whitelist as _wl
     tools: list[Tool] = []
     for name, b in _backends().items():
@@ -662,6 +679,9 @@ async def list_proxied_tools() -> list[Tool]:
             try:
                 async with _listing_env(name, b) as lb, _session(lb) as s:
                     res = await s.list_tools()
+                    # The annotations are kept beside the cache, not on the
+                    # Tools offered to agents: they feed the PDP (#634).
+                    tool_hints.record(name, res.tools)
                     _TOOL_CACHE[name] = [
                         Tool(
                             name=f"{name}{NS_SEP}{t.name}",
@@ -672,6 +692,7 @@ async def list_proxied_tools() -> list[Tool]:
                     ]
             except Exception as e:
                 _TOOL_CACHE[name] = []  # backend down: cache vuota (riprovabile a restart)
+                tool_hints.clear(name)
                 rifiuto = rifiuto_http(e)
                 if rifiuto is not None:
                     try:
