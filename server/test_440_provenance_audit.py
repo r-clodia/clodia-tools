@@ -125,12 +125,17 @@ class ProvenanceTests(unittest.TestCase):
 
     @patch.object(main, "_require_web_source", AsyncMock())  # #569 gate: not this test's subject
     def test_a_web_source_ref_carries_no_credentials_or_query(self) -> None:
-        self.call("web.fetch", {"url": "https://bob:hunter2@api.example.com/v1/doc?sig=ABC#x"},
+        # Every secret carries a `~` (clodia-platform#690): it is valid in a URL
+        # as is, and it is not in the hex, base64 or base64url alphabets, so
+        # it cannot turn up by chance in the ids, hashes and signatures of the
+        # raw segments — `ABC` did, once, on a run of 15 Nov 2026.
+        self.call("web.fetch",
+                  {"url": "https://u~bob:p~hunter2@api.example.com/v1/doc?q~sig=v~ABC#x"},
                   fetch=(main.web_fetch, "fetch", lambda a, agent="": {"ok": 1}))
         (src,) = self.reads()[0]["provenance"]["sources"]
         self.assertEqual(src["ref"], "https://api.example.com/v1/doc")
         raw = "".join(p.read_text() for p in self.root.glob("events-*.jsonl"))
-        for leaked in ("bob", "hunter2", "sig=", "ABC"):
+        for leaked in ("u~bob", "p~hunter2", "q~sig", "v~ABC"):
             self.assertNotIn(leaked, raw)
 
     def test_a_listing_is_not_a_read_of_something(self) -> None:
