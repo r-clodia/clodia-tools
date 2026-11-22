@@ -258,7 +258,15 @@ async def whitelist_edit(request):
     Rotta INTERNA: chi verifica che il richiedente sia admin è l'agent-server. Il
     gateway non conosce i ruoli umani, e un controllo che non può fare sarebbe un
     controllo per finta.
+
+    The door itself, though, is the agent-server's: the bootstrap secret, as on
+    every other route of this module (`observe._gw_post` sends it). Until
+    clodia-platform#584 this handler checked nothing, and any process that
+    reached the gateway — a spawn's shell included — could add a destination
+    to the GLOBAL lists, i.e. lift the egress confinement of every agent.
     """
+    if not _authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
     direzione = request.path_params["direction"]
     if direzione not in ("egress", "ingress"):
         return JSONResponse({"error": "direction_invalid"}, status_code=400)

@@ -145,7 +145,9 @@ class ApiTests(_Env):
 
     def test_deny_endpoint_records_the_human_and_role_from_the_token(self) -> None:
         gate.request("clodia", "clodia-320", "web.post", chat=CHAT)
-        payload = {"principal": "davide", "human_role": "admin", "on_behalf": True}
+        # The agent-server's service token with the deciding human (#584).
+        payload = {"agent": "clodia", "principal": "davide", "human_role": "admin",
+                   "role": "agent-server"}
         with patch.object(gate_api, "verify_session_token", return_value=payload), \
                 patch.object(gate_api.internal_auth, "refuse_if_revoked", return_value=None):
             r = self._client().post("/internal/gate/deny",
@@ -159,7 +161,8 @@ class ApiTests(_Env):
         self.assertEqual(dec["authorization"]["role"], "admin")
 
     def test_grant_endpoint_records_the_approval(self) -> None:
-        payload = {"principal": "davide", "human_role": "owner", "on_behalf": True}
+        payload = {"agent": "clodia", "principal": "davide", "human_role": "owner",
+                   "role": "agent-server"}
         with patch.object(gate_api, "verify_session_token", return_value=payload), \
                 patch.object(gate_api.internal_auth, "refuse_if_revoked", return_value=None):
             r = self._client().post("/internal/gate/grant",

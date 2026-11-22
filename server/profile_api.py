@@ -46,6 +46,16 @@ def _principal(request: Request) -> tuple[str | None, JSONResponse | None]:
         LOG.warning("profile: sessione non di servizio rifiutata (principal=%s)",
                     payload.get("principal"))
         return None, JSONResponse({"error": "forbidden"}, status_code=403)
+    # The only caller is the agent-server (`clodia-logic/server/api/profile.py`),
+    # and it says so with the signed service role (clodia-platform#584). The
+    # carrier name is not enough: a spawn of `clodia` holds a token whose
+    # `agent` is `clodia` too, and with it declared in the header the principal
+    # it wanted — reading and rewriting anyone's PII.
+    from .pki_mint import ROLE_AGENT_SERVER
+    if payload.get("role") != ROLE_AGENT_SERVER:
+        LOG.warning("profile: token senza ruolo di servizio rifiutato (agent=%s)",
+                    payload.get("agent"))
+        return None, JSONResponse({"error": "forbidden"}, status_code=403)
     agent = str(payload.get("agent") or "")
     # Un servizio fidato può agire per conto del principal reale (header).
     declared = request.headers.get("x-clodia-principal", "")

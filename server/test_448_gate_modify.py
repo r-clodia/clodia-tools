@@ -128,7 +128,9 @@ class EndToEndTests(unittest.TestCase):
         from starlette.testclient import TestClient
         from . import gate_api
         self.pending(self.ORIGINAL)
-        payload = {"principal": "davide", "human_role": "owner", "on_behalf": True}
+        # The agent-server's service token with the deciding human (#584).
+        payload = {"agent": "clodia", "principal": "davide", "human_role": "owner",
+                   "role": "agent-server"}
         with patch.object(gate_api, "verify_session_token", return_value=payload), \
                 patch.object(gate_api.internal_auth, "refuse_if_revoked", return_value=None):
             c = TestClient(Starlette(routes=gate_api.routes))

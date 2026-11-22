@@ -30,21 +30,30 @@ Ordine dei controlli, dal più economico al più costoso, e tutti fail-closed:
 3. `agent ∈ principals()`, il controllo che c'era già → 403;
 4. `on_behalf`: rifiutato salvo `allow_on_behalf=True`. Le rotte
    infrastrutturali (vault, provider, whitelist, connettori, imagegen, telegram)
-   non hanno un ramo umano — chi le chiama è il runner di clodia-logic con un
-   token nudo sul principal. Il ramo umano vive su `/internal/tool` e
+   non hanno un ramo umano — chi le chiama è il runner di clodia-logic con il
+   token del ruolo di servizio (step 6). Il ramo umano vive su `/internal/tool` e
    `/internal/authorize` (`tool_api`), dove resta ammesso → 403;
 5. tetto `scoped_tools` (`whitelist.scoped_ceiling_allows`, la stessa regola di
    `main._scoped_ceiling_ok`): un token che porta il claim può arrivare **solo**
    alle rotte il cui verbo sta sotto il tetto. Una rotta senza verbo dichiarato
    non è raggiungibile da un token scoped: è la direzione giusta dell'ignoranza,
-   perché il verbo mancante è una dichiarazione mancante, non un permesso → 403.
+   perché il verbo mancante è una dichiarazione mancante, non un permesso → 403;
+6. **service role** (clodia-platform#584, checked right after step 4): a
+   token that is NOT on-behalf must
+   carry the signed claim `role: agent-server`. The `agent` claim alone does not
+   tell the agent-server from an agent: a spawn of `clodia` holds a runtime
+   token whose `agent` is `clodia` — exactly the privileged principal of step 3
+   — in its environment (`CLODIA_TOOLS_TOKEN`, the MCP header), and it has a
+   shell that reaches the gateway. Without this step every internal route was
+   one prompt injection away (vault, providers, the agents' whitelist, every
+   topic's walls). The role is signed only by whoever holds the keys or the
+   bootstrap secret, which never enters a spawn → 403.
 
-Un token senza `scoped_tools` non ha tetto e passa come prima: i chiamanti reali
-(`git_client`, `provider_store`, `topics_client`, `telegram_client`,
-`imagegen_client`, `gateway_admin`, `pack_deprovision` in
-clodia-logic) coniano tutti `pki.mint_session_token(_PRINCIPAL, ttl)` — senza
-`scoped_tools`, senza `on_behalf`, senza `execution_id`. Un insieme di verbi
-indovinato al posto di questo censimento spegnerebbe un servizio in produzione.
+The real non-on-behalf callers in clodia-logic all mint the role:
+`topics_client`, `topic_indexer`, `pack_relay_adapter` (channels),
+`mail_courier`, `gateway_admin` (+ `pack_deprovision` through it),
+`provider_store`, `git_client` (vault), `imagegen_client`, `rag_store`. A
+token with no `scoped_tools` has no ceiling, as before.
 """
 from __future__ import annotations
 
@@ -133,6 +142,17 @@ def authorize(request: Request, *, verb: str | None = None,
                     "(principal=%s, kind=%s)", payload.get("principal"),
                     human_mcp.principal_kind_of(payload))
         return None, _no(403, "forbidden")
+
+    if not payload.get("on_behalf"):
+        from .pki_mint import ROLE_AGENT_SERVER
+        if payload.get("role") != ROLE_AGENT_SERVER:
+            # An agent's runtime token (agent=clodia, execution_id=<spawn>) or any
+            # other bare token: the agent-server says who it is, it is not
+            # recognised by the carrier name (clodia-platform#584).
+            log.warning("token senza ruolo di servizio rifiutato su rotta interna "
+                        "(agent=%s, execution=%s)", agent,
+                        payload.get("execution_id") or "-")
+            return None, _no(403, "forbidden")
 
     tetto = payload.get("scoped_tools") or []
     if tetto and not (verb and whitelist.scoped_ceiling_allows(verb, tetto)):

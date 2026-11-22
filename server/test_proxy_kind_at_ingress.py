@@ -172,7 +172,7 @@ class TheInternalApiIsNotAProxyDoorTests(unittest.TestCase):
         self.assertEqual(err.status_code, 403)
 
     def test_the_backend_runner_still_gets_in(self):
-        agente, err = self._richiesta({"agent": "clodia"})
+        agente, err = self._richiesta({"agent": "clodia", "role": "agent-server"})
         self.assertIsNone(err)
         self.assertEqual(agente, "clodia")
 

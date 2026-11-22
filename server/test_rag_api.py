@@ -17,9 +17,9 @@ from . import internal_auth, rag_api
 from .tools import eu_corpus
 
 _H = {"Authorization": "Bearer ckt1.finto"}
-#: Il runner di clodia-logic: `pki.mint_session_token(_PRINCIPAL, ttl)`, e basta
-#: — stesso payload minimale di `providers_api`/`test_internal_authz._RUNNER`.
-_RUNNER = {"agent": "clodia"}
+#: The clodia-logic runner (`rag_store`): its service token, with the signed
+#: role (clodia-platform#584) — as `test_internal_authz._RUNNER`.
+_RUNNER = {"agent": "clodia", "role": "agent-server"}
 
 
 def _sessione(payload: dict):
