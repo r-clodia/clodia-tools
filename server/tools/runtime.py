@@ -509,6 +509,15 @@ def mcp_servers() -> dict:
                 row["authorized"] = attivo == "oauth"
             row["auth_active"] = attivo
             row["connected"] = attivo is not None
+        # Un backend che ha risposto 401/403 non è connesso (#533), anche
+        # senza `auth`: stessa regola della card.
+        from .. import proxy as _proxy
+        rifiuto = _proxy.auth_failure(str(b.get("name") or ""))
+        if rifiuto:
+            row["connected"] = False
+            row["issue"] = rifiuto["detail"]
+            if rifiuto.get("oauth"):
+                row["oauth_detected"] = True
         mounted.append(row)
     native = ["fs", "agent", "email", "topic", "runtime"]
     return {"native": native, "mcp_backends": mounted, "count": len(mounted)}

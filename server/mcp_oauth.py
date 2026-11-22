@@ -13,11 +13,15 @@ sotto quel client le due cose che il gateway deve dare di suo:
 
 1. **dove stanno i segreti** — una `TokenStorage` su vault, così client
    registrato, access token e refresh token non toccano mai `config.yaml`;
-2. **come si chiede il consenso senza un browser** — il gateway non ha una URL
-   pubblica su cui ricevere il redirect, quindi il consenso segue la stessa
-   strada del connettore Google: l'URL di autorizzazione esce dalla card, la
-   persona autorizza, atterra sul loopback e incolla indietro la URL. Il `code`
-   e lo `state` si leggono da lì.
+2. **come torna il consenso** — l'URL di autorizzazione esce dalla card, la
+   persona autorizza e il browser torna alla webui (`/tools/oauth/callback`,
+   clodia-platform#534), che inoltra `code` e `state` a `oauth/complete`. Resta
+   il ritorno al loopback con la URL da incollare, per gli authorization server
+   che rifiutano una redirect http non-loopback.
+
+E una terza (clodia-platform#533): **riconoscere un server che vuole OAuth** dal
+suo 401 (`WWW-Authenticate` + RFC 9728), invece di montarlo come un backend a
+header statici che fallisce a ogni chiamata.
 
 Fuori dal consenso (cioè in ogni chiamata di tool) il provider NON è
 interattivo: se i token mancano o non sono rinnovabili la chiamata fallisce con
@@ -40,6 +44,7 @@ from mcp.client.auth.utils import (
     build_oauth_authorization_server_metadata_discovery_urls,
     build_protected_resource_metadata_discovery_urls,
     create_oauth_metadata_request,
+    extract_resource_metadata_from_www_auth,
     handle_auth_metadata_response,
     handle_protected_resource_response,
     validate_metadata_issuer,
@@ -189,7 +194,8 @@ class VaultTokenStorage:
         except Exception:  # noqa: BLE001
             return None
 
-    async def set_tokens(self, tokens: OAuthToken) -> None:
+    @staticmethod
+    def _token_patch(tokens: OAuthToken) -> dict[str, Any]:
         # `expires_at` è calcolato QUI perché `expires_in` è una durata: salvata
         # da sola, dopo un restart non dice più niente. Senza, `is_token_valid()`
         # del provider crede valido per sempre un token scaduto e il 401 che ne
@@ -197,7 +203,10 @@ class VaultTokenStorage:
         patch: dict[str, Any] = {"tokens": tokens.model_dump(mode="json", exclude_none=True)}
         patch["expires_at"] = (time.time() + tokens.expires_in) if tokens.expires_in else None
         patch["obtained_at"] = time.time()
-        self._save(patch)
+        return patch
+
+    async def set_tokens(self, tokens: OAuthToken) -> None:
+        self._save(self._token_patch(tokens))
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         raw = self._bundle().get("client_info")
@@ -218,6 +227,46 @@ class VaultTokenStorage:
 
     def save_metadata(self, md: dict) -> None:
         self._save({"as_metadata": md})
+
+
+class _ConsentStorage(VaultTokenStorage):
+    """La storage di UN consenso guidato dalla card (clodia-platform#534).
+
+    Due differenze da `VaultTokenStorage`, entrambe per la redirect URI:
+
+    - un client registrato per un'altra redirect URI non si riusa: l'AS
+      rifiuterebbe il ritorno (o peggio lo accetterebbe solo verso la vecchia).
+      Allora `get_client_info` dice «nessun client» e l'SDK si registra di nuovo
+      (RFC 7591) con quella giusta — è il «re-register if a new allowed origin
+      appears» della issue;
+    - il client registrato durante il consenso resta IN MEMORIA finché non ci
+      sono i token, e va nella vault insieme a loro con una sola scrittura. Un
+      consenso abbandonato a metà (o uno `state` falso) non lascia niente: non
+      sostituisce il client con cui il refresh token salvato è ancora buono.
+    """
+
+    def __init__(self, slug: str, redirect: str):
+        super().__init__(slug)
+        self.redirect = redirect
+        self._pending_client: OAuthClientInformationFull | None = None
+
+    async def get_client_info(self) -> OAuthClientInformationFull | None:
+        if self._pending_client is not None:
+            return self._pending_client
+        info = await super().get_client_info()
+        if info is None:
+            return None
+        uris = [str(u) for u in (info.redirect_uris or [])]
+        return info if self.redirect in uris else None
+
+    async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
+        self._pending_client = client_info
+
+    async def set_tokens(self, tokens: OAuthToken) -> None:
+        patch = self._token_patch(tokens)
+        if self._pending_client is not None:
+            patch["client_info"] = self._pending_client.model_dump(mode="json", exclude_none=True)
+        self._save(patch)
 
 
 def forget(slug: str) -> bool:
@@ -404,10 +453,10 @@ class _PinnedScopeMetadata(OAuthClientMetadata):
         super().__setattr__(name, value)
 
 
-def client_metadata(auth: dict) -> OAuthClientMetadata:
+def client_metadata(auth: dict, redirect: str | None = None) -> OAuthClientMetadata:
     md = _PinnedScopeMetadata.model_validate({
         "client_name": auth.get("client_name") or DEFAULT_CLIENT_NAME,
-        "redirect_uris": [redirect_uri(auth)],
+        "redirect_uris": [redirect or redirect_uri(auth)],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "scope": auth.get("scope"),
@@ -417,13 +466,17 @@ def client_metadata(auth: dict) -> OAuthClientMetadata:
     return md
 
 
-def provider_for(backend: dict, *, handlers: tuple | None = None) -> _Provider | None:
+def provider_for(backend: dict, *, handlers: tuple | None = None,
+                 redirect: str | None = None) -> _Provider | None:
     """Il provider httpx da passare al transport, o None se il backend non fa OAuth.
 
     `handlers` = `(redirect_handler, callback_handler)` e lo passa SOLO il
     consenso guidato dalla card. Senza, il provider non è interattivo: niente
     URL da aprire, niente attesa di un `code` — il che è esattamente ciò che
     serve dentro una chiamata di tool.
+
+    `redirect` lo passa solo il consenso (clodia-platform#534): la redirect URI
+    di QUEL consenso, con la sua storage (`_ConsentStorage`).
     """
     auth = auth_spec(backend)
     if not auth:
@@ -434,10 +487,11 @@ def provider_for(backend: dict, *, handlers: tuple | None = None) -> _Provider |
         raise ValueError(f"backend '{slug}': auth OAuth senza url")
     if handlers is None:
         handlers = (_refuse_redirect(slug), _refuse_callback(slug))
+    storage = _ConsentStorage(slug, redirect) if redirect else VaultTokenStorage(slug)
     provider = _Provider(
         server_url=str(url),
-        client_metadata=client_metadata(auth),
-        storage=VaultTokenStorage(slug),
+        client_metadata=client_metadata(auth, redirect),
+        storage=storage,
         redirect_handler=handlers[0],
         callback_handler=handlers[1],
     )
@@ -481,13 +535,147 @@ def authorization_status(backend: dict) -> dict:
             "detail": "token rinnovabile" if scaduto else "autorizzato"}
 
 
+# ── Dove torna il browser dopo il consenso (clodia-platform#534) ────────────
+#
+# Fino a #534 la redirect URI era un loopback su cui non ascoltava nessuno, e la
+# persona doveva copiare la URL d'atterraggio nella card. Una redirect URI deve
+# essere raggiungibile dal BROWSER di chi autorizza, non da internet: e quel
+# browser raggiunge già la webui. Il consenso torna quindi a una pagina della
+# webui sulla stessa origin da cui è partito, che inoltra `code` e `state` a
+# `oauth/complete`. L'origin la manda la webui a `oauth/start`, e qui si
+# controlla: senza il controllo `start` registrerebbe all'authorization server
+# una redirect URI qualsiasi, e il `code` di un consenso andrebbe a chi l'ha
+# scelta.
+
+#: La pagina della webui che riceve il ritorno del consenso.
+CALLBACK_PATH = "/tools/oauth/callback"
+
+#: Dove si torna se la pagina di partenza non è ammessa (o non è detta).
+DEFAULT_RETURN = "/tools"
+
+#: Pagine della webui da cui un consenso può partire, e a cui può tornare.
+RETURN_PREFIXES = ("/tools", "/packs", "/topics", "/databases", "/settings", "/agents")
+
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _origin_of(raw: str) -> tuple[str, str]:
+    """`(origin normalizzata, host)` di un'origin web, o ValueError.
+
+    Un'origin è schema + host + porta e nient'altro: niente credenziali, path,
+    query o frammento — un `https://a@evil/` o un `https://ok/x?y` non sono
+    l'origin di una pagina, sono un tentativo di farla sembrare tale.
+    """
+    from urllib.parse import urlsplit
+    s = str(raw or "").strip()
+    if not s or len(s) > 255 or any(c.isspace() or ord(c) < 0x20 for c in s):
+        raise ValueError("origin mancante o non valida")
+    p = urlsplit(s)
+    if p.scheme not in ("http", "https"):
+        raise ValueError("origin non valida: lo schema deve essere http o https")
+    if p.username is not None or p.password is not None or p.path not in ("", "/") \
+            or p.query or p.fragment or "\\" in s:
+        raise ValueError("origin non valida: solo schema, host e porta")
+    host = (p.hostname or "").lower().rstrip(".")
+    if not host:
+        raise ValueError("origin non valida: manca l'host")
+    try:
+        port = p.port
+    except ValueError as e:
+        raise ValueError("origin non valida: porta") from e
+    shown = f"[{host}]" if ":" in host else host
+    return f"{p.scheme}://{shown}{f':{port}' if port else ''}", host
+
+
+def _allowed_hosts() -> list[str]:
+    import os
+    return [h.strip().lower() for h in (os.environ.get("CLODIA_ALLOWED_HOSTS") or "").split(",")
+            if h.strip()]
+
+
+def callback_redirect(origin: str) -> str:
+    """La redirect URI della webui per `origin`, se l'origin è dell'istanza.
+
+    Ammesse, e nient'altro:
+      - un loopback (`localhost`, `127.0.0.1`, `::1`): il browser sulla stessa
+        macchina, come la webui sul Mac;
+      - l'origin di `CLODIA_WEBUI_URL`, l'indirizzo pubblico della webui;
+      - un host di `CLODIA_ALLOWED_HOSTS`, la stessa lista che la webui usa per
+        i propri host (un elemento che inizia con `.` copre i sottodomini, come
+        in vite). Il nome Tailscale con cui la si raggiunge da fuori sta qui.
+    """
+    import os
+    norm, host = _origin_of(origin)
+    ok = host in _LOOPBACK_HOSTS
+    webui = (os.environ.get("CLODIA_WEBUI_URL") or "").strip()
+    if not ok and webui:
+        from urllib.parse import urlsplit
+        w = urlsplit(webui)
+        try:
+            ok = _origin_of(f"{w.scheme}://{w.netloc}")[0] == norm
+        except ValueError:
+            ok = False
+    if not ok:
+        for entry in _allowed_hosts():
+            if entry.startswith("."):
+                if host == entry[1:] or host.endswith(entry):
+                    ok = True
+                    break
+            elif host == entry:
+                ok = True
+                break
+    if not ok:
+        raise ValueError(
+            f"origin {norm} non ammessa per il ritorno del consenso: non è un "
+            "loopback, né CLODIA_WEBUI_URL, né un host di CLODIA_ALLOWED_HOSTS")
+    return norm + CALLBACK_PATH
+
+
+def safe_return_path(raw: Any) -> str:
+    """La pagina della webui a cui tornare dopo il consenso, o `DEFAULT_RETURN`.
+
+    Solo un path RELATIVO alla stessa origin e sotto una pagina che il consenso
+    può davvero aver aperto: mai una URL assoluta, mai `//host` (che il browser
+    legge come «altro host»), mai una barra rovesciata (che alcuni browser
+    trattano come `/`), mai caratteri di controllo, mai la pagina di callback
+    stessa. Tutto il resto torna a Tools: un ritorno sbagliato costa un clic,
+    un open redirect costa il consenso.
+    """
+    from urllib.parse import urlsplit
+    s = str(raw or "").strip()
+    if not s or len(s) > 512 or not s.startswith("/") or s.startswith("//") \
+            or "\\" in s or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in s):
+        return DEFAULT_RETURN
+    p = urlsplit(s)
+    if p.scheme or p.netloc:
+        return DEFAULT_RETURN
+    path = p.path
+    if path.startswith(CALLBACK_PATH) or ".." in path.split("/"):
+        return DEFAULT_RETURN
+    if not any(path == pre or path.startswith(pre + "/") for pre in RETURN_PREFIXES):
+        return DEFAULT_RETURN
+    return s
+
+
 # ── Consenso guidato dalla card ─────────────────────────────────────────────
 
 class _Flow:
-    """Un consenso in corso: la richiesta che lo guida vive in un task a parte."""
+    """Un consenso in corso: la richiesta che lo guida vive in un task a parte.
 
-    def __init__(self, slug: str):
+    Lo `state` lo genera l'SDK (32 byte casuali) insieme al PKCE verifier, che
+    non esce mai dal provider. Qui il consenso è anche LEGATO (#534): al
+    backend, a chi l'ha avviato, alla redirect URI usata, e si consuma una
+    volta sola.
+    """
+
+    def __init__(self, slug: str, *, principal: str = "", redirect: str = "",
+                 mode: str = "paste", return_to: str = DEFAULT_RETURN):
         self.slug = slug
+        self.principal = principal
+        self.redirect = redirect
+        self.mode = mode
+        self.return_to = return_to
+        self.used = False
         self.url: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         self.code: asyncio.Future[tuple[str, str | None]] = \
             asyncio.get_running_loop().create_future()
@@ -526,8 +714,9 @@ def code_from(raw: str) -> tuple[str, str | None]:
     return raw, None
 
 
-async def begin(backend: dict) -> dict:
-    """Avvia il consenso e ritorna `{state, auth_url}`.
+async def begin(backend: dict, *, origin: str | None = None,
+                return_to: str | None = None, principal: str = "") -> dict:
+    """Avvia il consenso e ritorna `{state, auth_url, redirect_uri, mode, return_to}`.
 
     Il flusso OAuth dell'SDK è guidato dalla risposta 401 del server MCP, non
     da noi: apriamo una sessione vera in un task a parte, e quella sessione si
@@ -535,6 +724,12 @@ async def begin(backend: dict) -> dict:
     discovery, registrazione del client, PKCE e scambio restano quelli
     dell'SDK, e in più il consenso che va a buon fine ha già dimostrato che il
     backend risponde.
+
+    Con `origin` (clodia-platform#534) il consenso torna alla webui
+    (`mode: "callback"`); senza, resta il loopback da incollare
+    (`mode: "paste"`), che serve agli authorization server che rifiutano una
+    redirect http non-loopback. Una `auth.redirect_uri` scritta nel backend è
+    una scelta dell'owner e vince su entrambe.
     """
     _gc_flows()
     slug = str(backend.get("name") or "")
@@ -544,7 +739,14 @@ async def begin(backend: dict) -> dict:
             raise ValueError(f"il server MCP '{slug}' è connesso con una credenziale: "
                              "«Disconnetti» prima di avviare un consenso OAuth")
         raise ValueError(f"il server MCP '{slug}' non è configurato con auth OAuth")
-    flow = _Flow(slug)
+    if auth.get("redirect_uri"):
+        redirect, mode = str(auth["redirect_uri"]), "paste"
+    elif origin:
+        redirect, mode = callback_redirect(origin), "callback"
+    else:
+        redirect, mode = redirect_uri(auth), "paste"
+    flow = _Flow(slug, principal=principal, redirect=redirect, mode=mode,
+                 return_to=safe_return_path(return_to))
 
     async def _redirect(url: str) -> None:
         flow.state = _state_of(url)
@@ -559,7 +761,8 @@ async def begin(backend: dict) -> dict:
     async def _drive() -> dict:
         from . import proxy  # import locale: proxy importa questo modulo
         try:
-            async with proxy.session(backend, oauth_handlers=(_redirect, _callback)) as s:
+            async with proxy.session(backend, oauth_handlers=(_redirect, _callback),
+                                     oauth_redirect=redirect) as s:
                 res = await s.list_tools()
                 return {"ok": True, "detail": f"{len(res.tools)} tool esposti"}
         finally:
@@ -571,7 +774,7 @@ async def begin(backend: dict) -> dict:
                                  return_when=asyncio.FIRST_COMPLETED)
     if flow.url.done():
         return {"state": flow.state or "", "auth_url": flow.url.result(),
-                "redirect_uri": redirect_uri(auth)}
+                "redirect_uri": redirect, "mode": mode, "return_to": flow.return_to}
     if flow.task in done:
         # Nessuna URL e il task è finito: o il backend non chiede OAuth (401 mai
         # arrivato) o è caduto. In entrambi i casi il dettaglio sta lì.
@@ -585,23 +788,39 @@ async def begin(backend: dict) -> dict:
     raise ValueError("nessuna URL di autorizzazione entro 30s: il server MCP non risponde")
 
 
-async def finish(state: str, raw_code: str) -> dict:
-    """Consegna `code` (+ `state`) al consenso in attesa e aspetta l'esito."""
+async def finish(state: str, raw_code: str, *, slug: str | None = None,
+                 principal: str | None = None) -> dict:
+    """Consegna `code` (+ `state`) al consenso in attesa e aspetta l'esito.
+
+    Rifiuta, senza toccare la vault (clodia-platform#534):
+      - uno `state` sconosciuto (falso, di un altro gateway, o già concluso);
+      - uno scaduto (`FLOW_TTL_S`);
+      - uno già consegnato (replay mentre lo scambio è in corso);
+      - uno di un altro backend (`slug`) o avviato da un'altra persona
+        (`principal`), quando la rotta li passa.
+    """
     _gc_flows()
     code, url_state = code_from(raw_code)
     state = (state or url_state or "").strip()
     flow = _flows.get(state)
-    if flow is None:
+    if flow is None or flow.exp < time.time():
         raise ValueError("nessun consenso in attesa per questo state "
                          "(scaduto, già concluso, o gateway riavviato): rilancia «Connetti»")
     if url_state and state and url_state != state:
         raise ValueError("lo state della URL incollata non è quello del consenso in corso")
+    if slug is not None and slug != flow.slug:
+        raise ValueError("questo consenso non è di questo server MCP: rilancia «Connetti»")
+    if principal is not None and flow.principal and principal != flow.principal:
+        raise ValueError("questo consenso l'ha avviato un'altra sessione: rilancia «Connetti»")
+    if flow.used:
+        raise ValueError("questo consenso è già stato consegnato: un ritorno vale una volta sola")
     if not code:
         raise ValueError("manca il parametro 'code' nella URL incollata")
     if vault.has_credential(credential_cred_name(flow.slug)):
         # Un consenso partito prima di un «Connetti» con credenziale (#565).
         raise ValueError(f"il server MCP '{flow.slug}' è stato connesso con una "
                          "credenziale nel frattempo: «Disconnetti» prima del consenso")
+    flow.used = True
     if not flow.code.done():
         flow.code.set_result((code, url_state or state))
     assert flow.task is not None
@@ -609,4 +828,147 @@ async def finish(state: str, raw_code: str) -> dict:
         res = await asyncio.wait_for(asyncio.shield(flow.task), timeout=60)
     except TimeoutError as e:
         raise ValueError("scambio del token non concluso entro 60s") from e
-    return {"connected": True, "server": flow.slug, **res}
+    finally:
+        _flows.pop(state, None)
+    return {"connected": True, "server": flow.slug, "return_to": flow.return_to, **res}
+
+
+# ── Rilevamento: un 401 che annuncia OAuth (clodia-platform#533) ────────────
+#
+# Un server MCP che vuole OAuth lo dice da sé: `401` con
+# `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource"`
+# (RFC 9728). Fino a #533 il gateway non lo ascoltava: un server montato senza
+# `auth` diventava un backend «a header statici», verde nella card e 401 a ogni
+# chiamata, e il «Test» diceva «unhandled errors in a TaskGroup». Qui il 401 si
+# legge: il documento del protected resource dice quale authorization server
+# usare, e i metadati di quello (RFC 8414 / OIDC) dicono che il consenso si può
+# davvero avviare.
+#
+# Solo metadati PUBBLICI: nessuna richiesta di questo blocco porta un token o
+# un header del backend, e nessun valore di un header finisce in un messaggio.
+
+PROBE_TIMEOUT_S = 8
+_PROBE_MAX_BYTES = 64 * 1024
+
+
+def _probe_client() -> httpx.AsyncClient:
+    """Client del rilevamento (sostituibile nei test). Niente redirect seguiti:
+    un 30x verso un altro host non è un documento di metadata di questo."""
+    return httpx.AsyncClient(timeout=PROBE_TIMEOUT_S, follow_redirects=False)
+
+
+def _same_origin(a: str, b: str) -> bool:
+    pa, pb = urlparse(a), urlparse(b)
+    return (pa.scheme, pa.netloc.lower()) == (pb.scheme, pb.netloc.lower())
+
+
+async def _get_json(c: httpx.AsyncClient, url: str) -> dict | None:
+    try:
+        r = await c.get(url, headers={"Accept": "application/json"})
+    except httpx.HTTPError:
+        return None
+    if r.status_code != 200 or len(r.content) > _PROBE_MAX_BYTES:
+        return None
+    try:
+        data = r.json()
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+async def detect(url: str, *, status: int | None = None, headers: Any = None) -> dict:
+    """Che cosa vuole un server MCP che rifiuta, da come rifiuta.
+
+    Con `status`/`headers` (la risposta di un 401 vero, presa da una chiamata
+    fallita) non si manda niente al server MCP; senza, lo si sonda con un
+    `initialize` anonimo. Ritorna
+    `{status, oauth, resource_metadata?, authorization_server?, as_metadata?, detail}`,
+    con `oauth: True` solo se il protected-resource metadata c'è e nomina un
+    authorization server.
+    """
+    out: dict[str, Any] = {"status": status, "oauth": False}
+    async with _probe_client() as c:
+        if status is None:
+            try:
+                r = await c.post(url, json={
+                    "jsonrpc": "2.0", "id": 0, "method": "initialize",
+                    "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                               "clientInfo": {"name": "clodia-gateway-probe",
+                                              "version": "1"}}},
+                    headers={"Accept": "application/json, text/event-stream"})
+            except httpx.HTTPError as e:
+                out["detail"] = f"server MCP non raggiungibile: {type(e).__name__}"
+                return out
+            status, headers = r.status_code, r.headers
+            out["status"] = status
+        if status not in (401, 403):
+            out["detail"] = f"HTTP {status}: nessuna autenticazione richiesta"
+            return out
+        www = str((headers.get("www-authenticate") if headers is not None else None) or "")
+        fake = httpx.Response(status, headers={"WWW-Authenticate": www} if www else {})
+        announced = extract_resource_metadata_from_www_auth(fake)
+        bearer = www.strip().lower().startswith("bearer")
+        candidates: list[str] = []
+        if announced:
+            # Il documento annunciato si legge solo in https o sulla stessa
+            # origin del server: un header non può mandare il gateway a
+            # leggere un indirizzo interno qualsiasi.
+            if announced.startswith("https://") or _same_origin(announced, url):
+                candidates.append(announced)
+        if announced or bearer or status == 401:
+            candidates += [u for u in build_protected_resource_metadata_discovery_urls(None, url)
+                           if u not in candidates]
+        prm = None
+        for cand in candidates:
+            data = await _get_json(c, cand)
+            if data is None:
+                continue
+            try:
+                prm = ProtectedResourceMetadata.model_validate(data)
+            except Exception:  # noqa: BLE001 — documento non conforme: il prossimo
+                prm = None
+                continue
+            out["resource_metadata"] = cand
+            break
+        if prm is None or not prm.authorization_servers:
+            out["detail"] = (
+                f"{status} {'Unauthorized' if status == 401 else 'Forbidden'} — il server "
+                "rifiuta la richiesta e non annuncia OAuth: serve una credenziale valida "
+                "negli headers (o un metodo 'credential' in auth.methods)")
+            if announced:
+                out["detail"] = (
+                    f"{status} — il server annuncia OAuth (resource_metadata) ma il "
+                    "documento RFC 9728 non è leggibile: impossibile avviare il consenso")
+            return out
+        issuer = issuer_of(str(prm.authorization_servers[0]))
+        out["oauth"] = True
+        out["authorization_server"] = issuer.rstrip("/")
+        for cand in build_oauth_authorization_server_metadata_discovery_urls(issuer, url):
+            data = await _get_json(c, cand)
+            if data is None:
+                continue
+            try:
+                asm = OAuthMetadata.model_validate(data)
+                validate_metadata_issuer(asm, issuer)
+            except Exception:  # noqa: BLE001
+                continue
+            out["as_metadata"] = True
+            break
+        else:
+            out["as_metadata"] = False
+        out["detail"] = (
+            f"{status} Unauthorized — il server richiede un consenso OAuth "
+            f"(authorization server {urlparse(issuer).netloc or issuer}): premi «Connetti»")
+        return out
+
+
+def adoptable(backend: dict) -> bool:
+    """Si può dare `auth: {type: oauth}` a questo backend senza togliere niente?
+
+    Solo a un backend http senza `auth` e senza `headers`: uno che porta già un
+    header (un token statico, magari giusto per un altro endpoint) è una
+    scelta dell'owner, e lì il messaggio dice cosa cambiare invece di farlo.
+    """
+    return (isinstance(backend, dict) and backend.get("transport") == "http"
+            and bool(backend.get("url")) and backend.get("auth") is None
+            and not backend.get("headers"))

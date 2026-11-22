@@ -446,7 +446,7 @@ class ConsentDrivenByTheCardTests(unittest.IsolatedAsyncioTestCase):
         apri = asyncio.Event()
         risultato = {}
 
-        async def fake_session(backend, *, oauth_handlers=None):
+        async def fake_session(backend, *, oauth_handlers=None, **_kw):
             redirect, callback = oauth_handlers
             await redirect("https://as.example/authorize?state=STATO&code_challenge=x")
             risultato["code"] = await callback()
