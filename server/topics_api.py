@@ -1577,6 +1577,10 @@ async def files(request: Request):
             return JSONResponse({"files": await asyncio.to_thread(svc.list_files, tier, name, subpath)})
         except TopicError as e:
             return JSONResponse({"error": str(e)}, status_code=404)
+        except Exception:  # noqa: BLE001 — log the cause, then let Starlette return 500
+            LOG.exception("topic files: elenco fallito per %s/%s (path=%r)",
+                          tier, name, subpath)
+            raise
     # POST upload: {filename, content_b64}
     try:
         body = await request.json()
