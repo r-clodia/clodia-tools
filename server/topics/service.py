@@ -2856,8 +2856,24 @@ class TopicService:
         def _mp(subdir: str, nome: str) -> str:
             return f"{mount}/" + (f"{subdir}/" if subdir else "") + nome
 
+        def _require_directory(store: Storage, path: str, shown: str) -> None:
+            st = store.stat(path)
+            if st is None:
+                raise TopicError(f"cartella non esistente: {shown}")
+            if st.kind != "dir":
+                raise TopicError(
+                    f"{shown} è un file: leggilo con topic.read_file")
+
         if is_files:
-            entries = list(store.list(f"{base}/{sub}".strip("/")))
+            target = f"{base}/{sub}".strip("/")
+            # Il mount locale esiste logicamente appena nasce il topic, ma il
+            # backend filesystem materializza `files/` al primo documento.
+            # Quella radice virtuale è una cartella vuota, non un path mancante.
+            if not sub and mount == self.MOUNT_LOCAL and store.stat(target) is None:
+                entries = []
+            else:
+                _require_directory(store, target, rel)
+                entries = list(store.list(target))
             for e in entries:
                 if e.name.startswith("."):
                     continue
@@ -2900,6 +2916,7 @@ class TopicService:
             # raggiungibile navigando.
             d = self._dir(tier, name)
             base = f"{d}/{rel}"
+            _require_directory(self.s, base, rel)
             seen_files = False
             for e in self.s.list(base):
                 if e.name.startswith("."):
