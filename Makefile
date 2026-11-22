@@ -60,6 +60,11 @@ help:
 # PREREQUISITO di `test`: agganciato altrove tornerebbe a essere codice di
 # guardia che nessuna macchina invoca.
 #
+# `--open-prs` (clodia-platform#355): the version must also not be declared by
+# another open PR towards the same base — two PRs on the same number are both
+# above `main` and both green until one merges. Reads the open PRs through the
+# GitHub API with the read-only GITHUB_TOKEN that tests.yml passes to `make test`.
+#
 # `GITHUB_BASE_REF` è valorizzato solo nelle run di `pull_request`. Fuori di lì
 # non si confronta niente: in locale non c'è un bersaglio, e su un push a `main`
 # il confronto sarebbe `main` contro sé stesso, cioè rosso sempre.
@@ -67,7 +72,7 @@ version-check:
 	@if [ -z "$(GITHUB_BASE_REF)" ]; then \
 	  echo "version-check: fuori da una pull request, niente con cui confrontare"; \
 	else \
-	  $(PY) -m server.version_guard --base-ref "$(GITHUB_BASE_REF)"; \
+	  $(PY) -m server.version_guard --base-ref "$(GITHUB_BASE_REF)" --open-prs; \
 	fi
 
 # `-t .` perché i test importano il package `server`: senza, la discovery li
