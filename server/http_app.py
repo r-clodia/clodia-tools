@@ -108,6 +108,11 @@ async def _lifespan(_app):
         # per nominare una saturazione invece di dedurla.
         inflight.install_offload_pool()
         guardia = asyncio.create_task(inflight.watch())
+        # Thread stacks during a stall and on SIGUSR1 (clodia-platform#710):
+        # the watchdog above beats the heartbeat, this thread reads it.
+        from . import stackdump
+        campionatore = stackdump.StallSampler().start()
+        await asyncio.to_thread(stackdump.install_signal_dump)
         # Audit trail (clodia-platform#431): mark the start in the chain, then
         # sign and export checkpoints periodically. Never blocks the boot.
         from . import audit
@@ -173,6 +178,7 @@ async def _lifespan(_app):
             yield
         finally:
             guardia.cancel()
+            campionatore.stop()
             checkpoints.cancel()
             retention.cancel()
             servizi.cancel()
@@ -240,6 +246,8 @@ def build_app() -> Starlette:
     # route keeps winning.
     from .components_api import catch_all_routes as component_routes
     from .components_api import internal_routes as components_internal
+    # Thread/task stack dump (#710): admins and the service role only.
+    from .stackdump_api import routes as stackdump_routes
     from .audit.trace import TraceparentMiddleware
     return Starlette(
         routes=[Mount("/mcp", app=handler), *tools_routes, *providers_routes,
@@ -248,7 +256,7 @@ def build_app() -> Starlette:
                 *tool_routes, *mint_routes, *gate_routes, *logic_routes,
                 *egress_routes, *proxy_auth_routes, *rag_routes, *databases_routes,
                 *audit_routes, *egress_proxy_routes, *connectors_routes,
-                *components_internal, *component_routes],
+                *components_internal, *stackdump_routes, *component_routes],
         # Chi è in volo, su tutte le rotte (clodia-platform#316). Attorno a tutto
         # e non alle due rotte della issue: nell'incidente del 7 set le rotte
         # «innocenti» erano quelle in timeout, e un contatore puntato sui

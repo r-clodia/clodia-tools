@@ -324,7 +324,12 @@ async def watch(interval: float = 0.5) -> None:
     watchdog che si spegne al primo errore toglie la misura proprio nel momento
     in cui serviva.
     """
+    from . import stackdump
     while True:
+        # The stall sampler's heartbeat (#710): a thread that sees it age
+        # samples the stacks WHILE the loop is blocked — this coroutine can
+        # only speak after the stall is over.
+        stackdump.heartbeat()
         t0 = time.monotonic()
         await asyncio.sleep(interval)
         lag = time.monotonic() - t0 - interval

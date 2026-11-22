@@ -136,7 +136,29 @@ def _cache_key(backends: bool) -> tuple:
         cl = current_clearance()
     except Exception:  # noqa: BLE001
         cl = None
-    return (bool(backends), cl)
+    # …and on whether the reader is an admin person: only then the answer
+    # carries the stall diagnostics (#710).
+    return (bool(backends), cl, _admin_reader())
+
+
+def _admin_reader() -> bool:
+    """Is the person behind this call a human admin (the same rule as the
+    role tools, `authz_runtime.role_principal_ok`)? Fail closed."""
+    try:
+        from ..authz_runtime import role_principal_ok
+        return bool(role_principal_ok())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _stalls() -> dict:
+    """For admins (#710): is the SIGUSR1 dump armed, and the last stall the
+    sampler caught — when, how long, the innermost frames of the loop thread
+    and of the busy ones. Code locations only, redacted; the full dump is
+    `GET /internal/diagnostics/stacks`."""
+    from .. import stackdump
+    return {"signal_dump": stackdump.signal_dump_installed(),
+            "last_stall": stackdump.last_stall()}
 
 
 def reset_cache() -> None:
@@ -184,6 +206,8 @@ async def _run(*, backends: bool = True) -> dict:
         out["mcp_backends"] = {"count": len(mcp),
                                "failing": [b["name"] for b in mcp if not b["ok"]],
                                "backends": mcp}
+    if _admin_reader():
+        out["stalls"] = _stalls()
     out["ok"] = bool(agent_server.get("ok") and courier.get("ok")
                      and (mcp is None or all(b["ok"] for b in mcp)))
     return out
