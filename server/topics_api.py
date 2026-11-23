@@ -197,9 +197,30 @@ async def list_topics(request: Request):
         return JSONResponse({"topics": hit[1]})
     # list() apre ogni topic (I/O per topic): sincrono e ~O(topic). Offload su
     # thread per non bloccare l'event loop del gateway (che serve anche l'MCP).
-    topics = await asyncio.to_thread(_service().list, tier, include_archived=inc)
+    topics = await asyncio.to_thread(_list_with_inbox, tier, inc)
     _LIST_CACHE[key] = (now, topics)
     return JSONResponse({"topics": topics})
+
+
+def _list_with_inbox(tier, include_archived: bool) -> list:
+    """`service.list`, each row with its message box address as `inbox`
+    (clodia-platform#726): the 📧 of the /topics cards. One read of the codes
+    for the whole list; absent when the room has no code or the colony
+    mailbox is not set (then no address reaches the room)."""
+    svc = _service()
+    topics = svc.list(tier, include_archived=include_archived)
+    try:
+        from .mail_courier_api import message_box_address
+        by_room = {tuple(room): code for code, room in svc.mailbox_codes().items()}
+    except Exception as e:  # noqa: BLE001 — a decoration never fails the list
+        LOG.warning("topics list: codici delle caselle non leggibili (%s)", type(e).__name__)
+        return topics
+    for t in topics:
+        code = by_room.get((t.get("tier"), t.get("name")))
+        addr = message_box_address(code) if code else ""
+        if addr:
+            t["inbox"] = addr
+    return topics
 
 
 async def open_topic(request: Request):
