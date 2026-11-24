@@ -65,6 +65,13 @@ class Decisions(_Rooms):
         self.assertTrue(egress.mailbox_allowed("inbox", "info@x.it", "SEAL-1/blog"))
         self.assertFalse(egress.mailbox_allowed("inbox", "info@x.it", "SEAL-1/other"))
 
+    def test_an_archived_room_is_not_read(self):
+        RT.enable_mcp("SEAL-1", "other", "mailbox:info")
+        meta, ver = self.svc._read_meta("SEAL-1", "other")
+        meta["status"] = "archived"
+        self.svc._write_meta("SEAL-1", "other", meta, base_version=ver)
+        self.assertEqual(RM.reading_rooms(), [])
+
     def test_a_mailbox_switched_off_is_not_used(self):
         RT.enable_mcp("SEAL-1", "blog", "mailbox:info")
         with patch("server.tools.mail_switch.system_mailboxes",
@@ -112,6 +119,14 @@ class Migration(_Rooms):
             "SEAL-1/deleted": ["outbox:info@x.it"],
         }
         whitelist.CONFIG["source_allow"] = ["inbox:box@gmail.com"]
+
+    def test_an_archived_room_only_loses_its_entries(self):
+        with patch("server.mail_courier_api._topic_exists",
+                   lambda t, n: (t, n) != ("SEAL-1", "other")):
+            out = RM.migrate()
+        self.assertNotIn("SEAL-1/other", out["connected"])
+        self.assertIn("SEAL-1/other", out["dropped_rooms"])
+        self.assertEqual(RM.connected_accounts(self.svc._read_meta("SEAL-1", "other")[0]), [])
 
     def test_the_plan_writes_nothing(self):
         p = RM.plan()["rooms"]
