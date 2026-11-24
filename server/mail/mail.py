@@ -167,6 +167,8 @@ def credential_diagnostics() -> list[dict]:
             # Dichiarato, non dedotto da un fallimento: chi legge questa riga
             # deve sapere che l'account NON si legge, prima di provarci.
             "send_only": solo_invio,
+            # Switched off from Tools (#733): still configured, not used.
+            "enabled": not _host.get().mailbox_disabled(account),
             "missing": missing,
             "error": error,
         })
@@ -224,7 +226,9 @@ def system_mailboxes() -> list[dict]:
                 "send_only": bool(row.get("send_only")),
             }
             for row in credential_diagnostics()
-            if row["operational"]
+            # A mailbox switched off (#733) is no system mailbox: no room
+            # reads it, no delivery sends with it, it is not offered.
+            if row["operational"] and row.get("enabled", True)
         ),
         key=lambda r: r["account"],
     )
@@ -305,6 +309,10 @@ def _secrets_env(account: str, direction: str):
         raise PermissionError(
             f"l'account '{account}' è un account Google: google-pack non è "
             "attivo su questa istanza, quindi la sua posta non si usa ora")
+    if cred == mcred and _host.get().mailbox_disabled(account):
+        raise PermissionError(
+            f"la casella '{account}' è spenta (Strumenti → Email): non si legge "
+            "e non si usa per spedire finché un admin non la riaccende")
     if cred is None:
         addr = _legacy_address(account)
         if not addr:

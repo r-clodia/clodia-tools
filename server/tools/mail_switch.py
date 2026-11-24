@@ -36,6 +36,7 @@ def _services() -> dict[str, Callable]:
         "mailbox_add": mailboxes.mailbox_add,
         "mailbox_remove": mailboxes.mailbox_remove,
         "test_mailboxes": mailboxes.test_mailboxes,
+        "mailbox_set_enabled": mailboxes.mailbox_set_enabled,
         # The courier (#531): envelopes and attachment bytes, never the body.
         "courier_envelopes": lambda a: mail.courier_envelopes(
             str(a.get("account") or ""), str(a.get("folder") or "INBOX"),
@@ -86,6 +87,6 @@ def system_mailboxes() -> list[dict]:
     return [dict(r) for r in call("system_mailboxes")]
 
 
-def component_test_mailboxes() -> dict:
-    """`{ok, detail}` of the mailboxes Tools card."""
-    return dict(call("test_mailboxes"))
+def component_test_mailboxes(account: str | None = None) -> dict:
+    """`{ok, detail}` of the mailboxes Tools card, or of ONE mailbox's (#733)."""
+    return dict(call("test_mailboxes", account) if account else call("test_mailboxes"))
