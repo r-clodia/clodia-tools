@@ -91,6 +91,15 @@ async def _lifespan(_app):
             LOG.info("message box: codice assegnato a %d topic esistenti", n)
     except Exception as e:  # noqa: BLE001
         LOG.warning("message box: codici non assegnati al boot (%s)", type(e).__name__)
+    # The rooms' `inbox:`/`outbox:` entries become connected mailboxes (#734),
+    # once. Best effort — a failure is retried next boot.
+    try:
+        from . import room_mailboxes
+        out = await asyncio.to_thread(room_mailboxes.migrate)
+        if out.get("done"):
+            LOG.warning("room mailboxes migrated: %s", {k: v for k, v in out.items() if k != "done"})
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("room mailboxes: migration not done at boot (%s)", type(e).__name__)
     # The data catalog (#590): what exists and is not listed yet. Best effort.
     try:
         from . import data_catalog
