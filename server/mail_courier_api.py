@@ -158,6 +158,20 @@ def rooms(indexed: bool = False) -> list[dict]:
                    **_senders(f"{tier}/{name}")}
             if addr in boxes and row not in out:
                 out.append(row)
+    # The mailboxes each room CONNECTS (clodia-platform#734), read for its own
+    # senders. One scan of the metas, like the message-box codes below.
+    from . import room_mailboxes
+    try:
+        collegate = room_mailboxes.reading_rooms()
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("courier: connected mailboxes unavailable (%s)", type(e).__name__)
+        collegate = []
+    for tier, name, acct, addr in collegate:
+        row = {"tier": tier, "name": name, "account": acct, "address": addr,
+               "strict": bool(egress.ingress_strict(f"{tier}/{name}")),
+               **_senders(f"{tier}/{name}")}
+        if not any((r["tier"], r["name"], r["address"]) == (tier, name, addr) for r in out):
+            out.append(row)
     # The globally authorised mailboxes, read for every room's OWN senders.
     _colony_acct, colony_addr = colony_mailbox()
     globali = [str(u)[len("inbox:"):].strip().lower()

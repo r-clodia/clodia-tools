@@ -479,6 +479,11 @@ def mailbox_allowed(direction: str, email: str, scope: str | None = None) -> boo
     addr = (email or "").strip().lower()
     if not addr:
         return False
+    # A mailbox the room CONNECTS (clodia-platform#734) — the room's own
+    # decision, so it holds in a strict room too.
+    from . import room_mailboxes
+    if room_mailboxes.scope_allows(direction, addr, scope or _scope_of_call()):
+        return True
     uri = f"{direction}:{addr}"
     rules = (ingress_rules(scope) if direction == "inbox"
              else effective_uris("egress", scope))

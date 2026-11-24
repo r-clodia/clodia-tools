@@ -305,6 +305,8 @@ def mcp_catalogue() -> dict[str, dict]:
         e["verbs"] = sorted(set(e["verbs"]) | vv)
     for mid, e in _capability_entries(groups).items():
         out.setdefault(mid, e)
+    for mid, e in _mailbox_entries().items():
+        out.setdefault(mid, e)
     reg = _registry()
     for mid, e in out.items():
         if not e["agent_verbs"]:
@@ -344,6 +346,30 @@ def _capability_entries(groups: dict[str, dict]) -> dict[str, dict]:
         out[mid] = {"id": mid, "label": g.get("label") or mid, "kind": "connector",
                     "namespaces": sorted(g["namespaces"]), "verbs": [], "write": [],
                     "schemes": [], "enumerable": True, "agent_verbs": False}
+    return out
+
+
+def _mailbox_entries() -> dict[str, dict]:
+    """One entry per mailbox of the instance (clodia-platform#734): a room
+    connects a mailbox like an MCP (`mailbox:<account>`). No agent verbs and
+    no resource rows — what it decides is where the courier reads for the
+    room and which mailbox the room sends with. The colony mailbox is not
+    offered: the room's own address on it is always on (#583)."""
+    from . import room_mailboxes as rm
+    try:
+        from .mail_courier_api import colony_mailbox
+        colony = colony_mailbox()[0]
+    except Exception:  # noqa: BLE001
+        colony = ""
+    out: dict[str, dict] = {}
+    for acct, box in sorted(rm.system_boxes().items()):
+        if not acct or acct == colony:
+            continue
+        mid = rm.key(acct)
+        out[mid] = {"id": mid, "label": box["email"] or acct, "kind": "mailbox",
+                    "account": acct, "send_only": box["send_only"],
+                    "namespaces": [], "verbs": [], "write": [], "schemes": [],
+                    "enumerable": True, "agent_verbs": False}
     return out
 
 
@@ -442,7 +468,8 @@ def email_authorised(meta: dict) -> bool:
     the question «may mail enter this room» is the room's authorisation of the
     mail capability, which is `meta.tools.mcp.<email id>`. A legacy per-verb
     entry (`enabled: ["email.*"]`, before #620) still counts, as it did."""
-    if any(mid in email_mcp_ids() for mid in _mcp_entries(meta)):
+    if any(mid in email_mcp_ids() or mid.startswith("mailbox:")
+           for mid in _mcp_entries(meta)):
         return True
     return any(e.partition(".")[0] == EMAIL_MCP for e in _legacy(meta)["enabled"])
 

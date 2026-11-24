@@ -50,7 +50,8 @@ class CatalogueTests(_Env):
 
     def test_every_other_mcp_gives_agent_verbs(self):
         for mid, e in RT.mcp_catalogue().items():
-            if mid != "email":
+            # A mailbox (#734) is a room capability too, like Email.
+            if mid != "email" and e.get("kind") != "mailbox":
                 self.assertTrue(e["agent_verbs"], mid)
 
     def test_the_mail_namespace_belongs_to_it(self):

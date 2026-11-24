@@ -1316,6 +1316,15 @@ async def email_mailbox_remove(request: Request):
     indirizzo, removed = info.get("email"), bool(info.get("removed"))
     from . import egress as eg
     pulizia = eg.forget_mailbox(indirizzo or "")
+    # The rooms that CONNECT it (#734) lose it too.
+    try:
+        from . import room_mailboxes
+        collegate = await asyncio.to_thread(room_mailboxes.forget, account)
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("email_mailbox_remove: '%s' non scollegata dalle stanze (%s)",
+                    account, type(e).__name__)
+        collegate = []
+    pulizia["scopes"] = sorted(set(pulizia["scopes"]) | set(collegate))
     if pulizia["scopes"] or pulizia["global"]:
         LOG.info("email_mailbox_remove: '%s' (%s) · voci ritirate: %d globali, "
                  "stanze %s", account, indirizzo, len(pulizia["global"]),

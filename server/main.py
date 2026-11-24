@@ -1949,22 +1949,27 @@ async def _dispatch_channel_relay_send(a: dict) -> dict:
 
 
 def _room_outbox_account(tier: str, tname: str) -> str:
-    """The mailbox the room sends from: the one of its OWN `outbox:` entries
-    that the instance has. None or several → ask for `account`."""
+    """The mailbox the room sends from: the one it connects (#734), or one of
+    its OWN `outbox:` entries (before the migration). None or several → ask
+    for `account`."""
     from . import egress as _eg
+    from . import room_mailboxes
     from .tools import mail_switch
     boxes = {str(r.get("email") or "").strip().lower(): str(r.get("account") or "")
              for r in mail_switch.system_mailboxes()}
     own = [boxes[u[len("outbox:"):].strip().lower()]
            for u in _eg.scope_uris("egress", f"{tier}/{tname}")
            if str(u).startswith("outbox:") and u[len("outbox:"):].strip().lower() in boxes]
+    try:
+        own += room_mailboxes.outbox_account(tier, tname)
+    except Exception:  # noqa: BLE001 — an unreadable room connects nothing
+        pass
     own = sorted(set(own))
     if len(own) == 1:
         return own[0]
     if not own:
-        raise ValueError(f"il topic {tier}/{tname} non ha una casella in uscita "
-                         "(voce outbox: della stanza): chiedi all'owner di "
-                         "autorizzarne una, o passa 'account'")
+        raise ValueError(f"il topic {tier}/{tname} non ha una casella collegata: "
+                         "chiedi all'owner di collegarne una dal 🔌 del canale")
     raise ValueError(f"il topic {tier}/{tname} ha più caselle in uscita ({', '.join(own)}): "
                      "indica quale con 'account'")
 
