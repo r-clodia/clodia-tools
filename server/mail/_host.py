@@ -36,6 +36,10 @@ GMAIL_ACCOUNTS = "mail_accounts"
 GMAIL_EXEC = "mail_exec"
 
 
+#: Config key: the accounts of the mailboxes switched off from Tools (#733).
+DISABLED_KEY = "mailboxes_disabled"
+
+
 class _Gateway:
     """The calls the mail code makes, answered from the gateway's modules."""
 
@@ -49,6 +53,23 @@ class _Gateway:
     def agent(self) -> str:
         from ..whitelist import agent_name
         return agent_name()
+
+    def mailbox_disabled(self, account: str) -> bool:
+        """Is the mailbox switched off from Tools (clodia-platform#733)? A
+        switched-off mailbox is neither read by the courier nor used to send."""
+        from ..whitelist import CONFIG
+        return str(account or "") in set(CONFIG.get(DISABLED_KEY) or [])
+
+    def set_mailbox_enabled(self, account: str, enabled: bool) -> None:
+        """Record the switch in the gateway's config; the caller saves it."""
+        from ..whitelist import CONFIG
+        spente = {a for a in (CONFIG.get(DISABLED_KEY) or []) if a != account}
+        if not enabled:
+            spente.add(account)
+        if spente:
+            CONFIG[DISABLED_KEY] = sorted(spente)
+        else:
+            CONFIG.pop(DISABLED_KEY, None)
 
     def current_topic(self) -> tuple[str | None, str | None]:
         from .. import main

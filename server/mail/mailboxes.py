@@ -33,10 +33,24 @@ def mailboxes_list() -> dict:
         "mailboxes": sorted(row["account"] for row in rows if row["operational"]),
         "statuses": [
             {"account": row["account"], "operational": row["operational"],
+             "enabled": row.get("enabled", True), "send_only": row.get("send_only", False),
+             "email": mail.mailbox_address(row["account"]),
              "missing": row["missing"], "error": row["error"]}
             for row in rows
         ],
     }
+
+
+def mailbox_set_enabled(account: str, enabled: bool) -> dict:
+    """Switch a mailbox on or off (clodia-platform#733), keeping its
+    credential. `{"status", "body"}`; the caller persists the config."""
+    from . import _host
+    account = str(account or "").strip().lower()
+    if mail.mailbox_address(account) is None:
+        return {"status": 404, "body": {"error": f"nessuna casella '{account}'"}}
+    _host.get().set_mailbox_enabled(account, bool(enabled))
+    LOG.info("casella '%s' %s", account, "accesa" if enabled else "spenta")
+    return {"status": 200, "body": {"account": account, "enabled": bool(enabled)}}
 
 
 def mailbox_add(b: dict) -> dict:
@@ -116,10 +130,11 @@ def _prova_smtp(b: dict, account: str) -> str:
         return type(e).__name__
 
 
-def test_mailboxes() -> dict:
+def test_mailboxes(only: str | None = None) -> dict:
     """Prova un login IMAP VERO per ogni casella configurata (SMTP per quelle
     di solo invio): «operativa» vuol dire «i campi ci sono», non «il login
-    funziona» (clodia-platform#176). Il segreto non esce: l'esito per account."""
+    funziona» (clodia-platform#176). Il segreto non esce: l'esito per account.
+    `only`: una casella sola, il test della sua card (#733)."""
     import imaplib
 
     esiti, ok_tutti = [], True
@@ -127,6 +142,8 @@ def test_mailboxes() -> dict:
         if not nome.startswith("mailbox_"):
             continue
         account = nome[len("mailbox_"):]
+        if only is not None and account != only:
+            continue
         try:
             b = vault.read_internal(nome)
         except Exception:  # noqa: BLE001
@@ -166,5 +183,6 @@ def test_mailboxes() -> dict:
             esiti.append(f"{account}: {type(e).__name__}")
             ok_tutti = False
     if not esiti:
-        return {"ok": None, "detail": "nessuna casella configurata"}
+        return {"ok": None, "detail": ("nessuna casella configurata" if only is None
+                                       else f"nessuna casella '{only}'")}
     return {"ok": ok_tutti, "detail": " · ".join(esiti)}

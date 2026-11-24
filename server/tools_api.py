@@ -359,6 +359,25 @@ def connectors_snapshot() -> list[dict]:
             for row in mailbox_rows if not row["operational"]
         ] + mailbox_issue,
     })
+    # One integration per mailbox (clodia-platform#733): its own card, status,
+    # test and on/off switch. The `mail` row above stays as the place where
+    # mailboxes are added.
+    for row in sorted(mailbox_rows, key=lambda r: r["account"]):
+        acct = row["account"]
+        enabled = bool(row.get("enabled", True))
+        connectors.append({
+            "id": f"mailbox:{acct}",
+            "label": mail_switch.call("mailbox_address", acct) or acct,
+            "provider": "mailbox",
+            "account": acct,
+            "connected": bool(row["operational"]),
+            "operational": bool(row["operational"]) and enabled,
+            "enabled": enabled,
+            "send_only": bool(row.get("send_only")),
+            "colony": acct == str(whitelist.CONFIG.get("colony_mailbox") or ""),
+            "issues": ([] if row["operational"] else
+                       [{"account": acct, "missing": row["missing"], "error": row["error"]}]),
+        })
     # Integrazione Image generation (OpenAI): attiva se la key è nel vault.
     connectors.append({
         "id": "openai-images",
@@ -1251,6 +1270,26 @@ async def email_mailbox_add(request: Request):
     return JSONResponse(out["body"], status_code=int(out["status"]))
 
 
+async def email_mailbox_enabled(request: Request):
+    """POST `{enabled: bool}` → switch one mailbox on or off, keeping its
+    credential (clodia-platform#733). A HUMAN admin only, like choosing the
+    colony mailbox: an agent able to switch mailboxes would pick its sources."""
+    if not _authorized_owner(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+        return JSONResponse({"error": "enabled (bool) richiesto"}, status_code=400)
+    from .tools import mail_switch
+    out = await asyncio.to_thread(mail_switch.call, "mailbox_set_enabled",
+                                  request.path_params["account"], body["enabled"])
+    if int(out["status"]) == 200:
+        await asyncio.to_thread(whitelist.save_config)
+    return JSONResponse(out["body"], status_code=int(out["status"]))
+
+
 async def email_mailbox_remove(request: Request):
     """DELETE → rimuove una casella generica dal vault E le sue autorizzazioni.
 
@@ -1601,6 +1640,10 @@ def _test_connector(cid: str) -> dict:
             from .tools import mail_switch
             return mail_switch.component_test_mailboxes()
 
+        if cid.startswith("mailbox:"):
+            from .tools import mail_switch
+            return mail_switch.component_test_mailboxes(cid[len("mailbox:"):])
+
         if cid == "topic-storage":
             return {"ok": True, "detail": "storage locale sempre disponibile"}
     except _rq.RequestException as e:
@@ -1759,6 +1802,8 @@ routes = [
     Route("/tools/email/mailboxes", email_mailboxes, methods=["GET"]),
     Route("/tools/email/mailboxes", email_mailbox_add, methods=["POST"]),
     Route("/tools/email/mailboxes/{account}", email_mailbox_remove, methods=["DELETE"]),
+    Route("/tools/email/mailboxes/{account}/enabled", email_mailbox_enabled,
+          methods=["POST"]),
     Route("/tools/connectors/{id}/pairing", connector_pairing,
           methods=["GET", "POST"]),
     Route("/tools/backup/config", backup_configure, methods=["POST"]),

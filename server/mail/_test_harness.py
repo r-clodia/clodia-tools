@@ -103,6 +103,14 @@ class FakeGateway:
     def agent(self):
         return "segretario"
 
+    disabled: set = set()
+
+    def mailbox_disabled(self, account):
+        return str(account or "") in self.disabled
+
+    def set_mailbox_enabled(self, account, enabled):
+        self.disabled = (self.disabled - {account}) | (set() if enabled else {account})
+
     def current_topic(self):
         return self.topic
 
