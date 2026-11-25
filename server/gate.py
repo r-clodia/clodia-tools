@@ -511,7 +511,7 @@ def grant(agent: str, instance: str, verb: str, token: str, *,
     bound = None
     if modified:
         pending = _load(_req_path()).get(_key(agent, instance, verb)) or {}
-        if not pending or now - float(pending.get("at", 0)) > _REQ_TTL:
+        if not _req_alive(pending, now):
             raise PermissionError("modified: la richiesta a cui si riferisce la correzione "
                                   "non è più in attesa")
         bound = pending.get("args_hash")
@@ -644,6 +644,18 @@ def revoke_instance(agent: str, instance: str, prefix: str) -> list[str]:
 
 # ── Richieste di gate (qualunque agente → approva l'umano in-contesto) ───────
 _REQ_TTL = 30 * 60
+#: An ASYNC request (a courier send, #736) is not waited on by a tool call: the
+#: message sits in the courier's queue until someone decides, so it lives as
+#: long as the queued message does (owner, 25 Nov 2026: 24 hours).
+_REQ_TTL_ASYNC = 24 * 3600
+
+
+def _req_ttl(v: dict | None) -> float:
+    return _REQ_TTL_ASYNC if (v or {}).get("mode") == "async" else _REQ_TTL
+
+
+def _req_alive(v: dict | None, now: float) -> bool:
+    return bool(v) and now - float((v or {}).get("at", 0)) <= _req_ttl(v)
 
 
 def _req_path() -> Path:
@@ -660,7 +672,7 @@ def request(agent: str, instance: str, verb: str, *, context: Optional[str] = No
     d = _load(_req_path())
     now = time.time()
     _expire_requests(d, now)
-    d = {k: v for k, v in d.items() if now - float((v or {}).get("at", 0)) <= _REQ_TTL}
+    d = {k: v for k, v in d.items() if _req_alive(v, now)}
     rid = _key(agent, instance, verb)
     renewed = rid in d
     d[rid] = {"agent": agent, "instance": instance or "-", "verb": verb,
@@ -684,7 +696,7 @@ def request(agent: str, instance: str, verb: str, *, context: Optional[str] = No
 def _expire_requests(d: dict, now: float) -> None:
     """Emit `gate.expire` for requests that nobody answered in time."""
     for k, v in d.items():
-        if now - float((v or {}).get("at", 0)) > _REQ_TTL:
+        if not _req_alive(v, now):
             _audit("gate.expire", "expire", v.get("agent", ""), v.get("instance", "-"),
                    v.get("verb", ""), chat=v.get("chat"),
                    actor={"type": "service", "id": "clodia-tools"},
@@ -694,7 +706,7 @@ def _expire_requests(d: dict, now: float) -> None:
 def list_requests() -> list:
     d = _load(_req_path())
     now = time.time()
-    live = {k: v for k, v in d.items() if now - float((v or {}).get("at", 0)) <= _REQ_TTL}
+    live = {k: v for k, v in d.items() if _req_alive(v, now)}
     if len(live) != len(d):
         _expire_requests(d, now)
         _save(_req_path(), live)
@@ -765,4 +777,4 @@ def request_pending(agent: str, instance: str, verb: str) -> bool:
     'negata' (resolve senza consenso)."""
     now = time.time()
     v = _load(_req_path()).get(_key(agent, instance, verb))
-    return bool(v and now - float(v.get("at", 0)) <= _REQ_TTL)
+    return _req_alive(v, now)

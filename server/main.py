@@ -860,6 +860,29 @@ _TOPIC_TOOLS: list[Tool] = [
         }, "required": ["tier", "name"]},
     ),
     Tool(
+        name="topic.mail_send",
+        description=("Chiede al CORRIERE di spedire una mail da questa stanza, con la "
+                     "casella collegata al canale (`account` se ce n'è più d'una). Non "
+                     "spedisce subito: la mail entra in coda e il verbo risponde con il "
+                     "numero di pratica. Se il destinatario è già autorizzato (Destinatari "
+                     "del canale o lista globale) parte al prossimo giro del corriere; "
+                     "altrimenti nel canale si apre un'approvazione e la mail aspetta la "
+                     "decisione, fino a 24 ore. L'esito (inviata, negata, scaduta, non "
+                     "inviata) arriva nel canale come messaggio di 'posta'. Senza una "
+                     "casella collegata al canale il verbo rifiuta. Gli allegati sono "
+                     "file del topic (es. files/offerta.pdf)."),
+        inputSchema={"type": "object", "properties": {
+            "tier": {"type": "string", "enum": ["SEAL-0", "SEAL-1", "SEAL-2", "SEAL-3", "SEAL-4"]},
+            "name": {"type": "string"},
+            "to": {"type": "string", "description": "un solo indirizzo email"},
+            "subject": {"type": "string"},
+            "body": {"type": "string"},
+            "attachments": {"type": "array", "items": {"type": "string"},
+                            "description": "file del topic, es. files/offerta.pdf"},
+            "account": {"type": "string", "description": "solo se il canale ha più caselle collegate"},
+        }, "required": ["tier", "name", "to", "subject", "body"]},
+    ),
+    Tool(
         name="topic.goal_progress",
         description=("Fa avanzare l'OBIETTIVO fissato dall'owner su questo canale "
                      "(lo leggi in topic.open, campo meta.goal). Serve a dichiarare a "
@@ -1855,13 +1878,18 @@ async def _dispatch_channel_deliver(a: dict) -> dict:
         if "@" not in addr:
             raise ValueError(f"destinazione '{destinazione}' non riconosciuta: usa "
                              "mailto:<indirizzo> oppure <schema>:<chat> di un canale")
-        account = str(a.get("account") or "").strip() or _room_outbox_account(tier, tname)
+        # Mail goes through the courier (#736, owner 25 Nov 2026): one road
+        # out for mail — queued, gated per recipient, sent at the courier's
+        # pass. Nothing is sent during the turn.
         meta = (_topics().open(tier, tname) or {}).get("meta") or {}
-        args = {"to": addr, "subject": str(a.get("subject") or meta.get("title") or tname),
-                "body": text, "account": account}
-        if allegati:
-            args.update({"topic_files": allegati, "tier": tier, "name": tname})
-        calls = [("email.send", args)]
+        from . import courier_send
+        coda = await asyncio.to_thread(
+            courier_send.enqueue, tier=tier, name=tname, agent=agent_name(),
+            chat=current_chat() or "", principal=current_principal(), to=addr,
+            subject=str(a.get("subject") or meta.get("title") or tname), body=text,
+            attachments=allegati, account=str(a.get("account") or "").strip())
+        return {"delivered": [], "queued": [{"via": "courier", "to": f"mailto:{coda['to']}",
+                                             **coda}]}
     risultati = []
     for verb, args in calls:
         tok = _DELIVER_VIA.set(frozenset({verb}))
@@ -5834,7 +5862,7 @@ _TOPIC_SCOPED_VERBS = {
     "open", "save_summary",
     "files", "read_file",
     "read_document", "convert_document", "write_document", "write_file", "fetch",
-    "put", "delete_file", "move_file", "goal_progress", "mail_check",
+    "put", "delete_file", "move_file", "goal_progress", "mail_check", "mail_send",
     "todo_add", "todo_update", "todo_remove",
     "post_message", "messages", "my_mentions", "mark_seen",
     "drive_folder_add", "local_folder_add",
@@ -6967,6 +6995,18 @@ def _dispatch_topic(name: str, a: dict):
         out = transfer_channel._post("/internal/courier/check",
                                      {"tier": a["tier"], "name": a["name"]})
         return {"delivered": int((out or {}).get("delivered") or 0)}
+    if verb == "mail_send":
+        # Mail goes out through the courier's queue (#736): never during the
+        # turn, and a new recipient waits for the room's decision.
+        if _current_topic() != (a["tier"], a["name"]):
+            raise PermissionError("topic.mail_send spedisce dalla stanza in cui sei: "
+                                  "chiamalo dal canale di quel topic")
+        from . import courier_send
+        return courier_send.enqueue(
+            tier=a["tier"], name=a["name"], agent=agent_name(), chat=current_chat() or "",
+            principal=current_principal(), to=a["to"], subject=str(a.get("subject") or ""),
+            body=str(a.get("body") or ""), attachments=a.get("attachments") or [],
+            account=str(a.get("account") or ""))
     if verb == "goal_progress":
         # Avanzamento, non pin: creare e togliere un obiettivo restano
         # dell'owner (TopicService.advance_goal).

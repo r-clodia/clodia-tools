@@ -59,38 +59,63 @@ class _Env:
 
 
 class ChannelDeliverTests(unittest.TestCase):
-    def test_mail_goes_out_through_email_send_from_the_rooms_mailbox(self):
+    """Since #736 mail is not sent during the turn: `channel.deliver` to a
+    `mailto:` destination queues it on the courier (and opens the room's gate
+    for a new recipient); the courier sends at its pass."""
+
+    def _queue(self, env, known=True):
+        posted, reqs = [], []
+        p1 = patch("server.transfer_channel._post",
+                   lambda path, body: posted.append((path, body)) or {"id": "q7"})
+        p2 = patch("server.gate.request",
+                   lambda *a, **k: reqs.append((a, k)) or {"id": "rid"})
+        p3 = patch("server.courier_send.allowed", lambda a, s: known)
+        for p in (p1, p2, p3):
+            p.start(); self.addCleanup(p.stop)
+        return posted, reqs
+
+    def test_mail_is_queued_on_the_courier_from_the_rooms_mailbox(self):
         env = _Env(self)
+        posted, reqs = self._queue(env)
         out = env.call("channel.deliver", {"destination": "mailto:cliente@x.it",
                                            "text": "Ecco l'offerta.",
                                            "attachments": ["files/offerta.pdf"]})
         self.assertFalse(out.startswith(("DENIED", "ERROR")), out)
-        (verb, args), = env.sent
-        self.assertEqual(verb, "email.send")
-        self.assertEqual((args["to"], args["account"], args["body"], args["subject"]),
-                         ("cliente@x.it", "info", "Ecco l'offerta.", "Preventivi"))
-        self.assertEqual(args["topic_files"], ["files/offerta.pdf"])
+        self.assertEqual(env.sent, [])                    # nothing during the turn
+        (path, body), = posted
+        self.assertEqual(path, "/internal/courier/enqueue")
+        self.assertEqual((body["to"], body["account"], body["body"], body["subject"],
+                          body["state"]),
+                         ("cliente@x.it", "info", "Ecco l'offerta.", "Preventivi", "queued"))
+        self.assertEqual(body["attachments"], ["files/offerta.pdf"])
+        self.assertEqual(reqs, [])
+        self.assertEqual(json.loads(out)["queued"][0]["queue_id"], "q7")
 
-    def test_an_undeclared_destination_is_refused_by_the_pdp(self):
+    def test_a_new_recipient_waits_for_the_rooms_decision(self):
         env = _Env(self)
+        posted, reqs = self._queue(env, known=False)
         out = env.call("channel.deliver", {"destination": "altro@y.it", "text": "x"})
-        self.assertTrue(out.startswith("DENIED"), out)
+        self.assertFalse(out.startswith(("DENIED", "ERROR")), out)
+        self.assertEqual(posted[0][1]["state"], "pending_gate")
+        (args, kw), = reqs
+        self.assertEqual((args[2], kw["mode"]), ("egress:email:mailto:altro@y.it", "async"))
         self.assertEqual(env.sent, [])
 
     def test_the_grant_does_not_outlive_the_call(self):
         env = _Env(self)
+        self._queue(env)
         env.call("channel.deliver", {"destination": "cliente@x.it", "text": "x"})
         out = env.call("email.send", {"to": "cliente@x.it", "subject": "s", "body": "b",
                                       "account": "info"})
         self.assertTrue(out.startswith("DENIED"), out)
-        self.assertIn("non in whitelist", out)
-        self.assertEqual(len(env.sent), 1)
-
-    def test_a_denied_verb_stays_denied_through_deliver(self):
-        env = _Env(self, denied=("email.send",))
-        out = env.call("channel.deliver", {"destination": "cliente@x.it", "text": "x"})
-        self.assertTrue(out.startswith("DENIED"), out)
         self.assertEqual(env.sent, [])
+
+    def test_nothing_is_sent_during_the_turn(self):
+        env = _Env(self, denied=("email.send",))
+        posted, _ = self._queue(env)
+        env.call("channel.deliver", {"destination": "cliente@x.it", "text": "x"})
+        self.assertEqual(env.sent, [])
+        self.assertEqual(len(posted), 1)
 
     def test_without_the_grant_nothing_goes_out(self):
         env = _Env(self, allowed=("topic.open",))
@@ -134,7 +159,10 @@ class NativeMailDeliveryTests(unittest.TestCase):
         self.assertEqual(acct, "info")
         self.assertEqual(argv[:3], ["send", "--to", "cliente@x.it"])
 
-    def test_a_delivery_runs_the_native_verb(self):
+    def test_the_couriers_pass_runs_the_native_verb(self):
+        """#736: the courier's pass (`send_now`) reaches the gateway's own
+        `email.send` for a recipient the room declares."""
+        from . import courier_send
         from .mail import verbs
         real_send = verbs.send          # before `_Env` stands a recorder in
         env = _Env(self)
@@ -143,9 +171,10 @@ class NativeMailDeliveryTests(unittest.TestCase):
                           lambda to, subject, body, **k: got.append((to, k["account"])) or {"ok": True}), \
                 patch("server.mail.verbs.send", real_send), \
                 patch.object(verbs.mail, "available_accounts", lambda _a: ["info"]):
-            out = env.call("channel.deliver", {"destination": "mailto:cliente@x.it",
-                                               "text": "x"})
-        self.assertFalse(out.startswith(("DENIED", "ERROR")), out)
+            out = asyncio.run(courier_send.send_now(
+                tier=ROOM[0], name=ROOM[1], account="", to="cliente@x.it",
+                subject="s", body="x"))
+        self.assertTrue(out["ok"], out)
         self.assertEqual(got, [("cliente@x.it", "info")])
 
 

@@ -400,6 +400,34 @@ async def box_route(request: Request):
         return JSONResponse({"error": str(e)[:200]}, status_code=502)
 
 
+async def send_route(request: Request):
+    """The courier sends one queued mail (#736): `{tier, name, account, to,
+    subject, body, attachments}` → `{ok, detail}`. In the room's claims; the
+    mailbox and the recipient are checked again here, at sending time."""
+    payload, err = _authorize(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad_json"}, status_code=400)
+    tier, name = str(body.get("tier") or ""), str(body.get("name") or "")
+    if not (tier and name and await asyncio.to_thread(_topic_exists, tier, name)):
+        return JSONResponse({"error": "tier/name of an existing topic required"},
+                            status_code=400)
+    from .claims import ClaimsContext
+    from . import courier_send
+    with ClaimsContext(_room_claims(tier, name, payload), ""):
+        out = await courier_send.send_now(
+            tier=tier, name=name, account=str(body.get("account") or ""),
+            to=str(body.get("to") or ""), subject=str(body.get("subject") or ""),
+            body=str(body.get("body") or ""),
+            attachments=[str(x) for x in (body.get("attachments") or []) if str(x).strip()])
+    return JSONResponse(out)
+
+
 async def attachment_route(request: Request):
     return await _room_call(request, "courier_attachment",
                             ("account", "email_id", "filename", "folder"))
@@ -415,4 +443,5 @@ routes = [
     Route("/internal/mail/courier/rooms", rooms_route, methods=["GET"]),
     Route("/internal/mail/courier/envelopes", envelopes_route, methods=["POST"]),
     Route("/internal/mail/courier/attachment", attachment_route, methods=["POST"]),
+    Route("/internal/mail/courier/send", send_route, methods=["POST"]),
 ]

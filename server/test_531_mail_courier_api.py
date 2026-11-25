@@ -145,7 +145,8 @@ class InRoomTests(unittest.TestCase):
                                  "/internal/mail/courier/envelopes",
                                  "/internal/mail/courier/attachment",
                                  "/internal/mail/courier/eml",
-                                 "/internal/mail/courier/box"})
+                                 "/internal/mail/courier/box",
+                                 "/internal/mail/courier/send"})
 
 
 if __name__ == "__main__":
