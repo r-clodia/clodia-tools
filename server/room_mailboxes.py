@@ -100,6 +100,8 @@ def reading_rooms() -> list[tuple[str, str, str, str]]:
             meta, _ = svc._read_meta(tier, name)
         except Exception:  # noqa: BLE001
             continue
+        if meta.get("status") == "archived":
+            continue    # an archived room is no room the courier serves
         for acct, box in room_mailboxes(meta, boxes).items():
             if not box["send_only"] and box["email"]:
                 out.append((tier, name, acct, box["email"]))
@@ -165,11 +167,12 @@ def plan(cfg: dict | None = None) -> dict:
 
 
 def _exists(tier: str, name: str) -> bool:
-    try:
-        _read_meta(tier, name)
-        return True
-    except Exception:  # noqa: BLE001
-        return False
+    """A room the courier serves: one the topics service opens. An ARCHIVED
+    topic is not one (its meta is still readable): on terra the migration
+    connected three mailboxes to an archived topic that the approved plan
+    had listed as gone (25 Nov 2026)."""
+    from .mail_courier_api import _topic_exists
+    return _topic_exists(tier, name)
 
 
 def migrate(*, dry_run: bool = False) -> dict:
